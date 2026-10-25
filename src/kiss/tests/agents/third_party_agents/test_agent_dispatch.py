@@ -33,6 +33,7 @@ kiss.agents.sorcar + kiss.server closure) moved to
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -132,6 +133,7 @@ def test_available_channels_discovery() -> None:
 
 
 def test_docstring_lists_channels() -> None:
+    assert run_agent.__name__ == "run_agent"
     doc = run_agent.__doc__ or ""
     assert "{channels}" not in doc
     assert "slack" in doc and "telegram" in doc
@@ -185,8 +187,6 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
     assert out.startswith("Error: the ntfy agent task could not run:")
     assert "no-daemon.json" in out
     # The workspace env var (unset before the call) is unset again.
-    import os
-
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
     # Channel dispatches run in the channel agents' shared work
     # directory (the same default their poll-mode runner uses).
@@ -362,7 +362,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 
 
 def test_channel_and_cron_refuse_options_that_contradict_the_base_class(
-    tmp_path: Path, daemon: RecordingDaemon
+    daemon: RecordingDaemon,
 ) -> None:
     """Asking a channel/cron sub-task for memory is refused, never silently undone.
 
@@ -471,12 +471,9 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     assert sent["useMemory"] is None
     assert sent["chatId"] == ""
 
-    # For cron and the channel agents ``ChannelSea`` locks
-    # classification off: asking for it is refused, agreeing is forwarded.
-    before = len(daemon.run_commands)
-    out = tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
-    assert out == "Error: cron: the script locks auto_classify=False (asked for True)"
-    assert len(daemon.run_commands) == before
+    # For cron and the channel agents ``ChannelSea`` locks classification
+    # off: an agreeing option is forwarded (a contradicting one is refused;
+    # see test_channel_and_cron_refuse_options_that_contradict_the_base_class).
     tool("say hi", "ntfy", options='{"auto_classify": "False", "use_memory": false}')
     sent = _sent(daemon)
     assert sent["classifyTasks"] is False
@@ -581,8 +578,6 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     # A valid SEA path takes the path branch (no channel
     # lookup, no workspace handling) and fails cleanly on the
     # unreachable daemon, named by the script's file stem.
-    import os
-
     script = _write_sea_script(tmp_path / "my_researcher.py")
     # ``workspace`` is a channel option: a ``BaseSea`` SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
@@ -754,8 +749,6 @@ def test_dispatch_forwards_the_workspace_to_the_daemon(daemon: RecordingDaemon) 
     # forwards the ``workspace`` option as a wire field, and the
     # daemon's task runner holds it for the channel run's lifetime
     # (see kiss.server.task_runner).
-    import os
-
     run_agent("say hi", "ntfy", options='{"workspace": " my-ws "}')
     sent = _sent(daemon)
     assert sent["workspace"] == "my-ws"
@@ -879,9 +872,6 @@ def test_run_agent_tool_and_sorcar_wiring() -> None:
 
     assert "run_agent" in SYSTEM_PROMPT
     assert "run_agent" in SYSTEM_PROMPT_LITE
-    tool = make_run_agent_tool("")
-    assert tool.__name__ == "run_agent"
-    assert "slack" in (tool.__doc__ or "")
     loaded = subprocess.run(
         [
             sys.executable,

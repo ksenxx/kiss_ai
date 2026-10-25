@@ -309,16 +309,39 @@
    * it had when wired.  The click neither bubbles nor acts as a
    * default (a row's button must not open its row).  Every copy
    * control of the page (panels, sidebar rows, id chips, the
-   * remote-URL bar) goes through here.
+   * remote-URL bar, the tips sheet) goes through here.
    *
    * @param {HTMLButtonElement} btn The button.
    * @param {string|function(): string} text What the click copies, or
    *     a function yielding it at click time.
+   * @param {function(HTMLButtonElement, boolean|null): void} [render]
+   *     Paints the button instead of the glyphs: called with `true`
+   *     after a successful copy, `false` after a failed one, and `null`
+   *     now and when the flash reverts.
    */
-  function wireCopyButton(btn, text) {
+  function wireCopyButton(btn, text, render) {
     const doc = btn.ownerDocument || document;
     const idleTitle = btn.title;
-    btn.innerHTML = PANEL_COPY_SVG;
+    function paintGlyph(ok) {
+      if (ok === null) {
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied', 'copy-failed');
+        if (idleTitle) btn.title = idleTitle;
+        else btn.removeAttribute('title');
+        return;
+      }
+      btn.innerHTML = ok ? PANEL_CHECK_SVG : PANEL_FAIL_SVG;
+      btn.classList.toggle('copied', ok);
+      btn.classList.toggle('copy-failed', !ok);
+      btn.title = ok
+        ? 'Copied'
+        : 'Copy failed: select the text and copy it with the keyboard';
+    }
+    function paint(ok) {
+      if (render) render(btn, ok);
+      else paintGlyph(ok);
+    }
+    paint(null);
     // The revert timer is tracked per button and restarted on every
     // copy: a bare setTimeout let a rapid second click's flash be cut
     // short by the first click's stale timer.
@@ -329,19 +352,11 @@
     let copyGen = 0;
     function revert() {
       flashTimer = null;
-      btn.innerHTML = PANEL_COPY_SVG;
-      btn.classList.remove('copied', 'copy-failed');
-      if (idleTitle) btn.title = idleTitle;
-      else btn.removeAttribute('title');
+      paint(null);
     }
     function flash(ok, gen) {
       if (gen !== copyGen) return;
-      btn.innerHTML = ok ? PANEL_CHECK_SVG : PANEL_FAIL_SVG;
-      btn.classList.toggle('copied', ok);
-      btn.classList.toggle('copy-failed', !ok);
-      btn.title = ok
-        ? 'Copied'
-        : 'Copy failed: select the text and copy it with the keyboard';
+      paint(ok);
       if (flashTimer) clearTimeout(flashTimer);
       flashTimer = setTimeout(revert, 1500);
     }
@@ -535,6 +550,9 @@
     return span;
   }
 
+  // getRawText, fallbackCopyText, formatEventTs, formatCallCost and the
+  // two SVG strings are exported for the tests only; the app reaches
+  // them through the other entries.
   const api = {
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,

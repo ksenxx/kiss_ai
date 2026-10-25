@@ -15,7 +15,13 @@
 // * a switch from a running chat to an idle one fires no poll for the
 //   idle tab: restoreTab retargets the panel before it applies the
 //   destination's running state, so the poll must consult the POLLED
-//   tab's own running flag rather than the lagging module-level one.
+//   tab's own running flag rather than the lagging module-level one;
+// * the poll of a tab bound to a remote machine (the daemon's
+//   `tabMachine` binding) is stamped with that machine, so the daemon
+//   forwards it to the machine's daemon, which runs the task and owns
+//   its update; the drop-down's unsent pick does not count, a tab of
+//   this machine polls with an empty `machine`, and the machine's
+//   reply (stamped `machine`) renders like a local one.
 //
 // The rest of the protocol (reply matching, rendering, refresh) is
 // test/remoteMetaPanelInfo.test.js.  The old editor-panel / Task Info
@@ -25,29 +31,26 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness.js');
+const {
+  makePage,
+  send,
+  stubRaf,
+  fakeIntervals,
+  fakeMatchMedia,
+} = require('./simplify2_harness.js');
 
 const POLL_MS = 5000;
 
-/** Record every setInterval so a test can fire the poll on demand. */
-function captureIntervals(win) {
-  const intervals = [];
-  const realSetInterval = win.setInterval.bind(win);
-  const realClearInterval = win.clearInterval.bind(win);
-  win.setInterval = function (fn, ms, ...args) {
-    const id = realSetInterval(fn, ms, ...args);
-    intervals.push({id, fn, ms});
-    return id;
-  };
-  win.clearInterval = function (id) {
-    realClearInterval(id);
-    const i = intervals.findIndex(entry => entry.id === id);
-    if (i >= 0) intervals.splice(i, 1);
-  };
+/**
+ * The poll timers (the 5 s intervals) among the page's live intervals
+ * as `fakeIntervals` records them, listed and fired on demand.
+ */
+function pollControls(intervals) {
+  const pollTimers = () => intervals.filter(iv => iv.ms === POLL_MS);
   return {
-    pollTimers: () => intervals.filter(entry => entry.ms === POLL_MS),
+    pollTimers,
     tickPolls() {
-      for (const entry of intervals.filter(e => e.ms === POLL_MS)) entry.fn();
+      for (const iv of pollTimers()) iv.cb(...iv.args);
     },
   };
 }
@@ -56,16 +59,9 @@ function desktopPage() {
   let timers;
   const page = makePage({
     beforeScripts: win => {
-      timers = captureIntervals(win);
+      timers = pollControls(fakeIntervals(win).intervals);
       stubRaf(win);
-      win.matchMedia = query => ({
-        matches: query === '(min-width: 900px)',
-        media: query,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-        addListener: () => {},
-        removeListener: () => {},
-      });
+      fakeMatchMedia(win, true);
     },
   });
   assert.ok(
@@ -213,10 +209,86 @@ function testSwitchToIdleTabFiresNoPoll() {
   console.log('  ok - a switch to an idle chat fires no poll');
 }
 
+function testRemoteBoundTabPollsItsMachine() {
+  const page = desktopPage();
+  const win = page.win;
+  const root = win._testApi.getActiveTabId();
+  send(win, {
+    type: 'machines',
+    machines: [
+      {name: 'laptop', local: true, status: 'reachable', address: 'x'},
+      {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
+    ],
+  });
+  // The drop-down's unsent pick is not a binding: the task of a tab
+  // that has not been submitted anywhere runs here when it starts.
+  const select = win.document.getElementById('chat-machine');
+  select.value = 'gpu-box';
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
+  send(win, {type: 'status', running: true, tabId: root});
+  let last = polls(page)[polls(page).length - 1];
+  assert.strictEqual(last.tabId, root);
+  assert.strictEqual(
+    last.machine,
+    '',
+    'an unsent drop-down pick must not redirect the poll',
+  );
+
+  // The daemon binds the tab to the machine its task runs on.
+  send(win, {type: 'tabMachine', tabId: root, machine: 'gpu-box'});
+  page.tickPolls();
+  last = polls(page)[polls(page).length - 1];
+  assert.strictEqual(last.tabId, root);
+  assert.strictEqual(
+    last.machine,
+    'gpu-box',
+    'a bound tab polls the machine that runs its task',
+  );
+  assert.strictEqual(typeof last.token, 'string');
+
+  // The machine's reply, relayed by the daemon stamped `machine`,
+  // shows the subpanel like a local one.
+  send(win, {
+    type: 'taskUpdate',
+    tabId: root,
+    token: last.token,
+    machine: 'gpu-box',
+    exists: true,
+    sig: '3:1',
+    content: '<p>remote progress</p>',
+    error: '',
+    running: false,
+    cost: 0.02,
+    updatedAt: Date.UTC(2026, 9, 24, 17, 0),
+  });
+  assert.ok(
+    win.document.getElementById('meta-info').classList.contains('visible'),
+    'the Task update subpanel shows for a task running on a machine',
+  );
+  assert.ok(
+    win.document
+      .getElementById('meta-info-content')
+      .textContent.includes('remote progress'),
+  );
+  page.tickPolls();
+  last = polls(page)[polls(page).length - 1];
+  assert.strictEqual(last.knownSig, '3:1', 'the next poll names the sig');
+  assert.strictEqual(last.machine, 'gpu-box');
+
+  // The binding is the daemon's: unbound again, the poll stays home.
+  send(win, {type: 'tabMachine', tabId: root, machine: ''});
+  page.tickPolls();
+  last = polls(page)[polls(page).length - 1];
+  assert.strictEqual(last.machine, '', 'an unbound tab polls this machine');
+  win.close();
+  console.log('  ok - a remote-bound tab polls its machine for the update');
+}
+
 function main() {
   testTaskStartFiresOneImmediatePoll();
   testPollGoesQuietWhenOwnerStopsBehindContentTab();
   testSwitchToIdleTabFiresNoPoll();
+  testRemoteBoundTabPollsItsMachine();
   console.log('taskUpdatePolling: all passed.');
 }
 

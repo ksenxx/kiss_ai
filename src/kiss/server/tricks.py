@@ -8,7 +8,7 @@ The "Inject instruction" panel and the ghost-text fast-complete
 suggestions both consume a single ordered list of trick strings
 returned by :func:`read_tricks`, built from two sources:
 
-1. ``~/.kiss/MY_INJECTION.md`` — user-curated tricks.  Auto-seeded on
+1. ``$KISS_HOME/MY_INJECTION.md`` — user-curated tricks.  Auto-seeded on
    first read with the default starter
 
        ## Trick
@@ -20,7 +20,7 @@ returned by :func:`read_tricks`, built from two sources:
 
 2. The bundled ``src/kiss/INJECTIONS.md`` shipped with the package.
    Read **directly from the package**; no copy is ever written into
-   ``~/.kiss/``.  This way every package upgrade automatically
+   the brand home (``$KISS_HOME``).  This way every package upgrade automatically
    delivers the latest bundled tricks without clobbering the user's
    curated list.
 
@@ -98,7 +98,7 @@ def _parse_trick_sections(text: str) -> list[str]:
 
 
 def ensure_user_asset_from_default(name: str, default_content: str) -> Path | None:
-    """Return ``~/.kiss/<name>``, seeding it with *default_content* if absent.
+    """Return ``$KISS_HOME/<name>``, seeding it with *default_content* if absent.
 
     The seed is :func:`kiss.core.utils.seed_file_atomically`: atomic and
     non-clobbering, so a concurrent reader (the autocomplete worker
@@ -112,7 +112,7 @@ def ensure_user_asset_from_default(name: str, default_content: str) -> Path | No
 
     Returns:
         The path when the file exists or was just created; ``None``
-        when ``~/.kiss/`` is not writable (read-only FS, missing
+        when the brand home (``$KISS_HOME``) is not writable (read-only FS, missing
         ``HOME``) so callers can skip silently.
     """
     user_path = kiss_home() / name
@@ -124,10 +124,10 @@ def ensure_user_asset_from_default(name: str, default_content: str) -> Path | No
 
 
 def _read_my_injection_tricks() -> list[str]:
-    """Return the user-curated tricks from ``~/.kiss/MY_INJECTION.md``.
+    """Return the user-curated tricks from ``$KISS_HOME/MY_INJECTION.md``.
 
     Auto-seeds the file with :data:`DEFAULT_MY_INJECTION` on first read.
-    Returns an empty list when ``~/.kiss/`` is not writable (so the
+    Returns an empty list when the brand home (``$KISS_HOME``) is not writable (so the
     seed cannot be written) or when the file is unreadable / corrupt.
     """
     user_path = ensure_user_asset_from_default(
@@ -158,7 +158,7 @@ def _bundled_injections_path() -> Path:
 def _read_bundled_tricks() -> list[str]:
     """Return the tricks shipped in the bundled ``src/kiss/INJECTIONS.md``.
 
-    Read directly from the package — no copy into ``~/.kiss/`` ever
+    Read directly from the package — no copy into the brand home (``$KISS_HOME``) ever
     happens.  Returns an empty list if the file is missing or
     unreadable (graceful degradation).
     """
@@ -175,10 +175,10 @@ def read_tricks_data() -> TricksData:
 
     The list is built by concatenating, in order:
 
-    1. ``~/.kiss/MY_INJECTION.md`` (user-curated, auto-seeded with the
+    1. ``$KISS_HOME/MY_INJECTION.md`` (user-curated, auto-seeded with the
        default test-first trick on first read).
     2. The bundled ``src/kiss/INJECTIONS.md`` (read directly from the
-       package; never copied into ``~/.kiss/``).
+       package; never copied into the brand home (``$KISS_HOME``)).
 
     ``userCount`` is the length of the first part: the panel shows a
     delete button only on those leading rows, since only the user
@@ -214,24 +214,27 @@ class _TrickError(Exception):
 
 
 def _read_my_injection(verb: str) -> tuple[Path, str]:
-    """Seed ``~/.kiss/MY_INJECTION.md`` if missing and return ``(path, text)``.
+    """Seed ``$KISS_HOME/MY_INJECTION.md`` if missing and return ``(path, text)``.
 
     The shared prologue of the add/delete/edit helpers, called under
-    :data:`_APPEND_LOCK`.  Raises :class:`_TrickError` when ``~/.kiss/``
-    is not writable (the message says the caller could not *verb* the
-    file) or when the file is not UTF-8 text.
+    :data:`_APPEND_LOCK`.  Raises :class:`_TrickError` when the brand
+    home is not writable (the message says the caller could not *verb*
+    the file), when the file cannot be read, or when it is not UTF-8
+    text.
     """
     user_path = ensure_user_asset_from_default("MY_INJECTION.md", DEFAULT_MY_INJECTION)
     if user_path is None:
         raise _TrickError(f"Could not {verb} ~/{HOME_DIR}/MY_INJECTION.md")
     try:
         return user_path, user_path.read_text(encoding="utf-8")
+    except OSError:
+        raise _TrickError(f"Could not read ~/{HOME_DIR}/MY_INJECTION.md") from None
     except UnicodeDecodeError:
         raise _TrickError(f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text") from None
 
 
 def delete_my_injection_trick(text: str) -> str | None:
-    """Remove the ``## Trick`` section(s) whose body is *text* from ``~/.kiss/MY_INJECTION.md``.
+    """Remove the ``## Trick`` section(s) whose body is *text* from ``$KISS_HOME/MY_INJECTION.md``.
 
     Services the delete button of the Inject promptlet panel.  Every
     section whose parsed body (trimmed, backslash-unescaped — what the
@@ -309,7 +312,7 @@ def _reject_new_body(body: str) -> str | None:
 
 
 def edit_my_injection_trick(text: str, new_text: str) -> str | None:
-    """Rewrite the ``## Trick`` section *text* of ``~/.kiss/MY_INJECTION.md`` as *new_text*.
+    """Rewrite the ``## Trick`` section *text* of ``$KISS_HOME/MY_INJECTION.md`` as *new_text*.
 
     Services the edit (pencil) button of the Inject promptlet panel.
     The first section whose parsed body (trimmed, backslash-unescaped —
@@ -366,7 +369,7 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
 
 
 def append_my_injection_trick(text: str) -> str | None:
-    """Append *text* as a new ``## Trick`` section of ``~/.kiss/MY_INJECTION.md``.
+    """Append *text* as a new ``## Trick`` section of ``$KISS_HOME/MY_INJECTION.md``.
 
     Services the "Add" button of the Inject promptlet panel.  The file
     is seeded first when missing (so the user's default trick is never
@@ -386,9 +389,9 @@ def append_my_injection_trick(text: str) -> str | None:
         ``None`` on success, else a user-facing error message: an
         empty body, a body that would itself start a new ``##``
         section (which the parser would split), a duplicate of a
-        trick already in the file, an unwritable ``~/.kiss/``, or a
-        file that is not UTF-8 text.  ``OSError`` from the read or
-        write propagates to the caller.
+        trick already in the file, an unwritable brand home, or a
+        file that cannot be read or is not UTF-8 text.  ``OSError``
+        from the write propagates to the caller.
     """
     body = text.replace("\r\n", "\n").strip()
     if (error := _reject_new_body(body)) is not None:

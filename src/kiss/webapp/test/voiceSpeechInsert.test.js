@@ -6,40 +6,19 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {send: sendHostMessage} = require('./simplify2_harness');
+const {makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-
-
 function makeWindow() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
-  );
-  const win = dom.window;
-  win.__VOICE__ = {};
-
   const inputEvents = {count: 0};
-  win.document
-    .getElementById('task-input')
-    .addEventListener('input', () => inputEvents.count++);
-
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
-
+  const win = makeBareVoiceWindow({}, w => {
+    w.document
+      .getElementById('task-input')
+      .addEventListener('input', () => inputEvents.count++);
+  });
   return {win, inputEvents};
-}
-
-function sendHostMessage(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 test('voiceSpeech after a wake types only the translated text', () => {

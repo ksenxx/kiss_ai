@@ -44,8 +44,6 @@ from kiss.tests.agents.seas.sea_contract import (
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
-_REMEMBER_PATH = Path(remember_sea.__file__).resolve()
-_FORGET_PATH = Path(forget_sea.__file__).resolve()
 _WORKER_SETTINGS: dict[str, Any] = {
     "tool_profile": "bash",
     "max_budget": 1.0,
@@ -97,20 +95,6 @@ def test_sea_methods_follow_the_contract() -> None:
         assert resolve_settings(declared) == _WORKER_SETTINGS, module.__name__
         assert sea_commands.base_settings([sea]) == _WORKER_SETTINGS, module.__name__
         assert_no_removed_getters(module)
-
-
-def test_slash_commands_resolve_to_the_bundled_seas() -> None:
-    """``/remember text`` and ``/forget text`` resolve to the text and these files."""
-    assert sea_commands.get_command("remember") == _REMEMBER_PATH
-    assert sea_commands.get_command("forget") == _FORGET_PATH
-    assert sea_commands.slash_command_task("/remember Always reply tersely") == (
-        "Always reply tersely", _REMEMBER_PATH)
-    assert sea_commands.slash_command_task("/forget Always reply tersely") == (
-        "Always reply tersely", _FORGET_PATH)
-    for path in (_REMEMBER_PATH, _FORGET_PATH):
-        assert sea_commands.sea_settings(path) == _WORKER_SETTINGS
-    assert sea_commands.help_text_if_command("/remember help") == RememberSea().description()
-    assert sea_commands.help_text_if_command("/forget help") == ForgetSea().description()
 
 
 def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -> None:
@@ -251,6 +235,7 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
         snapshots = pool.submit(read).result(timeout=120)
         writer.result(timeout=120)
     finally:
+        done.set()  # a blocked writer must not leave the reader spinning past interpreter exit
         pool.shutdown(wait=False, cancel_futures=True)
     assert len(snapshots) > 100, len(snapshots)
     bad = [s for s in snapshots if standing not in s]

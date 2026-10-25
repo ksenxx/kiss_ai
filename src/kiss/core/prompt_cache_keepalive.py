@@ -17,8 +17,10 @@ that asks the model to re-read its cached prefix every
 :data:`KEEP_ALIVE_INTERVAL_SECONDS` (via ``Model.keep_prompt_cache_warm``,
 a no-op for providers that need none).  A ping costs one cache read of
 the context plus a few output tokens; a miss costs the cache write of the
-whole context, so pings are capped at :data:`KEEP_ALIVE_MAX_PINGS`, past
-which letting the cache go cold is cheaper.
+whole context, so pings are capped per model by :func:`keep_alive_max_pings`:
+a little under ``(cache_write_price - cache_read_price) / cache_read_price``
+pings cost less than the one rewrite they avert, and
+:data:`KEEP_ALIVE_MAX_SECONDS` bounds the wall clock.
 """
 
 from __future__ import annotations
@@ -28,20 +30,54 @@ import threading
 import time
 from typing import Any
 
+from kiss.core.models.model_info import _lookup_model_info
+
 logger = logging.getLogger(__name__)
 
 KEEP_ALIVE_INTERVAL_SECONDS = 240.0
 """Seconds between cache touches: one minute inside the 5-minute TTL."""
 KEEP_ALIVE_MAX_PINGS = 10
-"""Pings per tool call before the cache is allowed to expire.  At Fable
-5.1 prices a miss on a C-token context costs C x $12.25/M and a ping
-C x $0.25/M plus output, so ~40 minutes of pings match one miss on the
-0.1x models and are far cheaper on Fable."""
+"""Pings per tool call for a model whose prices are unknown."""
+KEEP_ALIVE_MAX_SECONDS = 4 * 3600.0
+"""Wall-clock bound of the pings of one tool call, whatever the prices."""
+PING_PRICE_MARGIN = 0.8
+"""Fraction of the break-even ping count kept, so the pings' own output
+tokens and the final rewrite still come in under one cold miss."""
 LONG_TOOL_TIMEOUT_SECONDS = 300.0
 """A tool call whose ``timeout``/``timeout_seconds`` argument reaches this
 may outlive the cache and gets a keep-alive."""
 FAN_OUT_TOOLS = frozenset({"run_parallel", "run_commands_parallel", "run_agent"})
 """Tools that block on other agents or command batches for an unbounded time."""
+WAITING_TOOLS = frozenset({"ask_user_question"})
+"""Tools that wait on a person, however short their timeout."""
+
+
+def keep_alive_max_pings(model_name: str) -> int:
+    """Return how many keep-alive pings one tool call may send on *model_name*.
+
+    A ping re-reads the cached context at the cache-read price; letting
+    the cache expire rewrites it at the cache-write price (the input
+    price on a model that charges no write), so the break-even count
+    is ``(write - read) / read`` and :data:`PING_PRICE_MARGIN` of it is
+    kept: about 40 pings (2.7 hours) on claude-fable-5-1, 9 on a model
+    reading at 0.1x.  The result is at least 1 and never more than
+    :data:`KEEP_ALIVE_MAX_SECONDS` worth of intervals.
+
+    Args:
+        model_name: The model, with or without its provider prefix.
+
+    Returns:
+        The ping cap; :data:`KEEP_ALIVE_MAX_PINGS` when the model's
+        prices are unknown or it has no cache-read price.
+    """
+    info = _lookup_model_info(model_name)
+    wall_clock_cap = int(KEEP_ALIVE_MAX_SECONDS / KEEP_ALIVE_INTERVAL_SECONDS)
+    if info is None or not info.cache_read_price_per_1M:
+        return min(KEEP_ALIVE_MAX_PINGS, wall_clock_cap)
+    read = info.cache_read_price_per_1M
+    write = info.cache_write_price_per_1M or info.input_price_per_1M
+    by_price = int(PING_PRICE_MARGIN * (write - read) / read)
+    return max(1, min(by_price, wall_clock_cap))
 
 
 def is_long_running_call(name: str, args: dict[str, Any]) -> bool:
@@ -52,14 +88,16 @@ def is_long_running_call(name: str, args: dict[str, Any]) -> bool:
         args: The tool's keyword arguments as the model supplied them.
 
     Returns:
-        ``True`` for fan-out tools, for a ``bash_job`` wait (its default
-        timeout already reaches the threshold), and for calls whose
+        ``True`` for fan-out tools, for the tools that wait on a person
+        (:data:`WAITING_TOOLS`, whatever their timeout), for a
+        ``bash_job`` or ``agent_job`` wait (whatever its timeout: the
+        job is another process or agent), and for calls whose
         ``timeout`` or ``timeout_seconds`` argument is at least
         :data:`LONG_TOOL_TIMEOUT_SECONDS`.
     """
-    if name in FAN_OUT_TOOLS:
+    if name in FAN_OUT_TOOLS or name in WAITING_TOOLS:
         return True
-    if name == "bash_job" and args.get("action") == "wait":
+    if name in ("bash_job", "agent_job") and args.get("action") == "wait":
         return True
     for key in ("timeout_seconds", "timeout"):
         try:
@@ -99,7 +137,6 @@ class PromptCacheKeepAlive:
         function_map: dict[str, Any],
         tools_schema: list[dict[str, Any]] | None,
         cache_touched_at: float,
-        interval: float | None = None,
         max_pings: int | None = None,
     ) -> None:
         self.responses: list[Any] = []
@@ -109,7 +146,7 @@ class PromptCacheKeepAlive:
         self._tools_schema = tools_schema
         self._cache_touched_at = cache_touched_at
         # Read at call time so tests can shorten the module defaults.
-        self._interval = KEEP_ALIVE_INTERVAL_SECONDS if interval is None else interval
+        self._interval = KEEP_ALIVE_INTERVAL_SECONDS
         self._max_pings = KEEP_ALIVE_MAX_PINGS if max_pings is None else max_pings
         self._stop = threading.Event()
         self._thread = threading.Thread(

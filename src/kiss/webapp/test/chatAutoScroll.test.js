@@ -19,7 +19,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  nextFrames,
+} = require('./simplify2_harness');
 
 /**
  * Class-keyed fake geometry lets a test give scroll geometry to panels
@@ -73,17 +77,6 @@ function bottom(geo) {
   return Math.max(0, geo.sh - geo.ch);
 }
 
-function nextFrames(win, n = 3) {
-  return new Promise(resolve => {
-    let left = n;
-    function step() {
-      if (--left <= 0) return resolve();
-      win.requestAnimationFrame(step);
-    }
-    win.requestAnimationFrame(step);
-  });
-}
-
 function userScroll(win, el, top) {
   el.scrollTop = top;
   el.dispatchEvent(new win.Event('scroll'));
@@ -101,8 +94,6 @@ function startRunningTask(win, posted) {
   });
   return ready.tabId;
 }
-
-const label = 'remote webapp';
 
 // --------------------------------------------------------------------
 // Outer chat: streamed events pin the chat to the end of the latest
@@ -126,9 +117,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): streamed bash output did not auto-scroll the chat to the end',
+    'BUG: streamed bash output did not auto-scroll the chat to the end',
   );
 
   // Even a SMALL user scroll up must DISABLE auto-scroll: the chat
@@ -142,7 +131,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     smallTop,
-    'BUG (' + label + '): a small user scroll-up did not disable auto-scroll',
+    'BUG: a small user scroll-up did not disable auto-scroll',
   );
 
   // A larger scroll up keeps auto-scroll disabled too.
@@ -154,9 +143,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     lockedTop,
-    'BUG (' +
-      label +
-      '): streaming auto-scrolled the chat although the user had ' +
+    'BUG: streaming auto-scrolled the chat although the user had ' +
       'scrolled up',
   );
 
@@ -168,9 +155,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     lockedTop,
-    'BUG (' +
-      label +
-      '): an event auto-scrolled the chat while the user scroll lock ' +
+    'BUG: an event auto-scrolled the chat while the user scroll lock ' +
       'was engaged',
   );
 
@@ -184,9 +169,7 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     nearBottom,
-    'BUG (' +
-      label +
-      '): auto-scroll resumed before the user reached the bottom',
+    'BUG: auto-scroll resumed before the user reached the bottom',
   );
 
   // Scrolling to the bottom must RESUME auto-scroll.
@@ -196,17 +179,13 @@ async function testOuterChatFollowsLocksAndResumes() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): auto-scroll did not resume after the user scrolled to the ' +
+    'BUG: auto-scroll did not resume after the user scrolled to the ' +
       'bottom',
   );
   win.close();
   console.log(
     '  ok - outer chat follows, locks on user scroll-up, resumes at ' +
-      'the bottom (' +
-      label +
-      ')',
+      'the bottom',
   );
 }
 
@@ -245,14 +224,12 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
-    'BUG (' +
-      label +
-      '): streamed thinking did not scroll the thoughts panel to its end',
+    'BUG: streamed thinking did not scroll the thoughts panel to its end',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' + label + '): streamed thinking did not scroll the chat to its end',
+    'BUG: streamed thinking did not scroll the chat to its end',
   );
 
   // A user scroll away from the thoughts panel's bottom engages the
@@ -266,17 +243,13 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     40,
-    'BUG (' +
-      label +
-      '): streamed thinking auto-scrolled a thoughts panel the user ' +
+    'BUG: streamed thinking auto-scrolled a thoughts panel the user ' +
       'had scrolled up',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      "): the locked thoughts panel disabled the chat's auto-scroll",
+    "BUG: the locked thoughts panel disabled the chat's auto-scroll",
   );
 
   // Scrolling the panel back to its bottom releases its lock: the
@@ -288,9 +261,7 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
-    'BUG (' +
-      label +
-      '): the thoughts panel did not resume following after the user ' +
+    'BUG: the thoughts panel did not resume following after the user ' +
       'scrolled it back to its bottom',
   );
 
@@ -306,9 +277,7 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
-    'BUG (' +
-      label +
-      '): thinking_end did not scroll the flushed thoughts panel to its end',
+    'BUG: thinking_end did not scroll the flushed thoughts panel to its end',
   );
 
   // A LOCKED thoughts panel is left alone even by the thinking_end
@@ -329,9 +298,7 @@ async function testThinkPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): the thinking_end flush auto-scrolled a thoughts panel the user ' +
+    'BUG: the thinking_end flush auto-scrolled a thoughts panel the user ' +
       'had scrolled up',
   );
   assert.ok(
@@ -339,9 +306,7 @@ async function testThinkPanelAutoScrolls() {
     'the pending thinking text must still flush into the locked panel',
   );
   win.close();
-  console.log(
-    '  ok - thinking text auto-scrolls its Thoughts panel (' + label + ')',
-  );
+  console.log('  ok - thinking text auto-scrolls its Thoughts panel');
 }
 
 // --------------------------------------------------------------------
@@ -370,16 +335,12 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      '): streamed bash output did not scroll the bash panel to its end',
+    'BUG: streamed bash output did not scroll the bash panel to its end',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): streamed bash output did not scroll the chat to its end',
+    'BUG: streamed bash output did not scroll the chat to its end',
   );
 
   // After the user scrolls the bash panel up, its own lock engages:
@@ -393,17 +354,13 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     bp.scrollTop,
     40,
-    'BUG (' +
-      label +
-      '): streamed bash output auto-scrolled the bash panel although ' +
+    'BUG: streamed bash output auto-scrolled the bash panel although ' +
       'the user had scrolled it up',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      "): the locked bash panel disabled the chat's auto-scroll",
+    "BUG: the locked bash panel disabled the chat's auto-scroll",
   );
 
   // Scrolling the bash panel back to its bottom releases its lock.
@@ -414,9 +371,7 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      '): the bash panel did not resume following after the user ' +
+    'BUG: the bash panel did not resume following after the user ' +
       'scrolled it back to its bottom',
   );
 
@@ -429,16 +384,12 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      "): the locked chat disabled the bash subpanel's auto-scroll",
+    "BUG: the locked chat disabled the bash subpanel's auto-scroll",
   );
   assert.strictEqual(
     O.scrollTop,
     50,
-    'BUG (' +
-      label +
-      '): streamed bash output auto-scrolled the chat although the ' +
+    'BUG: streamed bash output auto-scrolled the chat although the ' +
       'user had scrolled it up',
   );
   userScroll(win, O, bottom(geoO));
@@ -457,12 +408,12 @@ async function testBashPanelAutoScrolls() {
   assert.strictEqual(
     rp.scrollTop,
     bottom(geoR),
-    'BUG (' + label + '): the tool result subpanel was not scrolled to its end',
+    'BUG: the tool result subpanel was not scrolled to its end',
   );
   delete win._geoByClass['tr-content'];
   delete win._geoByClass['bash-panel-content'];
   win.close();
-  console.log('  ok - bash subpanel auto-scrolls to its end (' + label + ')');
+  console.log('  ok - bash subpanel auto-scrolls to its end');
 }
 
 // --------------------------------------------------------------------
@@ -491,14 +442,12 @@ async function testThoughtsPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
-    'BUG (' +
-      label +
-      '): streamed text did not scroll the thoughts panel to its end',
+    'BUG: streamed text did not scroll the thoughts panel to its end',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' + label + '): streamed text did not scroll the chat to its end',
+    'BUG: streamed text did not scroll the chat to its end',
   );
 
   // A user scroll away from the thoughts panel's bottom engages its
@@ -512,17 +461,13 @@ async function testThoughtsPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     60,
-    'BUG (' +
-      label +
-      '): streamed text auto-scrolled the thoughts panel although the ' +
+    'BUG: streamed text auto-scrolled the thoughts panel although the ' +
       'user had scrolled it up',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      "): the locked thoughts panel disabled the chat's auto-scroll",
+    "BUG: the locked thoughts panel disabled the chat's auto-scroll",
   );
 
   // Scrolling the thoughts panel back to its bottom releases its lock.
@@ -533,9 +478,7 @@ async function testThoughtsPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     bottom(geoL),
-    'BUG (' +
-      label +
-      '): the thoughts panel did not resume following after the user ' +
+    'BUG: the thoughts panel did not resume following after the user ' +
       'scrolled it back to its bottom',
   );
 
@@ -550,23 +493,17 @@ async function testThoughtsPanelAutoScrolls() {
   assert.strictEqual(
     lp.scrollTop,
     70,
-    'BUG (' +
-      label +
-      '): text_end auto-scrolled the thoughts panel although the user ' +
+    'BUG: text_end auto-scrolled the thoughts panel although the user ' +
       'had scrolled it up',
   );
   assert.strictEqual(
     O.scrollTop,
     90,
-    'BUG (' +
-      label +
-      '): text_end auto-scrolled the chat although the user had ' +
+    'BUG: text_end auto-scrolled the chat although the user had ' +
       'scrolled up',
   );
   win.close();
-  console.log(
-    '  ok - thoughts subpanel auto-scrolls to its end (' + label + ')',
-  );
+  console.log('  ok - thoughts subpanel auto-scrolls to its end');
 }
 
 // --------------------------------------------------------------------
@@ -603,14 +540,10 @@ async function testReplayLandsAtEnd() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): replaying task events did not land the chat at the end',
+    'BUG: replaying task events did not land the chat at the end',
   );
   win.close();
-  console.log(
-    '  ok - task replay lands at the end of the latest panel (' + label + ')',
-  );
+  console.log('  ok - task replay lands at the end of the latest panel');
 }
 
 // --------------------------------------------------------------------
@@ -654,9 +587,7 @@ async function testReconnectReplayKeepsReadingPosition() {
   assert.strictEqual(
     O.scrollTop,
     readingAt,
-    'BUG (' +
-      label +
-      '): the reconnect replay yanked the chat away from where the user ' +
+    'BUG: the reconnect replay yanked the chat away from where the user ' +
       'was reading',
   );
   // The lock is still on: streaming does not pull the view down.
@@ -672,12 +603,10 @@ async function testReconnectReplayKeepsReadingPosition() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' + label + '): a bottom-pinned replay did not land at the end',
+    'BUG: a bottom-pinned replay did not land at the end',
   );
   win.close();
-  console.log(
-    '  ok - a reconnect replay keeps the reading position (' + label + ')',
-  );
+  console.log('  ok - a reconnect replay keeps the reading position');
 }
 
 // --------------------------------------------------------------------
@@ -720,16 +649,10 @@ async function testBackgroundTabDoesNotScrollActiveChat() {
   assert.strictEqual(
     O.scrollTop,
     pos,
-    'BUG (' +
-      label +
-      '): background-tab streaming moved the visible chat scroll',
+    'BUG: background-tab streaming moved the visible chat scroll',
   );
   win.close();
-  console.log(
-    '  ok - background-tab streaming leaves the visible chat alone (' +
-      label +
-      ')',
-  );
+  console.log('  ok - background-tab streaming leaves the visible chat alone');
 }
 
 // --------------------------------------------------------------------
@@ -752,7 +675,7 @@ async function testStaticSubpanelsAutoScroll() {
   assert.strictEqual(
     pb.scrollTop,
     bottom(geoP),
-    'BUG (' + label + '): the prompt body was not scrolled to its end',
+    'BUG: the prompt body was not scrolled to its end',
   );
   delete win._geoByClass['prompt-body'];
 
@@ -764,7 +687,7 @@ async function testStaticSubpanelsAutoScroll() {
   assert.strictEqual(
     tcb.scrollTop,
     bottom(geoTcb),
-    'BUG (' + label + '): the tool-call body was not scrolled to its end',
+    'BUG: the tool-call body was not scrolled to its end',
   );
 
   // A user scroll away from the tool body's bottom engages its lock:
@@ -782,24 +705,18 @@ async function testStaticSubpanelsAutoScroll() {
   assert.strictEqual(
     tr.scrollTop,
     bottom(geoTr),
-    'BUG (' +
-      label +
-      '): the error tool-result panel was not scrolled to its end',
+    'BUG: the error tool-result panel was not scrolled to its end',
   );
   assert.strictEqual(
     tcb.scrollTop,
     10,
-    'BUG (' +
-      label +
-      '): a tool_result auto-scrolled a tool body the user had ' +
+    'BUG: a tool_result auto-scrolled a tool body the user had ' +
       'scrolled up',
   );
   delete win._geoByClass['tc-b'];
   delete win._geoByClass['tr'];
   win.close();
-  console.log(
-    '  ok - static subpanels auto-scroll to their end (' + label + ')',
-  );
+  console.log('  ok - static subpanels auto-scroll to their end');
 }
 
 // --------------------------------------------------------------------
@@ -827,9 +744,7 @@ async function testBashFlushOnNextToolCallScrolls() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      "): the previous tool's bash subpanel was not scrolled when its " +
+    "BUG: the previous tool's bash subpanel was not scrolled when its " +
       'pending output was flushed by the next tool_call',
   );
   assert.ok(bp.textContent.includes('tail line'), 'flush must land the text');
@@ -852,9 +767,7 @@ async function testBashFlushOnNextToolCallScrolls() {
   assert.strictEqual(
     bp2.scrollTop,
     20,
-    'BUG (' +
-      label +
-      '): the flush on the next tool_call auto-scrolled a bash ' +
+    'BUG: the flush on the next tool_call auto-scrolled a bash ' +
       'subpanel the user had scrolled up',
   );
   assert.ok(
@@ -862,11 +775,7 @@ async function testBashFlushOnNextToolCallScrolls() {
     'the flush must still land the text in the locked panel',
   );
   win.close();
-  console.log(
-    '  ok - pending bash output flushed by a tool_call auto-scrolls (' +
-      label +
-      ')',
-  );
+  console.log('  ok - pending bash output flushed by a tool_call auto-scrolls');
 }
 
 // --------------------------------------------------------------------
@@ -892,7 +801,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' + label + '): a warning banner auto-scrolled the locked chat',
+    'BUG: a warning banner auto-scrolled the locked chat',
   );
 
   geoO.sh += 100;
@@ -900,7 +809,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' + label + '): an error banner auto-scrolled the locked chat',
+    'BUG: an error banner auto-scrolled the locked chat',
   );
 
   // Back at the bottom, auto-scroll resumes for banners.
@@ -910,9 +819,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): a notice banner did not auto-scroll after the user returned ' +
+    'BUG: a notice banner did not auto-scroll after the user returned ' +
       'to the bottom',
   );
 
@@ -927,7 +834,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' + label + '): a worktree action result did not auto-scroll',
+    'BUG: a worktree action result did not auto-scroll',
   );
 
   // Locked again: a follow-up suggestion bar must not move the chat…
@@ -941,9 +848,7 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): a follow-up suggestion bar auto-scrolled the locked chat',
+    'BUG: a follow-up suggestion bar auto-scrolled the locked chat',
   );
 
   // …until the user scrolls back to the bottom.
@@ -953,17 +858,13 @@ async function testBannersActionResultsAndFollowupsRespectLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): a follow-up suggestion bar did not auto-scroll after the ' +
+    'BUG: a follow-up suggestion bar did not auto-scroll after the ' +
       'user returned to the bottom',
   );
   win.close();
   console.log(
     '  ok - banners, action results and follow-ups respect the user ' +
-      'scroll lock (' +
-      label +
-      ')',
+      'scroll lock',
   );
 }
 
@@ -1021,15 +922,11 @@ async function testTabRestoreLandsAtEnd() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): restoring a tab with hidden streamed events did not land the ' +
+    'BUG: restoring a tab with hidden streamed events did not land the ' +
       'chat at the end',
   );
   win.close();
-  console.log(
-    '  ok - tab restore lands at the end of the latest panel (' + label + ')',
-  );
+  console.log('  ok - tab restore lands at the end of the latest panel');
 }
 
 // --------------------------------------------------------------------
@@ -1051,7 +948,7 @@ async function testScrollLockThresholdAndResume() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'streaming must pin the chat to the bottom first (' + label + ')',
+    'streaming must pin the chat to the bottom first',
   );
 
   // 1px above the bottom is within the fractional-scroll tolerance:
@@ -1063,9 +960,7 @@ async function testScrollLockThresholdAndResume() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): a 1px scroll offset (fractional-scroll tolerance) disabled ' +
+    'BUG: a 1px scroll offset (fractional-scroll tolerance) disabled ' +
       'auto-scroll',
   );
 
@@ -1078,9 +973,7 @@ async function testScrollLockThresholdAndResume() {
   assert.strictEqual(
     O.scrollTop,
     lockedTop,
-    'BUG (' +
-      label +
-      '): scrolling up away from the bottom did not disable auto-scroll',
+    'BUG: scrolling up away from the bottom did not disable auto-scroll',
   );
 
   // Scrolling further up keeps the lock engaged.
@@ -1092,9 +985,7 @@ async function testScrollLockThresholdAndResume() {
   assert.strictEqual(
     O.scrollTop,
     higher,
-    'BUG (' +
-      label +
-      '): auto-scroll resumed before the user reached the bottom',
+    'BUG: auto-scroll resumed before the user reached the bottom',
   );
 
   // At the bottom, the lock releases and auto-scroll resumes.
@@ -1105,17 +996,12 @@ async function testScrollLockThresholdAndResume() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): auto-scroll did not resume once the user scrolled to the ' +
-      'bottom',
+    'BUG: auto-scroll did not resume once the user scrolled to the ' + 'bottom',
   );
   win.close();
   console.log(
     '  ok - lock engages on any scroll away from the bottom and ' +
-      'releases at the bottom (' +
-      label +
-      ')',
+      'releases at the bottom',
   );
 }
 
@@ -1141,7 +1027,7 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'streaming must pin the bash panel to its bottom first (' + label + ')',
+    'streaming must pin the bash panel to its bottom first',
   );
 
   // 1px above the subpanel's bottom is within the fractional-scroll
@@ -1153,9 +1039,7 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      '): a 1px offset (fractional-scroll tolerance) disabled the ' +
+    'BUG: a 1px offset (fractional-scroll tolerance) disabled the ' +
       "bash panel's auto-scroll",
   );
 
@@ -1168,9 +1052,7 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     lockedTop,
-    'BUG (' +
-      label +
-      '): scrolling a subpanel away from its bottom did not disable ' +
+    'BUG: scrolling a subpanel away from its bottom did not disable ' +
       'its auto-scroll',
   );
 
@@ -1183,9 +1065,7 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     nearBottom,
-    'BUG (' +
-      label +
-      "): a subpanel's auto-scroll resumed before the user reached its " +
+    "BUG: a subpanel's auto-scroll resumed before the user reached its " +
       'bottom',
   );
 
@@ -1197,17 +1077,13 @@ async function testSubpanelLockThresholdAndResume() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      "): a subpanel's auto-scroll did not resume once the user " +
+    "BUG: a subpanel's auto-scroll did not resume once the user " +
       'scrolled it to its bottom',
   );
   win.close();
   console.log(
     '  ok - subpanel lock engages away from its bottom and releases ' +
-      'at its bottom (' +
-      label +
-      ')',
+      'at its bottom',
   );
 }
 
@@ -1239,7 +1115,7 @@ async function testSubpanelStaleLockReleasedByShrink() {
   assert.strictEqual(
     bp.scrollTop,
     0,
-    'precondition (' + label + "): the subpanel's lock must be " + 'engaged',
+    "precondition: the subpanel's lock must be engaged",
   );
 
   // The subpanel shrinks until it is not scrollable at all; scrollTop
@@ -1257,17 +1133,13 @@ async function testSubpanelStaleLockReleasedByShrink() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      '): a stale subpanel lock left behind by a content shrink kept ' +
+    'BUG: a stale subpanel lock left behind by a content shrink kept ' +
       'suppressing its auto-scroll',
   );
   win.close();
   console.log(
     '  ok - a subpanel shrink to its bottom releases a stale subpanel ' +
-      'lock (' +
-      label +
-      ')',
+      'lock',
   );
 }
 
@@ -1333,17 +1205,13 @@ async function testSubpanelLockSurvivesTabSwitch() {
   assert.strictEqual(
     bp.scrollTop,
     25,
-    'BUG (' +
-      label +
-      "): switching tabs and back lost a locked subpanel's reading " +
+    "BUG: switching tabs and back lost a locked subpanel's reading " +
       'position',
   );
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG (' +
-      label +
-      '): the restored chat did not land at the end of the latest panel',
+    'BUG: the restored chat did not land at the end of the latest panel',
   );
 
   // The lock (and the reading position) still holds against a second
@@ -1355,9 +1223,7 @@ async function testSubpanelLockSurvivesTabSwitch() {
   assert.strictEqual(
     bp.scrollTop,
     25,
-    'BUG (' +
-      label +
-      '): a subpanel lock did not survive a second tab switch and back',
+    'BUG: a subpanel lock did not survive a second tab switch and back',
   );
 
   // …until the user scrolls the subpanel back to its bottom: the next
@@ -1370,15 +1236,11 @@ async function testSubpanelLockSurvivesTabSwitch() {
   assert.strictEqual(
     bp.scrollTop,
     bottom(geoB),
-    'BUG (' +
-      label +
-      "): a subpanel's auto-scroll did not resume after the user " +
+    "BUG: a subpanel's auto-scroll did not resume after the user " +
       'returned it to its bottom',
   );
   win.close();
-  console.log(
-    '  ok - a subpanel lock survives a tab switch and back (' + label + ')',
-  );
+  console.log('  ok - a subpanel lock survives a tab switch and back');
 }
 
 // --------------------------------------------------------------------
@@ -1402,7 +1264,7 @@ async function testSendMessageKeepsLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'precondition (' + label + '): the user scroll lock must be engaged',
+    'precondition: the user scroll lock must be engaged',
   );
 
   // The user submits a follow-up message while the task is running and
@@ -1420,9 +1282,7 @@ async function testSendMessageKeepsLock() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): sending a message released the scroll lock before the user ' +
+    'BUG: sending a message released the scroll lock before the user ' +
       'scrolled to the bottom',
   );
 
@@ -1434,17 +1294,13 @@ async function testSendMessageKeepsLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): auto-scroll did not resume after the user scrolled to the ' +
+    'BUG: auto-scroll did not resume after the user scrolled to the ' +
       'bottom',
   );
   win.close();
   console.log(
     '  ok - sending a message keeps the scroll lock until the user ' +
-      'returns to the bottom (' +
-      label +
-      ')',
+      'returns to the bottom',
   );
 }
 
@@ -1480,9 +1336,7 @@ async function testIdleScrollAlsoLocks() {
   assert.strictEqual(
     O.scrollTop,
     30,
-    'BUG (' +
-      label +
-      '): a task started while the user was scrolled up yanked the ' +
+    'BUG: a task started while the user was scrolled up yanked the ' +
       'chat to the end',
   );
 
@@ -1494,17 +1348,12 @@ async function testIdleScrollAlsoLocks() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): auto-scroll did not start after the user scrolled to the ' +
-      'bottom',
+    'BUG: auto-scroll did not start after the user scrolled to the ' + 'bottom',
   );
   win.close();
   console.log(
     '  ok - an idle scroll-up keeps the chat where the user is when a ' +
-      'task starts (' +
-      label +
-      ')',
+      'task starts',
   );
 }
 
@@ -1527,11 +1376,7 @@ async function testClearEventResetsLock() {
   geo.sh += 100;
   send(win, {type: 'text_delta', text: 'still old '});
   await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    30,
-    'precondition (' + label + '): the lock must be engaged',
-  );
+  assert.strictEqual(O.scrollTop, 30, 'precondition: the lock must be engaged');
 
   // A new task starts in this tab: the backend broadcasts `clear`.
   send(win, {type: 'clear', tabId: tabId});
@@ -1541,14 +1386,10 @@ async function testClearEventResetsLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      "): a new task's clear event did not reset the scroll lock",
+    "BUG: a new task's clear event did not reset the scroll lock",
   );
   win.close();
-  console.log(
-    '  ok - a clear event (new task) resets the scroll lock (' + label + ')',
-  );
+  console.log('  ok - a clear event (new task) resets the scroll lock');
 }
 
 // --------------------------------------------------------------------
@@ -1573,7 +1414,7 @@ async function testReadingPreviousTaskNeverYanked() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'precondition (' + label + '): streaming must follow the end',
+    'precondition: streaming must follow the end',
   );
 
   // The user scrolls to the top and the previous task of the same chat
@@ -1620,9 +1461,7 @@ async function testReadingPreviousTaskNeverYanked() {
   assert.strictEqual(
     O.scrollTop,
     120,
-    'BUG (' +
-      label +
-      "): the running task's event panels scrolled the chat to the " +
+    "BUG: the running task's event panels scrolled the chat to the " +
       'end while the user was reading a previous task',
   );
 
@@ -1634,15 +1473,11 @@ async function testReadingPreviousTaskNeverYanked() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): auto-scroll did not resume after the user scrolled to the ' +
+    'BUG: auto-scroll did not resume after the user scrolled to the ' +
       'end of the chat',
   );
   win.close();
-  console.log(
-    '  ok - reading a previous task is never yanked to the end (' + label + ')',
-  );
+  console.log('  ok - reading a previous task is never yanked to the end');
 }
 
 // --------------------------------------------------------------------
@@ -1667,11 +1502,7 @@ async function testCollapseShrinkReleasesStaleLock() {
   geo.sh += 100;
   send(win, {type: 'text_delta', text: 'more '});
   await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    0,
-    'precondition (' + label + '): the lock must be engaged',
-  );
+  assert.strictEqual(O.scrollTop, 0, 'precondition: the lock must be engaged');
 
   // Panels collapse: the chat shrinks until it is not scrollable at
   // all.  scrollTop is already 0, so the browser fires NO scroll event
@@ -1687,17 +1518,11 @@ async function testCollapseShrinkReleasesStaleLock() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geo),
-    'BUG (' +
-      label +
-      '): a stale lock left behind by a content shrink (no scroll ' +
+    'BUG: a stale lock left behind by a content shrink (no scroll ' +
       'event) kept suppressing auto-scroll',
   );
   win.close();
-  console.log(
-    '  ok - a content shrink to the bottom releases a stale lock (' +
-      label +
-      ')',
-  );
+  console.log('  ok - a content shrink to the bottom releases a stale lock');
 }
 
 async function main() {

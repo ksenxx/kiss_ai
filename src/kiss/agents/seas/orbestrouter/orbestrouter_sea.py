@@ -6,7 +6,7 @@
 
 Same protocol as :mod:`kiss.agents.seas.bestrouter.bestrouter_sea` (one
 frontier model does the work, a second one reviews it read-only through
-``run_parallel`` on at most 75% of the budget), with both models taken from
+a non-blocking ``run_agent`` on at most 75% of the budget), with both models taken from
 the OpenRouter vendor: :data:`PRIMARY_MODEL` is Claude Fable 5.1 and
 :data:`REVIEW_MODEL` is GPT-6 Astra, both as ``openrouter/...`` catalog
 entries, so one OpenRouter key runs the whole session.
@@ -45,7 +45,8 @@ class OrbestrouterSea(BaseSea):
         """Return the one-sentence help text shown by ``/orbestrouter help``."""
         return (
             f"Runs every task on {PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
-            "result read-only through run_parallel on at most 75% of the task budget (the "
+            "result read-only through a non-blocking run_agent on at most 75% of the task "
+            "budget (the "
             "bestrouter on OpenRouter models only); pick `orbestrouter` in the model picker, "
             "use `/orbestrouter <task>` in the chat, or "
             'run_agent(agent="orbestrouter", task="...").'

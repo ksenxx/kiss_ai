@@ -322,8 +322,6 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   findings file right after the call. `sea_runs()` returns about 220k chars: call it once
   per sweep, write the per-SEA numbers into `tmp/rsi7d/baseline.md` at once, and never
   call it again, with or without `name` / `days`.
-- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
-  otherwise the 10th, 20th, ... call is refused.
 - In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash
   command, heredoc bodies included: the guard rejects the whole call. Read the main
   branch's copy with `git show main:<path>`; quote such paths only in `Write`d notes.
@@ -430,6 +428,29 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
    exercised". `git add` the report. Maintain `./tmp/PROGRESS.md` while you work.
 8. Finish with a summary that lists every changed file, every added instruction and the
    evaluation evidence.
+
+
+## Lessons from recent runs (rsi7d)
+- A bucket attributed "(system prompt signature)" whose `sea_findings` tool_calls name tools
+  the SEA lacks (`ask` with Bash/Edit/Read) is misattributed: the signature came from text
+  shared with the plain prompt. Fix `_signatures` / `_distinctive_prefix` in rsi7d_sea.py,
+  never patch that SEA for those runs (2026-10-25 sweep 23b4cc21: 679 plain runs under
+  `ask`, 1 under `sorcar`).
+- After `patch_sea_code("rsi7d", ...)` this session's own mining tools still run the code
+  loaded at start: check the effect with `uv run python -c "from
+  kiss.agents.seas.rsi7d.rsi7d_sea import ..."` printing counts only (never the full
+  `sea_runs` JSON), then verify by replay.
+- `run_findings` of a still-running task (this sweep) reports `cost 0.0, steps 0` (23b4cc21,
+  cde195d4 [19]): quote the sweep's own cost as "final figure in task_history", never as a
+  number from the running `Budget:` line (32d783fe [63] wrote "running estimate ~$1.9");
+  quote every past run's and replay's cost from `run_findings(<finished id>)`.
+- In the `write_autorouter_evidence` table keep every row under 92 characters: name the
+  folded models in a bullet, not in the row (`| others | 5 | sub | 0/0 | - | - | - |`); a
+  longer row is refused and the whole block is re-sent (cde195d4 [10]).
+- Before adding a bullet about a framework mechanism (a gate, a refusal text), confirm it
+  still exists in the current code (`grep -rn "<refusal text>" src/kiss`): the summary
+  gate seen in the window's runs was removed by 1509b8cc0 (`core/step_recap.py` writes the
+  recap), so a bullet about it would have been stale (sweep 23b4cc21).
 """
 
 
@@ -1034,12 +1055,36 @@ def _assigned_value(node: ast.stmt, name: str) -> ast.expr | None:
     return node.value if isinstance(target, ast.Name) and target.id == name else None
 
 
+SOURCE_COLUMNS = 100
+"""The line length ``uv run check`` (ruff E501) allows in a SEA file."""
+
+
+def _continue_long_lines(body: str, limit: int = SOURCE_COLUMNS) -> str:
+    """Return *body* with every line longer than *limit* columns split at spaces into
+    ``\\``-continued source lines, which a triple-quoted literal joins back without a newline.
+
+    A constant written with such continuations (``git_extract_knowledge_sea.py``) was
+    re-serialised as 26 lines of up to 619 columns by the 2026-10-25 sweep, failing
+    ``uv run check --full``; a line without a space before *limit* stays long.
+    """
+    out: list[str] = []
+    for line in body.split("\n"):
+        while len(line) > limit:
+            cut = line.rfind(" ", 0, limit - 1)
+            if cut <= 0:
+                break
+            out.append(line[: cut + 1] + "\\")
+            line = line[cut + 1 :]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _string_literal(text: str) -> str:
     """Return a Python literal evaluating to *text* (triple-quoted when multi-line)."""
     body = text.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
     if body.endswith('"'):
         body = body[:-1] + '\\"'
-    literal = '"""\\\n' + body + '"""' if "\n" in text else repr(text)
+    literal = '"""\\\n' + _continue_long_lines(body) + '"""' if "\n" in text else repr(text)
     if ast.literal_eval(literal) != text:
         literal = repr(text)
     return literal
@@ -1387,21 +1432,65 @@ def _sorcar_info() -> dict[str, Any]:
     }
 
 
+def _plain_prompts() -> tuple[str, ...]:
+    """Return the rendered prompt files a plain KISS Sorcar run carries (those that exist).
+
+    ``SYSTEM.md`` and ``SYSTEM_LITE.md`` of the checkout's package, brand
+    placeholders filled as the daemon fills them, so that text shared with
+    them never serves as a SEA's signature.
+    """
+    texts: list[str] = []
+    try:
+        pkg = _kiss_pkg_dir()
+    except Exception:  # noqa: BLE001 - no checkout layout: nothing is shared
+        return ()
+    for fname in SORCAR_PROMPT_FILES:
+        path = pkg / fname
+        if path.is_file():
+            texts.append(render_brand(path.read_text(encoding="utf-8")))
+    return tuple(texts)
+
+
+def _distinctive_prefix(text: str, shared: tuple[str, ...]) -> str:
+    """Return the first :data:`SIGNATURE_CHARS`-long window of *text* that starts at a line
+    start and that none of the *shared* prompts contains, or ``""``.
+
+    A SEA whose ``system_prompt`` replaces the prompt with the brand
+    identity followed by its own playbook (``/ask``) starts with text every
+    plain run's ``system_prompt`` event also carries; a signature cut from
+    that part would claim every plain run for the SEA (the 2026-10-25 sweep
+    found 679 plain runs under ``ask`` and one under ``sorcar``).
+    """
+    start = 0
+    while start + SIGNATURE_CHARS <= len(text):
+        window = text[start : start + SIGNATURE_CHARS]
+        if not any(window in s for s in shared):
+            return window
+        nxt = text.find("\n", start)
+        if nxt < 0:
+            break
+        start = nxt + 1
+    return ""
+
+
 def _signatures() -> dict[str, str]:
     """Return ``{sea name: prompt prefix}`` of every editable SEA whose ``system_prompt`` loads.
 
-    The prefix (the first 200 characters of the SEA's own prompt text)
+    The prefix (the first 200 characters of the SEA's own prompt text that
+    no plain prompt file shares, see :func:`_distinctive_prefix`)
     identifies a run's ``system_prompt`` event when no ``run_agent``
     tool call links it to the SEA.
     """
     signatures: dict[str, str] = {}
+    shared = _plain_prompts()
     for name, path in sorted(_editable_seas().items()):
         try:
             text = _sea_prompt_text(path)
         except Exception:  # noqa: BLE001 - a SEA that does not load has no runs to mine
             continue
-        if len(text) >= SIGNATURE_CHARS:
-            signatures[name] = text[:SIGNATURE_CHARS]
+        signature = _distinctive_prefix(text, shared)
+        if signature:
+            signatures[name] = signature
     return signatures
 
 

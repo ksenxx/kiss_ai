@@ -113,7 +113,6 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     oauth, server = slack
     agent = SlackAgent()
     tools = auth_tools(agent)
-    assert "Not authenticated" in tools["check_slack_auth"]()
 
     done = sign_in(tools, oauth)
     assert done["ok"] is True

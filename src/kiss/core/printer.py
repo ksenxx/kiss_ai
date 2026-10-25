@@ -38,6 +38,44 @@ def parse_result_yaml(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def cost_fields(
+    cost: Any, cost_usd: float | None, budget_offset: float
+) -> tuple[Any, float | None]:
+    """Add the task's *budget_offset* to a cost; return both renderings.
+
+    The ``"$x.xxxx"`` string is what the UI shows; the float is what a
+    ``run_agent`` / ``run_parallel`` parent charges to its ledger
+    (``daemon_client._net_totals``), so it must not go through the
+    four-decimal rounding of the string.  Non-dollar or malformed
+    costs (``"N/A"``, ``"$abc"``) without *cost_usd* pass through
+    verbatim so a junk value never raises out of the emitting agent
+    thread.
+
+    Args:
+        cost: The raw display cost (usually a ``"$1.2345"`` string).
+        cost_usd: The unrounded USD figure when the emitter knows it;
+            parsed from *cost* otherwise.
+        budget_offset: The task's banked USD total to add.
+
+    Returns:
+        ``(display, exact)``: the offset-adjusted cost string (or
+        *cost* unchanged) and the offset-adjusted USD float, ``None``
+        when neither input yields a number.
+    """
+    exact: float | None = None
+    if cost_usd is not None:
+        exact = float(cost_usd)
+    elif isinstance(cost, str) and cost.startswith("$"):
+        try:
+            exact = float(cost[1:])
+        except ValueError:
+            exact = None
+    if exact is None:
+        return cost, None
+    exact += budget_offset
+    return f"${exact:.4f}", exact
+
+
 LANG_MAP = {
     "py": "python",
     "js": "javascript",
@@ -163,10 +201,6 @@ class Printer(ABC):
         Args:
             is_start: ``True`` for block start, ``False`` for block end.
         """
-
-    @abstractmethod
-    def reset(self) -> None:
-        """Reset the printer's internal streaming state between messages."""
 
     def thread_binding(self) -> Any:
         """Return the calling thread's task binding for :meth:`adopt_thread_binding`.

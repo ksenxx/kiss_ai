@@ -332,7 +332,7 @@ class AgentEvolver:
         self.evolve_to_solve_task = evolve_to_solve_task
 
         self.work_dir = Path(tempfile.mkdtemp())
-        self.optimal_dir = Path(config_module.artifact_dir) / "optimal_agent"
+        self.optimal_dir = Path(config_module.get_artifact_dir()) / "optimal_agent"
 
         self.pareto_frontier: list[AgentVariant] = []
         self._variant_counter = 0

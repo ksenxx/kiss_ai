@@ -680,6 +680,7 @@
         resolve();
       };
       s.onerror = () => {
+        s.remove();
         voskLoadPromise = null;
         reject(new Error('failed to load speech engine'));
       };
@@ -694,7 +695,8 @@
   // fetch hangs on a dead tunnel, WASM init stalls) leaves the promise
   // pending for ever, so without a bound `busy` stays true for the page
   // lifetime and the mic is wedged on 'loading' with every re-enable
-  // deferring to `busy`.
+  // deferring to `busy`.  The server never sets `cfg.modelLoadTimeoutMs`;
+  // it is a test override of the 30 s bound.
   const MODEL_LOAD_TIMEOUT_MS =
     typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
       ? cfg.modelLoadTimeoutMs

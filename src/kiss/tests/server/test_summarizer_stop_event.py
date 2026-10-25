@@ -2,35 +2,32 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The summarizer's shell must be killable.
+"""A Stop during the hand-off summarizer ends the run at once.
 
 When an executor session dies with a recoverable error,
 :meth:`RelentlessAgent.perform_task` falls back to a summarizer agent
-armed with ``Read`` and ``Bash``.  It built those tools with
-``getattr(self.printer, "stop_event", None)`` — but ``stop_event``
-lives on the printer's THREAD-LOCAL, not on the printer, so the value
-was always ``None`` and ``UsefulTools`` never started its
-process-group killer.  Clicking Stop then took as long as whatever
-shell command the summarizer happened to be running.
+that turns a scripted digest of the session into the continuation
+summary.  The summarizer has no shell (its only tool is ``finish``),
+so nothing but its model call can outlive a Stop: the stop event bound
+to the task thread (the printer's thread-local, where the web server
+publishes it) must end the run as soon as that call returns, without
+a second summarizer step.
 
 This test drives the real recovery path: a real agent, a real
-executor session that really exceeds its step budget, a real
-summarizer, and a real ``Bash`` child process whose PID is checked
-with :func:`kiss.core.processes.pid_alive`.
+executor session that really exceeds its step budget, and a real
+summarizer whose model call is held open by the stand-in server until
+the test has pressed Stop.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core.processes import pid_alive
-from kiss.tests.conftest import posix_only
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -52,29 +49,34 @@ def env() -> Iterator[IsolatedKissHome]:
         isolated.cleanup()
 
 
-@posix_only("bash's $$ is an MSYS pid, not a Windows pid")
-def test_summarizer_bash_is_killed_by_the_thread_stop_event(
-    env: IsolatedKissHome,
-) -> None:
-    """Stop must kill the summarizer's shell process group.
+def _text_response(text: str) -> dict[str, Any]:
+    """Build a chat-completions body holding plain text and no tool call."""
+    body = tool_call_response("finish", {})
+    body["choices"][0]["message"] = {"role": "assistant", "content": text}
+    body["choices"][0]["finish_reason"] = "stop"
+    return body
+
+
+def test_stop_during_the_summarizer_call_ends_the_run(env: IsolatedKissHome) -> None:
+    """Stop set while the summarizer's call is pending ends the run after that call.
 
     The executor session is starved of steps so it raises the
     recoverable "exceeded N steps" error, which is exactly the branch
-    that spawns the summarizer.  The summarizer's first (and only)
-    action is a real long-running shell command that records its own
-    process-group leader pid.
+    that spawns the summarizer.  The summarizer's one model call is
+    held open until the test sets the stop event; its reply is plain
+    text (no ``finish``), which without the stop would earn it a
+    second step.
     """
-    pid_file = env.repo / "summarizer.pid"
+    summarizer_requests: list[dict[str, Any]] = []
+    summarizer_started = threading.Event()
+    release = threading.Event()
 
     def responder(request: dict[str, Any]) -> dict[str, Any]:
-        if "The executor's trajectory is saved at" in request_text(request):
-            return tool_call_response(
-                "Bash",
-                {
-                    "command": f"echo $$ > {pid_file}; sleep 120",
-                    "description": "long summarizer analysis",
-                },
-            )
+        if "# Summarizer" in request_text(request):
+            summarizer_requests.append(request)
+            summarizer_started.set()
+            release.wait(timeout=30)
+            return _text_response("still thinking about the digest")
         return tool_call_response(
             "Bash", {"command": "echo working", "description": "executor step"},
         )
@@ -104,24 +106,18 @@ def test_summarizer_bash_is_killed_by_the_thread_stop_event(
     thread = threading.Thread(target=run_agent, daemon=True)
     thread.start()
     try:
-        assert wait_for(lambda: _pid_recorded(pid_file)), (
-            "the summarizer never started its shell command"
-        )
-        pid = int(pid_file.read_text().strip())
-        assert pid_alive(pid), "the shell exited before the stop"
-
+        assert wait_for(summarizer_started.is_set), "the summarizer never called the model"
         stop_event.set()
-
-        assert wait_for(lambda: not pid_alive(pid), timeout=10.0), (
-            "the summarizer's shell survived the stop: UsefulTools was "
-            "built with stop_event=None, so nothing polls the stop"
-        )
+        release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "the run survived a Stop set during the summarizer"
     finally:
         stop_event.set()
+        release.set()
         thread.join(timeout=30)
         server.stop()
 
-
-def _pid_recorded(pid_file: Path) -> bool:
-    """Return whether the shell has written its pid yet."""
-    return pid_file.exists() and bool(pid_file.read_text().strip())
+    assert len(summarizer_requests) == 1, "the summarizer took a step after the Stop"
+    tools = [t["function"]["name"] for t in summarizer_requests[0]["tools"]]
+    assert tools == ["finish"], tools
+    assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome

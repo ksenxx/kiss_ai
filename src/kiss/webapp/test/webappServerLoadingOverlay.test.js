@@ -3,11 +3,17 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// transport.js and the "<product> Server is starting ..." overlay: the
+// shim dispatches `daemonStatus` on auth_ok / auth_required (connected)
+// and on a socket close (disconnected), reconnects after a close (at
+// once on visibilitychange), and labels the overlay "Reconnecting ..."
+// after a post-auth close or on a page the service worker served from
+// its cache.  What main.js does with `daemonStatus` (hide the overlay,
+// show #app) is reconnectBannerKeepsAppVisible.test.js.
+
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   newAuthDom,
   bootShim,
@@ -15,258 +21,115 @@ const {
   waitForSocket,
 } = require('./transport_page_helpers');
 
-const PROJECT_ROOT = path.resolve(__dirname, '..');
-const CHAT_HTML = path.join(PROJECT_ROOT, 'media', 'chat.html');
+const RECONNECTING = 'Reconnecting to KISS Sorcar Server ...';
 
 function ok(msg) {
   console.log('  ok -', msg);
 }
 
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
+/** A booted shim page: its fake sockets and every daemonStatus it dispatched. */
+function boot(prepare) {
+  const {window} = newAuthDom();
+  const sockets = [];
+  installFakeWebSocket(window, sockets);
+  const seen = [];
+  window.addEventListener('message', ev => {
+    if (ev.data && ev.data.type === 'daemonStatus') seen.push(ev.data);
+  });
+  if (prepare) prepare(window);
+  bootShim(window);
+  assert.strictEqual(sockets.length, 1, 'the shim opens one WebSocket on load');
+  return {window, sockets, sock: sockets[0], seen};
 }
 
-function setupSimulatedSetServerLoading(window) {
-  function setServerLoading(loading) {
-    const overlay = window.document.getElementById('kiss-server-loading');
-    const app = window.document.getElementById('app');
-    if (overlay) overlay.style.display = loading ? '' : 'none';
-    if (app) app.style.display = loading ? 'none' : '';
-  }
-  window.addEventListener('message', (ev) => {
-    const d = ev.data;
-    if (d && d.type === 'daemonStatus') {
-      setServerLoading(!d.connected);
-    }
-  });
+function overlayText(window) {
+  return window.document.getElementById('kiss-server-loading-msg').textContent;
 }
 
 async function run() {
-  const tpl = fs.readFileSync(CHAT_HTML, 'utf-8');
-  try {
+  {
+    const {window, sock, seen} = boot();
+    assert.strictEqual(seen.length, 0, 'nothing is dispatched before auth');
+    sock.fireOpen();
     assert.ok(
-      /id="kiss-server-loading"/.test(tpl),
-      'chat.html must render the loading overlay element',
+      sock.sent.some(d => /"type":\s*"auth"/.test(d)),
+      'the shim sends an auth frame after the socket opens',
     );
+    sock.fireMessage({type: 'auth_ok'});
     assert.ok(
-      /\{\{PRODUCT_NAME\}\} Server is starting \.\.\./.test(tpl),
-      'overlay must contain the "<product> Server is starting ..." message',
+      seen.some(d => d.connected === true),
+      'auth_ok must dispatch daemonStatus(connected:true), or the remote ' +
+        'webapp stays on "Server is starting ..." forever',
     );
+    ok('auth_ok dispatches daemonStatus(connected:true)');
+    sock.fireClose();
     assert.ok(
-      /<div id="app" style="display:none;?"/.test(tpl),
-      '#app must start hidden so the overlay is what the user sees',
+      seen.some(d => d.connected === false),
+      'a socket close must dispatch daemonStatus(connected:false)',
     );
-    ok('chat.html paints overlay over a hidden #app on first load');
-  } catch (err) {
-    fail('chat.html initial overlay assertions', err);
+    assert.strictEqual(
+      overlayText(window),
+      RECONNECTING,
+      'the overlay says "Reconnecting ..." after a post-auth close',
+    );
+    ok(
+      'socket close dispatches daemonStatus(connected:false) and relabels the overlay',
+    );
+    window.close();
   }
 
   {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
+    const {window, sock, seen} = boot();
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_required'});
+    assert.ok(
+      seen.some(d => d.connected === true),
+      'auth_required must dispatch daemonStatus(connected:true), or a ' +
+        'password-protected webapp cannot show its password prompt',
+    );
+    ok('auth_required dispatches daemonStatus(connected:true)');
+    window.close();
+  }
 
-    const seen = [];
-    window.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type === 'daemonStatus') {
-        seen.push(ev.data);
-      }
-    });
+  {
+    const {window, sockets, sock} = boot();
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok'});
+    sock.fireClose();
+    // transport.js reconnects after onclose: _scheduleReconnect arms
+    // the first backoff at 500-1000 ms (jittered), and the wake-up
+    // listeners (pageshow, which jsdom fires right after load, and
+    // visibilitychange / online) reconnect at once.  The second socket
+    // is awaited with a bound well past the backoff, so a busy box
+    // cannot turn the backoff's jitter into a spurious failure.
+    await waitForSocket(sockets, 2);
+    ok('onclose reconnects: a 2nd socket is opened');
+    window.close();
+  }
 
-    bootShim(window);
-
+  {
+    const {window, sockets, sock} = boot();
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok'});
+    sock.fireClose();
     assert.strictEqual(
       sockets.length,
       1,
-      'shim must open exactly one WebSocket on load',
+      'only one socket right after onclose',
     );
-    const sock = sockets[0];
-
-    const overlay = window.document.getElementById('kiss-server-loading');
-    const app = window.document.getElementById('app');
-    assert.notStrictEqual(
-      overlay.style.display,
-      'none',
-      'overlay must still be visible before auth_ok arrives',
-    );
-    assert.strictEqual(
-      app.style.display,
-      'none',
-      '#app must still be hidden before auth_ok arrives',
-    );
-    ok('webapp loads with the "Server is starting" overlay covering #app');
-
-    sock.fireOpen();
-    assert.ok(
-      sock.sent.some((d) => /"type":\s*"auth"/.test(d)),
-      'shim must send an auth frame after WebSocket open',
-    );
-
-    sock.fireMessage({type: 'auth_ok'});
-
-    try {
-      assert.ok(
-        seen.some((d) => d.type === 'daemonStatus' && d.connected === true),
-        'shim must dispatch daemonStatus(connected:true) after auth_ok',
-      );
-      ok('auth_ok dispatches daemonStatus(connected:true) — overlay hides');
-    } catch (err) {
-      fail(
-        'auth_ok -> daemonStatus(connected:true): the remote webapp will ' +
-          'stay on "KISS Sorcar Server is starting ..." forever',
-        err,
-      );
-    }
-
-    assert.strictEqual(
-      overlay.style.display,
-      'none',
-      'overlay must be hidden once daemonStatus(connected:true) fires',
-    );
-    assert.notStrictEqual(
-      app.style.display,
-      'none',
-      '#app must be revealed once daemonStatus(connected:true) fires',
-    );
-    ok('setServerLoading(false) reveals #app after auth_ok');
-
-    window.close();
-  }
-
-  {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-
-    const seen = [];
-    window.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type === 'daemonStatus') {
-        seen.push(ev.data);
-      }
+    Object.defineProperty(window.document, 'visibilityState', {
+      configurable: true,
+      get() {
+        return 'visible';
+      },
     });
-
-    bootShim(window);
-    const sock = sockets[0];
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_required'});
-
-    try {
-      assert.ok(
-        seen.some((d) => d.type === 'daemonStatus' && d.connected === true),
-        'shim must dispatch daemonStatus(connected:true) on auth_required',
-      );
-      ok('auth_required dispatches daemonStatus(connected:true) — modal becomes visible');
-    } catch (err) {
-      fail(
-        'auth_required -> daemonStatus(connected:true): password-protected ' +
-          'webapp cannot show its password prompt',
-        err,
-      );
-    }
-
-    const overlay = window.document.getElementById('kiss-server-loading');
-    const app = window.document.getElementById('app');
-    assert.strictEqual(
-      overlay.style.display,
-      'none',
-      'overlay must be hidden on auth_required so the auth modal can render',
-    );
-    assert.notStrictEqual(
-      app.style.display,
-      'none',
-      '#app (parent of #auth-modal) must be revealed on auth_required',
-    );
-    ok('#app is revealed so #auth-modal can render on top');
-
-    window.close();
-  }
-
-  {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-
-    const seen = [];
-    window.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type === 'daemonStatus') {
-        seen.push(ev.data);
-      }
-    });
-
-    bootShim(window);
-    const sock = sockets[0];
-
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_ok'});
+    window.document.dispatchEvent(new window.Event('visibilitychange'));
     assert.ok(
-      seen.some((d) => d.connected === true),
-      'precondition: auth_ok must have produced a connected:true event',
+      sockets.length >= 2,
+      'visibilitychange must reconnect at once, or iOS Safari users wait ' +
+        'out the full backoff',
     );
-
-    sock.fireClose();
-
-    try {
-      assert.ok(
-        seen.some((d) => d.type === 'daemonStatus' && d.connected === false),
-        'shim must dispatch daemonStatus(connected:false) on socket close',
-      );
-      ok('socket close dispatches daemonStatus(connected:false) — overlay returns');
-    } catch (err) {
-      fail('close -> daemonStatus(connected:false)', err);
-    }
-
-    const overlay = window.document.getElementById('kiss-server-loading');
-    const app = window.document.getElementById('app');
-    assert.notStrictEqual(
-      overlay.style.display,
-      'none',
-      'overlay must be visible again after socket close',
-    );
-    assert.strictEqual(
-      app.style.display,
-      'none',
-      '#app must be re-hidden after socket close',
-    );
-    ok('setServerLoading(true) re-hides #app after disconnect');
-
-    window.close();
-  }
-
-  {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-
-    bootShim(window);
-    const sock = sockets[0];
-
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_ok'});
-
-    sock.fireClose();
-
-    const msg = window.document.getElementById('kiss-server-loading-msg');
-    try {
-      assert.ok(msg, 'overlay must have a #kiss-server-loading-msg node');
-      assert.strictEqual(
-        msg.textContent,
-        'Reconnecting to KISS Sorcar Server ...',
-        'overlay text must say "Reconnecting ..." after a post-auth close',
-      );
-      ok('onclose flips overlay text to "Reconnecting to KISS Sorcar Server ..."');
-    } catch (err) {
-      fail(
-        'overlay text must say "Reconnecting ..." after a post-auth close',
-        err,
-      );
-    }
-
+    ok('visibilitychange wakes the shim and reconnects immediately');
     window.close();
   }
 
@@ -274,124 +137,24 @@ async function run() {
     // A page the service worker served from its cache (the server was
     // unreachable) is a reconnect from the user's point of view: the
     // worker only has the copy because the server was up before.
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-    const meta = window.document.createElement('meta');
-    meta.setAttribute('name', 'kiss-offline-shell');
-    window.document.head.appendChild(meta);
-
-    bootShim(window);
-
-    const msg = window.document.getElementById('kiss-server-loading-msg');
-    try {
-      assert.ok(msg, 'overlay must have a #kiss-server-loading-msg node');
-      assert.strictEqual(
-        msg.textContent,
-        'Reconnecting to KISS Sorcar Server ...',
-        'overlay must say "Reconnecting ..." on a page served from the worker cache',
-      );
-      ok('offline-cached page shows "Reconnecting ..." immediately');
-    } catch (err) {
-      fail(
-        'shim must label the overlay a reconnect on an offline-shell page',
-        err,
-      );
-    }
-
+    const {window} = boot(window => {
+      const meta = window.document.createElement('meta');
+      meta.setAttribute('name', 'kiss-offline-shell');
+      window.document.head.appendChild(meta);
+    });
     assert.strictEqual(
-      sockets.length,
-      1,
-      'shim must still open exactly one WebSocket on load',
+      overlayText(window),
+      RECONNECTING,
+      'the overlay says "Reconnecting ..." on a page served from the worker cache',
     );
-
-    window.close();
-  }
-
-  {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-
-    bootShim(window);
-    const sock = sockets[0];
-
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_ok'});
-    assert.strictEqual(sockets.length, 1, 'precondition: 1 socket so far');
-
-    sock.fireClose();
-
-    // transport.js reconnects after onclose: _scheduleReconnect arms
-    // the first backoff at 500-1000 ms (jittered), and the wake-up
-    // listeners (pageshow, which jsdom fires right after load, and
-    // visibilitychange / online) reconnect at once.  The second socket
-    // is awaited with a bound well past the backoff, so a busy box
-    // cannot turn the backoff's jitter into a spurious failure.
-    try {
-      await waitForSocket(sockets, 2);
-      ok('onclose reconnects: a 2nd socket is opened');
-    } catch (err) {
-      fail('reconnect regression: no 2nd socket after onclose', err);
-    }
-
-    window.close();
-  }
-
-  {
-    const {window} = newAuthDom();
-    const sockets = [];
-    installFakeWebSocket(window, sockets);
-    setupSimulatedSetServerLoading(window);
-
-    bootShim(window);
-    const sock = sockets[0];
-
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_ok'});
-    sock.fireClose();
-    assert.strictEqual(
-      sockets.length,
-      1,
-      'precondition: still only one socket right after onclose',
-    );
-
-    try {
-      Object.defineProperty(window.document, 'visibilityState', {
-        configurable: true,
-        get() {
-          return 'visible';
-        },
-      });
-    } catch (e) {
-    }
-    window.document.dispatchEvent(
-      new window.Event('visibilitychange', {bubbles: false}),
-    );
-
-    try {
-      assert.ok(
-        sockets.length >= 2,
-        'visibilitychange must trigger an immediate reconnect',
-      );
-      ok('visibilitychange wakes the shim and reconnects immediately');
-    } catch (err) {
-      fail(
-        'visibilitychange did not trigger an immediate reconnect — ' +
-          'iOS Safari users will wait out the full backoff',
-        err,
-      );
-    }
-
+    ok('offline-cached page shows "Reconnecting ..." immediately');
     window.close();
   }
 
   console.log('\nAll webapp server-loading-overlay tests passed.');
 }
 
-run().catch((err) => {
+run().catch(err => {
   console.error('FAIL:', err);
   process.exit(1);
 });

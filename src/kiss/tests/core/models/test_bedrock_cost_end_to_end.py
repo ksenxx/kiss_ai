@@ -14,7 +14,7 @@ table (aws.amazon.com/bedrock/pricing, Anthropic tab, 2026-10):
 * ``agent.last_call_usage`` (the per-call tokens),
 * the ``usage_info`` event's ``cost`` / ``cost_usd`` (what the chat
   header and the task list show), including the string the server
-  renders through ``json_printer._cost_fields``.
+  renders through ``kiss.core.printer.cost_fields``.
 
 No mocks, patches or test doubles: the SDK, sockets, event-stream
 decoding, usage extraction, ``calculate_cost`` and the agent's ledger all
@@ -45,8 +45,7 @@ from kiss.core.models.model_info import (
     bedrock_price_factor,
     calculate_cost,
 )
-from kiss.core.printer import Printer
-from kiss.server.json_printer import _cost_fields
+from kiss.core.printer import Printer, cost_fields
 from kiss.tests.core.models.anthropic_sse_harness import ScriptedAnthropicServer, sse
 from kiss.tests.core.models.test_bedrock_claude import (
     _AWS_FIELDS,
@@ -223,7 +222,7 @@ def _check_event(
     assert event["cost_usd"] == pytest.approx(expected)
     assert event["cost"] == f"${expected:.4f}"
     assert event["cache_read"] == cache_read
-    display, exact = _cost_fields(event["cost"], event["cost_usd"], 0.0)
+    display, exact = cost_fields(event["cost"], event["cost_usd"], 0.0)
     assert display == f"${expected:.4f}"
     assert exact == pytest.approx(expected)
     assert agent.budget_used == pytest.approx(expected)

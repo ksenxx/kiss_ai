@@ -9,8 +9,6 @@
 // task panel that opens a transcript when the async clipboard API is
 // unavailable.
 
-/* global require, process, console, __dirname, global, clearTimeout */
-
 'use strict';
 
 const assert = require('assert');

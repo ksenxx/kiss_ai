@@ -42,6 +42,7 @@ from websockets.sync.client import connect as _ws_connect
 
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -123,21 +124,8 @@ def write_endpoint(path: Path, endpoint: LocalEndpoint) -> None:
         endpoint: The daemon's local endpoint.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with _endpoint_lock(path):
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(asdict(endpoint), handle, indent=2)
-                handle.write("\n")
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        atomic_write_text(path, json.dumps(asdict(endpoint), indent=2) + "\n", mode=0o600)
 
 
 def read_endpoint(path: Path | None = None) -> LocalEndpoint | None:

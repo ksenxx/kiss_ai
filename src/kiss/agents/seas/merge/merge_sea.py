@@ -74,8 +74,6 @@ Tool rules:
   N times (not unique)", `Read` the other occurrences and extend `old_string`
   with a unique neighbouring line; use `replace_all=True` only when every
   occurrence takes the same resolution.
-- When the `Steps:` footer of a tool result ends in 9, make your next call
-  `summary`; otherwise the 10th, 20th, ... call is refused.
 """
 
 

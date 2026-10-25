@@ -73,7 +73,7 @@ def test_start_line_with_max_lines_window(temp_dir: Path) -> None:
     out = UsefulTools().Read(str(p), start_line=4, max_lines=3)
 
     assert out.startswith("line-4\nline-5\nline-6\n")
-    assert "[truncated: 4 more lines]" in out
+    assert "[truncated: 4 more lines;" in out
     assert "line-7" not in out
 
 
@@ -139,7 +139,7 @@ def test_start_line_does_not_double_truncate_footer(temp_dir: Path) -> None:
     assert "line-50\n" in out
     assert "line-59\n" in out
     assert "line-60" not in out
-    assert "[truncated: 41 more lines]" in out
+    assert "[truncated: 41 more lines;" in out
 
 
 def test_start_line_preserves_trailing_newline_handling(temp_dir: Path) -> None:

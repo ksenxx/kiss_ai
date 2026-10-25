@@ -10,6 +10,7 @@ import shlex
 from collections.abc import Callable
 
 from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE
+from kiss.agents.sorcar.useful_tools import _edit_pairs
 
 #: Marker the Write script echoes only after the bytes really landed.
 #: Success must be proven positively: the bash function's *other* failure
@@ -259,9 +260,10 @@ class DockerTools:
     def Edit(  # noqa: N802
         self,
         file_path: str,
-        old_string: str,
-        new_string: str,
+        old_string: str = "",
+        new_string: str = "",
         replace_all: bool = False,
+        edits: str = "",
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -272,7 +274,24 @@ class DockerTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            edits: Several replacements in one call, as a JSON list of
+                ``{"old_string": ..., "new_string": ..., "replace_all": bool}``
+                objects applied in order; the first that fails stops the
+                batch and the result names the edits already applied.
+                ``old_string`` / ``new_string`` are then ignored.
         """
+        if edits:
+            pairs = _edit_pairs(edits)
+            if isinstance(pairs, str):
+                return pairs
+            results: list[str] = []
+            for index, (old_text, new_text, every) in enumerate(pairs, 1):
+                result = self.Edit(file_path, old_text, new_text, every)
+                if result.startswith("Error"):
+                    applied = f"edits 1-{index - 1} applied; " if index > 1 else ""
+                    return f"Error: edit {index}: {applied}{result.removeprefix('Error: ')}"
+                results.append(f"edit {index}: {result}")
+            return "\n".join(results)
         if old_string == "":
             return (
                 "Error: old_string must not be empty. "

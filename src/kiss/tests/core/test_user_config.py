@@ -206,6 +206,20 @@ class TestLoadSaveConfig:
         assert cfg_dir.exists()
         assert load_config()["max_budget"] == 99
 
+    def test_record_recent_work_dir_stores_extra_entries_in_one_write(
+        self, tmp_path: Path,
+    ) -> None:
+        """Adopting a work dir persists the row and the extra entries together."""
+        work = tmp_path / "proj"
+        work.mkdir()
+        save_config({"max_budget": 7, "custom_endpoint": "http://x/v1"})
+        user_config.record_recent_work_dir(str(work), {"work_dir": str(work), "max_budget": "9"})
+        cfg = load_config()
+        assert cfg["work_dir"] == str(work)
+        assert cfg["max_budget"] == 9  # sanitized like save_config
+        assert cfg["custom_endpoint"] == "http://x/v1"
+        assert [e["path"] for e in user_config.recent_work_dirs()] == [str(work)]
+
     def test_load_os_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OSError during load returns defaults."""
         cfg_dir = Path.home() / ".kiss"

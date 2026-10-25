@@ -271,9 +271,10 @@ body {
   margin-bottom: var(--space-1);
 }
 
+.kiss-notification-message { font-size: var(--fs-base); }
+
 .kiss-notification-message,
 .kiss-notification-progress-message {
-  font-size: var(--fs-base);
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -584,9 +585,10 @@ body.content-tab-open #chat-header { display: none; }
   align-items: center;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg2);
   overflow: hidden;
 }
+
+#content-tab-bar { background: var(--bg2); }
 
 #content-tab-bar,
 #pane-resizer { display: none; }
@@ -1517,6 +1519,18 @@ body.ask-answering #input-container {
   word-break: break-all;
 }
 
+/* A picture the agent wrote to disk and named in a result, answer or
+   Markdown panel (loaded by loadInlineImages): never wider than the
+   panel; one the daemon could not serve shows its alt text in a
+   dashed box with the reason in its tooltip. */
+.md-body img, .rc-body img { max-width: 100%; height: auto; }
+
+.md-body img.inline-img-missing, .rc-body img.inline-img-missing {
+  display: inline-block; padding: var(--space-1) var(--space-2);
+  border: 1px dashed var(--dim); border-radius: var(--radius-sm);
+  color: var(--dim); font-size: var(--fs-sm);
+}
+
 .llm-panel {
   border: 1px solid var(--border); border-radius: var(--radius-lg);
   margin: var(--space-1-5) 0; max-height: 350px; overflow-y: auto;
@@ -1618,11 +1632,6 @@ body.ask-answering #input-container {
 }
 #input-drawer-btn * { user-select: none; }
 
-#input-drawer-btn:hover {
-  color: var(--fg);
-  border-color: color-mix(in srgb, var(--fg) 30%, transparent);
-}
-
 #input-drawer-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
@@ -1679,18 +1688,10 @@ body.content-tab-open #send-btn { display: none !important; }
    stays in place, greyed out, until its bytes are ready. */
 .file-chip.pending { opacity: 0.6; }
 
-/* A file the browser could not decode (a HEIC outside Safari) is reported
-   here instead of vanishing. */
-.file-chip.error {
-  background: color-mix(in srgb, var(--red) 10%, transparent); border-color: color-mix(in srgb, var(--red) 30%, transparent);
-  color: color-mix(in srgb, var(--red) 91%, transparent);
-}
-
 #input-container {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: var(--radius-xl); padding: var(--space-2) var(--space-2-5); transition: border-color var(--dur-slow);
 }
-#input-container:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 #input-wrap { display: flex; align-items: flex-start; gap: var(--space-1); }
 #input-text-wrap { flex: 1; min-width: 0; position: relative; }
 
@@ -1700,7 +1701,6 @@ body.content-tab-open #send-btn { display: none !important; }
   resize: none; outline: none; min-height: 4.5em;
   padding: var(--space-0-5) var(--space-4) var(--space-0-5) var(--space-0-5);
 }
-#task-input::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
 
 /* 24x24 is the WCAG 2.2 minimum pointer target; the glyph keeps its
    size, the padding grows the hit area so a near miss does not land in
@@ -1724,7 +1724,6 @@ body.content-tab-open #send-btn { display: none !important; }
   flex-shrink: 0;
 }
 #send-btn svg { width: 16px; height: 16px; }
-#send-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); }
 #send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 #stop-btn {
@@ -1769,7 +1768,6 @@ body.content-tab-open #send-btn { display: none !important; }
    puts the overflow ellipsis on the left while the label text itself
    stays LTR (refreshModelLabel pins the order with U+200E marks). */
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-#model-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--fg) 20%, transparent); color: color-mix(in srgb, var(--fg) 74%, transparent); }
 #model-btn:disabled { opacity: 0.45; cursor: default; pointer-events: none; }
 #model-btn svg { flex-shrink: 0; opacity: 0.55; }
 
@@ -1789,10 +1787,6 @@ body.content-tab-open #send-btn { display: none !important; }
   display: flex; align-items: center; position: relative;
 }
 
-#menu-btn:hover:not(:disabled),
-#meta-drawer-btn:hover:not(:disabled),
-#new-chat-btn:hover:not(:disabled),
-#more-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) {
   color: color-mix(in srgb, var(--fg) 80%, transparent);
   background: color-mix(in srgb, var(--fg) 8%, transparent);
@@ -1845,11 +1839,6 @@ body.content-tab-open #send-btn { display: none !important; }
   color: color-mix(in srgb, var(--fg) 66%, transparent);
   transition: background var(--dur-fast), color var(--dur-base);
   white-space: nowrap;
-}
-
-.more-menu-item:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  color: color-mix(in srgb, var(--fg) 85%, transparent);
 }
 
 /* 0.5 keeps the disabled label legible so the user can still read
@@ -2071,7 +2060,6 @@ body.remote-chat #terminal-btn { display: flex; }
   display: none;
 }
 
-#meta-drawer-btn,
 #meta-close { display: none; }
 
 /* The drawer tab that brings the hidden task-info panel back exists
@@ -2206,12 +2194,6 @@ body.remote-chat #terminal-btn { display: flex; }
 }
 
 .meta-section-resizer.static { cursor: default; }
-
-.meta-section-resizer:not(.static):hover::after,
-.meta-section-resizer:not(.static):active::after,
-.meta-section-resizer:not(.static):focus-visible::after {
-  border-top-color: var(--accent);
-}
 
 .meta-section-resizer:focus-visible { outline: none; }
 
@@ -3003,12 +2985,6 @@ button.app-row-main .app-state { color: var(--accent); }
   border-radius: var(--radius-sm);
 }
 
-.explorer-row:hover,
-.scm-row:hover,
-.scm-commit:hover {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
-}
-
 .explorer-row:focus-visible,
 .scm-row:focus-visible,
 .scm-commit:focus-visible {
@@ -3154,8 +3130,6 @@ button.app-row-main .app-state { color: var(--accent); }
   user-select: none;
 }
 
-.scm-section-hdr:hover { color: var(--accent); }
-
 .scm-section-chevron {
   flex: 0 0 auto;
   transition: transform var(--dur-fast) var(--ease);
@@ -3253,8 +3227,6 @@ button.app-row-main .app-state { color: var(--accent); }
   color: var(--fg);
   padding-right: var(--space-1-5);
 }
-
-.scm-commit.expanded { background: color-mix(in srgb, var(--fg) 5%, transparent); }
 
 .scm-graph-cell {
   flex: 0 0 auto;
@@ -3746,6 +3718,23 @@ button.app-row-main .app-state { color: var(--accent); }
   font-size: var(--fs-md); font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.05em; color: color-mix(in srgb, var(--fg) 50%, transparent); margin-bottom: var(--space-2-5);
 }
+
+/* The Chats row: the title at the left, the app's refresh button at
+   the right end.  The drawer's absolute #sidebar-close (right: 12px,
+   ~28px wide) sits in this row's top-right corner, so the row keeps
+   that strip free (sidebar padding 16px + 32px reaches past the x);
+   remote-codex.css drops the padding where the x is hidden. */
+.sidebar-hdr.chats-hdr { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1-5); padding-right: var(--space-8); }
+
+#chats-refresh-btn {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: var(--radius-md); color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-size: var(--fs-md); cursor: pointer; transition: color var(--dur-base), background var(--dur-base);
+}
+#chats-refresh-btn:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+#chats-refresh-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 #history-search,
 #tricks-search,
@@ -5022,6 +5011,7 @@ code { font-family: var(--font-mono); }
 /* A column: the optional Save bar on top, the editor / frame filling
    the rest (min-height: 0 so the editor shrinks instead of overflowing). */
 #content-tab-area .content-tab-view {
+  position: relative; /* anchors the floating .content-refresh-overlay */
   width: 100%;
   height: 100%;
   display: flex;
@@ -5274,6 +5264,43 @@ code { font-family: var(--font-mono); }
 #content-tab-area .content-save-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* The "Reload from disk" button at the top right of every content tab:
+   the last item of the Save bar, or floating over the top right corner
+   of a view without one (a PDF, an image, a report, a folder listing). */
+#content-tab-area .content-refresh-btn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--dim);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+#content-tab-area .content-refresh-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+#content-tab-area .content-refresh-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#content-tab-area .content-refresh-overlay {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-3);
+  z-index: var(--z-float);
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
 }
 
 /* The Edit source / Preview toggle of a .md/.html tab: a secondary

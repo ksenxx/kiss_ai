@@ -6,10 +6,12 @@
 'use strict';
 
 const assert = require('assert');
-const harness = require('./simplify2_harness');
-const {clickTab} = harness;
-
-const {makePage: makeChatPage, send, stubRaf} = harness;
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  clickTab,
+} = require('./simplify2_harness');
 
 function makePage(templateModel, seededState) {
   return makeChatPage({
@@ -102,64 +104,13 @@ function testModelsEventPropagatesIntoTabState() {
   );
 }
 
-function testModelsEventPreservesUserPickedTabs() {
-  // Tabs are server-canonical now: only the selection is persisted,
-  // and the daemon's `tabs_state` snapshot supplies the tab set.
-  const seeded = {chatId: 'persisted-tab-a'};
-  const {win, posted} = makePage('claude-opus-4-7', seeded);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 'persisted-tab-a', chatId: '', title: 'first', workDir: ''},
-      {tabId: 'persisted-tab-b', chatId: '', title: 'second', workDir: ''},
-    ],
-  });
-
-  const modelList = [
-    {name: 'claude-opus-4-7', inp: 15, out: 75, uses: 0, vendor: 'Anthropic'},
-    {name: 'gpt-5.5', inp: 5, out: 25, uses: 0, vendor: 'OpenAI'},
-  ];
-
-  send(win, {type: 'models', models: modelList, selected: 'claude-opus-4-7'});
-
-  const modelItems = win.document.querySelectorAll('#model-list .model-item');
-  let picked = null;
-  modelItems.forEach(it => {
-    if ((it.textContent || '').includes('gpt-5.5')) picked = it;
-  });
-  assert.ok(picked, 'gpt-5.5 must be listed in the model dropdown');
-  picked.click();
-  assert.strictEqual(pickerText(win), 'gpt-5.5');
-
-  clickTab(win, 'persisted-tab-b');
-  assert.strictEqual(
-    pickerText(win),
-    'claude-opus-4-7',
-    'sibling tab must keep its own model (not inherit the just-picked value)',
-  );
-
-  clickTab(win, 'persisted-tab-a');
-  assert.strictEqual(
-    pickerText(win),
-    'gpt-5.5',
-    'user-picked model must persist across tab switches',
-  );
-
-  void posted;
-
-  win.close();
-  console.log('  ok - user-picked tab is not overwritten by models event');
-}
-
-function runTests() {
-  testModelsEventPropagatesIntoTabState();
-  testRestoredTabInheritsTemplateModelOnLaunch();
-  testModelsEventPreservesUserPickedTabs();
-}
+// A hand-picked model surviving a tab switch and a models refresh is
+// pinned by modelPickerAgentOverride.test.js.
 
 try {
-  runTests();
-  console.log('\n3 passed, 0 failed');
+  testModelsEventPropagatesIntoTabState();
+  testRestoredTabInheritsTemplateModelOnLaunch();
+  console.log('\n2 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

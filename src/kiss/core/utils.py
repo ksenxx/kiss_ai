@@ -19,7 +19,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import IO, Any
 
 import yaml
 from yaml.nodes import ScalarNode
@@ -529,33 +529,18 @@ def _is_secret_config_field(name: str) -> bool:
     return "API_KEY" in name or "WORKSPACE_ID" in name or name.startswith("AWS_")
 
 
-def config_to_dict() -> dict[Any, Any]:
-    """Convert the config to a dictionary.
+def config_to_dict() -> dict[str, Any]:
+    """Convert the default config to a dictionary, without its secret fields.
 
     Returns:
-        dict[Any, Any]: A dictionary representation of the default config.
+        dict[str, Any]: The default config's fields (every value is a
+        ``str``, ``bool``, ``int`` or ``float``) minus the API keys.
     """
-
-    def convert_to_json(obj: Any) -> Any:
-        if isinstance(obj, dict):  # pragma: no cover – config has no raw dicts
-            return {
-                k: convert_to_json(v)
-                for k, v in obj.items()  # type: ignore[misc]
-                if not _is_secret_config_field(k)
-            }
-        if isinstance(obj, list):  # pragma: no cover – config has no raw lists
-            return [convert_to_json(item) for item in obj]  # type: ignore[misc]
-        if isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        if hasattr(obj, "__dict__"):
-            return {
-                k: convert_to_json(getattr(obj, k))
-                for k in obj.__dict__.keys()
-                if not _is_secret_config_field(k)
-            }
-        return obj  # pragma: no cover – all config values have __dict__ or are primitives
-
-    return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
+    return {
+        k: v
+        for k, v in config_module.DEFAULT_CONFIG.model_dump().items()
+        if not _is_secret_config_field(k)
+    }
 
 
 def coerce_bool(value: bool | str) -> bool:

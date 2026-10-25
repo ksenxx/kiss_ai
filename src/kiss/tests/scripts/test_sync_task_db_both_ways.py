@@ -676,7 +676,8 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         (ddl,) = con.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'task_history'"
         ).fetchone()
-        legacy_ddl = re.sub(r",\s*(?:--[^\n]*\n\s*)*is_cron INTEGER DEFAULT 0\s*\)", "\n)", ddl)
+        # Drop the column wherever it sits (later releases append columns after it).
+        legacy_ddl = re.sub(r",\s*(?:--[^\n]*\n\s*)*is_cron INTEGER DEFAULT 0(?=\s*[,)])", "", ddl)
         self.assertNotIn("is_cron", legacy_ddl)
         con.executescript(f"DROP TABLE task_history; {legacy_ddl};")
         con.execute(

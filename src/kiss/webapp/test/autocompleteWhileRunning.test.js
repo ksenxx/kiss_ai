@@ -163,9 +163,17 @@ function testAtMentionPickerWhileRunning() {
     true,
     'a files reply must open the @-mention picker while the task runs',
   );
+  // Accepting a mention resizes the composer like the other accept
+  // paths: a stale height is re-measured.
+  inp.style.height = '999px';
   pressKey(win, 'Tab');
   assert.strictEqual(inp.value, 'look at ./src/main.py ');
   assert.strictEqual(pickerVisible(win), false);
+  assert.notStrictEqual(
+    inp.style.height,
+    '999px',
+    'accepting a mention re-measures the composer height',
+  );
 }
 
 async function testCompletionSurvivesRunEndingMidDraft() {

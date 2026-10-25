@@ -74,27 +74,9 @@ function testCompletionsRendersPicker() {
   const text = picker(win).textContent;
   assert.ok(text.includes('fix the parser bug now'));
   assert.ok(text.includes('fix parse_arguments'));
-}
-
-function testCompletionsHasSectionsAndIcons() {
-  const {win} = openPage();
-  setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-  });
-  const labels = sections(win);
-  assert.ok(
-    labels.length >= 2,
-    'completions picker must show grouped sections',
-  );
-  const iconCount = picker(win).querySelectorAll('.ac-icon').length;
-  assert.strictEqual(
-    iconCount,
-    COMPLETIONS.length,
-    'every item must carry a leading icon column (.ac-icon)',
-  );
+  const hl = picker(win).querySelectorAll('strong.ac-hl');
+  assert.ok(hl.length >= 1, 'matched prefix must be wrapped in .ac-hl');
+  assert.strictEqual(hl[0].textContent, 'fix');
 }
 
 function testCompletionsRendersFooter() {
@@ -109,6 +91,9 @@ function testCompletionsRendersFooter() {
   assert.ok(footer, 'completions picker must render the .ac-footer kbd row');
   assert.ok(/Tab/.test(footer.textContent));
   assert.ok(/Esc/.test(footer.textContent));
+  assert.ok(/navigate/.test(footer.textContent), 'navigate hint present');
+  assert.ok(/accept/.test(footer.textContent), 'accept hint present');
+  assert.ok(/dismiss/.test(footer.textContent), 'dismiss hint present');
 }
 
 function testCompletionsStaleQueryDropped() {
@@ -220,6 +205,11 @@ function testTabAcceptsCompletion() {
     'Tab inside picker accepts the selected completion',
   );
   assert.strictEqual(visible(win), false);
+  assert.strictEqual(
+    ev.defaultPrevented,
+    true,
+    'Tab inside the picker must not move focus',
+  );
 }
 
 function testEnterDoesNotAcceptCompletion() {
@@ -445,13 +435,18 @@ function testCompletionsIconsPerType() {
     ],
     query: 'fix',
   });
-  const icons = picker(win).querySelectorAll('.ac-icon');
-  assert.strictEqual(icons.length, 4);
-  const html = picker(win).innerHTML;
-  assert.ok(/polygon points="13 2 3 14/.test(html), 'task bolt icon present');
-  assert.ok(/M12 2l1.5 5L19 8.5/.test(html), 'trick sparkle icon present');
-  assert.ok(/M8 4H6a2 2 0 00-2 2v4/.test(html), 'identifier code icon present');
-  assert.ok(/M12 2l3.09 6.26/.test(html), 'frequent star icon present');
+  const icons = Array.from(picker(win).querySelectorAll('.ac-icon'));
+  assert.strictEqual(icons.length, 4, 'one icon column per item');
+  const drawings = icons.map(ic => ic.innerHTML.trim());
+  assert.ok(
+    drawings.every(d => d.length > 0),
+    'every type draws an icon',
+  );
+  assert.strictEqual(
+    new Set(drawings).size,
+    4,
+    'each completion type has its own icon',
+  );
   const labels = sections(win);
   assert.ok(labels.includes('History'));
   assert.ok(labels.includes('Frequent'));
@@ -473,33 +468,6 @@ function testAcceptCompletionPreservesTrailingSpace() {
     'fix that ends in space ',
     'no double-space when item already ends in whitespace',
   );
-}
-
-function testCompletionsFooterContents() {
-  const {win} = openPage();
-  setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-  });
-  const footer = picker(win).querySelector('.ac-footer');
-  assert.ok(/navigate/.test(footer.textContent), 'navigate hint present');
-  assert.ok(/accept/.test(footer.textContent), 'accept hint present');
-  assert.ok(/dismiss/.test(footer.textContent), 'dismiss hint present');
-}
-
-function testCompletionsHighlightsPrefix() {
-  const {win} = openPage();
-  setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-  });
-  const hl = picker(win).querySelectorAll('strong.ac-hl');
-  assert.ok(hl.length >= 1, 'matched prefix must be wrapped in .ac-hl');
-  assert.strictEqual(hl[0].textContent, 'fix');
 }
 
 function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
@@ -593,26 +561,8 @@ function testIdentifierClickAcceptPreservesExistingText() {
   );
 }
 
-function testTabInPickerPreventsDefault() {
-  const {win} = openPage();
-  const inp = setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-  });
-  const ev = new win.KeyboardEvent('keydown', {
-    key: 'Tab',
-    bubbles: true,
-    cancelable: true,
-  });
-  inp.dispatchEvent(ev);
-  assert.strictEqual(ev.defaultPrevented, true);
-}
-
 const tests = [
   testCompletionsRendersPicker,
-  testCompletionsHasSectionsAndIcons,
   testCompletionsRendersFooter,
   testCompletionsStaleQueryDropped,
   testCompletionsSuppressedDuringAtMention,
@@ -633,13 +583,10 @@ const tests = [
   testCompletionsMissingFieldHandled,
   testCompletionsIconsPerType,
   testAcceptCompletionPreservesTrailingSpace,
-  testCompletionsFooterContents,
-  testCompletionsHighlightsPrefix,
   testEmptyCompletionsDoesNotClobberAtMentionPicker,
   testIdentifierAcceptPreservesExistingText,
   testTrickAcceptPreservesEarlierSentences,
   testIdentifierClickAcceptPreservesExistingText,
-  testTabInPickerPreventsDefault,
 ];
 
 async function main() {

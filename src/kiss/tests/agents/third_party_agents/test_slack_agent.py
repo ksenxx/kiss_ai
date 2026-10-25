@@ -39,7 +39,7 @@ def _auth_test_called(server: RecordingServer) -> bool:
 
 
 class TestTokenPersistence:
-    """Tests for _load_token, _save_token, _clear_token."""
+    """Tests for loading unusable token files, legacy migration and workspace-scoped clear."""
 
     @pytest.mark.parametrize("content", ["{bad json!!", '"just a string"'])
     def test_load_unusable_token_file(self, content: str) -> None:

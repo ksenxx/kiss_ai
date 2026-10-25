@@ -5,7 +5,7 @@
 
 'use strict';
 
-/* global require, __dirname, console */
+/* global require, console */
 
 // Explorer re-listings that remove rows (handleDirListing):
 // 1. an error re-listing of a folder drops the registered nodes of the
@@ -15,46 +15,27 @@
 //    so a now-empty folder paints its "(empty)" note.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {newDom, send, stubRaf, click} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  click,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
+const {showSection, explorerRow: row} = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
 const WD = '/ws/repo';
 
 function makeExplorerPage() {
-  const win = newDom();
-  win.document.body.classList.add('remote-chat');
-  stubRaf(win);
-  win.matchMedia = function (query) {
-    return {
-      matches: query === '(min-width: 900px)',
-      media: query,
-      addEventListener() {},
-      removeEventListener() {},
-      addListener() {},
-      removeListener() {},
-    };
-  };
-  const posted = [];
-  let state;
-  win.acquireTransport = function () {
-    return {
-      postMessage: msg => posted.push(msg),
-      getState: () => state,
-      setState: s => {
-        state = s;
-      },
-    };
-  };
-  for (const name of ['panelCopy.js', 'api.js', 'main.js']) {
-    win.eval(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
-  }
+  const {win, posted} = makePage({
+    bodyClass: 'remote-chat',
+    beforeScripts: w => {
+      stubRaf(w);
+      fakeMatchMedia(w, true);
+    },
+  });
   send(win, {type: 'configData', config: {work_dir: WD}});
-  const sec = win.document.getElementById('meta-explorer');
-  if (sec.classList.contains('collapsed')) {
-    click(win, sec.querySelector('.meta-section-toggle'));
-  }
+  showSection(win, 'meta-explorer');
   return {win, posted};
 }
 
@@ -70,12 +51,6 @@ function answer(win, req, entries) {
     root: WD,
     entries,
   });
-}
-
-function row(win, p) {
-  return win.document.querySelector(
-    '.explorer-row[data-explorer-path="' + p + '"]',
-  );
 }
 
 function notes(win) {

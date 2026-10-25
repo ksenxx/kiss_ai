@@ -461,7 +461,8 @@ def test_interrupting_wait_false_during_startup_cancels_the_job(
         "class Sea(BaseSea):\n    def settings(self, settings):\n"
         "        return settings | {'model': 'm'}\n"
     )
-    token = tool_interrupt.begin_tool_call("run_agent")
+    token = tool_interrupt.new_tool_call("run_agent")
+    tool_interrupt.register_tool_call(token)
     seen: list[agent_dispatch.AgentJob] = []
     stopper = threading.Thread(
         target=_interrupt_once_the_job_exists, args=(threading.get_ident(), seen, False),
@@ -581,7 +582,8 @@ def test_interrupting_the_run_agent_call_kills_its_job(
         "class Sea(BaseSea):\n    def settings(self, settings):\n"
         "        return settings | {'model': 'm'}\n"
     )
-    token = tool_interrupt.begin_tool_call("run_agent")
+    token = tool_interrupt.new_tool_call("run_agent")
+    tool_interrupt.register_tool_call(token)
     seen: list[agent_dispatch.AgentJob] = []
     stopper = threading.Thread(
         target=_interrupt_once_the_job_exists, args=(threading.get_ident(), seen, True),

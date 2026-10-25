@@ -31,7 +31,13 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     write_private_file,
 )
-from kiss.agents.third_party_agents._composio_google import ComposioHttp, connected_account_id
+from kiss.agents.third_party_agents._composio_google import (
+    ComposioHttp,
+    connected_account_id,
+)
+from kiss.agents.third_party_agents._composio_google import (
+    connection_status as composio_connection_status,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
     google_auth_prompt,
     make_google_auth_tools,
@@ -39,6 +45,21 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
 from kiss.core.config import kiss_home
 
 _SERVICE = "googlechat"
+
+
+def connection_status() -> str:
+    """Return the connection status of this service (the cron pre-flight hook).
+
+    A stored service-account key (``service_account.json``, the Chat-bot
+    path) that parses wins, as it does in ``_load_service``: ``"ACTIVE"``
+    without a network call.  Otherwise the live Composio status: ``""``
+    when no account is connected, ``"ACTIVE"`` / ``"EXPIRED"`` / ... as
+    Composio reports it, or ``"UNKNOWN"`` when the check failed.
+    """
+    if _service_account_credentials(_service_account_path()) is not None:
+        return "ACTIVE"
+    return composio_connection_status(_SERVICE)
+
 
 _SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
@@ -89,6 +110,26 @@ def _service_account_path() -> Path:
     return _gchat_dir() / "service_account.json"
 
 
+def _service_account_credentials(sa_file: Path) -> Any:
+    """Parse a service-account key file into credentials, without a network call.
+
+    Args:
+        sa_file: Path to a service account JSON file.
+
+    Returns:
+        ``google.oauth2.service_account.Credentials``, or None when the
+        file is missing, unreadable or not a service-account key.
+    """
+    if not sa_file.exists():
+        return None
+    try:
+        from google.oauth2 import service_account
+
+        return service_account.Credentials.from_service_account_file(str(sa_file), scopes=_SCOPES)
+    except Exception:
+        return None
+
+
 def _load_service(sa_path: str = "") -> Any:
     """Load a Google Chat API service from a service account or Composio.
 
@@ -105,13 +146,9 @@ def _load_service(sa_path: str = "") -> Any:
     from googleapiclient.discovery import build
 
     sa_file = Path(sa_path) if sa_path else _service_account_path()
-    if sa_file.exists():
+    creds = _service_account_credentials(sa_file)
+    if creds is not None:
         try:
-            from google.oauth2 import service_account
-
-            creds = service_account.Credentials.from_service_account_file(
-                str(sa_file), scopes=_SCOPES
-            )
             return build("chat", "v1", credentials=creds)
         except Exception:
             pass

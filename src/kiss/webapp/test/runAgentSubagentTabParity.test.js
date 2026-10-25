@@ -51,6 +51,37 @@ function makePage() {
   return {win, posted, parentId: ready.tabId};
 }
 
+/** The registry snapshot: one chat tab, `parentId`, on PARENT_TASK. */
+function parentTabsState(win, parentId) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {
+        tabId: parentId,
+        chatId: 'chat-1',
+        title: 'parent',
+        taskId: PARENT_TASK,
+        workDir: '',
+        scopeWorkDir: '',
+      },
+    ],
+  });
+}
+
+/**
+ * The daemon's sub-agent tab announcement for a child of `parentId`;
+ * `fields` carries tab_id, task_id, description, isDone and the rest.
+ */
+function announceSubagent(win, parentId, fields) {
+  send(
+    win,
+    Object.assign(
+      {type: 'openSubagentTab', parent_tab_id: parentId, isSubagentTab: true},
+      fields,
+    ),
+  );
+}
+
 /** The tool-call panel whose header names *toolName*. */
 function toolPanel(win, toolName) {
   const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
@@ -106,13 +137,10 @@ function liveChildFinishes(toolName) {
     .find(m => m.type === 'resumeSession' && m.taskId === CHILD);
   assert.ok(resume, 'new_tab must make the page resume the child');
   const subTabId = resume.tabId;
-  send(win, {
-    type: 'openSubagentTab',
+  announceSubagent(win, parentId, {
     tab_id: subTabId,
-    parent_tab_id: parentId,
     description: 'child job',
     task_id: CHILD,
-    isSubagentTab: true,
     isDone: false,
   });
   send(win, {
@@ -175,19 +203,7 @@ function liveChildFinishes(toolName) {
 function replayFinishedParent(toolName) {
   const {win, posted, parentId} = makePage();
   const subTabId = parentId + '__sub_' + CHILD;
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: parentId,
-        chatId: 'chat-1',
-        title: 'parent',
-        taskId: PARENT_TASK,
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
+  parentTabsState(win, parentId);
   send(win, {
     type: 'task_events',
     task: 'parent',
@@ -208,14 +224,11 @@ function replayFinishedParent(toolName) {
       {type: 'task_done'},
     ],
   });
-  send(win, {
-    type: 'openSubagentTab',
+  announceSubagent(win, parentId, {
     tab_id: subTabId,
-    parent_tab_id: parentId,
     description: 'child job',
     task_id: CHILD,
     taskIndex: 0,
-    isSubagentTab: true,
     isDone: true,
   });
   send(win, {
@@ -296,14 +309,11 @@ function replayRepeatedReadyStaysClosed(toolName) {
   // Every reconnect replays the parent again: the second re-announce
   // must be as quiet as the first (one panel entry, still no tab).
   const {win, parentId, subTabId} = replayFinishedParent(toolName);
-  send(win, {
-    type: 'openSubagentTab',
+  announceSubagent(win, parentId, {
     tab_id: subTabId,
-    parent_tab_id: parentId,
     description: 'child job',
     task_id: CHILD,
     taskIndex: 0,
-    isSubagentTab: true,
     isDone: true,
   });
   assert.strictEqual(
@@ -422,13 +432,10 @@ function runAgentMultiChildDispatchLive() {
     taskId: '',
   });
   const sub1 = parentId + '__sub_c1';
-  send(win, {
-    type: 'openSubagentTab',
+  announceSubagent(win, parentId, {
     tab_id: sub1,
-    parent_tab_id: parentId,
     description: 'child job',
     task_id: 'c1',
-    isSubagentTab: true,
     isDone: false,
   });
   send(win, {type: 'subagentDone', tab_id: sub1, tabId: ''});
@@ -518,19 +525,7 @@ function replayAttributesInterleavedCalls() {
   // each must land on the call that was running when it started.
   const {win, parentId} = makePage();
   const T0 = 1_700_000_000_000;
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: parentId,
-        chatId: 'chat-1',
-        title: 'parent',
-        taskId: PARENT_TASK,
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
+  parentTabsState(win, parentId);
   send(win, {
     type: 'task_events',
     task: 'parent',
@@ -597,14 +592,11 @@ function replayAttributesInterleavedCalls() {
     ['s1', 'fixed prompt from script', T0 + 21_000],
   ];
   rows.forEach(([id, text, startTs], idx) => {
-    send(win, {
-      type: 'openSubagentTab',
+    announceSubagent(win, parentId, {
       tab_id: parentId + '__sub_' + id,
-      parent_tab_id: parentId,
       description: text,
       task_id: id,
       taskIndex: idx,
-      isSubagentTab: true,
       isDone: true,
       startTs,
     });
@@ -647,19 +639,7 @@ function replayWithoutStampsFallsBackToCounting() {
   // run_parallel children are still dealt by declared count, in spawn
   // order, and whatever is left goes to the newest panel.
   const {win, parentId} = makePage();
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: parentId,
-        chatId: 'chat-1',
-        title: 'parent',
-        taskId: PARENT_TASK,
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
+  parentTabsState(win, parentId);
   send(win, {
     type: 'task_events',
     task: 'parent',
@@ -700,14 +680,11 @@ function replayWithoutStampsFallsBackToCounting() {
     ],
   });
   ['p1', 'p2', 'a1'].forEach((id, idx) => {
-    send(win, {
-      type: 'openSubagentTab',
+    announceSubagent(win, parentId, {
       tab_id: parentId + '__sub_' + id,
-      parent_tab_id: parentId,
       description: id,
       task_id: id,
       taskIndex: idx,
-      isSubagentTab: true,
       isDone: true,
     });
   });
@@ -733,19 +710,7 @@ function replayBoundaryTieBelongsToNextCall() {
   // before that), so the tie is the next call's.
   const {win, parentId} = makePage();
   const T0 = 1_700_000_000_000;
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: parentId,
-        chatId: 'chat-1',
-        title: 'parent',
-        taskId: PARENT_TASK,
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
+  parentTabsState(win, parentId);
   send(win, {
     type: 'task_events',
     task: 'parent',
@@ -794,14 +759,11 @@ function replayBoundaryTieBelongsToNextCall() {
     ['second-child', T0 + 5000],
   ];
   rows.forEach(([id, startTs], idx) => {
-    send(win, {
-      type: 'openSubagentTab',
+    announceSubagent(win, parentId, {
       tab_id: parentId + '__sub_' + id,
-      parent_tab_id: parentId,
       description: id,
       task_id: id,
       taskIndex: idx,
-      isSubagentTab: true,
       isDone: true,
       startTs,
     });
@@ -875,19 +837,7 @@ function freshReconnectShowsRunningChild(toolName) {
   // expanded so that child gets a tab on this client too.
   const {win, posted, parentId} = makePage();
   const T0 = Date.now() - 60_000;
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: parentId,
-        chatId: 'chat-1',
-        title: 'parent',
-        taskId: PARENT_TASK,
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
+  parentTabsState(win, parentId);
   send(win, {
     type: 'status',
     running: true,
@@ -931,14 +881,11 @@ function freshReconnectShowsRunningChild(toolName) {
   );
   const before = posted.length;
   const subTabId = parentId + '__sub_' + CHILD;
-  send(win, {
-    type: 'openSubagentTab',
+  announceSubagent(win, parentId, {
     tab_id: subTabId,
-    parent_tab_id: parentId,
     description: 'child job',
     task_id: CHILD,
     taskIndex: 0,
-    isSubagentTab: true,
     isDone: false,
     startTs: T0 + 2000,
   });

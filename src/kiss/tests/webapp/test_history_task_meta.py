@@ -7,16 +7,17 @@ test.
 
 The real assertions live in
 ``src/kiss/webapp/test/historyTaskMeta.test.js`` (run under
-node, mirrors ``historyTaskWorkspace.test.js``).  This wrapper
-spawns ``node`` on that file so the integration test is also picked
-up by ``uv run pytest`` and shows up in CI alongside the rest of the
-webapp Python tests.
+node).  This wrapper spawns ``node`` on that file so the
+integration test is also picked up by ``uv run pytest`` and shows
+up in CI alongside the rest of the webapp Python tests.
 
 The test exercises the per-task workspace+metadata line in the
-History sidebar: every row whose persisted ``extra`` carries a
-``model`` must append the model name and the three run flags to
-the workspace span, separated by ``•``, so everything renders on
-the SAME visual line as the workspace path::
+History sidebar: every row with a non-empty ``work_dir`` renders a
+``.running-item-workspace`` span right after the
+``.running-item-metrics`` span, and every row whose persisted
+``extra`` carries a ``model`` appends the model name and the three
+run flags to that span, separated by ``•``, so everything renders
+on the SAME visual line as the workspace path::
 
     <work_dir> • <model> • <wt|no-wt>
         • <parallel|sequential> • <auto-commit|manual-commit>

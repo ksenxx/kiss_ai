@@ -23,7 +23,8 @@ def repo(tmp_path: Path) -> Path:
 def test_edit_refuses_unread_file(repo: Path) -> None:
     tools = UsefulTools(work_dir=str(repo))
     out = tools.Edit(str(repo / "a.py"), "x = 1", "x = 3")
-    assert out.startswith("Error:") and "has not been read" in out and "editing" in out
+    assert out.startswith("Error:") and "had not been read" in out and "NOT applied" in out
+    assert "    1 | x = 1" in out
     assert (repo / "a.py").read_text() == "x = 1\ny = 2\n"
 
 
@@ -31,7 +32,7 @@ def test_read_then_edit_succeeds(repo: Path) -> None:
     tools = UsefulTools(work_dir=str(repo))
     assert "x = 1" in tools.Read(str(repo / "a.py"))
     out = tools.Edit(str(repo / "a.py"), "x = 1", "x = 3")
-    assert out.startswith("Successfully replaced 1")
+    assert out.startswith("Successfully replaced 1 occurrence(s) in")
     assert (repo / "a.py").read_text() == "x = 3\ny = 2\n"
 
 
@@ -134,7 +135,7 @@ def test_write_overwrites_unread_scratch_file_under_tmp(repo: Path) -> None:
     assert nested.read_text() == "[]"
     other = UsefulTools(work_dir=str(repo))
     out = other.Edit(str(scratch), "new", "newer")
-    assert out.startswith("Error:") and "has not been read" in out
+    assert out.startswith("Error:") and "had not been read" in out
     tmp_named_file = repo / "tmp"
     assert other.Write(str(repo / "a.py"), "x = 9\n").startswith("Error:")
     assert tmp_named_file.is_dir()

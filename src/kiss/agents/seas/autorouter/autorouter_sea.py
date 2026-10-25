@@ -282,8 +282,8 @@ time; escalate only on a verified failure. Take models, prices and availability 
 ## Protocol
 
 1. Split the task into units, each with a mechanical acceptance check (a test command,
-   `git diff --stat`, a grep for the new symbol). Work without one
-   stays in your own loop. Never route a single tool call.
+   `git diff --stat`). Work without one
+   stays in your own loop.
 
 2. Classify each unit with `decide` (`state`: description, check, size, earlier failures).
    Ask `tier` (type `choice`; small = mechanical: read, grep, summarize, run tests,
@@ -307,7 +307,7 @@ time; escalate only on a verified failure. Take models, prices and availability 
    `run_parallel`.
 
 4. In your own loop: plan and final acceptance on the frontier model, execution on
-   medium, volume work (exploration, tests, logs) on small sub-agents. Caches are per
+   medium, volume work on small sub-agents. Caches are per
    model, so `set_model` only at a phase boundary: to the medium pick once the plan is
    written, back to the original model after two failed checks or for the final check.
    No downgrade for a short task (under about 10 tool calls), a pinned model, or a
@@ -316,7 +316,7 @@ time; escalate only on a verified failure. Take models, prices and availability 
 5. `Budget: $spent/$max` follows every tool result. Split a pick whose `estimated_usd`
    exceeds 25% of the remaining budget, or drop it one tier when the classifier allows
    (never below the guarded floor); else ask the user first. A user-named reviewer share
-   ("at most N% for reviewing") runs reviewers on small unless the diff is guarded.
+   runs reviewers on small unless the diff is guarded.
 
 6. Verify with the acceptance check yourself, never with the sub-agent's summary; accept
    a fact-gathering unit (mail, calendar, web) on the child's returned evidence, never by
@@ -352,6 +352,11 @@ in `exclude` even when `pick_model` ranks it first.
   its task opens "NOT an authentication task: after `check_gmail_auth` returns ok,
   continue with the steps below". Re-dispatch a child that "stopped after
   authentication" once that way on another model.
+
+## Lessons from recent runs (rsi7d)
+
+- `tmp/PROGRESS.md` may be the calling task's notes: Read it and append a section
+  under your own heading; never `Write` over it.
 
 ## Finishing
 

@@ -113,7 +113,7 @@ function openNewChat(st) {
   const addBtn = st.win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'the tab bar must offer a "+" new-chat button');
   addBtn.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
-  if (st.drain) st.drain();
+  st.drain();
   const active = st.win.document.querySelector('#tab-list .chat-tab.active');
   assert.ok(
     active && active.dataset.tabId !== st.parentId,
@@ -309,7 +309,7 @@ function testCollapseForgetsGrandchildSubagentTabs() {
     tabId: childId,
     extras: {tasks: JSON.stringify(['deep'])},
   });
-  let before = st.posted.length;
+  const before = st.posted.length;
   st.deliver({
     type: 'new_tab',
     task_id: 'deep-task',
@@ -349,7 +349,6 @@ function testCollapseForgetsGrandchildSubagentTabs() {
     );
   }
 
-  before = st.posted.length;
   togglePanel(st.win, st.panel, st.drain);
   const reopened = subagentTabEls(st.win).map(el => el.dataset.tabId);
   assert.strictEqual(
@@ -441,7 +440,7 @@ function testReplayWhileViewingSubagentKeepsWholeTranscript() {
   );
   assert.ok(subTabEl, 'the sub-agent tab must be on the group strip');
   subTabEl.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
-  if (st.drain) st.drain();
+  st.drain();
   assert.strictEqual(
     st.win.document.querySelector('#tab-list .chat-tab.active').dataset.tabId,
     st.subTabIds[0],
@@ -538,7 +537,7 @@ function testFailedReplayDoesNotStrandLaterCloses() {
   } catch {
     // The webapp shim hands the throw straight back to the caller.
   }
-  if (st.drain) st.drain();
+  st.drain();
 
   // The parent chat is hidden behind the new one (its sub-agents are
   // still running, so "+" did not retire it); the Chats panel's pick
@@ -548,7 +547,7 @@ function testFailedReplayDoesNotStrandLaterCloses() {
     'the parent chat must still be open',
   );
   st.win._testApi.switchToTab(st.parentId);
-  if (st.drain) st.drain();
+  st.drain();
   assert.strictEqual(st.win._testApi.getActiveTabId(), st.parentId);
   const out = st.win.document.getElementById('output');
   assert.ok(

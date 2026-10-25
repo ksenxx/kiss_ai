@@ -145,10 +145,7 @@ function testHeaderShowsMachineThenDirectory() {
     'the placeholder is no pick',
   );
 
-  // The "..." menu has no "Working directory" item any more, and the
-  // panel it used to open is gone.
-  assert.strictEqual(win.document.getElementById('workdir-btn'), null);
-  assert.strictEqual(win.document.getElementById('workdir-panel'), null);
+  // The "..." menu has no "Working directory" item any more.
   const labels = Array.from(
     win.document.querySelectorAll('#more-menu .more-item-label'),
     el => el.textContent.trim(),

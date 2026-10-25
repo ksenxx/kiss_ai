@@ -7,14 +7,12 @@
 // - I-R1: every tab-title write clips through clipTabTitle (30 chars +
 //   ellipsis), for the active tab (setTaskText) and background tabs
 //   (task_events) alike.
-// - I-R4: the "Suggested next" followup bar renders and inserts its
-//   text on click, both live (followup_suggestion event) and replayed
-//   (task_events history).
+// - I-R4: the followup bar is labelled "Suggested next" (its click
+//   behaviour, live and replayed, is pinned by
+//   followupSuggestionClickCopies.test.js).
 // - I-RC2: replacing the input history cache resets a live ArrowUp/
 //   ArrowDown cycling position instead of resuming at a stale index
 //   into the new list.
-
-/* global require, process, console, __dirname */
 
 'use strict';
 
@@ -60,52 +58,18 @@ function testBackgroundTabTitleClipped() {
   console.log('  ok - task_events clips a background tab title');
 }
 
-function testFollowupBarLive() {
+function testFollowupBarLabel() {
   const {win, posted} = makePage();
   const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   send(win, {type: 'followup_suggestion', tabId, text: 'Do X next'});
   const bar = win.document.querySelector('#output .followup-bar');
   assert.ok(bar, 'live followup bar not rendered');
-  assert.strictEqual(bar.querySelector('.fu-text').textContent, 'Do X next');
   assert.strictEqual(
     bar.querySelector('.fu-label').textContent,
     'Suggested next',
   );
-  bar.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(
-    win.document.getElementById('task-input').value,
-    'Do X next',
-    'clicking the live followup bar must insert its text',
-  );
-  console.log('  ok - live followup bar renders and inserts on click');
-}
-
-function testFollowupBarReplay() {
-  const {win, posted} = makePage();
-  const tabId = posted.find(m => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  send(win, {
-    type: 'task_events',
-    tabId,
-    chat_id: 'chat-r',
-    task_id: '7',
-    task: 'Old task',
-    events: [
-      {type: 'system_output', text: 'did things\n'},
-      {type: 'followup_suggestion', text: 'Replay me'},
-    ],
-  });
-  const bar = win.document.querySelector('.followup-bar');
-  assert.ok(bar, 'replayed followup bar not rendered');
-  assert.strictEqual(bar.querySelector('.fu-text').textContent, 'Replay me');
-  bar.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(
-    win.document.getElementById('task-input').value,
-    'Replay me',
-    'clicking the replayed followup bar must insert its text',
-  );
-  console.log('  ok - replayed followup bar renders and inserts on click');
+  console.log('  ok - followup bar is labelled "Suggested next"');
 }
 
 function testInputHistoryReplaceResetsCycling() {
@@ -143,8 +107,7 @@ function testInputHistoryReplaceResetsCycling() {
 function main() {
   testActiveTabTitleClipped();
   testBackgroundTabTitleClipped();
-  testFollowupBarLive();
-  testFollowupBarReplay();
+  testFollowupBarLabel();
   testInputHistoryReplaceResetsCycling();
   console.log('rr_area_hi_media_ui: all tests passed');
   process.exit(0);

@@ -9,7 +9,7 @@
 // `interruptTool` for the panel's tab and tool; the `tool_interrupt_ack`
 // receipt resets a rejected click; the arriving tool_result hides it.
 
-/* global require, __dirname, console, process, setTimeout */
+/* global require, console, process, setTimeout */
 
 'use strict';
 
@@ -22,26 +22,19 @@ const {
   makePage: makeSharedPage,
   send,
   loadMainCss,
+  click,
+  MEDIA,
 } = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 const {test, report} = makeRunner();
 
+/**
+ * Boot the chat page with the real stylesheet, so the running/finished
+ * visibility of the button is checked through the cascade, not through
+ * class names.
+ */
 function makePage() {
-  // The real stylesheet, so the running/finished visibility of the
-  // button is checked through the cascade, not through class names.
-  const {win, posted} = makeSharedPage({beforeScripts: loadMainCss});
-  return {win, posted};
-}
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  return makeSharedPage({beforeScripts: loadMainCss});
 }
 
 function display(win, el) {
@@ -119,7 +112,7 @@ async function pageTests() {
       'none',
     );
     // Unfold it for the tests below: the Stop click must not refold it.
-    click(tc.querySelector('.tc-h'));
+    click(win, tc.querySelector('.tc-h'));
     assert.ok(!tc.classList.contains('collapsed'));
   });
 
@@ -127,7 +120,7 @@ async function pageTests() {
     const tc = out.querySelector('.ev.tc');
     const stop = tc.querySelector(':scope > .panel-stop-btn');
     const before = wv.posted.length;
-    click(stop);
+    click(win, stop);
     const msg = wv.posted.slice(before).find(m => m.type === 'interruptTool');
     assert.ok(msg, 'interruptTool is posted');
     assert.strictEqual(msg.tabId, TAB);
@@ -164,7 +157,7 @@ async function pageTests() {
     send(win, {type: 'tool_interrupt_ack', accepted: false, tabId: TAB});
     assert.ok(!stop.classList.contains('stopping'), 'a rejected ack resets');
     assert.strictEqual(stop.disabled, false);
-    click(stop);
+    click(win, stop);
     assert.ok(stop.classList.contains('stopping'));
     send(win, {type: 'tool_interrupt_ack', accepted: false});
     assert.ok(
@@ -176,7 +169,7 @@ async function pageTests() {
   await test('the tool_result hides Stop and shows the interrupt message', () => {
     const tc = out.querySelector('.ev.tc');
     const stop = tc.querySelector(':scope > .panel-stop-btn');
-    click(stop);
+    click(win, stop);
     // Output streamed before the interrupt, without a trailing newline.
     send(win, {type: 'system_output', text: 'partial output', tabId: TAB});
     send(win, {
@@ -303,7 +296,7 @@ async function pageTests() {
     const stop = tc.querySelector(':scope > .panel-stop-btn');
     assert.strictEqual(display(win, stop), 'flex');
     const before = wv.posted.length;
-    click(stop);
+    click(win, stop);
     const msg = wv.posted.slice(before).find(m => m.type === 'interruptTool');
     assert.strictEqual(msg.toolName, 'ask_user_question');
     assert.ok(!('callId' in msg), 'an event without a callId sends none');
@@ -367,7 +360,7 @@ async function pageTests() {
       'the open replayed call can be stopped',
     );
     const before = wv2.posted.length;
-    click(openStop);
+    click(win2, openStop);
     const msg = wv2.posted.slice(before).find(m => m.type === 'interruptTool');
     assert.ok(msg && msg.tabId === TAB2 && msg.toolName === 'Read');
     // The task ending seals every open panel: the button goes away.
@@ -426,11 +419,11 @@ async function panelStopBody() {
   assert.strictEqual(PanelCopy.getRawText(panel), '');
   assert.strictEqual(PanelCopy.formattedTextFromNode(panel), '');
 
-  click(btn);
+  click(win, btn);
   assert.strictEqual(stops, 1);
   assert.ok(btn.classList.contains('stopping'));
   assert.strictEqual(btn.disabled, true);
-  click(btn);
+  click(win, btn);
   assert.strictEqual(stops, 1, 'a click while stopping is ignored');
 
   // Explicit clear (a rejected ack) cancels the pending reset timer;
@@ -440,7 +433,7 @@ async function panelStopBody() {
   assert.strictEqual(btn.disabled, false);
   btn._kissClearStopping();
 
-  click(btn);
+  click(win, btn);
   assert.strictEqual(stops, 2);
   // The 30 ms reset timer is a jsdom window timer; it is armed before
   // this node timer, so it fires first.  The assertions run here, in
@@ -452,13 +445,13 @@ async function panelStopBody() {
     'the stopping state clears by itself after resetMs',
   );
   assert.strictEqual(btn.disabled, false);
-  click(btn);
+  click(win, btn);
   assert.strictEqual(stops, 3, 'the button can be used again');
   // Default reset delay (no resetMs given).
   const panel2 = doc.createElement('div');
   doc.body.appendChild(panel2);
   const btn2 = PanelCopy.addStopButton(panel2, () => {});
-  click(btn2);
+  click(win, btn2);
   assert.ok(btn2.classList.contains('stopping'));
   btn2._kissClearStopping();
   win.close();

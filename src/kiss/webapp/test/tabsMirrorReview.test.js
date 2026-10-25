@@ -40,18 +40,7 @@ function tabBarIds(win) {
   return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
-function msgsOf(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
-function snapshotEntry(tabId, title, chatId, workDir) {
-  return {
-    tabId: tabId,
-    chatId: chatId || '',
-    title: title || 'new chat',
-    workDir: workDir || '',
-  };
-}
+const {ofType: msgsOf, snapshotEntry} = harness;
 
 // Give a page a mirrored parent tab plus one sub-agent tab: live by
 // default, finished history with `done` (only such a tab may be

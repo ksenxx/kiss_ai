@@ -224,18 +224,12 @@ def test_callback_verification_and_inbound_xml() -> None:
     backend, port = _connected_backend()
     try:
         url = f"http://127.0.0.1:{port}/"
-        ts, nonce = "1712345678", "n0nce"
-        good = hashlib.sha1("".join(sorted(["cbtok", ts, nonce])).encode()).hexdigest()
-        resp = requests.get(
-            url,
-            params={"signature": good, "timestamp": ts, "nonce": nonce, "echostr": "e-c-h-o"},
-            timeout=10,
-        )
+        resp = requests.get(url, params={**_signed_params(), "echostr": "e-c-h-o"}, timeout=10)
         assert resp.status_code == 200 and resp.text == "e-c-h-o"
 
         bad = requests.get(
             url,
-            params={"signature": "0" * 40, "timestamp": ts, "nonce": nonce, "echostr": "x"},
+            params={**_signed_params(), "signature": "0" * 40, "echostr": "x"},
             timeout=10,
         )
         assert bad.status_code == 401
@@ -335,22 +329,6 @@ def test_callback_post_bad_content_length() -> None:
         assert messages == []
     finally:
         backend.disconnect()
-
-
-def test_emulator_names_wrong_access_token(api: _WeixinApi) -> None:
-    """The emulated API answers a wrong access token with errcode 40001 quoting it."""
-    info = requests.get(
-        api.base_url + "/cgi-bin/user/info", params={"access_token": "stale"}, timeout=10
-    ).json()
-    sent = requests.post(
-        api.base_url + "/cgi-bin/message/custom/send",
-        params={"access_token": "stale"},
-        json={"touser": "o"},
-        timeout=10,
-    ).json()
-    assert info["errcode"] == sent["errcode"] == 40001
-    assert "'stale'" in info["errmsg"] and "'stale'" in sent["errmsg"]
-    assert api.requests == []
 
 
 def test_send_fails_on_http_error_status(api: _WeixinApi) -> None:

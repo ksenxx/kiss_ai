@@ -21,9 +21,9 @@
 //      deleted long ago.
 //
 // The fix confines the error push to idx >= 0 (a removed slot's failure
-// is moot).  The preserved policy is asserted too: when the slot is NOT
-// removed, the deadline failure must still produce the visible error chip
-// (as concaudit_f4_attachment_prepare_deadline.test.js also pins).
+// is moot).  The preserved policy (a slot the user did NOT remove still
+// shows the deadline error chip) is pinned by
+// concaudit_f4_attachment_prepare_deadline.test.js.
 //
 // The production deadline is 60s; waiting a real minute per run is not
 // acceptable, so main.js is loaded with that ONE constant lowered (and
@@ -34,7 +34,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makeWedgedDecoderPage, paste} = require('./attachment_helpers');
+const {makeWedgedDecoderPage, paste, settle} = require('./attachment_helpers');
 const {sleep} = require('./simplify2_harness');
 
 const SHORT_DEADLINE_MS = 300;
@@ -68,14 +68,14 @@ async function main() {
   );
   win._testApi.endLaunch();
 
-  // ---- Part 1: the bug. A pending HEIC whose decode is wedged is
-  // removed by the user BEFORE the prepare deadline fires. The later
-  // deadline failure of the removed slot must be moot: no error chip.
+  // A pending HEIC whose decode is wedged is removed by the user BEFORE
+  // the prepare deadline fires. The later deadline failure of the
+  // removed slot must be moot: no error chip.
   const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
     type: 'image/heic',
   });
   paste(win, heic);
-  await sleep(30);
+  await settle(() => decodeCount() === 1);
   assert.strictEqual(decodeCount(), 1, 'the HEIC reached the decoder');
   assert.match(chipText(win), /IMG_0001\.HEIC/, 'the pending chip shows');
 
@@ -87,8 +87,10 @@ async function main() {
   );
 
   // Well past the deadline: the removed slot's withDeadline rejection
-  // lands. Post-fix nothing is rendered; pre-fix a phantom error chip
-  // "IMG_0001.HEIC: it could not be read within Ns" appears.
+  // lands (the 300 ms timer was armed before this sleep, so it fires
+  // first whatever the load). Post-fix nothing is rendered; pre-fix a
+  // phantom error chip "IMG_0001.HEIC: it could not be read within Ns"
+  // appears.
   await sleep(SHORT_DEADLINE_MS + 200);
   assert.strictEqual(
     errorChips(win).length,
@@ -99,28 +101,6 @@ async function main() {
     chipText(win),
     /IMG_0001\.HEIC/,
     'the removed attachment must not reappear in the composer',
-  );
-
-  // ---- Part 2: the preserved behavior. The same deadline failure of a
-  // slot the user did NOT remove must still surface the error chip.
-  const heic2 = new win.File([new Uint8Array([4, 5, 6])], 'IMG_0002.HEIC', {
-    type: 'image/heic',
-  });
-  paste(win, heic2);
-  await sleep(30);
-  assert.strictEqual(decodeCount(), 2, 'the second HEIC reached the decoder');
-  assert.match(chipText(win), /IMG_0002\.HEIC/, 'its pending chip shows');
-
-  await sleep(SHORT_DEADLINE_MS + 200);
-  assert.strictEqual(
-    errorChips(win).length,
-    1,
-    'a still-present attachment that hit the deadline shows one error chip',
-  );
-  assert.match(
-    chipText(win),
-    /IMG_0002\.HEIC: it could not be read within \d+s/,
-    'the deadline failure is explained for the still-present slot',
   );
 
   console.log('conc2026_attachment_removed_slot: OK');

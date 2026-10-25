@@ -7,7 +7,7 @@
 ``JsonPrinter.cleanup_task`` pops the task's ``_BashState`` and cancels
 any pending flush timer — but ``threading.Timer.cancel()`` cannot stop a
 callback that has already fired.  A straggler
-``_timer_flush_for_task(task_id)`` (the exact function the timer thread
+``flush_bash_output(task_id)`` (the exact function the timer thread
 runs) then called ``_flush_bash``, whose ``_bash_state`` property
 RE-CREATED the just-popped entry in ``_bash_states``.  Every task that
 ended while a flush timer was in flight therefore leaked a permanent
@@ -41,9 +41,7 @@ class TestBashTimerStateResurrection(unittest.TestCase):
         p.cleanup_task("task-9")
         self.assertNotIn("task-9", p._bash_states)
         emitted_before = len(p.emitted)
-        worker = threading.Thread(
-            target=p._timer_flush_for_task, args=("task-9",),
-        )
+        worker = threading.Thread(target=p.flush_bash_output, args=("task-9",))
         worker.start()
         worker.join(timeout=5)
         self.assertFalse(worker.is_alive())

@@ -6,8 +6,6 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
@@ -17,8 +15,6 @@ const {
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
 function stubVoiceConfig(win) {
   stubRaf(win);
   win.__VOICE__ = {};
@@ -26,9 +22,10 @@ function stubVoiceConfig(win) {
 }
 
 function makePage() {
-  const page = makeChatPage({beforeScripts: stubVoiceConfig});
-  page.win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return page;
+  return makeChatPage({
+    beforeScripts: stubVoiceConfig,
+    extraScripts: ['voice.js'],
+  });
 }
 
 function taskInput(win) {

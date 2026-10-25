@@ -299,6 +299,7 @@ class GeminiModel(Model):
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
         self._http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
+        self._client_api_key: str | None = None
 
     def reset_conversation(self) -> None:
         """Reset conversation state including thought signatures.
@@ -318,10 +319,17 @@ class GeminiModel(Model):
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs) to include.
         """
-        self.client = genai.Client(
-            api_key=self.api_key,
-            http_options=types.HttpOptions(httpx_client=self._http_client),
-        )
+        # Built here rather than in __init__ because the Sorcar agent may
+        # override ``api_key`` between construction and initialize() (a
+        # task-specific key on a same-provider model switch).  Reused across
+        # runs: every ``genai.Client`` owns an ``httpx.AsyncClient`` that
+        # nothing closes, so rebuilding per run leaks one per run.
+        if self.client is None or self.api_key != self._client_api_key:
+            self.client = genai.Client(
+                api_key=self.api_key,
+                http_options=types.HttpOptions(httpx_client=self._http_client),
+            )
+            self._client_api_key = self.api_key
         msg: dict[str, Any] = {"role": "user", "content": prompt}
         if attachments:
             msg["attachments"] = attachments
@@ -378,13 +386,10 @@ class GeminiModel(Model):
         Returns:
             types.Part: The function-call part.
         """
-        thought_sig = self._thought_signatures.get(call_id) if call_id else None
-        if thought_sig:
-            return types.Part(
-                function_call=types.FunctionCall(name=name, args=args),
-                thought_signature=thought_sig,
-            )
-        return types.Part.from_function_call(name=name, args=args)
+        return types.Part(
+            function_call=types.FunctionCall(name=name, args=args),
+            thought_signature=self._thought_signatures.get(call_id) if call_id else None,
+        )
 
     def _function_response_part(
         self, name: str, content: Any, call_id: Any
@@ -399,14 +404,12 @@ class GeminiModel(Model):
         Returns:
             types.Part: The function-response part.
         """
-        response_dict = _tool_result_response_dict(content)
-        thought_sig = self._thought_signatures.get(call_id) if call_id else None
-        if thought_sig:
-            return types.Part(
-                function_response=types.FunctionResponse(name=name, response=response_dict),
-                thought_signature=thought_sig,
-            )
-        return types.Part.from_function_response(name=name, response=response_dict)
+        return types.Part(
+            function_response=types.FunctionResponse(
+                name=name, response=_tool_result_response_dict(content)
+            ),
+            thought_signature=self._thought_signatures.get(call_id) if call_id else None,
+        )
 
     def _block_list_to_parts(
         self, blocks: list[Any], id_to_name: dict[str, str]
@@ -467,7 +470,7 @@ class GeminiModel(Model):
         return parts
 
     def _convert_conversation_to_gemini_contents(
-        self, chat_messages: list[dict[str, Any]] | None = None
+        self, chat_messages: list[dict[str, Any]]
     ) -> list[types.Content]:
         """Converts the internal conversation format to Gemini contents.
 
@@ -489,14 +492,12 @@ class GeminiModel(Model):
         appends them as a follow-up user message instead.
 
         Args:
-            chat_messages: The pre-converted conversation, or ``None`` to
-                convert ``self.conversation`` here.
+            chat_messages: The conversation, pre-converted by
+                :meth:`_chat_messages`.
 
         Returns:
             list[types.Content]: The conversation in Gemini API format.
         """
-        if chat_messages is None:
-            chat_messages = self._chat_messages()
         id_to_name = self._tool_call_id_to_name_map(chat_messages)
         contents = []
         for msg in chat_messages:
@@ -587,7 +588,7 @@ class GeminiModel(Model):
         return content, function_calls
 
     def _resolve_system_instruction(
-        self, chat_messages: list[dict[str, Any]] | None = None
+        self, chat_messages: list[dict[str, Any]]
     ) -> str | None:
         """Merge configured and conversation-level system instructions.
 
@@ -599,21 +600,18 @@ class GeminiModel(Model):
         configured ``system_instruction`` are skipped.
 
         Args:
-            chat_messages: The pre-converted conversation, or ``None`` to
-                convert ``self.conversation`` here.
+            chat_messages: The conversation, pre-converted by
+                :meth:`_chat_messages`.
 
         Returns:
             str | None: The merged system instruction, or ``None``.
         """
-        return merge_system_texts(
-            self.system_instruction_text(),
-            chat_messages if chat_messages is not None else self._chat_messages(),
-        )
+        return merge_system_texts(self.system_instruction_text(), chat_messages)
 
     def _build_config(
         self,
+        chat_messages: list[dict[str, Any]],
         tools: list[types.Tool] | None = None,
-        chat_messages: list[dict[str, Any]] | None = None,
     ) -> types.GenerateContentConfig:
         """Translate ``model_config`` into a Gemini generation config.
 
@@ -628,10 +626,9 @@ class GeminiModel(Model):
         forwarding them blindly would raise a ``ValidationError``.
 
         Args:
+            chat_messages: The conversation, pre-converted by
+                :meth:`_chat_messages`, for :meth:`_resolve_system_instruction`.
             tools: Optional Gemini tool declarations for this request.
-            chat_messages: The pre-converted conversation for
-                :meth:`_resolve_system_instruction`, or ``None`` to
-                convert ``self.conversation`` there.
 
         Returns:
             The config to pass to ``generate_content``.
@@ -741,13 +738,7 @@ class GeminiModel(Model):
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
-        chat_messages = self._chat_messages()
-        contents = self._convert_conversation_to_gemini_contents(chat_messages)
-        parts, response = self._stream_turn(
-            contents, self._build_config(chat_messages=chat_messages)
-        )
-        content, _ = self._parse_parts(parts)
-        self.conversation.append({"role": "assistant", "content": content})
+        _, content, response = self.generate_and_process_with_tools({})
         return content, response
 
     def generate_and_process_with_tools(
@@ -781,7 +772,7 @@ class GeminiModel(Model):
 
         chat_messages = self._chat_messages()
         contents = self._convert_conversation_to_gemini_contents(chat_messages)
-        config = self._build_config(tools=gemini_tools, chat_messages=chat_messages)
+        config = self._build_config(chat_messages, tools=gemini_tools)
         all_parts, response = self._stream_turn(contents, config)
         content, function_calls = self._parse_parts(all_parts)
 

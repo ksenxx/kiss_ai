@@ -61,6 +61,18 @@ MUTATION_LOCK_TIMEOUT = 60.0
 FRONTMATTER_KEYS = ("title", "uuid", "summary", "created", "updated")
 
 
+def page_title(frontmatter: dict[str, Any], name: str) -> str:
+    """The page title from *frontmatter*, falling back to the page *name*."""
+    title = frontmatter.get("title")
+    return str(title) if title else name
+
+
+def page_summary(frontmatter: dict[str, Any]) -> str:
+    """The one-line summary from *frontmatter*, or an empty string."""
+    summary = frontmatter.get("summary")
+    return str(summary) if summary else ""
+
+
 @dataclass(frozen=True)
 class Page:
     """One memory page loaded from disk.
@@ -80,14 +92,12 @@ class Page:
     @property
     def title(self) -> str:
         """The page title from frontmatter, falling back to the page name."""
-        title = self.frontmatter.get("title")
-        return str(title) if title else self.name
+        return page_title(self.frontmatter, self.name)
 
     @property
     def summary(self) -> str:
         """The one-line summary from frontmatter, or an empty string."""
-        summary = self.frontmatter.get("summary")
-        return str(summary) if summary else ""
+        return page_summary(self.frontmatter)
 
 
 def read_page_text(path: Path) -> str:

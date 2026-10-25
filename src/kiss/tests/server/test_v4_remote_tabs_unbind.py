@@ -115,7 +115,8 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
 
         await self._send({"type": "resumeSession", "taskId": new_tab["task_id"], "tabId": first})
         # The sub-agent's transcript reaches the joined tab, which stays
-        # shown as the machine's (no ``tabMachine`` "": it still is).
+        # shown as the machine's: the join announces the stream's
+        # machine (box again), never a ``tabMachine`` "".
         seen: list[dict[str, Any]] = []
         for _ in range(400):
             msg = await self._next()
@@ -130,7 +131,9 @@ class TestUnbindEndsSubAgentTabs(RemoteTabsHarness):
         self.assertEqual(remote_tabs.machine_of(first), "box")
         types = [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen]
         self.assertNotIn(("subagentDone", announced), types, "the other stream is untouched")
-        self.assertNotIn(("tabMachine", first), types)
+        bindings = [m["machine"] for m in seen if m["type"] == "tabMachine" and m["tabId"] == first]
+        self.assertEqual(bindings, ["box"], "the joined tab is told the stream's machine")
+        self.assertLess(types.index(("tabMachine", first)), types.index(("task_events", first)))
         # Then the sub-agent's end.
         _FinishingModel.released.set()
         for _ in range(400):

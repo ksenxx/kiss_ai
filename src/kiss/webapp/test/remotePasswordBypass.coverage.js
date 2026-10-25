@@ -5,22 +5,32 @@
 
 // Coverage gate: requires 100% line coverage of the WHOLE of
 // media/transport.js and media/assetLoadGuard.js (not a fenced region) when
-// running test/remotePasswordBypass.test.js, plus every branch except the
+// running test/remotePasswordBypass.test.js together with
+// test/transportReloadOnNewDaemon.test.js (the shim's GET /api/daemon
+// reload check, whose pages have a fetch), plus every branch except the
 // spec-unreachable `location.reload()` catch.
 
 'use strict';
 
 const {runCovered, measure} = require('./coverage_gate');
 
-// The two page scripts of media/ that the functional test eval's, each
+// The two page scripts of media/ that the functional tests eval, each
 // under its own sourceURL pragma.
 const SCRIPTS = [
   {file: 'transport.js', sourceUrl: 'ws-shim.js', wholeFile: true},
   {file: 'assetLoadGuard.js', sourceUrl: 'asset-guard.js', wholeFile: true},
 ];
 
+const SUITES = [
+  'remotePasswordBypass.test.js',
+  'transportReloadOnNewDaemon.test.js',
+];
+
 function main() {
-  const reports = runCovered('remotePasswordBypass.test.js', 'ws-shim');
+  let reports = [];
+  for (const suite of SUITES) {
+    reports = reports.concat(runCovered(suite, 'ws-shim'));
+  }
   for (const target of SCRIPTS) gate(target, reports);
 }
 

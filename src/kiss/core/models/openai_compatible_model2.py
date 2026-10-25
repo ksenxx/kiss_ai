@@ -23,12 +23,11 @@ import base64
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
-from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     TOOL_RESULT_ATTACHMENT_NOTE,
@@ -46,9 +45,21 @@ from kiss.core.models.openai_compatible_model import (
     _extract_deepseek_reasoning,
     _function_call_entry,
 )
-from kiss.core.models.stream_abort import stop_error
 
 logger = logging.getLogger(__name__)
+
+
+class _StreamOrder(NamedTuple):
+    """The output ordering one streamed turn revealed.
+
+    Attributes:
+        item_indexes: Output item id to its ``output_index``.
+        message_index: The ``output_index`` of the first text-bearing
+            message, ``None`` when the turn streamed no text.
+    """
+
+    item_indexes: dict[str, int]
+    message_index: int | None
 
 
 def _new_tool_slot() -> dict[str, str]:
@@ -59,6 +70,58 @@ def _new_tool_slot() -> dict[str, str]:
 def _content_index(event: Any) -> int:
     """Return the content-part index of a text stream *event* (``0`` when absent)."""
     return int(getattr(event, "content_index", 0) or 0)
+
+
+def _move_markers(
+    args_from_delta: set[int], args_from_added: set[int], src: int, dst: int
+) -> None:
+    """Re-key the argument-source markers of the slot moved from *src* to *dst*.
+
+    Markers already at *dst* stay, so a slot merged into an occupant keeps
+    the markers of both.
+
+    Args:
+        args_from_delta: Indices whose arguments came from deltas.
+        args_from_added: Indices whose arguments came from ``added``.
+        src: The index the slot left.
+        dst: The index it now holds.
+    """
+    for markers in (args_from_delta, args_from_added):
+        if src in markers:
+            markers.discard(src)
+            markers.add(dst)
+
+
+def _hoist(value: Any, nested_key: str) -> Any:
+    """Hoist a Chat-Completions ``{"type": nested_key, nested_key: {...}}`` dict flat.
+
+    Chat Completions nests the payload of a function tool
+    (``{"type":"function","function":{"name":...}}``), of a ``tool_choice``
+    target and of a ``json_schema`` response format one level deeper than
+    the Responses API, which wants the same fields on the top level
+    (``{"type":"function","name":...}``).
+
+    Args:
+        value: A tool, ``tool_choice`` or ``response_format`` value in
+            either shape.
+        nested_key: The ``type`` the nested shape carries, which is also
+            the key holding the nested dict.
+
+    Returns:
+        A new flat dict when *value* has the nested shape; otherwise
+        *value* itself (a string such as ``"auto"``, a dict of another
+        type, or one that is already flat).
+    """
+    if (
+        isinstance(value, dict)
+        and value.get("type") == nested_key
+        and isinstance(value.get(nested_key), dict)
+    ):
+        flat = {k: v for k, v in value.items() if k != nested_key}
+        flat.update(value[nested_key])
+        flat["type"] = nested_key
+        return flat
+    return value
 
 
 # The request parameters a Responses call accepts, taken from the SDK's own
@@ -113,8 +176,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             thinking_callback=thinking_callback,
         )
         self._pending_function_calls: list[dict[str, str]] = []
-        self._last_stream_item_indexes: dict[str, int] = {}
-        self._last_stream_message_output_index: int | None = None
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with ``prompt`` and any ``attachments``.
@@ -130,50 +191,37 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         self._ensure_client()
         self.conversation = []
-        self._reset_turn_state()
+        self._pending_function_calls = []
         parts = self._attachments_to_content_parts(attachments) if attachments else []
         parts.append(self._text_part(prompt))
         self.conversation.append({"role": "user", "content": parts})
 
-    def _reset_stream_indexes(self) -> None:
-        """Forget the item ordering learned from the previous streamed turn."""
-        self._last_stream_item_indexes = {}
-        self._last_stream_message_output_index = None
-
-    def _reset_turn_state(self) -> None:
-        """Drop every scrap of per-turn state left by the previous turn."""
-        self._pending_function_calls = []
-        self._reset_stream_indexes()
-
     def reset_conversation(self) -> None:
-        """Reset the conversation together with all per-turn state.
+        """Reset the conversation together with the pending tool calls.
 
         The base implementation clears only the conversation.  Leaving
         ``_pending_function_calls`` behind would then reject the next
         generation on a *fresh, empty* conversation — a permanently
-        unusable model object — and leaving the stream indexes behind
-        would order a later non-streamed turn's assistant message using
-        the previous streamed turn's indexes.
+        unusable model object.
         """
         super().reset_conversation()
-        self._reset_turn_state()
+        self._pending_function_calls = []
 
-    def _request_response(self, kwargs: dict[str, Any]) -> tuple[str, list[dict[str, str]], Any]:
+    def _request_response(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[str, list[dict[str, str]], Any, _StreamOrder]:
         """Issue one Responses request, streaming iff a token callback is set.
 
-        The single place the transport talks to ``responses.create``, so
-        the per-turn stream bookkeeping is reset for *every* turn — a
-        non-streamed turn must never be ordered using the indexes of the
-        streamed turn before it.
+        The single place the transport talks to ``responses.create``.
 
         Args:
             kwargs: The request kwargs; ``stream`` is set here when
                 streaming.
 
         Returns:
-            ``(content, tool_calls, response)``.
+            ``(content, tool_calls, response, order)``; ``order`` is empty
+            for a non-streamed turn, whose items carry no output indexes.
         """
-        self._reset_stream_indexes()
         if self.token_callback is not None:
             return self._stream_request(self.client.responses.create, kwargs, self._consume_stream)
         response = self.client.responses.create(**kwargs)
@@ -183,7 +231,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._rejected_response = response
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
-        return content, tool_calls, response
+        return content, tool_calls, response, _StreamOrder({}, None)
 
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
@@ -264,72 +312,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
 
     @staticmethod
-    def _flatten_tools_schema(
-        tools: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Flatten Chat-Completions tool schemas to Responses-API shape.
-
-        Chat Completions wraps each function tool as
-        ``{"type":"function","function":{"name":...,...}}``.  The Responses
-        API expects the function fields to live directly on the tool dict
-        (``{"type":"function","name":...,"description":...,"parameters":...}``).
-
-        Tools that already have the flat shape (no ``function`` key) are
-        passed through unchanged.
-
-        Args:
-            tools: A list of tool schema dicts in either Chat-Completions
-                or Responses-API shape.
-
-        Returns:
-            A new list of tool schema dicts in Responses-API shape.
-        """
-        flat: list[dict[str, Any]] = []
-        for tool in tools:
-            if (
-                isinstance(tool, dict)
-                and tool.get("type") == "function"
-                and isinstance(tool.get("function"), dict)
-            ):
-                base = {k: v for k, v in tool.items() if k != "function"}
-                base.update(tool["function"])
-                base["type"] = "function"
-                flat.append(base)
-            else:
-                flat.append(tool)
-        return flat
-
-    @staticmethod
-    def _flatten_tool_choice(tool_choice: Any) -> Any:
-        """Flatten a Chat-Completions ``tool_choice`` to Responses-API shape.
-
-        Chat Completions targets a specific function with:
-        ``{"type":"function","function":{"name":"foo"}}``.  The Responses
-        API expects the flat form: ``{"type":"function","name":"foo"}``.
-
-        Strings (``"auto"`` / ``"none"`` / ``"required"``) and any other
-        already-flat shape are passed through unchanged.
-
-        Args:
-            tool_choice: Either a Chat-Completions or Responses-API
-                ``tool_choice`` value.
-
-        Returns:
-            The same value, with the nested ``function`` key hoisted onto
-            the top level when present.
-        """
-        if (
-            isinstance(tool_choice, dict)
-            and tool_choice.get("type") == "function"
-            and isinstance(tool_choice.get("function"), dict)
-        ):
-            out = {k: v for k, v in tool_choice.items() if k != "function"}
-            out.update(tool_choice["function"])
-            out["type"] = "function"
-            return out
-        return tool_choice
-
-    @staticmethod
     def _normalize_input(conversation: list[Any]) -> list[Any]:
         """Drop empty/whitespace-only items from a Responses ``input`` array.
 
@@ -386,10 +368,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     new_item = dict(item)
                     new_item["content"] = filtered
                     out.append(new_item)
-                continue
-            continue
         return out
 
+    # The pending-attachment sentinel counts as native so
+    # ``_foreign_items_to_native_input`` leaves it in place; ``_normalize_input``
+    # strips it from the request.
     _NATIVE_INPUT_ITEM_TYPES = {
         "function_call",
         "function_call_output",
@@ -458,7 +441,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         translated to Responses ``input`` items via
         :meth:`OpenAICompatibleModel._chat_message_to_responses_items`.
         Native Responses items pass through unchanged, so the conversion
-        is idempotent.
+        is idempotent: every public generation method runs it on the
+        whole conversation (the hand-off assigns ``conversation`` directly,
+        so there is no single entry point to convert at), and the pass
+        must stay a no-op on its own output — :meth:`_is_native_input_item`
+        accepts every ``role``-less item and every message whose parts are
+        Responses part types, which is exactly what this method emits.
 
         Args:
             conversation: The conversation, possibly containing foreign items.
@@ -474,26 +462,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             for chat_msg in OpenAICompatibleModel._normalize_message_for_api(item):
                 out.extend(OpenAICompatibleModel._chat_message_to_responses_items(chat_msg))
         return out
-
-    @staticmethod
-    def _translate_response_format_for_responses(
-        rf: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Flatten Chat-Completions ``response_format`` for the Responses API.
-
-        Chat-Completions uses ``{"type":"json_schema","json_schema":{...}}``
-        but the Responses API expects the schema fields hoisted to the
-        top level: ``{"type":"json_schema","name":"...","schema":{...}}``.
-        Other ``response_format`` shapes (``{"type":"json_object"}`` and
-        already-flat dicts) are passed through unchanged.
-        """
-        if (
-            isinstance(rf, dict)
-            and rf.get("type") == "json_schema"
-            and isinstance(rf.get("json_schema"), dict)
-        ):
-            return {"type": "json_schema", **rf["json_schema"]}
-        return rf
 
     @staticmethod
     def _is_valid_json(s: str) -> bool:
@@ -532,60 +500,33 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         When the destination is occupied by a DIFFERENT item_id (typically
         the result of an earlier provisional allocation), relocate that
-        occupant to ``old_idx`` if free, otherwise to a fresh index past
-        the current maximum.  This guarantees parallel streaming
-        function_call items both survive when their real output_indexes
-        arrive out of order.
+        occupant to ``old_idx``, which the moving item has just vacated.
+        This guarantees parallel streaming function_call items both
+        survive when their real output_indexes arrive out of order.
         """
         if old_idx == new_idx:
             return new_idx
-        moving_in_delta = old_idx in args_from_delta
-        moving_in_added = old_idx in args_from_added
-        occupant_in_delta = new_idx in args_from_delta
-        occupant_in_added = new_idx in args_from_added
-
         moving = tool_calls.pop(old_idx)
         occupant = tool_calls.get(new_idx)
-        occupant_relocated_to: int | None = None
-        occupant_merged = False
-        if occupant is not None:
-            occupant_iid = str(occupant.get("item_id", "") or "")
-            if occupant_iid and occupant_iid != item_id:
-                relocated_idx = (
-                    old_idx if old_idx not in tool_calls else (max(tool_calls, default=-1) + 1)
-                )
-                tool_calls[relocated_idx] = tool_calls.pop(new_idx)
-                item_to_idx[occupant_iid] = relocated_idx
-                occupant_relocated_to = relocated_idx
-            else:
+        occupant_iid = str(occupant.get("item_id", "") or "") if occupant is not None else ""
+        if occupant is not None and occupant_iid and occupant_iid != item_id:
+            # old_idx was just popped and nothing re-inserted it, so it is
+            # free: the two slots swap places, markers included.
+            tool_calls[old_idx] = occupant
+            item_to_idx[occupant_iid] = old_idx
+            for markers in (args_from_delta, args_from_added):
+                if (old_idx in markers) != (new_idx in markers):
+                    markers ^= {old_idx, new_idx}
+        else:
+            if occupant is not None:
                 for field_name in ("id", "name", "arguments", "item_id"):
                     if not occupant.get(field_name) and moving.get(field_name):
                         occupant[field_name] = moving[field_name]
                 moving = occupant
-                tool_calls.pop(new_idx, None)
-                occupant_merged = True
+            _move_markers(args_from_delta, args_from_added, old_idx, new_idx)
         tool_calls[new_idx] = moving
         if item_id:
             item_to_idx[item_id] = new_idx
-
-        args_from_delta.discard(old_idx)
-        args_from_delta.discard(new_idx)
-        args_from_added.discard(old_idx)
-        args_from_added.discard(new_idx)
-        if moving_in_delta:
-            args_from_delta.add(new_idx)
-        if moving_in_added:
-            args_from_added.add(new_idx)
-        if occupant_merged:
-            if occupant_in_delta:
-                args_from_delta.add(new_idx)
-            if occupant_in_added:
-                args_from_added.add(new_idx)
-        elif occupant_relocated_to is not None:
-            if occupant_in_delta:
-                args_from_delta.add(occupant_relocated_to)
-            if occupant_in_added:
-                args_from_added.add(occupant_relocated_to)
         return new_idx
 
     @staticmethod
@@ -612,6 +553,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         text_part_buffers: dict[tuple[int, int], str],
         text_delta_seen: set[tuple[int, int]],
         allow_suffix: bool = True,
+        thinking: bool = False,
     ) -> str:
         """Record an authoritative final text value for a content part.
 
@@ -621,7 +563,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         the full value for done-only parts (marking ``key`` as seen so the
         terminal merge doesn't duplicate it), or — when ``allow_suffix`` —
         the missing suffix when earlier deltas streamed a strict prefix of
-        the final value.
+        the final value.  A reasoning part (``thinking``) opens the
+        thinking bracket before forwarding, and only when there is
+        something to forward.
         """
         old_text = text_part_buffers.get(key, "")
         text_part_buffers[key] = final_text
@@ -633,6 +577,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         else:
             emitted = ""
         if emitted:
+            if thinking:
+                self._open_thinking_if_closed()
             self._invoke_token_callback(emitted)
         return emitted
 
@@ -724,12 +670,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         occupant_iid = str(relocated.get("item_id", "") or "")
         if occupant_iid:
             item_to_idx[occupant_iid] = free_idx
-        if from_idx in args_from_delta:
-            args_from_delta.discard(from_idx)
-            args_from_delta.add(free_idx)
-        if from_idx in args_from_added:
-            args_from_added.discard(from_idx)
-            args_from_added.add(free_idx)
+        _move_markers(args_from_delta, args_from_added, from_idx, free_idx)
 
     @staticmethod
     def _input_carries_system_text(items: list[Any], text: str) -> bool:
@@ -816,7 +757,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if response_format is not None:
             existing_text = kwargs.get("text")
             text_cfg = dict(existing_text) if isinstance(existing_text, dict) else {}
-            text_cfg["format"] = self._translate_response_format_for_responses(response_format)
+            text_cfg["format"] = _hoist(response_format, "json_schema")
             kwargs["text"] = text_cfg
 
         kwargs["model"] = self._api_model_name
@@ -860,7 +801,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if tools:
             kwargs["tools"] = tools
             if tool_choice is not None:
-                kwargs["tool_choice"] = self._flatten_tool_choice(tool_choice)
+                kwargs["tool_choice"] = _hoist(tool_choice, "function")
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = parallel_tool_calls
 
@@ -1149,7 +1090,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     def _consume_stream(
         self,
         stream: Any,
-    ) -> tuple[str, list[dict[str, str]], Any]:
+    ) -> tuple[str, list[dict[str, str]], Any, _StreamOrder]:
         """Consume a Responses stream under an abort watchdog.
 
         :meth:`~kiss.core.models.model.Model._watched_events` aborts the
@@ -1174,7 +1115,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     def _consume_stream_events(
         self,
         events: Any,
-    ) -> tuple[str, list[dict[str, str]], Any]:
+    ) -> tuple[str, list[dict[str, str]], Any, _StreamOrder]:
         """Drive callbacks from streaming events and collect final state.
 
         Walks every SSE event from the Responses streaming API:
@@ -1195,12 +1136,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             events: The stop/stall-aware iterator over the SDK stream.
 
         Returns:
-            ``(content, tool_calls, response)`` where ``tool_calls`` is a
-            list of ``{"id": call_id, "name": name, "arguments":
-            args_json}`` dicts in declaration order, and ``response`` is
-            the final response object from the terminal
-            ``response.completed`` event (or the last event seen as a
-            fallback).
+            ``(content, tool_calls, response, order)`` where ``tool_calls``
+            is a list of ``{"id": call_id, "name": name, "arguments":
+            args_json}`` dicts in declaration order, ``response`` is the
+            final response object from the terminal ``response.completed``
+            event (or the last event seen as a fallback) and ``order`` the
+            output indexes the events revealed.
         """
         content = ""
         tool_calls: dict[int, dict[str, str]] = {}
@@ -1215,8 +1156,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         response: Any = None
         saw_completed = False
         item_output_indexes: dict[str, int] = {}
-        self._last_stream_item_indexes = item_output_indexes
-        self._last_stream_message_output_index = None
 
         for event in events:
             etype = self._event_type(event)
@@ -1257,20 +1196,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.reasoning_text.done",
                 "response.reasoning_summary_text.done",
             ):
-                output_index = self._stream_output_index(event, 0)
-                inner_index = self._reasoning_inner_index(event)
-                key = (output_index, inner_index)
-                final_reasoning = str(getattr(event, "text", "") or "")
-                old_reasoning = reasoning_part_buffers.get(key, "")
-                if key not in reasoning_delta_seen and final_reasoning:
-                    self._open_thinking_if_closed()
-                    self._invoke_token_callback(final_reasoning)
-                elif key in reasoning_delta_seen and final_reasoning.startswith(old_reasoning):
-                    suffix = final_reasoning[len(old_reasoning) :]
-                    if suffix:
-                        self._open_thinking_if_closed()
-                        self._invoke_token_callback(suffix)
-                reasoning_part_buffers[key] = final_reasoning
+                key = (self._stream_output_index(event, 0), self._reasoning_inner_index(event))
+                self._commit_final_text(
+                    key,
+                    str(getattr(event, "text", "") or ""),
+                    reasoning_part_buffers,
+                    reasoning_delta_seen,
+                    thinking=True,
+                )
                 self._close_thinking_if_open()
             elif etype in (
                 "response.output_text.done",
@@ -1445,14 +1378,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         # clear the slot when they hand the response to their caller.
         self._rejected_response = response
         self._close_thinking_if_open()
-        # Leaving the loop with ``break`` skips the post-loop stop check
-        # inside ``stop_aware_events`` (closing the generator runs only its
-        # cleanup), so a Stop that landed once the terminal event was
-        # already handed out is honoured here, as the Chat Completions
-        # transport does after its own ``break``; the usage recorded above
-        # is billed to the stopped run via ``take_partial_usage_response``.
-        if stop_signal.stop_requested():
-            raise stop_error()
         if not saw_completed:
             raise KISSError(
                 "Responses API stream ended without a terminal response.completed event."
@@ -1461,8 +1386,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             raise KISSError("Responses API stream completed without a response payload.")
 
         all_text_keys = set(text_part_buffers.keys()) | set(added_message_buffers.keys())
-        if all_text_keys:
-            self._last_stream_message_output_index = min(key[0] for key in all_text_keys)
+        message_output_index = min(key[0] for key in all_text_keys) if all_text_keys else None
 
         self._raise_for_failed_response(response)
 
@@ -1528,7 +1452,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             slot = tool_calls[k]
             slot.setdefault("output_index", str(k))
             ordered.append(slot)
-        return content, ordered, response
+        return content, ordered, response, _StreamOrder(item_output_indexes, message_output_index)
 
     @classmethod
     def _response_output(cls, response: Any) -> list[Any]:
@@ -1731,7 +1655,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         self.conversation = self._foreign_items_to_native_input(self.conversation)
         kwargs = self._build_request_kwargs(tools=None)
-        content, _tc, response = self._request_response(kwargs)
+        content, _tc, response, _order = self._request_response(kwargs)
 
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
@@ -1775,10 +1699,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return self._generate_with_text_based_tools(function_map)
 
         chat_tools = self._resolve_openai_tools_schema(function_map, tools_schema)
-        responses_tools = self._flatten_tools_schema(chat_tools)
+        responses_tools = [_hoist(tool, "function") for tool in chat_tools]
         kwargs = self._build_request_kwargs(tools=responses_tools)
 
-        content, raw_tool_calls, response = self._request_response(kwargs)
+        content, raw_tool_calls, response, order = self._request_response(kwargs)
 
         for tc in raw_tool_calls:
             if not tc.get("id"):
@@ -1839,7 +1763,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 for item in raw_items
                 if isinstance(item, dict) and item.get("type") == "function_call"
             }
-            item_output_indexes = dict(self._last_stream_item_indexes)
+            item_output_indexes = order.item_indexes
             combined: list[tuple[int, int, dict[str, Any]]] = []
             used_orders: set[int] = set()
             unknown_raw: list[tuple[int, dict[str, Any]]] = []
@@ -1876,7 +1800,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if content.strip() and not any(
                 self._raw_items_have_message_text([entry[2]]) for entry in combined
             ):
-                msg_order = self._last_stream_message_output_index
+                msg_order = order.message_index
                 if msg_order is None:
                     msg_order = max(used_orders) + 1 if used_orders else len(raw_items)
                 used_orders.add(msg_order)
@@ -1918,21 +1842,20 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
         self._ensure_no_pending_function_calls()
         kwargs = self._shape_responses_kwargs(input_items=items, tools=None)
-        content, _tc, response = self._request_response(kwargs)
+        content, _tc, response, _order = self._request_response(kwargs)
         return content, response
 
     def _append_text_based_tool_turn(
-        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+        self, content: str, function_calls: list[dict[str, Any]]
     ) -> None:
         """Append the cleaned assistant text and one ``function_call`` item per call.
 
         Args:
-            content: The raw text response (reasoning included), unused.
-            content_clean: The response without the DeepSeek reasoning block.
+            content: The response without the DeepSeek reasoning block.
             function_calls: The parsed tool calls (may be empty).
         """
-        if content_clean.strip():
-            self.conversation.append({"role": "assistant", "content": content_clean})
+        if content.strip():
+            self.conversation.append({"role": "assistant", "content": content})
         for fc in function_calls:
             self.conversation.append(
                 {
@@ -1997,6 +1920,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     "output": result_content,
                 }
             )
+            # The attachments ride in the conversation itself, as sentinel
+            # items, not on the model: the user message carrying them can
+            # only follow the LAST function_call_output of the turn, and a
+            # conversation serialised or handed to another model instance
+            # before then must still deliver them.
             for att in attachments:
                 self.conversation.append(
                     {
@@ -2034,7 +1962,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int, int]:
         """Extract Responses-API token counts.
 
         The Responses API reports usage as
@@ -2050,27 +1978,38 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         Returns:
             ``(input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens)``.  ``cache_write_tokens`` comes from
-            ``input_tokens_details.cache_write_tokens``: api.openai.com
-            reports it for GPT-5.6-and-later models (billed at 1.25x the
-            input rate; free and reported as 0 for earlier families), and
-            gateways (e.g. OpenRouter Anthropic passthrough) report it
-            for their cache-write-billing upstreams.
+            cache_write_tokens, cache_write_12h_tokens)``.  The writes come
+            from ``input_tokens_details.cache_write_tokens``: api.openai.com
+            reports it for GPT-5.6-and-later models (free and reported as
+            0 for earlier families), and gateways (e.g. OpenRouter
+            Anthropic passthrough) report it for their cache-write-billing
+            upstreams.  Its ``cache_write_tokens_details.ttl_12h_tokens``
+            share (a ``prompt_cache_options.ttl="12h"`` request) bills at
+            2.5x input instead of the 30-minute 1.25x, so it is returned
+            separately in the long-lifetime write slot.
         """
         usage = _get_attr_or_key(response, "usage")
         if usage is None:
-            return 0, 0, 0, 0
+            return 0, 0, 0, 0, 0
         input_tokens = int(_get_attr_or_key(usage, "input_tokens", 0) or 0)
         output_tokens = int(_get_attr_or_key(usage, "output_tokens", 0) or 0)
         cached_tokens = 0
         cache_write_tokens = 0
+        cache_write_12h_tokens = 0
         details = _get_attr_or_key(usage, "input_tokens_details")
         if details is not None:
             cached_tokens = int(_get_attr_or_key(details, "cached_tokens", 0) or 0)
             cache_write_tokens = int(_get_attr_or_key(details, "cache_write_tokens", 0) or 0)
+            write_details = _get_attr_or_key(details, "cache_write_tokens_details")
+            if write_details is not None:
+                cache_write_12h_tokens = min(
+                    cache_write_tokens,
+                    int(_get_attr_or_key(write_details, "ttl_12h_tokens", 0) or 0),
+                )
         return (
             max(0, input_tokens - cached_tokens - cache_write_tokens),
             output_tokens,
             cached_tokens,
-            cache_write_tokens,
+            cache_write_tokens - cache_write_12h_tokens,
+            cache_write_12h_tokens,
         )

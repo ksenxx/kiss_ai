@@ -12,6 +12,7 @@
 
 const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
+const {visibleTitles} = require('./history_helpers');
 
 const ALL_TAGS = [
   'work',
@@ -36,17 +37,6 @@ const ALL_TAGS = [
   'scheduling',
   'failed',
 ];
-
-function visibleTitles(win) {
-  const list = win.document.getElementById('history-list');
-  const out = [];
-  list.querySelectorAll('.sidebar-item').forEach(r => {
-    if (r.style.display !== 'none') {
-      out.push(r.querySelector('.sidebar-item-text').textContent);
-    }
-  });
-  return out;
-}
 
 function session(id, title, timestamp, tags) {
   return {

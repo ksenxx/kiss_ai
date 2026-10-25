@@ -26,6 +26,7 @@ from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
     GoogleChatAgent,
     _load_service,
     _service_account_path,
+    connection_status,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
@@ -167,6 +168,34 @@ def test_clear_forgets_the_service_account_key(chat, tmp_path: Path) -> None:
     assert composio.deleted == []
     # A fresh agent no longer finds a key either.
     assert GoogleChatAgent()._backend._service is None
+
+
+def test_cron_preflight_status_prefers_a_usable_service_account(
+    chat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cron pre-flight hook is ACTIVE on a parsable Chat-bot key, else asks Composio."""
+    composio, _server = chat
+    assert connection_status() == ""
+    path = _service_account_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A corrupt key is not a connection: with no Composio account either, nothing.
+    path.write_text("{}")
+    assert _load_service() is None
+    assert connection_status() == ""
+    _write_service_account_key(path)
+    assert connection_status() == "ACTIVE"
+    path.unlink()
+    agent = GoogleChatAgent()
+    started = json.loads(auth_tools(agent)["authenticate_googlechat"]())
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    assert json.loads(auth_tools(agent)["finish_googlechat_auth"]())["ok"] is True
+    assert connection_status() == "ACTIVE"
+    monkeypatch.setenv("COMPOSIO_BASE_URL", "http://127.0.0.1:9")  # unreachable
+    assert connection_status() == "UNKNOWN"
+    path.write_text("{}")
+    assert connection_status() == "UNKNOWN"  # a corrupt key falls through to Composio
+    _write_service_account_key(path)
+    assert connection_status() == "ACTIVE"  # a usable key needs no network call
 
 
 def test_malformed_stored_key_is_not_authenticated() -> None:

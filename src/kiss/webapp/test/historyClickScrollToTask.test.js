@@ -20,7 +20,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sendEmptyWorkDir} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  sendEmptyWorkDir,
+  readyTabId,
+  ofType,
+} = require('./simplify2_harness');
+const {historyRows, makeRow} = require('./history_helpers');
 
 function chatTabs(win) {
   return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
@@ -35,32 +42,15 @@ function shownTask(win) {
 }
 
 function resumeMessages(posted) {
-  return posted.filter(msg => msg && msg.type === 'resumeSession');
+  return ofType(posted, 'resumeSession');
 }
 
 function historyRow(win, idx) {
-  const rows = win.document.querySelectorAll('#history-list .sidebar-item');
-  return rows[idx];
+  return historyRows(win)[idx];
 }
 
 function historySession(id, taskId, title) {
-  return {
-    id,
-    task_id: taskId,
-    title,
-    preview: title,
-    has_events: true,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    timestamp: 1_700_000_000,
-    work_dir: '',
-    startTs: 1_700_000_000_000,
-    endTs: 1_700_000_001_000,
-  };
+  return makeRow({id, task_id: taskId, title, has_events: true});
 }
 
 // jsdom computes no layout, so give the transcript a fake geometry that
@@ -93,7 +83,7 @@ function fakeRegionGeometry(win, O) {
 function setupTabWithNeighbour() {
   const {win, posted} = makePage();
   sendEmptyWorkDir(win);
-  const tabId = posted.find(msg => msg && msg.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   send(win, {
     type: 'task_events',
@@ -301,7 +291,7 @@ function testClickRowWithoutTaskIdJustSwitches() {
 function testClickOwnTaskWithoutRegionReclaimsPanel() {
   const {win, posted} = makePage();
   sendEmptyWorkDir(win);
-  const tabId = posted.find(msg => msg && msg.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   // The tab's own "Task B" (id 42) recorded no output at all.
   send(win, {

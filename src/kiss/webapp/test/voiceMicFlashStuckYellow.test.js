@@ -16,15 +16,19 @@
 // expects and feeds real audio blocks through the real capture logic.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {send} = require('./simplify2_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {
+  micBtn,
+  audioBlock,
+  makeBareVoiceWindow,
+} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
+const CFG = {
+  voskSrc: '/media/vosk.js',
+  modelUrl: 'https://models.example.com/model.tar.gz',
+};
 
 class FakeRecognizer {
   constructor() {
@@ -40,22 +44,24 @@ class FakeRecognizer {
 }
 
 function makeWindow() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
-  );
-  const win = dom.window;
-  win.__VOICE__ = {
-    voskSrc: '/media/vosk.js',
-    modelUrl: 'https://models.example.com/model.tar.gz',
+  const page = {
+    timers: [],
+    clock: {now: 1000000},
+    state: {recognizers: [], processors: []},
+    posted: [],
   };
+  page.win = makeBareVoiceWindow(CFG, win => stubVoiceSurface(win, page));
+  return page;
+}
 
-  // The page's timers are recorded so a test can fire the flash safety
-  // timeout instead of waiting a minute.
-  const timers = [];
+/**
+ * Give `win` the microphone, Vosk model and audio graph the pipeline
+ * expects, recording recognizers, processor nodes and posts in `page`.
+ * The page's timers are recorded too, so a test can fire the flash
+ * safety timeout instead of waiting a minute.
+ */
+function stubVoiceSurface(win, page) {
+  const {timers, clock, state, posted} = page;
   win.setTimeout = (fn, ms) => {
     timers.push({fn, ms, cleared: false});
     return timers.length;
@@ -66,10 +72,8 @@ function makeWindow() {
     }
   };
 
-  const clock = {now: 1000000};
   win.Date.now = () => clock.now;
 
-  const state = {recognizers: [], processors: []};
   Object.defineProperty(win.navigator, 'mediaDevices', {
     configurable: true,
     value: {
@@ -118,14 +122,7 @@ function makeWindow() {
     }
   };
 
-  const posted = [];
   win.addEventListener('kiss-voice-post', e => posted.push(e.detail));
-
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
-
-  return {win, timers, clock, state, posted};
 }
 
 function tick() {
@@ -140,19 +137,6 @@ async function startMic(page) {
     micBtn(page.win).classList.contains('voice-listening'),
     `pipeline must be live: ${micBtn(page.win).className}`,
   );
-}
-
-/** One onaudioprocess block: 4096 samples at 16 kHz = 256 ms. */
-function audioBlock(loud) {
-  const samples = new Float32Array(4096);
-  if (loud) samples.fill(0.5);
-  return {
-    inputBuffer: {
-      getChannelData: () => samples,
-      sampleRate: 16000,
-      numberOfChannels: 1,
-    },
-  };
 }
 
 // Say the wake word, speak for half a second and fall silent for two:

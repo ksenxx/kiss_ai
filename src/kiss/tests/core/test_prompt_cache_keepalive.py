@@ -37,6 +37,12 @@ def test_is_long_running_call() -> None:
     assert is_long_running_call("run_parallel", {"tasks": "[]"})
     assert is_long_running_call("run_commands_parallel", {"commands": "[]"})
     assert is_long_running_call("bash_job", {"job_id": "j1", "action": "wait"})
+    # Waiting on a person or another agent outlives the cache whatever the timeout.
+    assert is_long_running_call("ask_user_question", {"question": "ok?"})
+    assert is_long_running_call(
+        "agent_job", {"job_id": "a1", "action": "wait", "timeout_seconds": "30"}
+    )
+    assert not is_long_running_call("agent_job", {"job_id": "a1", "action": "tail"})
     assert not is_long_running_call("bash_job", {"job_id": "j1", "action": "tail"})
     assert not is_long_running_call("bash_job", {"job_id": "j1"})
     assert not is_long_running_call("Bash", {"command": "ls", "timeout_seconds": 120})
@@ -160,6 +166,30 @@ def test_long_tool_call_pings_the_cache_and_pays_for_it(monkeypatch: pytest.Monk
     ) * sum(usage.values())
 
 
+def test_step_footer_reports_the_generation_cost_not_the_last_pings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The footer appended to the tool results names the step's own model call."""
+    monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.3)
+    script = _script(600)
+    with anthropic_server.serve(script) as (url, requests):
+        _run_anthropic_agent(monkeypatch, url, len(script))
+    assert [r for r in requests if not r.get("stream")], "the slow tool must be pinged"
+    usage = anthropic_server.PING_USAGE
+    ping_cost = calculate_cost(
+        anthropic_server.MODEL,
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["cache_read_input_tokens"],
+        usage["cache_creation_input_tokens"],
+    )
+    step_one_cost = calculate_cost(anthropic_server.MODEL, script[0]["prompt_tokens"], 30)
+    assert f"{ping_cost:.4f}" != f"{step_one_cost:.4f}"
+    tool_results = str([r for r in requests if r.get("stream")][1]["messages"][-1])
+    assert f"This step's model call: ${step_one_cost:.4f}," in tool_results
+    assert f"This step's model call: ${ping_cost:.4f}," not in tool_results
+
+
 def test_short_tool_call_gets_no_ping(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.3)
     script = _script(120)
@@ -261,10 +291,28 @@ def test_keepalive_stops_at_max_pings(monkeypatch: pytest.MonkeyPatch) -> None:
     # Each ping is a full request to the local server, ~0.1 s on a busy
     # machine, so give the tool 4 s: with a 0.05 s interval that fits ~25
     # pings and the cap is what limits the count.
+    # The cap is the model's price-derived one (39 pings on
+    # claude-fable-5-1); the wall-clock bound brings it down to 10 here.
     monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(keepalive, "KEEP_ALIVE_MAX_SECONDS", 0.5)
     monkeypatch.setitem(globals(), "_SLOW_TOOL_SECONDS", 4.0)
+    assert keepalive.keep_alive_max_pings(anthropic_server.MODEL) == 10
     script = _script(600)
     with anthropic_server.serve(script) as (url, requests):
         _run_anthropic_agent(monkeypatch, url, len(script))
     pings = [r for r in requests if not r.get("stream")]
-    assert len(pings) == keepalive.KEEP_ALIVE_MAX_PINGS
+    assert len(pings) == 10
+
+
+def test_ping_cap_follows_the_models_prices() -> None:
+    """Break-even pings = 0.8 x (write - read) / read, at least 1, at most 4 hours' worth."""
+    # claude-fable-5-1: read $0.25/M, write $12.5/M -> 0.8 x 49 = 39.
+    assert keepalive.keep_alive_max_pings("claude-fable-5-1") == 39
+    # gpt-6-astra reads at 0.1x: 0.8 x 11.5 -> 9.
+    assert keepalive.keep_alive_max_pings("gpt-6-astra") == 9
+    # No cache-write price: the input price is the rewrite price.
+    assert keepalive.keep_alive_max_pings("gemini-3.5-flash") == 7
+    assert keepalive.keep_alive_max_pings("no-such-model") == keepalive.KEEP_ALIVE_MAX_PINGS
+    assert keepalive.keep_alive_max_pings("claude-fable-5-1") <= (
+        keepalive.KEEP_ALIVE_MAX_SECONDS / keepalive.KEEP_ALIVE_INTERVAL_SECONDS
+    )

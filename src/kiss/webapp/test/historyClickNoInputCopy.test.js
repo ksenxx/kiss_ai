@@ -20,7 +20,9 @@ const {
   send,
   fakeMatchMedia,
   sendEmptyWorkDir,
+  lastMsg,
 } = require('./simplify2_harness');
+const {gatewaySession, historyRows} = require('./history_helpers');
 
 function makePage() {
   // The app docks the sidebar permanently on wide screens, where
@@ -57,12 +59,6 @@ function activeTabLabel(win) {
   return tab ? tab.title : '';
 }
 
-function historyRows(win) {
-  return Array.from(
-    win.document.querySelectorAll('#history-list .sidebar-item'),
-  );
-}
-
 function sidebarOpen(win) {
   return win.document.getElementById('sidebar').classList.contains('open');
 }
@@ -71,43 +67,18 @@ function countMessages(posted, type) {
   return posted.filter(msg => msg && msg.type === type).length;
 }
 
-function lastMessage(posted, type) {
-  const msgs = posted.filter(msg => msg && msg.type === type);
-  return msgs.length ? msgs[msgs.length - 1] : null;
-}
-
 function openSidebar(win) {
   const btn = win.document.getElementById('menu-btn');
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(sidebarOpen(win), 'burger click must open the history sidebar');
 }
 
-function session(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-1',
-      task_id: 1,
-      title: 'Refactor the payment gateway retries',
-      preview: 'Refactor the payment gateway retries',
-      has_events: true,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      timestamp: 1_700_000_000,
-      work_dir: '',
-    },
-    overrides || {},
-  );
-}
-
 // renderHistory drops replies whose generation is stale, and opening the
 // sidebar bumps it, so always answer the generation the page last asked
-// for.
+// for.  (history_helpers.sendHistory sends `generation: undefined` when
+// nothing was requested, which main.js drops silently; this one fails.)
 function sendHistory(win, posted, sessions) {
-  const req = lastMessage(posted, 'getHistory');
+  const req = lastMsg(posted, 'getHistory');
   assert.ok(req, 'the open sidebar must have requested history');
   send(win, {
     type: 'history',
@@ -149,7 +120,7 @@ function testResumeBranchLeavesInputEmpty() {
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
-  const s = session({id: 'chat-resume', task_id: 7});
+  const s = gatewaySession({id: 'chat-resume', task_id: 7});
   sendHistory(win, posted, [s]);
   clickOnlyRow(win);
 
@@ -166,7 +137,7 @@ function testResumeBranchLeavesInputEmpty() {
     `the read-only task panel must still show the resumed task`,
   );
   assertOpenedInFreshTab(win, tabBefore, 'resuming an unopened chat');
-  const resume = lastMessage(posted, 'resumeSession');
+  const resume = lastMsg(posted, 'resumeSession');
   assert.ok(resume, `clicking a resumable row must post resumeSession`);
   assert.strictEqual(resume.id, 'chat-resume');
   assert.strictEqual(resume.taskId, 7);
@@ -192,7 +163,7 @@ function testFallbackBranchLeavesInputEmpty() {
   const tabBefore = win._testApi.getActiveTabId();
   const resumeBefore = countMessages(posted, 'resumeSession');
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-empty',
       task_id: 8,
       has_events: false,
@@ -252,7 +223,7 @@ function testSwitchBranchLeavesInputEmpty() {
   openSidebar(win);
   const resumeBefore = countMessages(posted, 'resumeSession');
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-open',
       task_id: 9,
       title: 'Already open task',
@@ -308,7 +279,7 @@ function testResumeBranchPreservesTypedDraft() {
   input(win).dispatchEvent(new win.Event('input', {bubbles: true}));
 
   openSidebar(win);
-  sendHistory(win, posted, [session({id: 'chat-draft-resume', task_id: 11})]);
+  sendHistory(win, posted, [gatewaySession({id: 'chat-draft-resume', task_id: 11})]);
   clickOnlyRow(win);
 
   assert.strictEqual(
@@ -332,7 +303,7 @@ function testFallbackBranchPreservesTypedDraft() {
 
   openSidebar(win);
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-draft-empty',
       task_id: 12,
       has_events: false,
@@ -369,7 +340,7 @@ function testRunningRowWithoutEventsResumes() {
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
-  const s = session({
+  const s = gatewaySession({
     id: 'chat-running',
     task_id: 21,
     has_events: false,
@@ -380,7 +351,7 @@ function testRunningRowWithoutEventsResumes() {
   sendHistory(win, posted, [s]);
   clickOnlyRow(win);
 
-  const resume = lastMessage(posted, 'resumeSession');
+  const resume = lastMsg(posted, 'resumeSession');
   assert.ok(
     resume,
     `a running row without persisted events must still post ` +
@@ -417,7 +388,7 @@ function testRunningRowWithoutEventsPreservesTypedDraft() {
 
   openSidebar(win);
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-running-draft',
       task_id: 22,
       has_events: false,
@@ -434,7 +405,7 @@ function testRunningRowWithoutEventsPreservesTypedDraft() {
     `resuming a running row must preserve the draft the user ` +
       `already typed — got ${JSON.stringify(input(win).value)}`,
   );
-  const resume = lastMessage(posted, 'resumeSession');
+  const resume = lastMsg(posted, 'resumeSession');
   assert.ok(resume, `the running row must still resume`);
   assert.strictEqual(resume.id, 'chat-running-draft');
   assert.strictEqual(resume.taskId, 22);
@@ -451,7 +422,7 @@ function testTaskTextFallsBackToTitle() {
   openSidebar(win);
 
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-title-only',
       task_id: 31,
       title: 'Only a title survived',
@@ -482,7 +453,7 @@ function testTaskTextEmptyWithoutPreviewOrTitle() {
   openSidebar(win);
 
   sendHistory(win, posted, [
-    session({
+    gatewaySession({
       id: 'chat-no-text',
       task_id: 32,
       has_events: false,

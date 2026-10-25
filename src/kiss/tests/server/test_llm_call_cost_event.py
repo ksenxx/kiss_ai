@@ -161,13 +161,13 @@ class TestAgentEmitsLlmCall:
         assert agent.last_call_usage is None
 
     def test_non_agentic_generation_emits_too(self) -> None:
-        """``_generate_once`` (non-agentic and whole-task runs) is a billed call."""
+        """``_run_non_agentic`` (non-agentic and whole-task runs) is a billed call."""
         model = _ScriptedModel((200, 40, 0, 0))
         model.generate = lambda: ("plain answer", object())  # type: ignore[attr-defined]
         printer = _recording_printer()
         agent = _agent(model, printer)
         agent.step_count = 0
-        assert agent._generate_once() == "plain answer"
+        assert agent._run_non_agentic() == "plain answer"
         (call,) = [e for e in printer.stop_recording() if e["type"] == "llm_call"]
         assert call["input_tokens"] == 200 and call["output_tokens"] == 40
         assert call["step"] == 1
@@ -183,7 +183,7 @@ class TestAgentEmitsLlmCall:
         printer = _recording_printer()
         agent = _agent(failing, printer)
         with pytest.raises(RuntimeError, match="timed out"):
-            agent._generate_once()
+            agent._run_non_agentic()
         (call,) = [e for e in printer.stop_recording() if e["type"] == "llm_call"]
         assert call["input_tokens"] == 300
 

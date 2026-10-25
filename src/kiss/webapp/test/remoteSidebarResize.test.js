@@ -59,11 +59,7 @@ function testResizerExistsAndIsAccessible() {
   );
   assert.strictEqual(resizer.getAttribute('aria-valuemin'), String(MIN_W));
   assert.strictEqual(resizer.getAttribute('aria-valuemax'), String(MAX_W));
-  assert.strictEqual(
-    resizer.getAttribute('aria-valuenow'),
-    String(DEFAULT_W),
-    'default width must be reflected in aria-valuenow',
-  );
+  // The default aria-valuenow is pinned by remoteDesktopWidths.test.js.
   assert.strictEqual(
     resizer.parentElement.id,
     'sidebar',

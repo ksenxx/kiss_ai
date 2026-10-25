@@ -83,12 +83,13 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
 
     def test_model_can_widen_the_output_cap(self) -> None:
         """``max_output_chars`` must reach the manager's truncation."""
-        big = "python -c \"print('x' * 120000)\""
+        big = "python -c \"print('x' * 30000)\""
         narrow = self._bash_tool()(big, "big output", max_output_chars=1000)
         self.assertLessEqual(len(narrow), 1000)
         self.assertIn("truncated", narrow)
 
-        wide = self._bash_tool()(big, "big output", max_output_chars=150000)
+        # Wider than the 8,000-char default, within the 50,000-char ceiling.
+        wide = self._bash_tool()(big, "big output", max_output_chars=40000)
         self.assertGreater(
             len(wide),
             1000,
@@ -103,6 +104,18 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
             list(parameters),
             ["command", "description", "timeout_seconds", "max_output_chars", "background"],
         )
+
+    def test_default_output_cap_is_the_configured_budget(self) -> None:
+        """The public wrapper's default is the 8,000-char budget, and a bare call honours it."""
+        from kiss.core.config import DEFAULT_CONFIG
+
+        parameters = inspect.signature(self._bash_tool()).parameters
+        self.assertEqual(
+            parameters["max_output_chars"].default, DEFAULT_CONFIG.tool_output_default_chars,
+        )
+        result = self._bash_tool()("python -c \"print('y' * 30000)\"", "big output")
+        self.assertLessEqual(len(result), DEFAULT_CONFIG.tool_output_default_chars)
+        self.assertIn("truncated", result)
 
     def test_background_is_refused_with_the_nohup_fallback(self) -> None:
         """Docker mode has no job registry; the model is told what to do instead."""

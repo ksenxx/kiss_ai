@@ -30,9 +30,10 @@ import docker
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -88,7 +89,8 @@ class TestDockerBashStop(unittest.TestCase):
         outcome: dict[str, object] = {}
 
         def run() -> None:
-            token = begin_tool_call("Bash")
+            token = new_tool_call("Bash")
+            register_tool_call(token)
             try:
                 try:
                     outcome["result"] = self.env.Bash(

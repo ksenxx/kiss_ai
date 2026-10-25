@@ -7,23 +7,13 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {visibleTitles} = require('./history_helpers');
 
 function makePage(preSetup) {
   return harness.makePage({beforeScripts: preSetup});
 }
 
 const send = harness.send;
-
-function visibleTitles(win) {
-  const list = win.document.getElementById('history-list');
-  const out = [];
-  list.querySelectorAll('.sidebar-item').forEach(r => {
-    if (r.style.display !== 'none') {
-      out.push(r.querySelector('.sidebar-item-text').textContent);
-    }
-  });
-  return out;
-}
 
 function clickToggle(win) {
   const btn = win.document.getElementById('history-filters-toggle');
@@ -320,38 +310,16 @@ function testExpandedStatePersists() {
   console.log('  ok - collapsed/expanded state persists across reloads');
 }
 
-function testFilteringStillWorksInsidePanel() {
+// Chip toggling itself is pinned by historyFilterChips.test.js; this
+// only checks that collapsing the panel does not reset the filters.
+function testFiltersStayAppliedWhileCollapsed() {
   const {win} = makePage();
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
-  assert.deepStrictEqual(
-    visibleTitles(win).sort(),
-    ['errored task', 'running task', 'succeeded task'],
-    'all three rows visible with the default collapsed panel',
-  );
-
   clickToggle(win);
-
-  const toggle = (id, checked) => {
-    const chk = win.document.getElementById(id);
-    chk.checked = checked;
-    chk.dispatchEvent(new win.Event('change', {bubbles: true}));
-  };
-
-  toggle('hf-errors', false);
-  assert.deepStrictEqual(
-    visibleTitles(win).sort(),
-    ['running task', 'succeeded task'],
-    'unchecking the Errored chip inside the panel still filters rows',
-  );
-  toggle('hf-errors', true);
-  assert.strictEqual(
-    visibleTitles(win).length,
-    3,
-    're-checking the chip shows every row again',
-  );
-
-  toggle('hf-completed', false);
+  const chk = win.document.getElementById('hf-completed');
+  chk.checked = false;
+  chk.dispatchEvent(new win.Event('change', {bubbles: true}));
   clickToggle(win);
   assert.deepStrictEqual(
     visibleTitles(win).sort(),
@@ -360,7 +328,7 @@ function testFilteringStillWorksInsidePanel() {
   );
 
   win.close();
-  console.log('  ok - filtering still works inside the Filters panel');
+  console.log('  ok - filters stay applied while the panel is collapsed');
 }
 
 function testLocalStorageUnavailableFallsBackToCollapsed() {
@@ -434,7 +402,7 @@ function main() {
   testDefaultCollapsedThenControlsVisibleOnExpand();
   testToggleExpandsAndCollapses();
   testExpandedStatePersists();
-  testFilteringStillWorksInsidePanel();
+  testFiltersStayAppliedWhileCollapsed();
   testLocalStorageUnavailableFallsBackToCollapsed();
   testFiltersPanelCss();
   console.log('historyFiltersCollapsible.test.js: all assertions passed.');

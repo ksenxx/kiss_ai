@@ -30,6 +30,7 @@ from kiss.tests.agents.seas.sea_contract import (
     assert_no_removed_getters,
     system_message,
     tool_names,
+    tool_result_text,
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
@@ -66,17 +67,10 @@ def test_sea_methods_follow_the_contract_and_share_the_autorouter_protocol() -> 
     assert_no_removed_getters(orautorouter_sea)
 
 
-def test_orautorouter_is_a_model_picker_sea_and_a_slash_command() -> None:
-    """Registered under its command name in the picker registry and as ``/orautorouter``."""
+def test_orautorouter_is_a_model_picker_sea() -> None:
+    """Registered under its command name in the picker registry."""
     assert sea_commands.model_seas()["orautorouter"] == _SEA_PATH
     assert sea_commands.model_sea("orautorouter") == _SEA_PATH
-    assert sea_commands.get_command("orautorouter") == _SEA_PATH
-    assert sea_commands.slash_command_task("/orautorouter add a --json flag") == (
-        "add a --json flag", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == OrautorouterSea().settings({})
-    assert sea_commands.help_text_if_command("/orautorouter help") == (
-        OrautorouterSea().description()
-    )
 
 
 def test_agent_file_loader_stages_the_openrouter_router() -> None:
@@ -177,7 +171,7 @@ def test_agent_run_offers_the_openrouter_tools_and_logs_to_the_shared_ledger(
         assert orautorouter_sea.SYSTEM_PROMPT in system
         assert "## Model routing protocol (autorouter)" not in system
     pick_result = tool_results(agentic[1])
-    pick_text = pick_result[0].split("\n\nSteps:")[0]
+    pick_text = tool_result_text(pick_result[0])
     if runnable:
         assert json.loads(pick_text)["model"] == model
         assert model.startswith(orautorouter_sea.VENDOR_PREFIX)
@@ -243,19 +237,20 @@ def test_routing_prompt_refuses_an_autorouter_prompt_that_lost_its_intro(tmp_pat
     """A copy of the SEA whose constant opens differently fails loudly, not with two headings."""
     from kiss.agents.sorcar.sea_settings import execute_python_file
 
+    # The anchors come from the SEA's own constants, so a reworded prompt
+    # that keeps them in step with ``routing_prompt`` does not break this test.
     source = Path(autorouter_sea.__file__).read_text(encoding="utf-8")
-    assert source.count("\nYou are the autorouter. Finish the task") == 1
+    opening = "\n" + autorouter_sea.INTRO.rsplit("\n", 1)[-1]  # "\nYou are the autorouter."
+    assert source.count(opening) == 1
     copy = tmp_path / "autorouter_sea.py"
-    copy.write_text(
-        source.replace("\nYou are the autorouter. Finish the task", "\nYou route. Finish the task"),
-        encoding="utf-8",
-    )
+    copy.write_text(source.replace(opening, "\nYou route."), encoding="utf-8")
     namespace = execute_python_file(str(copy))
     with pytest.raises(ValueError, match="no longer opens with"):
         namespace["routing_prompt"]("x", "You are x.")
     # Likewise when the heading after the evidence block is renamed.
-    assert source.count("\n## Hard rules\n") == 1
-    copy.write_text(source.replace("\n## Hard rules\n", "\n## Rules\n"), encoding="utf-8")
+    heading = f"\n{autorouter_sea.AFTER_EVIDENCE.strip()}\n"  # "\n## Hard rules\n"
+    assert source.count(heading) == 1
+    copy.write_text(source.replace(heading, "\n## Rules\n"), encoding="utf-8")
     namespace = execute_python_file(str(copy))
     with pytest.raises(ValueError, match="evidence no longer ends at"):
         namespace["routing_prompt"]("x", "You are x.")

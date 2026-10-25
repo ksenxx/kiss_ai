@@ -12,7 +12,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: buildPage, send} = require('./simplify2_harness');
+const {
+  makePage: buildPage,
+  send,
+  ofType: msgsOf,
+  snapshotEntry,
+} = require('./simplify2_harness');
 
 // Windows opened by the running test, closed by the runner once the test
 // returns: a `daemonStatus connected:true` arms main.js's SCM badge poll
@@ -45,19 +50,6 @@ function plain(value) {
 
 function activeTabId(win) {
   return win._testApi.getActiveTabId();
-}
-
-function msgsOf(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
-function snapshotEntry(tabId, title, chatId, workDir) {
-  return {
-    tabId: tabId,
-    chatId: chatId || '',
-    title: title || 'new chat',
-    workDir: workDir || '',
-  };
 }
 
 // --- ready / boot ---------------------------------------------------------
@@ -279,6 +271,41 @@ function testSubagentAndContentTabsSurviveReconcile() {
   assert.deepStrictEqual(tabBarIds(win), ['t2']);
 }
 
+function testSiblingSubagentTabsKeepTheirOrderAcrossSnapshots() {
+  // A run_parallel fan-out opens several sub-agent tabs behind one
+  // parent.  Every tabs_state snapshot (the daemon broadcasts one on
+  // any tab change on any surface) re-anchors them after the parent;
+  // doing so must not shuffle siblings that are already in place.
+  const {win} = makePage(undefined);
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('t1', 'parent', 'chat-1')],
+  });
+  ['sub-1', 'sub-2', 'sub-3'].forEach((id, i) =>
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: id,
+      parent_tab_id: 't1',
+      description: 'sub ' + (i + 1),
+      task_id: 'task-' + (i + 1),
+      isSubagentTab: true,
+      isDone: false,
+    }),
+  );
+  assert.deepStrictEqual(tabBarIds(win), ['t1', 'sub-1', 'sub-2', 'sub-3']);
+  for (let i = 0; i < 2; i++) {
+    send(win, {
+      type: 'tabs_state',
+      tabs: [snapshotEntry('t1', 'parent', 'chat-1')],
+    });
+    assert.deepStrictEqual(
+      tabBarIds(win),
+      ['t1', 'sub-1', 'sub-2', 'sub-3'],
+      'snapshot ' + (i + 1) + ' must not reorder sibling sub-agent tabs',
+    );
+  }
+}
+
 function testPerTabComposerAndModelSurviveReconcile() {
   // Each tab keeps its own composer draft and model pick; a snapshot
   // (e.g. a rename from another client) must never clobber them.
@@ -390,6 +417,7 @@ const tests = [
   testCreateNewTabRegistersWithDaemon,
   testInFlightOpenSurvivesStaleSnapshot,
   testSubagentAndContentTabsSurviveReconcile,
+  testSiblingSubagentTabsKeepTheirOrderAcrossSnapshots,
   testPerTabComposerAndModelSurviveReconcile,
   testReconnectResendsReadyWithCurrentTabs,
   testCloseTabStillAnnouncedToDaemon,

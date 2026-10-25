@@ -21,7 +21,7 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send} = harness;
+const {send, clickTab} = harness;
 
 // The sourceURL is what audit0902_main_retryable_bar.coverage.js keys on.
 function makePage() {
@@ -30,16 +30,6 @@ function makePage() {
 
 function plain(x) {
   return JSON.parse(JSON.stringify(x));
-}
-
-// There is no row of chat tabs: the user picks a chat in the Chats
-// panel, which is what switchToTab stands in for.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  win._testApi.switchToTab(tabId);
 }
 
 function bar(win) {

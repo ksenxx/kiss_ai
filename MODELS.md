@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **932 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **933 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -9,7 +9,7 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | OpenAI | 111 |
 | Anthropic | 76 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
-| Gemini | 21 |
+| Gemini | 22 |
 | Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
@@ -20,9 +20,9 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 Current catalog capability totals:
 
 - **895** generation-capable models
-- **737** function-calling-capable models
+- **738** function-calling-capable models
 - **7** embedding models
-- **23** decision models
+- **24** decision models
 
 Full model list:
 
@@ -376,7 +376,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (21)</strong></summary>
+<summary><strong>Gemini (22)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -399,6 +399,7 @@ Full model list:
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
+- `gemini-nano-banana-2.1`
 
 </details>
 
@@ -702,8 +703,10 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-high`
 - `openrouter/moonshotai/kimi-k3-low`
 - `openrouter/moonshotai/kimi-k3-max`
+- `openrouter/moonshotai/kimi-k3.1-pro`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nace-ai/drex-max`
 - `openrouter/nace-ai/drex-v1.5`
 - `openrouter/nace-ai/drex-v2.0`
 - `openrouter/nex-agi/nex-n2.5-mini`
@@ -717,10 +720,8 @@ Full model list:
 - `openrouter/nvidia/nemotron-3.5-content-safety`
 - `openrouter/nvidia/nemotron-3.5-lightning`
 - `openrouter/nvidia/nemotron-3.5-super-vl`
-- `openrouter/openai/gpt-3.5-turbo`
 - `openrouter/openai/gpt-3.5-turbo-0613`
 - `openrouter/openai/gpt-3.5-turbo-16k`
-- `openrouter/openai/gpt-3.5-turbo-instruct`
 - `openrouter/openai/gpt-4`
 - `openrouter/openai/gpt-4-turbo`
 - `openrouter/openai/gpt-4.1`

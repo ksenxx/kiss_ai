@@ -6,14 +6,13 @@
 // I-R3: wheel and touch overscroll share one edge handler. Chaining to
 // the previous/next task must behave identically whichever input device
 // crossed the edge, at once, and a scroll that is not at an edge must
-// fetch nothing for either.
-
-/* global require, process, console, __dirname */
+// fetch nothing for either.  The wheel side is adjacentTaskScroll.test.js
+// (same task fixture and geometry); this file drives the touch side.
 
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 function fakeGeometry(el) {
   Object.defineProperty(el, 'scrollHeight', {value: 3000, configurable: true});
@@ -22,7 +21,7 @@ function fakeGeometry(el) {
 
 function setup() {
   const {win, posted} = makePage();
-  const tabId = posted.find(m => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
@@ -85,25 +84,6 @@ function testTouchNextAtBottom() {
   console.log('  ok - touch overscroll at the bottom requests the next task');
 }
 
-function testWheelParity() {
-  const {win, posted, O} = setup();
-  O.scrollTop = 0;
-  for (let i = 0; i < 10; i++) {
-    O.dispatchEvent(
-      new win.WheelEvent('wheel', {
-        deltaY: -50,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-  }
-  const adj = getAdjacent(posted);
-  assert.ok(adj.length > 0, 'wheel overscroll at top must chain to prev');
-  assert.strictEqual(adj[0].direction, 'prev');
-  win.close();
-  console.log('  ok - wheel overscroll behaves the same as touch');
-}
-
 function testOffEdgeTouchFetchesNothing() {
   const {win, posted, O} = setup();
   // A touch scroll that is not at an edge is ordinary scrolling: no
@@ -132,7 +112,6 @@ function testOffEdgeTouchFetchesNothing() {
 function main() {
   testTouchPrevAtTop();
   testTouchNextAtBottom();
-  testWheelParity();
   testOffEdgeTouchFetchesNothing();
   console.log('rr_area_hi_overscroll_touch_parity: all tests passed');
   process.exit(0);

@@ -27,6 +27,7 @@ const {
   openSettings,
   closeSettings,
   typeInto,
+  lastMsg,
 } = require('./settings_helpers');
 
 const TAB_ID = 'tab-remote-password-edit-test';
@@ -43,21 +44,13 @@ function openSettingsWith(wv, stored) {
   });
 }
 
-function lastSave(wv) {
-  const saves = wv.posted.filter(m => m.type === 'saveConfig');
-  return saves[saves.length - 1];
-}
-
-function testBoxIsMaskedAndEditable() {
+// That the box is an editable, masked input whose untouched value is
+// saved back is pinned by settingsPanelStaleConfig.test.js; here: the eye
+// toggle and the absence of a daemon-side Rotate button.
+function testEyeToggleRevealsAndHides() {
   const wv = makePreloadedPage(TAB_ID);
   openSettingsWith(wv, 'Old-Password-1');
   const box = byId(wv.win, 'cfg-remote-password');
-  assert.strictEqual(
-    box.type,
-    'password',
-    'the password is masked until revealed',
-  );
-  assert.strictEqual(box.readOnly, false, 'the box is editable');
   assert.strictEqual(
     box.value,
     'Old-Password-1',
@@ -75,18 +68,8 @@ function testBoxIsMaskedAndEditable() {
   assert.strictEqual(toggle.getAttribute('aria-label'), 'Hide password');
   click(wv.win, toggle);
   assert.strictEqual(box.type, 'password', 'the eye toggle hides it again');
-  closeSettings(wv.win);
-  const save = lastSave(wv);
-  assert.ok(save, 'closing Settings saves the form');
-  assert.strictEqual(
-    save.config.remote_password,
-    'Old-Password-1',
-    'an untouched box echoes the stored password',
-  );
   wv.close();
-  console.log(
-    '  ok - the remote password box is a masked editable input with an eye toggle',
-  );
+  console.log('  ok - the eye toggle reveals and hides the remote password');
 }
 
 function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
@@ -105,7 +88,7 @@ function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
     'a configData arriving mid-edit must not overwrite the typed password',
   );
   closeSettings(wv.win);
-  const save = lastSave(wv);
+  const save = lastMsg(wv.posted, 'saveConfig');
   assert.ok(save, 'closing Settings saves the form');
   assert.strictEqual(
     save.config.remote_password,
@@ -136,7 +119,7 @@ function testClearingTheBoxSavesAnEmptyPassword() {
   openSettingsWith(wv, 'Old-Password-1');
   typeInto(wv.win, 'cfg-remote-password', '');
   closeSettings(wv.win);
-  const save = lastSave(wv);
+  const save = lastMsg(wv.posted, 'saveConfig');
   assert.ok(save, 'closing Settings saves the form');
   assert.strictEqual(
     save.config.remote_password,
@@ -147,7 +130,7 @@ function testClearingTheBoxSavesAnEmptyPassword() {
   console.log('  ok - clearing the box saves an empty remote password');
 }
 
-testBoxIsMaskedAndEditable();
+testEyeToggleRevealsAndHides();
 testTypedPasswordIsSavedAndKeptOverALateConfigData();
 testClearingTheBoxSavesAnEmptyPassword();
 console.log('\nAll remotePasswordEdit tests passed.');

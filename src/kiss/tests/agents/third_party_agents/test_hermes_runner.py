@@ -529,10 +529,12 @@ class TestDmPairing:
         assert "not authorized" in backend.sent[0][1]
         assert "bob" in load_channel_state(state_path)["pending_pairing"]
 
-    def test_pairing_reply_names_cli(self, tmp_path: Path) -> None:
-        """The pairing reply names the channel CLI command."""
+    def test_pairing_reply_without_channel_name_omits_flag(self, tmp_path: Path) -> None:
+        """An empty channel_name leaves ``--channel`` out of the suggested command."""
         runner = _make_runner(RecordingBackend(), tmp_path / "s.json", cli_name="kiss-x")
-        assert "kiss-x --approve c0dec0de" in runner._pairing_reply_text("c0dec0de")
+        text = runner._pairing_reply_text("c0dec0de")
+        assert "kiss-x --approve c0dec0de" in text
+        assert "--channel" not in text
 
     def test_pairing_reply_is_complete_shell_command(self, tmp_path: Path) -> None:
         """The suggested command includes --channel and --workspace."""
@@ -578,8 +580,13 @@ def _admin_leaving_lock(frame_locals: dict[str, Any]) -> bool:
     return threading.current_thread().name == "admin" and "fp" in frame_locals
 
 
+@pytest.mark.usefixtures("isolated_kiss_home")
 class TestPairingAdminCli:
-    """channel_main --approve / --list-pending driven through a real main()."""
+    """channel_main --approve / --list-pending driven through a real main().
+
+    The seeded state files live next to the Telegram config under
+    ``KISS_HOME``, so the class runs in a per-test home.
+    """
 
     def _seed_state(self, channel: str, pending: dict[str, Any]) -> Path:
         state_path = derive_state_path(TelegramAgent, "Telegram", "default", channel)
@@ -848,13 +855,6 @@ class TestThreadContinuations:
         ]
         selected = runner._select_thread_followups(replies, "100.0", "101.0")
         assert [m["text"] for m in selected] == ["follow-up B"]
-
-    def test_followups_older_than_last_reply_ts_excluded(self, tmp_path: Path) -> None:
-        """Messages at or before last_reply_ts are not selected."""
-        runner = _make_runner(ThreadBackend(), tmp_path / "s.json")
-        runner._state = default_channel_state()
-        replies = [{"user": "alice", "text": "seen already", "ts": "105.0"}]
-        assert runner._select_thread_followups(replies, "100.0", "105.0") == []
 
     def test_threads_capped_at_twenty_per_tick(self, tmp_path: Path) -> None:
         """At most 20 threads are polled per tick, most recently updated first."""

@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import (
     _VERDICT_JSON_SCHEMA,
@@ -56,6 +57,7 @@ from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
     StandInModelServer,
+    finish_response,
 )
 
 MODEL = "claude-haiku-4-5"
@@ -660,7 +662,6 @@ def test_parse_verdict_rejects_junk() -> None:
     assert _parse_verdict("[1, 2]") is None
     assert _parse_verdict('{"is_development": true}') is None
     assert _parse_verdict("") is None
-    assert _parse_verdict(None) is None  # type: ignore[arg-type]
 
 
 def test_parse_verdict_rejects_non_boolean_values() -> None:
@@ -955,11 +956,17 @@ def test_zero_classifier_spend_emits_no_extra_event(env: IsolatedKissHome) -> No
 
 
 def _run_minimal_sorcar(agent: SorcarAgent, task: str, **kwargs: Any) -> str:
-    """Run *agent* on *task* with the smallest possible tool surface."""
+    """Run *agent* on *task* with the smallest tool surface that still carries the edit tools.
+
+    A run without the edit tools is a fixed toolset and runs on
+    SYSTEM_LITE.md regardless of the classifier, so the ``edit`` profile
+    keeps the classification verdict in charge of the prompt choice.
+    """
     return agent.run(
         model_name=MODEL,
         prompt_template=task,
-        append_basic_tools=False,
+        tool_profile="edit",
+        use_memory=False,
         web_tools=False,
         is_parallel=False,
         max_steps=8,
@@ -1030,9 +1037,13 @@ def test_base_system_prompt_override_beats_verdict(
     agent._classification_attempted = True
     agent._task_classification = TaskClassification(is_simple=True)
     custom = "You are a terse assistant. Use the finish tool to answer."
+    # The instruction names the success value, as the sibling tests do: a
+    # live model asked only for "the word DONE" occasionally reports
+    # success=false, and this test is about prompt selection, not about the
+    # model's judgement of whether DONE counts as a completed task.
     result = _run_minimal_sorcar(
         agent,
-        "Call the finish tool with the word DONE.",
+        "Call the finish tool with success=true and the word DONE.",
         base_system_prompt=custom,
     )
     assert yaml.safe_load(result)["success"] is True, result
@@ -1132,3 +1143,68 @@ def test_classifier_sees_substituted_template_arguments(
     )
     assert verdict is not None
     assert verdict.is_simple is False
+
+
+# ---------------------------------------------------------------------------
+# ChatSorcarAgent.run — the classifier runs only when its verdict matters
+# ---------------------------------------------------------------------------
+
+
+def _is_classifier_request(request: dict[str, Any]) -> bool:
+    """Whether *request* is the classifier's (its prompt names the verdict key)."""
+    return "is_simple" in json.dumps(request.get("messages", []))
+
+
+def test_chat_agent_classifies_only_when_the_verdict_can_choose_the_prompt(
+    env: IsolatedKissHome,
+) -> None:
+    """A run that cannot edit files always gets SYSTEM_LITE.md, so
+    ``ChatSorcarAgent.run`` must not pay for a classification whose
+    verdict it would then ignore: no built-in toolset (a script-only
+    SEA) and a profile without the edit tools skip the classifier; the
+    ``edit`` profile keeps it."""
+    seen: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def respond(request: dict[str, Any]) -> dict[str, Any]:
+        with lock:
+            seen.append(request)
+        if _is_classifier_request(request):
+            return _verdict_body(False)
+        return finish_response("<p>ok</p>")
+
+    server = StandInModelServer(respond)
+    try:
+        cases: list[tuple[dict[str, Any], bool]] = [
+            ({"append_basic_tools": False}, False),
+            ({"tool_profile": "review"}, False),
+            ({"tool_profile": "edit"}, True),
+        ]
+        for kwargs, classified in cases:
+            with lock:
+                seen.clear()
+            clear_classification_cache()
+            agent = ChatSorcarAgent("clf-chat-gate")
+            result = agent.run(
+                model_name=STANDIN_MODEL,
+                prompt_template=_DEV_TASK,
+                model_config=server.model_config,
+                work_dir=str(env.repo),
+                use_memory=False,
+                web_tools=False,
+                is_parallel=False,
+                max_steps=4,
+                max_budget=1.0,
+                verbose=False,
+                **kwargs,
+            )
+            assert yaml.safe_load(result)["success"] is True, (kwargs, result)
+            with lock:
+                classifier_calls = sum(map(_is_classifier_request, seen))
+                assert len(seen) > classifier_calls, (kwargs, seen)
+            assert classifier_calls == (1 if classified else 0), kwargs
+            assert agent.system_prompt.startswith(
+                SYSTEM_PROMPT if classified else SYSTEM_PROMPT_LITE
+            ), kwargs
+    finally:
+        server.stop()

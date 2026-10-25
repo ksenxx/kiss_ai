@@ -6,11 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send, output} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  makePage,
+  send,
+  output,
+  isDisplayed,
+  loadMainCss,
+} = require('./simplify2_harness');
 
 const DESC =
   'The agent explored the repository layout and read the main entry ' +
@@ -18,13 +20,6 @@ const DESC =
   'It then ran the existing test suite to establish a green baseline. ' +
   'Next it drafted the new feature behind a flag. It wired the flag ' +
   'into the CLI. Finally it re-ran the impacted tests and they passed.';
-
-function injectCss(win) {
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = css;
-  win.document.head.appendChild(styleEl);
-}
 
 function sendToolPanels(win, n, offset) {
   const start = offset || 0;
@@ -204,7 +199,7 @@ function testEmptyDescription() {
 
 function testDescriptionFullyVisibleWhileCollapsedViaCss() {
   const {win} = makePage();
-  injectCss(win);
+  loadMainCss(win);
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 6);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
@@ -496,15 +491,6 @@ function testReplayPathNestsAndCollapses() {
   console.log('  ok - history replay (task_events) path behaves the same');
 }
 
-function isDisplayed(win, el) {
-  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
-    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
-      return false;
-    if (n.id === 'output') break;
-  }
-  return true;
-}
-
 function replayCompletedSummaryTask(win) {
   const events = [{type: 'prompt', text: 'replayed task'}];
   for (let i = 0; i < 7; i++) {
@@ -549,7 +535,7 @@ function openTrajectory(win) {
 
 function testReplayedSummaryStaysVisibleInsideTrajectory() {
   const {win} = makePage();
-  injectCss(win);
+  loadMainCss(win);
   replayCompletedSummaryTask(win);
   const p = summaryPanels(win)[0];
   assert.ok(p, 'summary panel replays');
@@ -591,7 +577,7 @@ function testReplayedSummaryStaysVisibleInsideTrajectory() {
 
 function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   const {win} = makePage();
-  injectCss(win);
+  loadMainCss(win);
   replayCompletedSummaryTask(win);
   openTrajectory(win);
   const p = summaryPanels(win)[0];
@@ -614,7 +600,7 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
 
 function testAdoptedPanelKeepsOwnCollapsePreview() {
   const {win} = makePage();
-  injectCss(win);
+  loadMainCss(win);
   send(win, {type: 'status', running: true});
   sendToolPanels(win, 6);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});

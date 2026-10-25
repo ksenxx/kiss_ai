@@ -34,9 +34,10 @@ from kiss.agents.sorcar.sea_settings import SeaError, execute_python_file
 from kiss.core.stop_signal import set_thread_stop_event
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -104,7 +105,8 @@ def test_script_raising_keyboard_interrupt_without_a_stop_is_a_sea_error(tmp_pat
 
 def _lookup_inside_tool_call(path: Path, outcome: dict) -> None:
     """Run ``_registers_as_model`` inside a registered ``run_agent`` call; record the outcome."""
-    token = begin_tool_call("run_agent")
+    token = new_tool_call("run_agent")
+    register_tool_call(token)
     outcome["token"] = token
     try:
         outcome["verdict"] = sea_commands._registers_as_model(path)

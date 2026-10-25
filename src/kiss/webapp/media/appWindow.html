@@ -24,6 +24,12 @@
   itself after the daemon was down when it was opened), and a second
   popup would be a duplicate window.  A daemon that does not answer
   the question is taken for one without a popup.
+
+  Opened as the popup itself (window.name is kiss-app-window: the
+  start page appStart.html, which waited for the daemon, opened it so)
+  the page shows the webapp in place, at the saved bounds: opening a
+  popup by that name from here would navigate this very window, and
+  closing it would close the app.
 -->
 <html>
 <head>
@@ -38,16 +44,19 @@
       document.title = params.get('title') || '';
       if (!url) return;
 
-      function openPopup() {
+      function savedBounds() {
         var bounds = null;
         try {
           bounds = JSON.parse(localStorage.getItem('kissAppWindowBounds'));
         } catch (e) {
           bounds = null;
         }
-        if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) {
-          bounds = {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
-        }
+        return bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null;
+      }
+
+      function openPopup() {
+        var bounds = savedBounds() ||
+          {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
         var features = 'popup,left=' + bounds.left + ',top=' + bounds.top +
           ',width=' + bounds.width + ',height=' + bounds.height;
         if (window.open(url, 'kiss-app-window', features)) {
@@ -57,12 +66,23 @@
         }
       }
 
+      function showHere() {
+        var bounds = savedBounds();
+        if (bounds) {
+          window.moveTo(bounds.left, bounds.top);
+          window.resizeTo(bounds.width, bounds.height);
+        }
+        location.replace(url);
+      }
+
       fetch('/api/app-window', {cache: 'no-store'})
         .then(function (response) { return response.ok ? response.json() : null; })
         .catch(function () { return null; })
         .then(function (state) {
           if (state && state.open) {
             window.close();
+          } else if (window.name === 'kiss-app-window') {
+            showHere();
           } else {
             openPopup();
           }

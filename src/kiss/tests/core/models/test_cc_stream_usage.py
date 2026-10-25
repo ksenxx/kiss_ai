@@ -91,6 +91,7 @@ class TestNoDrainAfterKissToolCallStop:
             "usage": {"input_tokens": 11, "output_tokens": 7},
             "api_billed": False,
             "requests": 1,
+            "request_usages": [{"input_tokens": 11, "output_tokens": 7}],
         }
         assert "post-stop output" not in "".join(rec.text_tokens())
 
@@ -126,6 +127,7 @@ class TestPerMessageUsageAccounting:
             "usage": {**self._START, "output_tokens": 10},
             "api_billed": False,
             "requests": 1,
+            "request_usages": [{**self._START, "output_tokens": 10}],
         }
         assert m.extract_input_output_token_counts_from_response(response) == (
             100, 10, 400, 1000, 0,

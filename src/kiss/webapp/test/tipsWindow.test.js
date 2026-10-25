@@ -11,26 +11,40 @@ const path = require('path');
 
 const projectRoot = path.resolve(__dirname, '..');
 
-
-const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
+const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
-function loadTipsDom(cfg, {withMarked = true, withConfig = true} = {}) {
+// A page with tips.js (and its PanelCopy dependency) loaded over
+// `window.__TIPS__ = cfg`.  `withStorage` gives the page an http origin
+// so localStorage works; `seenVersion` seeds its kissTipsSeenVersion.
+//
+// The style tests below read the stylesheet text the component embeds
+// in its shadow root: jsdom neither cascades a shadow root's <style>
+// into getComputedStyle (`.tips-panel` reads `position: static`) nor
+// exposes it as a CSSStyleSheet (`style.sheet` is null).
+function loadTipsDom(
+  cfg,
+  {withMarked = true, withConfig = true, withStorage = false, seenVersion} = {},
+) {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     runScripts: 'outside-only',
+    url: withStorage ? 'http://localhost/' : undefined,
   });
+  if (seenVersion !== undefined) {
+    dom.window.localStorage.setItem('kissTipsSeenVersion', seenVersion);
+  }
   const run = file =>
     dom.window.eval(
       fs.readFileSync(path.join(projectRoot, 'media', file), 'utf-8'),
     );
   if (withMarked) run('marked.min.js');
   if (withConfig) dom.window.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
-  run('tips.js');
-  // tips.js delegates its execCommand copy fallback to PanelCopy, which
-  // every real host page loads alongside it (chat.html and the kiss-web
-  // server render both script tags).
+  // tips.js wires its Copy buttons through PanelCopy, which every real
+  // host page loads before it (chat.html and the kiss-web server render
+  // panelCopy.js first).
   run('panelCopy.js');
+  run('tips.js');
   return dom.window;
 }
 
@@ -252,7 +266,11 @@ test('Left/Right arrow keys page through the tips', () => {
   const {counter} = panelParts(win);
   const key = k =>
     win.document.dispatchEvent(
-      new win.KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}),
+      new win.KeyboardEvent('keydown', {
+        key: k,
+        bubbles: true,
+        cancelable: true,
+      }),
     );
   key('ArrowRight');
   assert.strictEqual(counter.textContent, '2 / 3');
@@ -268,22 +286,7 @@ test('Left/Right arrow keys page through the tips', () => {
 
 /** loadTipsDom on an http origin so localStorage works. */
 function loadTipsDomWithStorage(cfg, seenVersion) {
-  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-    runScripts: 'outside-only',
-    url: 'http://localhost/',
-  });
-  if (seenVersion !== undefined) {
-    dom.window.localStorage.setItem('kissTipsSeenVersion', seenVersion);
-  }
-  const run = file =>
-    dom.window.eval(
-      fs.readFileSync(path.join(projectRoot, 'media', file), 'utf-8'),
-    );
-  run('marked.min.js');
-  dom.window.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
-  run('tips.js');
-  run('panelCopy.js');
-  return dom.window;
+  return loadTipsDom(cfg, {withStorage: true, seenVersion});
 }
 
 test('a tipsData bootstrap after load opens the tips like an embedded config', () => {
@@ -295,7 +298,11 @@ test('a tipsData bootstrap after load opens the tips like an embedded config', (
   win.__kissApplyTipsConfig({tips: THREE_TIPS, show: true, version: '9.9.9'});
   const {counter} = panelParts(win);
   assert.strictEqual(counter.textContent.trim(), '1 / 3');
-  assert.deepStrictEqual(win.__TIPS__.tips, THREE_TIPS, 'the button reuses the tips');
+  assert.deepStrictEqual(
+    win.__TIPS__.tips,
+    THREE_TIPS,
+    'the button reuses the tips',
+  );
   win.__kissApplyTipsConfig({tips: THREE_TIPS, show: true, version: '9.9.9'});
   assert.strictEqual(
     win.document.querySelectorAll('kiss-tips-panel').length,
@@ -401,17 +408,16 @@ test('navigation re-creates copy buttons for each tip', () => {
   assert.strictEqual(copyButtons(body).length, 1);
 });
 
-const asyncTests = [];
-
-function asyncTest(name, fn) {
-  asyncTests.push({name, fn});
-}
-
 function tickAsync() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-function captureTimers(win) {
+/**
+ * Replace the window's setTimeout with a recorder that never fires, so a
+ * test can run the "Copied!" reset by hand (unlike the chat harness's
+ * captureTimers, which keeps real timers).
+ */
+function recordTimers(win) {
   const timers = [];
   win.setTimeout = fn => {
     timers.push(fn);
@@ -420,9 +426,10 @@ function captureTimers(win) {
   return timers;
 }
 
-asyncTest(
-  'copy button uses navigator.clipboard and shows Copied!',
-  async () => {
+// The copy tests await clipboard promises, so they run one after another
+// inside this async block; `test` returns the promise of an async body.
+(async () => {
+  await test('copy button uses navigator.clipboard and shows Copied!', async () => {
     const win = loadTipsDom({tips: [CODE_TIP], show: true});
     const {body} = panelParts(win);
     const copied = [];
@@ -435,7 +442,7 @@ asyncTest(
         },
       },
     });
-    const timers = captureTimers(win);
+    const timers = recordTimers(win);
     const btn = copyButtons(body)[0];
     btn.click();
     await tickAsync();
@@ -449,43 +456,40 @@ asyncTest(
     assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
     timers[0]();
     assert.strictEqual(btn.textContent, 'Copy', 'label resets after the timer');
-  },
-);
-
-asyncTest('copy falls back to execCommand when writeText rejects', async () => {
-  const win = loadTipsDom({tips: [CODE_TIP], show: true});
-  const {body} = panelParts(win);
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {writeText: () => Promise.reject(new Error('denied'))},
   });
-  const execCalls = [];
-  win.document.execCommand = command => {
-    const area = win.document.querySelector('textarea');
-    execCalls.push({command, value: area ? area.value : null});
-    return true;
-  };
-  captureTimers(win);
-  const btn = copyButtons(body)[0];
-  btn.click();
-  await tickAsync();
-  assert.strictEqual(execCalls.length, 1, 'execCommand fallback used once');
-  assert.strictEqual(execCalls[0].command, 'copy');
-  assert.strictEqual(
-    execCalls[0].value,
-    body.querySelector('pre code').textContent,
-  );
-  assert.strictEqual(
-    win.document.querySelector('textarea'),
-    null,
-    'helper textarea must be removed',
-  );
-  assert.strictEqual(btn.textContent, 'Copied!');
-});
 
-asyncTest(
-  'copy uses execCommand when the clipboard API is missing',
-  async () => {
+  await test('copy falls back to execCommand when writeText rejects', async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: {writeText: () => Promise.reject(new Error('denied'))},
+    });
+    const execCalls = [];
+    win.document.execCommand = command => {
+      const area = win.document.querySelector('textarea');
+      execCalls.push({command, value: area ? area.value : null});
+      return true;
+    };
+    recordTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(execCalls.length, 1, 'execCommand fallback used once');
+    assert.strictEqual(execCalls[0].command, 'copy');
+    assert.strictEqual(
+      execCalls[0].value,
+      body.querySelector('pre code').textContent,
+    );
+    assert.strictEqual(
+      win.document.querySelector('textarea'),
+      null,
+      'helper textarea must be removed',
+    );
+    assert.strictEqual(btn.textContent, 'Copied!');
+  });
+
+  await test('copy uses execCommand when the clipboard API is missing', async () => {
     const win = loadTipsDom({tips: [CODE_TIP], show: true});
     const {body} = panelParts(win);
     Object.defineProperty(win.navigator, 'clipboard', {
@@ -493,17 +497,14 @@ asyncTest(
       value: undefined,
     });
     win.document.execCommand = () => true;
-    captureTimers(win);
+    recordTimers(win);
     const btn = copyButtons(body)[0];
     btn.click();
     await tickAsync();
     assert.strictEqual(btn.textContent, 'Copied!');
-  },
-);
+  });
 
-asyncTest(
-  'copy falls back when clipboard has no writeText function',
-  async () => {
+  await test('copy falls back when clipboard has no writeText function', async () => {
     const win = loadTipsDom({tips: [CODE_TIP], show: true});
     const {body} = panelParts(win);
     Object.defineProperty(win.navigator, 'clipboard', {
@@ -511,74 +512,71 @@ asyncTest(
       value: {},
     });
     win.document.execCommand = () => true;
-    captureTimers(win);
+    recordTimers(win);
     const btn = copyButtons(body)[0];
     btn.click();
     await tickAsync();
     assert.strictEqual(btn.textContent, 'Copied!');
-  },
-);
+  });
 
-asyncTest('copy falls back when writeText throws synchronously', async () => {
-  const win = loadTipsDom({tips: [CODE_TIP], show: true});
-  const {body} = panelParts(win);
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: () => {
-        throw new Error('not allowed');
+  await test('copy falls back when writeText throws synchronously', async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: () => {
+          throw new Error('not allowed');
+        },
       },
-    },
+    });
+    win.document.execCommand = () => true;
+    recordTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(btn.textContent, 'Copied!');
   });
-  win.document.execCommand = () => true;
-  captureTimers(win);
-  const btn = copyButtons(body)[0];
-  btn.click();
-  await tickAsync();
-  assert.strictEqual(btn.textContent, 'Copied!');
-});
 
-asyncTest('copy shows Failed when execCommand returns false', async () => {
-  const win = loadTipsDom({tips: [CODE_TIP], show: true});
-  const {body} = panelParts(win);
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: undefined,
+  await test('copy shows Failed when execCommand returns false', async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    win.document.execCommand = () => false;
+    const timers = recordTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(btn.textContent, 'Failed');
+    assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
+    timers[0]();
+    assert.strictEqual(btn.textContent, 'Copy', 'label resets after Failed');
   });
-  win.document.execCommand = () => false;
-  const timers = captureTimers(win);
-  const btn = copyButtons(body)[0];
-  btn.click();
-  await tickAsync();
-  assert.strictEqual(btn.textContent, 'Failed');
-  assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
-  timers[0]();
-  assert.strictEqual(btn.textContent, 'Copy', 'label resets after Failed');
-});
 
-asyncTest('copy shows Failed when execCommand throws', async () => {
-  const win = loadTipsDom({tips: [CODE_TIP], show: true});
-  const {body} = panelParts(win);
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: undefined,
+  await test('copy shows Failed when execCommand throws', async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    win.document.execCommand = () => {
+      throw new Error('unsupported');
+    };
+    recordTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(btn.textContent, 'Failed');
+    assert.strictEqual(
+      win.document.querySelector('textarea'),
+      null,
+      'helper textarea must be removed even when execCommand throws',
+    );
   });
-  win.document.execCommand = () => {
-    throw new Error('unsupported');
-  };
-  captureTimers(win);
-  const btn = copyButtons(body)[0];
-  btn.click();
-  await tickAsync();
-  assert.strictEqual(btn.textContent, 'Failed');
-  assert.strictEqual(
-    win.document.querySelector('textarea'),
-    null,
-    'helper textarea must be removed even when execCommand throws',
-  );
-});
 
-(async () => {
-  for (const t of asyncTests) await test(t.name, t.fn);
   report('tipsWindow');
 })();

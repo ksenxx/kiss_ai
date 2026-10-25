@@ -32,7 +32,7 @@
 
 const assert = require('assert');
 const {makeWebappClient} = require('./transport_page_helpers');
-const {send} = require('./simplify2_harness');
+const {send, clickTab} = require('./simplify2_harness');
 
 // ---------------------------------------------------------------------------
 // scenario helpers
@@ -132,14 +132,6 @@ function streamSubagentRun(win, subTabId, taskId, marker) {
   send(win, stamp({type: 'tool_result', content: 'tool-output-' + marker}));
 }
 
-function activateTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
-  assert.ok(el, 'tab ' + tabId + ' must exist in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 function outputText(win) {
   const out = win.document.getElementById('output');
   return out ? out.textContent || '' : '';
@@ -163,7 +155,7 @@ function testLiveEventsReachTheBackgroundSubagentTab() {
     'the parent transcript must not show sub-agent output',
   );
 
-  activateTab(win, subTabId);
+  clickTab(win, subTabId);
   const text = outputText(win);
   for (const needle of [
     'live-words-' + marker,
@@ -186,7 +178,7 @@ function testLiveEventsReachTheActiveSubagentTab() {
   const {win, taskId, subTabId} = bootLiveSubagent();
   const marker = 'fg';
 
-  activateTab(win, subTabId);
+  clickTab(win, subTabId);
   streamSubagentRun(win, subTabId, taskId, marker);
 
   const text = outputText(win);
@@ -230,7 +222,7 @@ function testReplayedHeadAndLiveTailBothVisible() {
   // ... and the live tail keeps streaming afterwards.
   streamSubagentRun(win, subTabId, taskId, 'tail');
 
-  activateTab(win, subTabId);
+  clickTab(win, subTabId);
   const text = outputText(win);
   for (const needle of ['head-words', 'live-words-tail']) {
     assert.ok(

@@ -391,8 +391,8 @@ def _parse_verdict(result: str) -> TaskClassification | None:
     The schema demands a bare JSON object, but a lax model (or one on an
     endpoint without structured-output enforcement) may wrap it in a
     code fence or surround it with prose, so every JSON object embedded
-    in *result* is tried, in order, until one carries both verdict keys
-    with genuinely boolean values.
+    in *result* is tried, in order, until one carries a genuinely
+    boolean ``is_simple`` value.
 
     Args:
         result: The response text of the non-agentic classification
@@ -403,8 +403,6 @@ def _parse_verdict(result: str) -> TaskClassification | None:
         JSON object holding a boolean ``is_simple`` value can be found
         in *result*.
     """
-    if not isinstance(result, str):
-        return None
     decoder = json.JSONDecoder()
     idx = result.find("{")
     while idx != -1:
@@ -692,8 +690,8 @@ def _remember_locked(key: str, is_simple: bool) -> None:
 def clear_classification_cache() -> None:
     """Forget every memoised verdict, in memory and on disk.
 
-    Used by tests and by callers that change the classifier prompt
-    semantics.
+    A test helper: a prompt or criteria change needs no reset because
+    the criteria text is part of the cache key.
     """
     locked_call(_cache_lock, _clear_locked)
 

@@ -21,7 +21,7 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const {sleep, click} = require('./simplify2_harness');
+const {sleep, click, showTips} = require('./simplify2_harness');
 
 // The 1500 ms revert timers are recorded instead of waited for: the
 // test fires them by hand, so no wall-clock sleep decides whether the
@@ -65,15 +65,12 @@ function makePage(clipboardImpl) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   // tips.js copies through PanelCopy.copyText (panelCopy.js).
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(
-    fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8') +
-      '\n//# sourceURL=audit0903-tips.js',
-  );
+  win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
   return {win, timers};
 }
 
 function openTipWithCode(win) {
-  const el = win.__kissShowTipsPanel(['A tip:\n\n```\necho hello\n```\n']);
+  const el = showTips(win, ['A tip:\n\n```\necho hello\n```\n']);
   const btn = el.shadowRoot.querySelector('.tips-copy');
   assert.ok(btn, 'the code block must get a copy button');
   return btn;

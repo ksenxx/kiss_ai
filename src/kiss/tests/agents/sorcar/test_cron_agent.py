@@ -585,6 +585,37 @@ def test_load_jobs_tolerates_bad_store(tmp_path: Path) -> None:
     assert load_jobs() == []
 
 
+def test_writers_refuse_a_corrupt_store(tmp_path: Path) -> None:
+    """A store that exists but is not a JSON list is never overwritten.
+
+    ``load_jobs()`` reads a damaged file as ``[]`` for listing; a writer
+    must not mistake that for an empty store and replace the user's
+    schedules with the one job it was about to save.
+    """
+    mine = _create(cron_job("create", name="mine", command="echo 1", schedule="every 1m"))
+    store = tmp_path / "cron" / "jobs.json"
+    damaged = store.read_text(encoding="utf-8")[:-5]  # truncated mid-JSON
+    store.write_text(damaged, encoding="utf-8")
+    error = cron_agent.apply_job_action(
+        "create", "", name="new", schedule="every 1m", what="echo 2", kind="command",
+    )
+    assert "not a JSON list" in error
+    assert store.read_text(encoding="utf-8") == damaged
+    assert "not a JSON list" in cron_job(
+        "create", name="new", command="echo 2", schedule="every 1m",
+    )
+    assert store.read_text(encoding="utf-8") == damaged
+    assert "not a JSON list" in cron_job("remove", job_id=mine["id"])
+    cron_agent._execute_job(mine)  # the run happens; the record step is skipped
+    assert store.read_text(encoding="utf-8") == damaged
+    assert tick(2_000_000_000.0) == 0  # a damaged store reads as []: nothing due, no save
+    assert store.read_text(encoding="utf-8") == damaged
+    store.write_text('{"a": 1}', encoding="utf-8")
+    created = cron_job("create", name="new", command="echo 2", schedule="every 1m")
+    assert "not a JSON list" in created
+    assert store.read_text(encoding="utf-8") == '{"a": 1}'
+
+
 def test_tick_runs_due_command_job(tmp_path: Path) -> None:
     job = _create(cron_job(
         "create", name="greeter", command="echo hello from cron",
@@ -805,7 +836,8 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     assert not list(work_dir.iterdir())
     sent = captured[0]
     assert sent["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
-    assert sent["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
+    assert str(sent["prompt"]).startswith(cron_agent.PROMPT_PREAMBLE + "# Run context\n- Now: ")
+    assert str(sent["prompt"]).endswith("itself: do not write a log.\n\nsay 'hi'\n")
     assert sent["model"] == "some-model"
     assert sent["max_budget"] == 1.5
     assert sent["work_dir"] == str(work_dir)
@@ -817,7 +849,7 @@ def test_prompt_job_runs_the_cron_prompt_sea(
         "classifyTasks": None,
     }
     assert apply_sea(cmd) == {"classifyTasks"}
-    assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
+    assert str(cmd["prompt"]).endswith("\n\nsay 'hi'\n")
     assert cmd["classifyTasks"] is False
 
 
@@ -853,7 +885,8 @@ def test_slash_command_prompt_job_runs_that_sea(
     assert (status, text) == ("ok", "<ul><li>five</li></ul>")
     sent = captured[0]
     assert sent["sea_path"] == str(Path(recommendations_sea.__file__).resolve())
-    assert sent["prompt"] == cron_agent.PROMPT_PREAMBLE + "now"
+    assert str(sent["prompt"]).startswith(cron_agent.PROMPT_PREAMBLE + "# Run context")
+    assert str(sent["prompt"]).endswith("\n\nnow")
     assert sent["auto_classify"] is False
     assert sent["work_dir"] == str(work_dir)
     assert sent["parent_task_id"] == ""
@@ -861,13 +894,13 @@ def test_slash_command_prompt_job_runs_that_sea(
     job["prompt"] = "/recommendations"
     cron_agent._run_prompt_job(job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS)
     assert captured[1]["sea_path"] == str(Path(recommendations_sea.__file__).resolve())
-    assert captured[1]["prompt"] == cron_agent.PROMPT_PREAMBLE
+    assert str(captured[1]["prompt"]).endswith("do not write a log.\n\n")
     assert captured[1]["auto_classify"] is False
     # A prompt that names no command still runs the generic prompt SEA.
     job["prompt"] = "list my open pull requests"
     cron_agent._run_prompt_job(job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS)
     assert captured[2]["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
-    assert captured[2]["prompt"] == cron_agent.PROMPT_PREAMBLE + "list my open pull requests"
+    assert str(captured[2]["prompt"]).endswith("\n\nlist my open pull requests")
     assert captured[2]["auto_classify"] is None
 
 
@@ -913,7 +946,8 @@ def test_prompt_job_text_survives_adversarial_text(
     prompt = 'line1\n"""\n' + "'''\n\\n ünïcode \x00 {braces} #comment"
     job = {"id": "abcd1234", "name": name, "prompt": prompt, "model_name": name}
     cron_agent._run_prompt_job(job, tmp_path, tmp_path, cron_agent.PROMPT_TIMEOUT_SECONDS)
-    assert captured[0]["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
+    assert str(captured[0]["prompt"]).startswith(cron_agent.PROMPT_PREAMBLE + "# Run context")
+    assert str(captured[0]["prompt"]).endswith("\n\n" + prompt)
     assert captured[0]["model"] == name
 
 
@@ -1506,3 +1540,157 @@ def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
     assert stored["last_summary"] == "ran now"
     assert stored["enabled"] is False, "a run now does not resume a paused job"
     assert cron_agent.apply_job_action("run_now", "nope") == "no job with id 'nope'"
+
+
+def test_run_context_names_time_window_and_previous_result() -> None:
+    """The block carries now, the schedule, the window start, the previous attempt, its result."""
+    job = {
+        "id": "abcd1234", "schedule": "every 1h", "previous_run_at": _ts(2026, 3, 2, 9, 0),
+        "covered_until": _ts(2026, 3, 2, 8, 0), "last_status": "failed",
+        "last_summary": "x" * 2000 + "\nlast line",
+    }
+    block = cron_agent.run_context(job, now=_ts(2026, 3, 2, 10, 0))
+    lines = block.splitlines()
+    assert lines[0] == "# Run context"
+    assert lines[1] == "- Now: 2026-03-02 10:00:00 PST (2026-03-02 18:00 UTC)"
+    assert lines[2] == "- Schedule: every 1h"
+    assert lines[3] == (
+        "- Window start: 2026-03-02 08:00:00 PST (the last successful run; cover everything since)"
+    )
+    assert lines[4] == "- Previous attempt: 2026-03-02 09:00:00 PST (failed)"
+    assert lines[5] == "- Previous result (failed, tail):"
+    assert lines[-2] == "last line" and "x" * 1400 in lines[-3]
+    assert lines[-1].endswith("/abcd1234.md itself: do not write a log.")
+    first = cron_agent.run_context({"id": "x"}, now=_ts(2026, 3, 2, 10, 0))
+    assert "- Window start: not set (no successful run yet; use your judgement)" in first
+    assert "- Previous attempt: none (first run)" in first
+    assert "Previous result" not in first
+    interval_job = {
+        "id": "y", "last_run_at": _ts(2026, 3, 2, 9, 0), "next_run_at": _ts(2026, 3, 2, 10, 0),
+        "previous_run_at": _ts(2026, 3, 2, 8, 0), "last_status": "failed",
+    }
+    second = cron_agent.run_context(interval_job, now=_ts(2026, 3, 2, 10, 0))
+    assert "- Window start: 2026-03-02 09:00:00 PST (one schedule interval back)" in second
+    # A new job's watermark is its creation until a run succeeds.
+    fresh = {"id": "z", "created_at": _ts(2026, 3, 2, 7, 0), "covered_until": _ts(2026, 3, 2, 7, 0)}
+    assert (
+        "- Window start: 2026-03-02 07:00:00 PST (the job was created; no run has "
+        "succeeded yet; cover everything since)"
+    ) in cron_agent.run_context(fresh, now=_ts(2026, 3, 2, 10, 0))
+
+
+def test_covered_until_advances_on_success_or_silence_and_survives_failures(
+    tmp_path: Path,
+) -> None:
+    """The watermark starts at creation, moves to the start of an ok/silent run, never on error."""
+    job = _create(cron_job("create", name="cov", command="echo fine", schedule="every 1d"))
+    stored = next(j for j in load_jobs() if j["id"] == job["id"])
+    assert stored["covered_until"] == stored["created_at"]
+    before = time.time()
+    cron_agent.apply_job_action("run_now", job["id"])  # a run now never sets last_run_at
+    stored = _wait_for_run(job["id"])
+    assert stored["last_status"] == "ok" and stored["last_run_at"] is None
+    assert before <= stored["covered_until"] <= time.time()
+    covered = stored["covered_until"]
+    _set_job_fields(job["id"], command="exit 3")
+    cron_agent.apply_job_action("run_now", job["id"])
+    failed = _wait_for_run(job["id"])
+    assert failed["last_status"] == "error" and failed["covered_until"] == covered
+    _set_job_fields(job["id"], command="true", last_status="")  # empty output: silent
+    cron_agent.apply_job_action("run_now", job["id"])
+    silent = _wait_for_run(job["id"])
+    assert silent["last_status"] == "silent" and silent["covered_until"] > covered
+
+
+def test_failure_backoff_doubles_to_a_day() -> None:
+    assert cron_agent.failure_backoff_seconds(0) == 0
+    assert [cron_agent.failure_backoff_seconds(n) for n in (1, 2, 3, 5, 6)] == [
+        3600, 7200, 14400, 57600, 86400,
+    ]
+
+
+def test_repeated_identical_failure_is_delivered_once_and_backs_off(tmp_path: Path) -> None:
+    """The second identical failure is not written to the log and pushes next_run_at by an hour."""
+    job = _create(cron_job(
+        "create", name="broken", command="echo same-error >&2; exit 3",
+        schedule="every 1m",
+    ))
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    first = load_jobs()[0]
+    assert first["last_status"] == "error" and first["failure_streak"] == 0
+    log_path = tmp_path / "cron" / "output" / f"{job['id']}.md"
+    assert log_path.read_text(encoding="utf-8").count("same-error") == 1
+    _set_job_fields(job["id"], next_run_at=1.0)
+    before = time.time()
+    assert tick(2.0) == 1
+    second = load_jobs()[0]
+    assert second["failure_streak"] == 1
+    assert second["last_delivery"][0].startswith("repeat of the previous failure (1)")
+    assert second["next_run_at"] >= before + 3600
+    assert log_path.read_text(encoding="utf-8").count("same-error") == 1
+    # A different failure (or a success) resets the streak and is delivered.
+    _set_job_fields(job["id"], next_run_at=1.0, command="echo other-error >&2; exit 4")
+    assert tick(2.0) == 1
+    third = load_jobs()[0]
+    assert third["failure_streak"] == 0
+    assert log_path.read_text(encoding="utf-8").count("other-error") == 1
+
+
+def test_prompt_job_naming_an_unconnected_connector_does_not_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt that names Gmail with no Gmail connection fails before any daemon call."""
+    from kiss.agents.sorcar import daemon_client
+
+    def never(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        raise AssertionError("the run must not be dispatched")
+
+    monkeypatch.setattr(daemon_client, "run", never)
+    monkeypatch.delenv("KISS_SORCAR_LOCAL", raising=False)
+    job = _create(cron_job(
+        "create", name="mail", prompt="Summarise my Gmail inbox", schedule="every 1h",
+        deliver="none",
+    ))
+    _set_job_fields(job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored = load_jobs()[0]
+    assert stored["last_status"] == "error"
+    assert stored["last_summary"].startswith("Gmail is not connected: this scheduled job")
+    assert "/gmail authenticate" in stored["last_summary"]
+    assert cron_agent.connector_problem("list my open pull requests") is None
+
+
+def test_every_connector_word_resolves_to_a_sea_with_a_status_hook() -> None:
+    """Each SEA named by CONNECTOR_WORDS exposes connection_status(); none is connected here."""
+    import importlib
+
+    for word, (sea, label) in cron_agent.CONNECTOR_WORDS.items():
+        module = importlib.import_module(f"kiss.agents.third_party_agents.{sea}.{sea}_sea")
+        assert module.connection_status() == "", (word, sea)
+        problem = cron_agent.connector_problem(f"check {word} now")
+        assert problem is not None and problem.startswith(f"{label} is not connected"), word
+        assert f"/{sea} authenticate" in problem, word
+    assert cron_agent.CONNECTOR_WORDS["googlechat"][0] == "googlechat"
+
+
+def test_connector_preflight_skips_authentication_and_in_chat_jobs() -> None:
+    """A job that reconnects a connector, or runs in a chat with a person, is never held back."""
+    assert cron_agent.connector_problem("Summarise my Gmail inbox") is not None
+    assert cron_agent.connector_problem("/gmail authenticate") is None
+    assert cron_agent.connector_problem("Reconnect Google Drive for me") is None
+    assert cron_agent.connector_problem("Summarise my Gmail inbox", in_chat=True) is None
+
+
+def test_cron_prompt_sea_swaps_the_full_base_for_the_lite_one() -> None:
+    """A scheduled run gets the lite base plus the scheduled-run rules; the suffix survives."""
+    from kiss.agents.sorcar.cron_prompt_sea import CRON_RUN_RULES, CronPromptSea
+    from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+
+    sea = CronPromptSea()
+    rewritten = sea.system_prompt(SYSTEM_PROMPT + "\n\n# House rule\nbe brief")
+    assert rewritten == SYSTEM_PROMPT_LITE + CRON_RUN_RULES + "\n\n# House rule\nbe brief"
+    assert len(rewritten) < len(SYSTEM_PROMPT) // 2
+    assert "never call ask_user_question" in rewritten
+    assert sea.system_prompt("custom base") == "custom base" + CRON_RUN_RULES
+    assert sea.settings({"auto_classify": True})["auto_classify"] is False

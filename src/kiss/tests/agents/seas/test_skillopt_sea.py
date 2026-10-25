@@ -400,7 +400,7 @@ class Sea(BaseSea):
         SeaTarget(malformed).rollout_kwargs()
 
 
-def test_sea_fingerprint_detects_code_changes_outside_the_prompt(tmp_path: Path) -> None:
+def test_sea_fingerprint_detects_code_changes_outside_the_prompt() -> None:
     """The confinement gate compares ASTs with the prompt blanked."""
     base = (
         """
@@ -1148,10 +1148,6 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert skillopt.system_prompt("") == skillopt_sea.SYSTEM_PROMPT
     # The class is the contract: the module keeps no getter of the old shape.
     assert_no_removed_getters(skillopt_sea)
-    assert sea_commands.get_command("skillopt") == _SKILLOPT_SEA
-    assert sea_commands.slash_command_task("/skillopt x.py evals.json") == (
-        "x.py evals.json", _SKILLOPT_SEA
-    )
     assert sea_commands.sea_settings(_SKILLOPT_SEA) == effective
     cmd: dict[str, Any] = {"seaPath": str(_SKILLOPT_SEA), "prompt": "x.py evals.json"}
     # The hooks are written on every run, so the set lists the settings only.

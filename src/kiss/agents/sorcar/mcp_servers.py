@@ -10,7 +10,7 @@ Implements MCP server management with Claude Code compatibility:
   JSON, the same shape Claude Code uses, and are discovered from
   (low → high precedence; later wins on a name clash):
 
-  - ``~/.kiss/mcp.json`` (respecting ``KISS_HOME``) — user servers.
+  - ``$KISS_HOME/mcp.json`` — user servers.
   - ``<work_dir>/.mcp.json`` — Claude Code's project file, so MCP
     servers checked into a repo for Claude Code work unchanged.
   - ``<work_dir>/.kiss/mcp.json`` — native project servers.
@@ -27,7 +27,7 @@ Implements MCP server management with Claude Code compatibility:
   standard kiss schema builder produces a faithful OpenAI tool schema.
 
 * **Permission wildcards** — the ``mcp_permissions`` key in
-  ``~/.kiss/config.json`` maps wildcard patterns to ``"allow"`` or
+  ``$KISS_HOME/config.json`` maps wildcard patterns to ``"allow"`` or
   ``"deny"`` (e.g. ``{"*": "allow", "mymcp_*": "deny"}``).  Patterns
   are matched against the full ``<server>_<tool>`` name with the
   *last* matching rule winning (OpenCode semantics); denied tools are
@@ -35,7 +35,7 @@ Implements MCP server management with Claude Code compatibility:
 
 * **OAuth** — remote (``http``/``sse``) servers authenticate through
   the MCP SDK's OAuth 2.1 provider using tokens persisted per server
-  under ``~/.kiss/mcp_auth/`` by :class:`FileTokenStorage`.  The user
+  under ``$KISS_HOME/mcp_auth/`` by :class:`FileTokenStorage`.  The user
   signs in once through :mod:`kiss.agents.sorcar.mcp_oauth` (the
   ``connect_mcp_server`` tool); agent runs then reuse and refresh those
   tokens without ever blocking on a browser.
@@ -67,9 +67,9 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar._concurrency import locked, locked_call
-from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
+from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
@@ -205,8 +205,8 @@ class MCPServerConfig:
 
 
 def user_mcp_config_path() -> Path:
-    """Return the user-level MCP config file (``~/.kiss/mcp.json``)."""
-    return _default_kiss_dir() / "mcp.json"
+    """Return the user-level MCP config file (``$KISS_HOME/mcp.json``)."""
+    return kiss_home() / "mcp.json"
 
 
 def project_mcp_config_path(work_dir: str) -> Path:
@@ -221,7 +221,7 @@ def claude_project_mcp_config_path(work_dir: str) -> Path:
 
 def mcp_auth_dir() -> Path:
     """Return the directory holding per-server OAuth token files."""
-    return _default_kiss_dir() / "mcp_auth"
+    return kiss_home() / "mcp_auth"
 
 
 def _parse_server_entry(name: str, raw: Any) -> MCPServerConfig | None:
@@ -288,7 +288,7 @@ def load_mcp_servers(work_dir: str) -> dict[str, MCPServerConfig]:
     """Load all configured MCP servers visible from *work_dir*.
 
     Load order (low → high precedence; later wins on a name clash):
-    user (``~/.kiss/mcp.json``), Claude Code project (``.mcp.json``),
+    user (``$KISS_HOME/mcp.json``), Claude Code project (``.mcp.json``),
     native project (``.kiss/mcp.json``).
 
     Args:
@@ -308,7 +308,7 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
 
     Args:
         cfg: The server configuration to save.
-        scope: ``"user"`` (``~/.kiss/mcp.json``) or ``"project"``
+        scope: ``"user"`` (``$KISS_HOME/mcp.json``) or ``"project"``
             (``<work_dir>/.kiss/mcp.json``).
         work_dir: The project directory (used for project scope).
 
@@ -412,7 +412,7 @@ class FileTokenStorage:
     """MCP SDK :class:`~mcp.client.auth.TokenStorage` backed by a JSON file.
 
     Tokens and the dynamically registered client information for one
-    server are stored together at ``~/.kiss/mcp_auth/<server>.json``
+    server are stored together at ``$KISS_HOME/mcp_auth/<server>.json``
     with mode ``0600``.
     """
 
@@ -938,13 +938,14 @@ class MCPManager:
         a pending connection stamps it in ``disconnect_all``, and the
         wait sees that.
         """
-        if conn.task is None:
+        task = conn.task
+        if task is None:
             return
         if _wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
             return
         if locked_call(self._lock, self._orphan_timed_out, key, conn):
             self._loop.call_soon_threadsafe(conn.stop.set)
-            self._reap_straggler(conn)
+            self._reap_straggler(conn, task)
 
     def _connection_for(self, key: str, config: MCPServerConfig) -> _Connection:
         """Return the live connection under *key*, starting one when there is none (locked)."""
@@ -958,8 +959,6 @@ class MCPManager:
         if existing is not None and existing.error == "":
             existing.last_used = time.monotonic()
             return existing
-        if existing is not None:
-            self._loop.call_soon_threadsafe(existing.stop.set)
         auth = build_oauth_provider(config) if config.transport in ("http", "sse") else None
         conn = _Connection(config=config)
         self._connections[key] = conn
@@ -1037,7 +1036,7 @@ class MCPManager:
             doomed.update(oldest[:surplus])
         return [self._connections.pop(key) for key in doomed]
 
-    def _reap_straggler(self, conn: _Connection) -> None:
+    def _reap_straggler(self, conn: _Connection, task: Any) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
 
         Registers a done callback that drops *conn* from ``_orphans``
@@ -1049,10 +1048,8 @@ class MCPManager:
 
         Args:
             conn: The timed-out connection whose task may be stuck.
+            task: ``conn.task``, the connection's maintainer.
         """
-        task = conn.task
-        if task is None:
-            return
         # A future that already finished runs the callback right here,
         # on the task thread, so it takes the manager lock through
         # ``locked_call`` like every other task-reachable section.
@@ -1065,6 +1062,14 @@ class MCPManager:
         self._loop.call_soon_threadsafe(
             self._loop.call_later, _CONNECT_STRAGGLER_GRACE_S, task.cancel,
         )
+
+    def _take_all(self) -> list[_Connection]:
+        """Empty the pool and the orphan list, returning every connection (locked)."""
+        conns = list(self._connections.values())
+        self._connections.clear()
+        conns.extend(self._orphans)
+        self._orphans.clear()
+        return conns
 
     def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
         """Drop a finished straggler from ``_orphans`` (done callback; locked)."""
@@ -1188,11 +1193,7 @@ class MCPManager:
         across every connection, so a shutdown is bounded by
         2 × :data:`_DISCONNECT_WAIT_S` however many servers hang.
         """
-        with self._lock:
-            conns = list(self._connections.values())
-            self._connections.clear()
-            conns.extend(self._orphans)
-            self._orphans.clear()
+        conns = locked_call(self._lock, self._take_all)
         for conn in conns:
             self._loop.call_soon_threadsafe(conn.stop.set)
         deadline = time.monotonic() + _DISCONNECT_WAIT_S
@@ -1447,11 +1448,15 @@ def make_mcp_tool_wrapper(
 # these (e.g. server "run" + tool "parallel" → "run_parallel") would
 # make KISSAgent._add_functions() raise and abort the whole tool loop,
 # so such names are pre-reserved and the MCP tool gets a numeric suffix
-# instead.
+# instead.  The default of ``make_mcp_tools``' *taken_names*; a caller
+# that has its toolset in hand passes the real names instead.
 _RESERVED_TOOL_NAMES = frozenset({
     "Bash", "bash_job", "run_commands_parallel", "Read", "Edit", "Write", "finish",
+    "create_worktree", "commit_and_merge",
     "go_to_url", "click", "type_text", "press_key", "scroll",
     "screenshot", "get_page_content", "show_browser", "close_browser",
+    "memory_search", "memory_pull", "memory_read", "memory_write", "memory_list",
+    "memory_delete", "memory_refresh",
     "skill", "ask_user_question", "talk", "set_model", "decide",
     "run_parallel", "number_of_cores", "summary",
     "cron_job", "run_agent", "agent_job",
@@ -1459,7 +1464,9 @@ _RESERVED_TOOL_NAMES = frozenset({
 })
 
 
-def make_mcp_tools(work_dir: str) -> list[Any]:
+def make_mcp_tools(
+    work_dir: str, taken_names: Iterable[str] = _RESERVED_TOOL_NAMES,
+) -> list[Any]:
     """Build the agent tools for every configured, permitted MCP server.
 
     Connects to every server configured for *work_dir* at once (errors
@@ -1470,6 +1477,9 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
 
     Args:
         work_dir: The project directory whose MCP servers to expose.
+        taken_names: Tool names already in use by the agent; a
+            synthesized name among them gets a numeric suffix.  Defaults
+            to the built-in tool names.
 
     Returns:
         The (possibly empty) list of tool callables.
@@ -1480,7 +1490,7 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
     rules = load_permission_rules("mcp_permissions")
     manager = MCPManager.instance()
     tools: list[Any] = []
-    taken_names: set[str] = set(_RESERVED_TOOL_NAMES)
+    taken = set(taken_names)
     connections = manager.connect_all(servers.values())
     for (name, config), conn in zip(servers.items(), connections, strict=True):
         if conn.session is None:
@@ -1508,10 +1518,10 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
             base = wrapper.__name__
             full_name = base
             counter = 2
-            while full_name in taken_names:
+            while full_name in taken:
                 full_name = f"{base}_{counter}"
                 counter += 1
-            taken_names.add(full_name)
+            taken.add(full_name)
             wrapper.__name__ = full_name
             wrapper.__qualname__ = full_name
             if skill_permission(full_name, rules) == "deny":

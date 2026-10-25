@@ -27,15 +27,9 @@
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {makePage: makeChatPage, stubRaf} = require('./simplify2_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {makePage: makeChatPage, stubRaf, sleep} = require('./simplify2_harness');
+const {micBtn, VOICE_CFG} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
-
-const VOICE_CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: 'https://models.example.com/model.tar.gz',
-  ackAudioUrl: '/media/working-on-it.mp3',
-};
 
 /** A KaldiRecognizer with the surface the pipeline uses. */
 class FakeRecognizer {
@@ -163,10 +157,6 @@ function setPageVisibility(win, state) {
   win.document.dispatchEvent(new win.Event('visibilitychange'));
 }
 
-function tick(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms || 20));
-}
-
 async function main() {
   await test('the mic button injects the vosk bundle and starts the pipeline directly', async () => {
     const {win, mic} = makePage({noVosk: true});
@@ -187,10 +177,10 @@ async function main() {
     // The bundle arrives: the engine loads, then the microphone is asked.
     win.Vosk = {createModel: () => Promise.resolve(fakeModel())};
     script.onload();
-    await tick();
+    await sleep(20);
     assert.strictEqual(mic.calls.length, 1, 'pipeline must request the mic');
     mic.calls[0].grant();
-    await tick();
+    await sleep(20);
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `pipeline must be live: ${micBtn(win).className}`,
@@ -198,10 +188,30 @@ async function main() {
     assert.strictEqual(win.localStorage.getItem('kissVoiceEnabled'), '1');
   });
 
+  await test('a vosk bundle that fails to load leaves no dead script tag behind', async () => {
+    const {win} = makePage({noVosk: true});
+    const selector = `script[src=${JSON.stringify(VOICE_CFG.voskSrc)}]`;
+    micBtn(win).click();
+    const first = win.document.querySelector(selector);
+    assert.ok(first, 'the vosk bundle must be injected');
+    first.onerror();
+    await sleep(20);
+    assert.strictEqual(
+      win.document.querySelectorAll(selector).length,
+      0,
+      'the failed script tag must be removed from the document',
+    );
+    micBtn(win).click(); // off
+    micBtn(win).click(); // retry
+    const scripts = win.document.querySelectorAll(selector);
+    assert.strictEqual(scripts.length, 1, 'the retry injects exactly one tag');
+    assert.notStrictEqual(scripts[0], first, 'the retry uses a fresh tag');
+  });
+
   await test('toggling off while the engine loads settles at off, never stuck loading, mic never opened', async () => {
     const {win, mic, log} = makePage({pendingModel: true});
     micBtn(win).click(); // on: model pending
-    await tick();
+    await sleep(20);
     assert.ok(
       micBtn(win).classList.contains('voice-loading'),
       `pipeline should be loading: ${micBtn(win).className}`,
@@ -212,7 +222,7 @@ async function main() {
       `off click must paint off immediately: ${micBtn(win).className}`,
     );
     mic.modelResolve(); // the superseded start now settles
-    await tick();
+    await sleep(20);
     assert.ok(
       micBtn(win).classList.contains('voice-off'),
       `must stay off after the stale start settles: ${micBtn(win).className}`,
@@ -228,11 +238,11 @@ async function main() {
   await test('a microphone granted after the off click is released immediately', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await tick(); // model resolves, getUserMedia pending
+    await sleep(20); // model resolves, getUserMedia pending
     assert.strictEqual(mic.calls.length, 1, 'pipeline must request the mic');
     micBtn(win).click(); // off while getUserMedia is pending
     mic.calls[0].grant(); // the embedder grants it anyway
-    await tick();
+    await sleep(20);
     assert.ok(
       log.includes('track-stopped'),
       `the late-granted stream must be stopped: ${JSON.stringify(log)}`,
@@ -244,10 +254,10 @@ async function main() {
   await test('a failure settling after the off click paints off, not a stale red error', async () => {
     const {win, mic} = makePage();
     micBtn(win).click();
-    await tick();
+    await sleep(20);
     micBtn(win).click(); // off while getUserMedia is pending
     mic.calls[0].refuse('Requested device not found');
-    await tick();
+    await sleep(20);
     const btn = micBtn(win);
     assert.ok(
       !btn.classList.contains('voice-error'),
@@ -259,9 +269,9 @@ async function main() {
   await test('a failure of an attempt the user still wants keeps the red error', async () => {
     const {win, mic} = makePage();
     micBtn(win).click();
-    await tick();
+    await sleep(20);
     mic.calls[0].refuse('Requested device not found');
-    await tick();
+    await sleep(20);
     const btn = micBtn(win);
     assert.ok(
       btn.classList.contains('voice-error'),
@@ -277,13 +287,13 @@ async function main() {
   await test('ON-OFF-ON around a pending microphone: the stale grant is released and exactly one pipeline runs', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click(); // on: getUserMedia 1 pending after the load
-    await tick();
+    await sleep(20);
     assert.strictEqual(mic.calls.length, 1);
     micBtn(win).click(); // off
     micBtn(win).click(); // on again: deferred behind the in-flight start
     assert.ok(micBtn(win).classList.contains('voice-loading'));
     mic.calls[0].grant(); // the stale request is granted
-    await tick();
+    await sleep(20);
     assert.ok(
       log.includes('track-stopped'),
       `the stale stream must be released: ${JSON.stringify(log)}`,
@@ -299,7 +309,7 @@ async function main() {
       'exactly one restarted pipeline may request the mic',
     );
     mic.calls[1].grant();
-    await tick();
+    await sleep(20);
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
@@ -310,19 +320,19 @@ async function main() {
   await test('OFF then ON during an in-flight start restarts the pipeline exactly once', async () => {
     const {win, mic} = makePage({pendingModel: true});
     micBtn(win).click(); // on: model pending
-    await tick();
+    await sleep(20);
     micBtn(win).click(); // off during the load
     micBtn(win).click(); // on again during the same load
     assert.ok(micBtn(win).classList.contains('voice-loading'));
     mic.modelResolve(); // the stale start settles and hands over
-    await tick();
+    await sleep(20);
     assert.strictEqual(
       mic.calls.length,
       1,
       'exactly one restarted pipeline may request the mic',
     );
     mic.calls[0].grant();
-    await tick();
+    await sleep(20);
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
@@ -332,9 +342,9 @@ async function main() {
   await test('turning the mic off releases the microphone and closes the audio graph', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await tick();
+    await sleep(20);
     mic.calls[0].grant();
-    await tick();
+    await sleep(20);
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     micBtn(win).click(); // off
     assert.ok(
@@ -349,9 +359,9 @@ async function main() {
   await test('a hidden tab keeps listening for its wake word', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await tick();
+    await sleep(20);
     mic.calls[0].grant();
-    await tick();
+    await sleep(20);
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     setPageVisibility(win, 'hidden');
     assert.ok(
@@ -360,7 +370,7 @@ async function main() {
     );
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     setPageVisibility(win, 'visible');
-    await tick();
+    await sleep(20);
     assert.strictEqual(
       mic.calls.length,
       1,

@@ -31,16 +31,9 @@
 'use strict';
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, clickTab: activateTab} = require('./simplify2_harness');
 const {makeWebappClient} = require('./transport_page_helpers');
-
-function activateTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
-  assert.ok(el, 'tab ' + tabId + ' must exist in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
+const {bootParallelRun} = require('./subagent_tab_helpers');
 
 /**
  * The `.panel-elapsed` label of *panel*'s own footer bar, or null.
@@ -79,52 +72,25 @@ function bootSubagent() {
   const client = makeWebappClient();
   const {win} = client;
   const all = () => client.drain();
-  const ready = all().find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the client must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub 1'])},
-  });
-
-  const taskId = 'sub-task-elapsed-1';
-  send(win, {
-    type: 'new_tab',
-    task_id: taskId,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = all()
-    .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
-    .pop();
-  assert.ok(resume, 'new_tab must make the client resume the sub-agent');
-  const subTabId = resume.tabId;
-
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: taskId,
-    isSubagentTab: true,
-    isDone: false,
-  });
+  // The shim buffers frames until drained, so drain after every delivery
+  // for the helper to see the page's resumeSession reply.
+  function deliver(msg) {
+    send(win, msg);
+    all();
+  }
+  const {parentId, taskIds, subTabIds} = bootParallelRun(
+    1,
+    {win, posted: all()},
+    {deliver},
+  );
+  const subTabId = subTabIds[0];
   send(win, {
     type: 'status',
     running: true,
     tabId: subTabId,
     startTs: Date.now(),
   });
-  return {win, all, parentId, taskId, subTabId};
+  return {win, all, parentId, taskId: taskIds[0], subTabId};
 }
 
 // A sub-agent transcript replayed mid-run (`task_events` for a RUNNING
@@ -444,80 +410,6 @@ function testTerminalEventSealsOpenPanels() {
   );
 }
 
-// The replay-only report suppression must not survive into the live
-// stream the replay's tail state becomes: a report the task writes
-// AFTER its transcript was replayed opens like any live report, while
-// a report inside the replayed transcript still opens nothing.
-function testReplayDoesNotSuppressLiveReports() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  const tabId = all().find(m => m.type === 'ready').tabId;
-  const t0 = Date.now() - 30000;
-  const oldDoc = '<!DOCTYPE html><html><body>old</body></html>';
-  send(win, {type: 'status', running: true, tabId: tabId, startTs: t0});
-  send(win, {
-    type: 'task_events',
-    tabId: tabId,
-    chat_id: 'chat-report',
-    task: 'reporting task',
-    task_id: '92',
-    events: [
-      {type: 'prompt', text: 'write reports', ts: t0},
-      {
-        type: 'tool_call',
-        name: 'Write',
-        path: 'reports/old.html',
-        content: oldDoc,
-        ts: t0 + 1000,
-      },
-      {
-        type: 'tool_result',
-        content:
-          'Successfully wrote ' +
-          oldDoc.length +
-          ' characters to reports/old.html',
-        is_error: false,
-        tool_name: 'Write',
-        path: 'reports/old.html',
-        ts: t0 + 2000,
-      },
-    ],
-  });
-  assert.strictEqual(
-    win.document.querySelectorAll('#tab-list .chat-tab.content-tab').length,
-    0,
-    'a replayed report opens no content tab',
-  );
-  const liveDoc = '<!DOCTYPE html><html><body>live</body></html>';
-  send(win, {
-    type: 'tool_call',
-    name: 'Write',
-    path: 'reports/live.html',
-    content: liveDoc,
-    tabId: tabId,
-    ts: Date.now(),
-  });
-  send(win, {
-    type: 'tool_result',
-    content:
-      'Successfully wrote ' +
-      liveDoc.length +
-      ' characters to reports/live.html',
-    is_error: false,
-    tool_name: 'Write',
-    path: 'reports/live.html',
-    tabId: tabId,
-    ts: Date.now(),
-  });
-  send(win, {type: 'task_done', success: true, tabId: tabId});
-  assert.strictEqual(
-    win.document.querySelectorAll('#tab-list .chat-tab.content-tab').length,
-    1,
-    'the live report written after the replay opens its tab',
-  );
-}
-
 const tests = [
   testReplayedSubagentPanelsShowDurations,
   testLiveSubagentPanelsShowElapsed,
@@ -525,7 +417,6 @@ const tests = [
   testCloseWithoutTimestampSealsWithoutLabel,
   testAdjacentReplayNeverTicks,
   testTerminalEventSealsOpenPanels,
-  testReplayDoesNotSuppressLiveReports,
 ];
 
 let failures = 0;

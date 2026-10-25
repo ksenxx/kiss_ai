@@ -132,7 +132,7 @@ class TestGeminiNonStrContent(TestCase):
         )
         m.initialize("hello")
         m.conversation[0]["content"] = 12345
-        contents = m._convert_conversation_to_gemini_contents()
+        contents = m._convert_conversation_to_gemini_contents(m._chat_messages())
         assert len(contents) == 0
 
 
@@ -149,7 +149,7 @@ class TestGeminiBuildConfigThinkingProvided(TestCase):
             model_config={"thinking_config": custom_tc},
         )
         m.initialize("hello")
-        config = m._build_config()
+        config = m._build_config(m._chat_messages())
         assert config.thinking_config == custom_tc
 
 

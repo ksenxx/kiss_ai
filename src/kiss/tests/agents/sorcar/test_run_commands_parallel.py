@@ -26,9 +26,10 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 from kiss.tests.conftest import IS_WINDOWS
@@ -181,7 +182,8 @@ class TestStop:
         outcome: dict[str, Any] = {}
 
         def run() -> None:
-            token = begin_tool_call("run_commands_parallel")
+            token = new_tool_call("run_commands_parallel")
+            register_tool_call(token)
             try:
                 try:
                     outcome["result"] = tools.run_commands_parallel(

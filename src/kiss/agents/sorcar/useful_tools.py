@@ -7,6 +7,7 @@
 import difflib
 import functools
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -25,12 +26,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.edit_guards import (
+    line_of,
+    numbered_region,
+    output_shows_file,
+    region_around_string,
+    repo_read_key,
+    rewrite_guard,
+    shell_view_target,
+)
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
 )
-from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
+from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.models.model import (
@@ -41,6 +51,7 @@ from kiss.core.processes import (
     SIGKILL,
     find_bash,
     kill_process_group,
+    kill_process_tree,
     pid_alive,
     popen_process_group,
 )
@@ -371,7 +382,7 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
                 f"worktree path (or a path relative to it) so the "
                 f"change is captured by the framework's auto-commit "
                 f"and does not mutate the user's main checkout. "
-                f"Suggested command: {suggested[:2000]}"
+                f"Copy this rewritten command as is: {suggested[:20000]}"
             )
     return None
 
@@ -548,20 +559,119 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
     return {"args": [ps, "-NoProfile", "-Command", command]}
 
 
-def _truncate_output(output: str, max_chars: int) -> str:
+def _truncate_output(output: str, max_chars: int, spilled_to: str = "") -> str:
+    """Return *output* cut to *max_chars*: its head and tail around a marker.
+
+    Args:
+        output: The full text.
+        max_chars: Characters kept, marker included.
+        spilled_to: Path of the file holding the full text (named in
+            the marker so the model can grep it), ``""`` when none.
+    """
     if len(output) <= max_chars:
         return output
-    worst_msg = f"\n\n... [truncated {len(output)} chars] ...\n\n"
+    where = f"; full output ({len(output)} chars) in {spilled_to}" if spilled_to else ""
+    worst_msg = f"\n\n... [truncated {len(output)} chars{where}] ...\n\n"
     if max_chars < len(worst_msg):
         return output[:max_chars]
     remaining = max_chars - len(worst_msg)
     head = remaining // 2
     tail = remaining - head
     dropped = len(output) - head - tail
-    msg = f"\n\n... [truncated {dropped} chars] ...\n\n"
+    msg = f"\n\n... [truncated {dropped} chars{where}] ...\n\n"
     if tail:
         return output[:head] + msg + output[-tail:]
     return output[:head] + msg
+
+
+def _edit_pairs(edits: str) -> list[tuple[str, str, bool]] | str:
+    """Parse the ``edits`` JSON list of an Edit call into ``(old, new, replace_all)`` triples.
+
+    Returns the error text instead when the JSON is not a non-empty
+    list of objects with string ``old_string`` and ``new_string``.
+    """
+    try:
+        items = json.loads(edits)
+    except ValueError as e:
+        return f"Error: edits must be a JSON list of objects: {e}"
+    if not isinstance(items, list) or not items:
+        return "Error: edits must be a non-empty JSON list of objects"
+    pairs: list[tuple[str, str, bool]] = []
+    for index, item in enumerate(items, 1):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("old_string"), str)
+            or not isinstance(item.get("new_string"), str)
+        ):
+            return (
+                f"Error: edit {index} must be an object with string old_string and new_string"
+            )
+        pairs.append((item["old_string"], item["new_string"], bool(item.get("replace_all"))))
+    return pairs
+
+
+def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
+    """Return whether *pattern* occurs in the job log at *log_path* (unreadable = no)."""
+    try:
+        return pattern.search(log_path.read_text(encoding="utf-8", errors="replace")) is not None
+    except OSError:
+        return False
+
+
+_FOREGROUND_SLEEP = re.compile(r"(?:^|[;&|(]\s*)sleep\s+(\d+(?:\.\d+)?)(?:\s*[;&|)]|\s*$)")
+FOREGROUND_SLEEP_MAX_SECONDS = 30
+
+
+def sleep_guard(command: str) -> str | None:
+    """Refuse a foreground ``sleep N`` with N over :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
+
+    A long sleep is a polling turn: the model pays a full step to wait.
+    The wait belongs in ``bash_job(action="wait", until=<regex>,
+    timeout_seconds=N)``, which blocks server-side at no step cost.
+    """
+    for match in _FOREGROUND_SLEEP.finditer(command):
+        if float(match.group(1)) > FOREGROUND_SLEEP_MAX_SECONDS:
+            return (
+                f"REFUSED: the Bash call did NOT run: a foreground sleep of {match.group(1)}s "
+                "is a polling turn. Start the thing you are waiting for with "
+                "Bash(background=True) and block on it with "
+                'bash_job(job_id, action="wait", until="<regex in its log>", '
+                "timeout_seconds=N); or agent_job(job_id, \"wait\") for a sub-agent."
+            )
+    return None
+
+
+def _lines_within_budget(lines: list[str], budget: int) -> list[str]:
+    """Return the longest prefix of *lines* that fits *budget* characters.
+
+    At least one line is kept; a first line longer than the budget (a
+    one-line JSON or log file) is clipped to it with a marker, so no
+    file can put more than *budget* characters into the context.
+    """
+    kept: list[str] = []
+    size = 0
+    for line in lines:
+        if kept and size + len(line) > budget:
+            break
+        if not kept and len(line) > budget:
+            note = f"\n[line clipped to {budget} chars; grep or cut for the rest]\n"
+            return [line[:budget] + note]
+        kept.append(line)
+        size += len(line)
+    return kept
+
+
+SPILL_DIR = "tmp/tool-out"
+"""Where a truncated tool output is written in full, under the work dir.
+
+POSIX form on every OS: the path is shown to the model for the Bash tool,
+which is bash on Windows too, where a backslash would be eaten.
+"""
+
+
+def _output_budget(max_output_chars: int) -> int:
+    """Return the characters a result may keep: the model's request, capped at the ceiling."""
+    return max(1, min(int(max_output_chars), DEFAULT_CONFIG.tool_output_max_chars))
 
 
 def _clean_env(work_dir: str | None = None) -> dict[str, str]:
@@ -593,16 +703,20 @@ def _clean_env(work_dir: str | None = None) -> dict[str, str]:
     return env
 
 
-def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> str:
+def _format_bash_result(
+    returncode: int, output: str, max_output_chars: int, spilled_to: str = ""
+) -> str:
     if returncode != 0:
         msg = f"Error (exit code {returncode}):"
         if output:
             msg += f"\n{output}"
-        return _truncate_output(msg, max_output_chars)
-    return _truncate_output(output, max_output_chars)
+        return _truncate_output(msg, max_output_chars, spilled_to)
+    return _truncate_output(output, max_output_chars, spilled_to)
 
 
-def _format_bash_timeout(output: str, timeout_seconds: float, max_output_chars: int) -> str:
+def _format_bash_timeout(
+    output: str, timeout_seconds: float, max_output_chars: int, spilled_to: str = ""
+) -> str:
     """Report a killed-at-the-deadline command, keeping what it printed before the kill.
 
     The partial output (how far a test run or build got) is what lets the
@@ -611,7 +725,7 @@ def _format_bash_timeout(output: str, timeout_seconds: float, max_output_chars: 
     msg = "Error: Command execution timeout"
     if output:
         msg += f" after {timeout_seconds:g}s. Output before the timeout:\n{output}"
-    return _truncate_output(msg, max_output_chars)
+    return _truncate_output(msg, max_output_chars, spilled_to)
 
 
 def _refuse_or_lift(
@@ -633,10 +747,9 @@ def _refuse_or_lift(
         ``(refusal, timeout_seconds)``: the guard's error message (``None``
         when the command may run) and the possibly lifted deadline.
     """
-    guard = _bash_parent_repo_guard(command, work_dir) or destructive_command_guard(
-        command, work_dir
-    )
-    return guard, lift_install_timeout(command, timeout_seconds)
+    guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
+    refusal = _bash_parent_repo_guard(command, work_dir) or guard or rewrite_guard(command)
+    return refusal, timeout_seconds
 
 
 def _run_one_command(
@@ -778,51 +891,23 @@ def _format_parallel_report(
 
 
 def _kill_process_group(process: subprocess.Popen) -> None:
-    """Kill a subprocess and all its children.
-
-    On Windows, uses ``taskkill /T /F`` to kill the entire process tree.
-    On Unix, sends ``SIGKILL`` to the process group created by
-    ``start_new_session=True``, falling back to ``process.kill()``.
+    """Kill a subprocess and all its children, then reap it.
 
     Args:
-        process: The subprocess to terminate.
+        process: The shell started by :func:`popen_process_group`.
     """
-    if sys.platform == "win32":  # pragma: no cover — Windows only
-        # Bounded like ``git_worktree._git``'s taskkill: a hung taskkill
-        # would otherwise wedge the stop monitor / timeout path forever.
-        with suppress(subprocess.TimeoutExpired):
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                capture_output=True,
-                timeout=10,
-            )
-        if process.poll() is None:
-            # taskkill hung or failed: at least the shell itself must
-            # not survive, or the caller reports ``exit code None``
-            # for a command that is still running.
-            with suppress(OSError):
-                process.kill()
-    else:
-        if process.poll() is not None:
-            # Already reaped: the shell's PID — and therefore the PGID
-            # named after it — may have been recycled by an unrelated
-            # process, so ``killpg`` here could SIGKILL a stranger's
-            # process group.  Nothing is left to kill anyway (the group
-            # leader is gone and its exit already broke the pipes this
-            # module reads).  Same hazard ``web_use_tool`` guards with
-            # ``_process_identity``.
-            return
-        try:
-            kill_process_group(process.pid, SIGKILL)
-        except OSError:
-            try:
-                process.kill()
-            except OSError:  # pragma: no cover — Popen.send_signal polls first in Python 3.13+
-                pass
-    try:
+    if process.poll() is not None:
+        # Already reaped: the shell's PID — and therefore the PGID
+        # named after it — may have been recycled by an unrelated
+        # process, so ``killpg`` here could SIGKILL a stranger's
+        # process group.  Nothing is left to kill anyway (the group
+        # leader is gone and its exit already broke the pipes this
+        # module reads).  Same hazard ``web_use_tool`` guards with
+        # ``_process_identity``.
+        return
+    kill_process_tree(process)
+    with suppress(subprocess.TimeoutExpired):  # pragma: no cover — unreachable after SIGKILL
         process.wait(timeout=5)
-    except subprocess.TimeoutExpired:  # pragma: no cover — unreachable after SIGKILL
-        pass
 
 
 @dataclass
@@ -986,11 +1071,29 @@ class UsefulTools:
         # Read dedupe: (path, start_line, max_lines) -> sha of the file text
         # the model was last shown for that window (see :meth:`Read`).
         self._reads_shown: dict[tuple[str, int, int], str] = {}
+        # Outputs spilled to tmp/tool-out/ by this instance (see _spill);
+        # the tag keeps instances sharing a work dir (a parent and its
+        # reviewer, parallel siblings) from overwriting each other's files.
+        self._spill_count = 0
+        self._spill_tag = uuid.uuid4().hex[:6]
         # Files this instance has shown the model (Read) or written itself
-        # (Write, Edit).  Edit and Write refuse an existing file that is not
-        # in this set, so the read-before-modify rule of SYSTEM.md is
-        # enforced by the tools and not only requested by the prompt.
-        self.read_files: set[Path] = set()
+        # (Write, Edit), keyed by ``edit_guards.repo_read_key`` so a file
+        # shown at the main checkout stays read at its worktree path.
+        # Edit and Write refuse an existing file that is not in this set,
+        # so the read-before-modify rule of SYSTEM.md is enforced by the
+        # tools and not only requested by the prompt.
+        self._read_keys: set[str] = set()
+        # Files this instance wrote (Write, Edit): listed in a
+        # continuation's first message.
+        self.written_files: set[Path] = set()
+
+    def _mark_read(self, resolved: Path) -> None:
+        """Record that the model has seen *resolved* (a Read, a Write, or a Bash view of it)."""
+        self._read_keys.add(repo_read_key(resolved))
+
+    def _is_read(self, resolved: Path) -> bool:
+        """Return whether the model has seen *resolved*, at this path or at its other checkout."""
+        return repo_read_key(resolved) in self._read_keys
 
     def forget_reads(self) -> None:
         """Forget which file windows the model has already been shown.
@@ -998,7 +1101,7 @@ class UsefulTools:
         Called by the agent when earlier tool outputs left the model's
         context (compaction, a new session), so the next ``Read`` of an
         unchanged file returns its content instead of the dedupe stub.
-        ``read_files`` is kept: the model has still seen the file once in
+        The read set is kept: the model has still seen the file once in
         this task, so Edit and Write stay permitted on it.
         """
         self._reads_shown.clear()
@@ -1008,6 +1111,26 @@ class UsefulTools:
         return (
             f"Error: {file_path} has not been read in this session. "
             f"Call Read on it before {verb} it."
+        )
+
+    def _unread_edit_refusal(self, file_path: str, resolved: Path, old_string: str) -> str:
+        """Refuse an Edit of an unread file, showing the region around *old_string*.
+
+        The refusal is itself a read of that region (the file is marked
+        read), so the next Edit call can go ahead without a separate
+        Read; the edit is not applied here — the read-before-modify
+        rule stays a rule.
+        """
+        try:
+            content = resolved.read_text(encoding="utf-8", newline="")
+        except (OSError, UnicodeDecodeError):
+            return self._unread_error(file_path, "editing")
+        self._mark_read(resolved)
+        return (
+            f"Error: {file_path} had not been read in this session, so the edit was NOT "
+            f"applied. The region around old_string is shown below (the file now counts "
+            f"as read): re-issue the Edit with the exact current text.\n"
+            + region_around_string(content, old_string)
         )
 
     def _spawn(self, command: str) -> subprocess.Popen:
@@ -1078,7 +1201,9 @@ class UsefulTools:
         )
         return None
 
-    def _start_background_job(self, command: str) -> str:
+    def _start_background_job(
+        self, command: str, machine: str = ""
+    ) -> tuple[BackgroundJob | None, str]:
         """Start *command* detached and register it as a background job.
 
         Equivalent to ``nohup command > log 2>&1 < /dev/null &``: the
@@ -1089,21 +1214,43 @@ class UsefulTools:
         report the exit code and a task Stop kills the job's process
         group like it kills a foreground command.
 
+        With *machine* (a registered SSH machine, ``/machine add``) the
+        command runs there through ``ssh``: the ssh client is the local
+        job, so the remote output streams into the same local log and
+        ``bash_job`` works unchanged; an experiment on a bench node is
+        one turn to start and one to collect.
+
         Args:
             command: The shell command to run.
+            machine: Name or address of a registered SSH machine to run
+                on; empty runs locally.
 
         Returns:
-            The job id, pid and log path, plus how to follow the job; a
-            string starting with ``Error:`` when it could not be started.
+            The registered job and the model-facing text giving its id,
+            pid and log path plus how to follow it; ``None`` and a string
+            starting with ``Error:`` when it could not be started.
         """
         cwd = self._resolve_cwd()
         job_id = "j" + uuid.uuid4().hex[:8]
         log_path = Path(cwd or os.getcwd()) / "tmp" / "bash_jobs" / f"{job_id}.log"
+        popen_kwargs = _popen_kwargs(command)
+        if machine:
+            from kiss.agents.sorcar.machines import find_machine, ssh_command
+
+            found = find_machine(machine)
+            if found is None:
+                return None, f"Error: no registered machine named {machine!r} (see /machine list)."
+            if not found.ssh:
+                return None, (
+                    f"Error: machine {found.name!r} was registered by URL, not over ssh; a "
+                    "background job can only be started on an SSH machine."
+                )
+            popen_kwargs = {"args": ssh_command(found.ssh, command=command)}
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "wb") as log_file:
                 process = popen_process_group(
-                    **_popen_kwargs(command),
+                    **popen_kwargs,
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
@@ -1112,7 +1259,7 @@ class UsefulTools:
                 )
         except OSError as e:
             logger.debug("Exception caught", exc_info=True)
-            return f"Error: could not start background job: {e}"
+            return None, f"Error: could not start background job: {e}"
         try:
             threading.Thread(
                 target=_watch_job,
@@ -1125,34 +1272,44 @@ class UsefulTools:
             # behind with no watcher and no job id anyone could kill it by.
             _kill_job_group(process)
             raise
-        self._jobs[job_id] = BackgroundJob(
+        job = BackgroundJob(
             job_id,
-            command,
+            f"[{machine}] {command}" if machine else command,
             log_path,
             process,
             time.monotonic(),
         )
-        return (
-            f"Started background job {job_id} (pid {process.pid}).\n"
+        self._jobs[job_id] = job
+        where = f" on {machine}" if machine else ""
+        return job, (
+            f"Started background job {job_id}{where} (pid {process.pid}).\n"
             f"Log: {log_path}\n"
             f'Follow it with bash_job({job_id!r}, action="tail") or block on it with '
             f'bash_job({job_id!r}, action="wait", timeout_seconds=...); '
             f'bash_job({job_id!r}, action="kill") stops it.'
         )
 
-    def _wait_for_job(self, job: BackgroundJob, timeout_seconds: float) -> None:
-        """Block until *job* exits, *timeout_seconds* pass, or a stop lands.
+    def _wait_for_job(
+        self, job: BackgroundJob, timeout_seconds: float, until: re.Pattern[str] | None = None,
+    ) -> None:
+        """Block until *job* exits, *timeout_seconds* pass, the log matches *until* or a stop lands.
 
         Polls in 0.2 s slices so the task Stop event and the tool
         panel's interrupt event are observed promptly; a tool-panel
         Stop raises :class:`~kiss.core.tool_interrupt.ToolCallInterrupted`
-        after the loop, exactly like a foreground :meth:`Bash`.
+        after the loop, exactly like a foreground :meth:`Bash`.  The
+        log is searched once a second for *until*.
         """
         deadline = time.monotonic() + timeout_seconds
+        next_scan = 0.0
         while job.process.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or _stop_requested(self.stop_event):
                 break
+            if until is not None and time.monotonic() >= next_scan:
+                next_scan = time.monotonic() + 1.0
+                if _log_matches(job.log_path, until):
+                    break
             time.sleep(min(remaining, 0.2))
         tool_interrupt.raise_if_interrupted()
 
@@ -1232,13 +1389,13 @@ class UsefulTools:
                 logger.debug("Binary file detected", exc_info=True)
                 shown = self._read_binary(file_path, resolved)
                 if not shown.startswith("Error:"):
-                    self.read_files.add(resolved)
+                    self._mark_read(resolved)
                 return shown
             except FileNotFoundError:
                 suggestion = _suggest_close_path(resolved)
                 return f"Error: File not found: {file_path}.{suggestion}"
 
-            self.read_files.add(resolved)
+            self._mark_read(resolved)
             if text == "":
                 return "(file is empty)"
 
@@ -1257,6 +1414,11 @@ class UsefulTools:
                 else None
             )
             window = lines[start_line - 1 : start_line - 1 + max_lines]
+            if whole_file_requested:
+                # No range asked for: keep the default output budget, the
+                # way Bash does, so a 200 KB file does not land whole in
+                # the context; the note says where to continue.
+                window = _lines_within_budget(window, DEFAULT_CONFIG.tool_output_default_chars)
             last = start_line - 1 + len(window)
             remaining = total - last
             if outline is not None:
@@ -1265,7 +1427,10 @@ class UsefulTools:
             else:
                 content = "".join(window)
                 if remaining > 0:
-                    content += f"\n[truncated: {remaining} more lines]"
+                    content += (
+                        f"\n[truncated: {remaining} more lines; "
+                        f"Read(file_path, start_line={last + 1}, max_lines=N) continues]"
+                    )
                 shown = f"lines {start_line}-{last} of {total}"
                 key = (str(resolved), start_line, max_lines)
             digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()
@@ -1348,13 +1513,14 @@ class UsefulTools:
                 )
             if (
                 resolved.is_file()
-                and resolved not in self.read_files
+                and not self._is_read(resolved)
                 and not _is_scratch_path(resolved, self.work_dir)
             ):
                 return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8", newline="")
-            self.read_files.add(resolved)
+            self._mark_read(resolved)
+            self.written_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -1363,9 +1529,10 @@ class UsefulTools:
     def Edit(  # noqa: N802
         self,
         file_path: str,
-        old_string: str,
-        new_string: str,
+        old_string: str = "",
+        new_string: str = "",
         replace_all: bool = False,
+        edits: str = "",
     ) -> str:
         """Performs precise string replacements in files with exact matching.
 
@@ -1374,43 +1541,66 @@ class UsefulTools:
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
+            edits: Several replacements in one call, as a JSON list of
+                ``{"old_string": ..., "new_string": ..., "replace_all": bool}``
+                objects applied in order (all or none); ``old_string`` /
+                ``new_string`` are then ignored.
 
         Returns:
-            The output of the edit operation.
+            The lines around each replacement after the edit (so no
+            verifying Read is needed), or an error naming what went wrong.
         """
         try:
             resolved = resolve_tool_path(file_path, self.work_dir, Path.is_file)
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
-            if resolved not in self.read_files:
-                return self._unread_error(file_path, "editing")
-            if old_string == new_string:
-                return "Error: new_string must be different from old_string"
-            if old_string == "":
-                return (
-                    "Error: old_string must not be empty. "
-                    "Use the Write tool to create or overwrite a file."
-                )
+            pairs = _edit_pairs(edits) if edits else [(old_string, new_string, replace_all)]
+            if isinstance(pairs, str):
+                return pairs
+            if not self._is_read(resolved):
+                return self._unread_edit_refusal(file_path, resolved, pairs[0][0])
             content = resolved.read_text(encoding="utf-8", newline="")
-            count = content.count(old_string)
-            if count == 0 and "\r\n" in content and "\r\n" not in old_string:
-                old_string = old_string.replace("\n", "\r\n")
-                new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
-                count = content.count(old_string)
-            if count == 0:
-                return "Error: String not found in file"
-            if not replace_all and count > 1:
-                return (
-                    f"Error: String appears {count} times (not unique). "
-                    f"Use replace_all=True to replace all occurrences."
+            crlf = "\r\n" in content
+            reports: list[str] = []
+            total = 0
+            for index, (old, new, every) in enumerate(pairs, 1):
+                label = f"edit {index}: " if len(pairs) > 1 else ""
+                if old == new:
+                    return f"Error: {label}new_string must be different from old_string"
+                if old == "":
+                    return (
+                        f"Error: {label}old_string must not be empty. "
+                        "Use the Write tool to create or overwrite a file."
+                    )
+                count = content.count(old)
+                if count == 0 and crlf and "\r\n" not in old:
+                    old = old.replace("\n", "\r\n")
+                    new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+                    count = content.count(old)
+                if count == 0:
+                    return f"Error: {label}String not found in file"
+                if not every and count > 1:
+                    return (
+                        f"Error: {label}String appears {count} times (not unique). "
+                        f"Use replace_all=True to replace all occurrences."
+                    )
+                position = content.find(old)
+                content = content.replace(old, new) if every else content.replace(old, new, 1)
+                replaced = count if every else 1
+                total += replaced
+                first = line_of(content, position)
+                last = first + new.rstrip("\n").count("\n")
+                head = f"edit {index} ({replaced} occurrence(s)); " if len(pairs) > 1 else ""
+                reports.append(
+                    f"{head}lines {max(1, first - 3)}-{last + 3} after the edit:\n"
+                    + numbered_region(content, first - 3, last + 3)
                 )
-            if replace_all:
-                new_content = content.replace(old_string, new_string)
-            else:
-                new_content = content.replace(old_string, new_string, 1)
-            resolved.write_text(new_content, encoding="utf-8", newline="")
-            replaced = count if replace_all else 1
-            return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
+            resolved.write_text(content, encoding="utf-8", newline="")
+            self.written_files.add(resolved)
+            return (
+                f"Successfully replaced {total} occurrence(s) in {file_path}\n"
+                + "\n\n".join(reports)
+            )
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
@@ -1420,8 +1610,10 @@ class UsefulTools:
         command: str,
         description: str,
         timeout_seconds: float = 300,
-        max_output_chars: int = DEFAULT_CONFIG.tool_output_max_chars,
+        max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
         background: bool = False,
+        machine: str = "",
+        on_timeout: str = "kill",
     ) -> str:
         """Runs a bash command and returns its output.
 
@@ -1429,7 +1621,9 @@ class UsefulTools:
         ``nohup cmd > log 2>&1 < /dev/null &``) and the call returns at
         once with a job id; follow the job with ``bash_job``.  Use it for
         anything expected to run longer than about a minute (builds,
-        training runs, servers, large test suites).
+        training runs, servers, large test suites).  A foreground
+        ``sleep N`` with N over 30 is refused: wait with
+        ``bash_job(action="wait", until=...)`` instead.
 
         Args:
             command: The bash command to run.
@@ -1437,21 +1631,43 @@ class UsefulTools:
             timeout_seconds: Timeout in seconds for the command.  Ignored
                 when ``background`` is true; put the deadline on the
                 ``bash_job`` wait instead.
-            max_output_chars: Maximum characters in output before truncation.
+            max_output_chars: Characters of output kept in the result
+                (head and tail); the rest is written to tmp/tool-out/
+                and the result names the file.  Raise it for a result
+                you need whole, up to the configured ceiling (50,000).
             background: Start the command in the background and return a
                 job id immediately instead of waiting for it.
+            machine: With ``background=True``, the registered SSH machine
+                (``/machine add``) to run the command on; its output
+                streams into the local job log.
+            on_timeout: ``"kill"`` (default) kills the command at the
+                deadline and returns what it printed; ``"background"``
+                starts the command as a background job up front and
+                waits ``timeout_seconds`` for it, so a command that
+                outlives the deadline keeps running and is followed with
+                ``bash_job``.
 
         Returns:
             The output of the command, or for a background job its job
             id, pid and log file path.
         """
         del description
+        max_output_chars = _output_budget(max_output_chars)
 
         guard, timeout_seconds = _refuse_or_lift(command, self.work_dir, timeout_seconds)
         if guard is not None:
             return guard
         if background:
-            return self._start_background_job(command)
+            return self._start_background_job(command, machine)[1]
+        if machine:
+            return "Error: machine= applies to background=True only."
+        refused = sleep_guard(command)
+        if refused is not None:
+            return refused
+        if on_timeout == "background":
+            return self._run_then_detach(command, timeout_seconds, max_output_chars)
+        if on_timeout != "kill":
+            return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
 
         try:
             returncode, output = self._bash_streaming(command, timeout_seconds)
@@ -1464,9 +1680,81 @@ class UsefulTools:
                 raise
             logger.debug("Exception caught", exc_info=True)  # pragma: no cover
             return f"Error: {e}"  # pragma: no cover
+        spilled_to = self._spill(output, max_output_chars, "bash")
         if returncode is None:
-            return _format_bash_timeout(output, timeout_seconds, max_output_chars)
-        return _format_bash_result(returncode, output, max_output_chars)
+            return _format_bash_timeout(output, timeout_seconds, max_output_chars, spilled_to)
+        self._note_shell_view(command, returncode, output)
+        return _format_bash_result(returncode, output, max_output_chars, spilled_to)
+
+    def _note_shell_view(self, command: str, returncode: int | None, output: str) -> None:
+        """Count a ``cat`` / ``sed -n`` / ``grep -n`` of one file as a read of it for Edit/Write.
+
+        Only a command that succeeded and printed a line of the file
+        counts: a ``grep -q``, a ``sed -n`` of a line past the end or
+        an ``echo x; true || cat f`` shows the model nothing of it.
+
+        Args:
+            command: The shell command that ran.
+            returncode: Its exit status (``None`` on timeout).
+            output: What it printed.
+        """
+        if returncode != 0 or not output.strip():
+            return
+        viewed = shell_view_target(command, self.work_dir)
+        if viewed is not None and output_shows_file(output, viewed):
+            self._mark_read(viewed)
+
+    def _spill(self, output: str, max_output_chars: int, label: str) -> str:
+        """Write *output* under ``tmp/tool-out/`` when it exceeds the budget; return the path shown.
+
+        The path is relative to the work dir
+        (``tmp/tool-out/<tag>-<n>-<label>.txt``, ``tag`` naming this
+        instance and ``n`` counting its spills) so the model can
+        ``grep`` it; ``""`` when the output fits or cannot be written.
+        The file holds the output verbatim (no newline translation, so
+        a Windows file is not longer than the output by one CR per line).
+
+        Args:
+            output: The full output.
+            max_output_chars: The budget it must exceed to be spilled.
+            label: Tool label in the file name.
+        """
+        if len(output) <= max_output_chars or not self.work_dir:
+            return ""
+        self._spill_count += 1
+        relative = f"{SPILL_DIR}/{self._spill_tag}-{self._spill_count}-{label}.txt"
+        try:
+            path = Path(self.work_dir) / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(output, encoding="utf-8", errors="replace", newline="")
+        except OSError:
+            return ""
+        return relative
+
+    def _run_then_detach(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
+        """Run *command* as a background job and wait up to *timeout_seconds* for it.
+
+        The ``on_timeout="background"`` path of :meth:`Bash`: a command
+        that finishes in time reads like a foreground result (its log,
+        exit code first); one that does not stays running under its job
+        id instead of being killed at the deadline.
+        """
+        job, started = self._start_background_job(command)
+        if job is None:
+            return started
+        self._wait_for_job(job, timeout_seconds)
+        returncode = job.process.poll()
+        if returncode is None:
+            return (
+                f"Still running after {timeout_seconds:g}s; left running as background job "
+                f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path}\n"
+                f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
+                f"timeout_seconds=...).\n" + _tail_lines(job.log_path, 30, max_output_chars // 2)
+            )
+        output = job.log_path.read_text(encoding="utf-8", errors="replace")
+        spilled_to = self._spill(output, max_output_chars, "bash")
+        self._note_shell_view(command, returncode, output)
+        return _format_bash_result(returncode, output, max_output_chars, spilled_to)
 
     def bash_job(
         self,
@@ -1475,6 +1763,7 @@ class UsefulTools:
         timeout_seconds: float = 300,
         tail_lines: int = 50,
         max_output_chars: int = 50000,
+        until: str = "",
     ) -> str:
         """Wait for, tail, or kill a background job started by ``Bash(background=True)``.
 
@@ -1495,6 +1784,10 @@ class UsefulTools:
                 on the task's Stop button.
             tail_lines: Number of trailing log lines to include.
             max_output_chars: Maximum characters in the report before truncation.
+            until: With ``"wait"``, a regular expression: the wait also
+                ends as soon as the log matches it (an epoch marker, a
+                "Serving on" line), so a long run is one turn to start
+                and one to collect.
 
         Returns:
             The job report, or a string starting with ``Error:`` for an
@@ -1505,12 +1798,40 @@ class UsefulTools:
             known = ", ".join(self._jobs) or "none"
             return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
         if action == "wait":
-            self._wait_for_job(job, timeout_seconds)
+            pattern: re.Pattern[str] | None = None
+            if until:
+                try:
+                    pattern = re.compile(until)
+                except re.error as e:
+                    return f"Error: until is not a valid regular expression: {e}"
+            self._wait_for_job(job, timeout_seconds, pattern)
         elif action == "kill":
             _kill_job_group(job.process)
         elif action != "tail":
             return f"Error: action must be one of wait, tail, kill; got {action!r}."
         return _format_job_report(job, tail_lines, max_output_chars)
+
+    def _run_one_command_noting_views(
+        self,
+        command: str,
+        cancel: threading.Event,
+        work_dir: str | None,
+        timeout_seconds: float,
+    ) -> tuple[int | None, str, float]:
+        """Run one ``run_commands_parallel`` command and count a file it showed as read.
+
+        Args:
+            command: The shell command.
+            cancel: The pool's cancel event.
+            work_dir: Directory the command runs in.
+            timeout_seconds: Per-command deadline.
+
+        Returns:
+            What :func:`_run_one_command` returns.
+        """
+        result = _run_one_command(command, cancel, work_dir, timeout_seconds)
+        self._note_shell_view(command, result[0], result[1])
+        return result
 
     def run_commands_parallel(
         self,
@@ -1558,7 +1879,7 @@ class UsefulTools:
         if max_workers < 0:
             return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
         run_one = functools.partial(
-            _run_one_command,
+            self._run_one_command_noting_views,
             work_dir=self.work_dir,
             timeout_seconds=timeout_seconds,
         )

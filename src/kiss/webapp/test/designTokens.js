@@ -18,7 +18,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const MAIN_CSS = path.join(__dirname, '..', 'media', 'main.css');
+const MEDIA = path.join(__dirname, '..', 'media');
+const MAIN_CSS = path.join(MEDIA, 'main.css');
 
 // Names of the design tokens (see the "Design tokens" block in main.css).
 const TOKEN_NAME =
@@ -55,4 +56,17 @@ function inlineDesignTokens(css) {
   return css;
 }
 
-module.exports = {inlineDesignTokens};
+/**
+ * Append media/`name` to `win`'s <head> as a <style> with its design
+ * tokens inlined, so computed styles carry the concrete values.
+ */
+function installTokenisedCss(win, name) {
+  const style = win.document.createElement('style');
+  style.textContent = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, name), 'utf8'),
+  );
+  win.document.head.appendChild(style);
+  return style;
+}
+
+module.exports = {inlineDesignTokens, installTokenisedCss};

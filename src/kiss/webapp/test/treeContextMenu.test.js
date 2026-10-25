@@ -44,6 +44,11 @@ function key(win, name) {
   );
 }
 
+function isOpen(win) {
+  const el = win.document.getElementById('sidebar-context-menu');
+  return !!el && !el.hidden;
+}
+
 function rows(win) {
   return Array.from(
     win.document.querySelectorAll('#sidebar-context-menu .tree-ctx-item'),
@@ -71,7 +76,7 @@ function testRenderingAndSeparators() {
   assert.strictEqual(el.id, 'sidebar-context-menu');
   assert.strictEqual(el.getAttribute('role'), 'menu');
   assert.ok(!el.hidden, 'menu must be visible after show()');
-  assert.ok(win.TreeContextMenu.isOpen());
+  assert.ok(isOpen(win));
   // Leading, doubled and trailing separators are squashed like VS Code.
   const children = Array.from(el.children).map(c => c.className);
   assert.deepStrictEqual(children, [
@@ -106,14 +111,14 @@ function testRenderingAndSeparators() {
   items[2].click();
   assert.deepStrictEqual(ran, []);
   assert.ok(
-    win.TreeContextMenu.isOpen(),
+    isOpen(win),
     'clicking a disabled item keeps the menu open',
   );
 
   // Clicking an enabled item closes the menu first, then runs it.
   items[1].click();
   assert.deepStrictEqual(ran, ['rename']);
-  assert.ok(!win.TreeContextMenu.isOpen());
+  assert.ok(!isOpen(win));
   assert.ok(el.hidden);
   assert.strictEqual(el.childElementCount, 0, 'closing empties the menu');
   console.log(
@@ -142,7 +147,7 @@ function testViewportClamping() {
   ]);
   assert.strictEqual(el.style.left, '0px');
   assert.strictEqual(el.style.top, '0px');
-  win.TreeContextMenu.close();
+  key(win, 'Escape');
   console.log('ok: menu is kept inside the viewport');
 }
 
@@ -189,7 +194,7 @@ function testKeyboardNavigation() {
   key(win, 'Enter');
   assert.deepStrictEqual(ran, ['two'], 'Enter runs the focused item');
   assert.strictEqual(closedCalls, 1, 'the closed callback fires once');
-  assert.ok(!win.TreeContextMenu.isOpen());
+  assert.ok(!isOpen(win));
 
   // Space also runs; Escape only closes.
   win.TreeContextMenu.show(win.document, 0, 0, [
@@ -201,7 +206,7 @@ function testKeyboardNavigation() {
     {label: 'Go', run: () => ran.push('go2')},
   ]);
   key(win, 'Escape');
-  assert.ok(!win.TreeContextMenu.isOpen(), 'Escape closes the menu');
+  assert.ok(!isOpen(win), 'Escape closes the menu');
   assert.deepStrictEqual(ran, ['two', 'go'], 'Escape runs nothing');
   // Keys with no menu open are ignored, and Enter with nothing focused
   // runs nothing.
@@ -217,8 +222,8 @@ function testKeyboardNavigation() {
     {label: 'Off', enabled: false},
   ]);
   key(win, 'ArrowDown');
-  assert.ok(win.TreeContextMenu.isOpen());
-  win.TreeContextMenu.close();
+  assert.ok(isOpen(win));
+  key(win, 'Escape');
   console.log('ok: keyboard navigation matches VS Code menus');
 }
 
@@ -237,28 +242,28 @@ function testDismissal() {
     new win.MouseEvent('mousedown', {bubbles: true}),
   );
   assert.ok(
-    win.TreeContextMenu.isOpen(),
+    isOpen(win),
     'mousedown inside the menu keeps it open',
   );
   // Pressing anywhere else closes it.
   win.document.body.dispatchEvent(
     new win.MouseEvent('mousedown', {bubbles: true}),
   );
-  assert.ok(!win.TreeContextMenu.isOpen(), 'mousedown outside closes the menu');
+  assert.ok(!isOpen(win), 'mousedown outside closes the menu');
   assert.strictEqual(closedCalls, 1);
   // A right-click elsewhere closes it too (the tree then opens a new one).
   win.TreeContextMenu.show(win.document, 0, 0, [{label: 'A', run: () => {}}]);
   win.document.body.dispatchEvent(
     new win.MouseEvent('contextmenu', {bubbles: true}),
   );
-  assert.ok(!win.TreeContextMenu.isOpen());
+  assert.ok(!isOpen(win));
   // Window blur / resize close it.
   win.TreeContextMenu.show(win.document, 0, 0, [{label: 'A', run: () => {}}]);
   win.dispatchEvent(new win.Event('blur'));
-  assert.ok(!win.TreeContextMenu.isOpen(), 'window blur closes the menu');
+  assert.ok(!isOpen(win), 'window blur closes the menu');
   win.TreeContextMenu.show(win.document, 0, 0, [{label: 'A', run: () => {}}]);
   win.dispatchEvent(new win.Event('resize'));
-  assert.ok(!win.TreeContextMenu.isOpen(), 'window resize closes the menu');
+  assert.ok(!isOpen(win), 'window resize closes the menu');
   // Showing again reuses the single menu element and replaces its items.
   win.TreeContextMenu.show(win.document, 0, 0, [{label: 'X', run: () => {}}]);
   win.TreeContextMenu.show(win.document, 0, 0, [{label: 'Y', run: () => {}}]);
@@ -268,10 +273,10 @@ function testDismissal() {
   );
   assert.strictEqual(rows(win).length, 1);
   assert.strictEqual(rows(win)[0].textContent, 'Y');
-  // close() when nothing is open is a no-op; a closed callback that is
+  // Escape when nothing is open is ignored; a closed callback that is
   // not a function is ignored.
-  win.TreeContextMenu.close();
-  win.TreeContextMenu.close();
+  key(win, 'Escape');
+  key(win, 'Escape');
   win.TreeContextMenu.show(
     win.document,
     0,
@@ -280,7 +285,7 @@ function testDismissal() {
     'not-a-function',
   );
   rows(win)[0].click();
-  assert.ok(!win.TreeContextMenu.isOpen());
+  assert.ok(!isOpen(win));
   console.log('ok: outside clicks, blur and resize dismiss the menu');
 }
 
