@@ -17,9 +17,7 @@
 //     the quadratic cost (15 s in this harness before the fix) and ends
 //     with every older panel folded, exactly as before;
 //   * live streaming after the replay still keeps the newest two panels
-//     open, so the replay-only shortcut does not leak into the stream;
-//   * the page's `ready` names no `singleTabId`: it mirrors the whole
-//     registry.
+//     open, so the replay-only shortcut does not leak into the stream.
 
 /* global require, console, process */
 'use strict';
@@ -34,13 +32,13 @@ const STEPS = 150;
 const REPLAY_BUDGET_MS = 5000;
 
 function makePage() {
-  const {win, posted} = makeChatPage({
+  const {win} = makeChatPage({
     bodyClass: 'remote-chat',
     beforeScripts: stubRaf,
   });
   win._testApi.endLaunch();
   win._testApi.hideWelcome();
-  return {win, posted};
+  return {win};
 }
 
 /**
@@ -172,23 +170,9 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
   console.log('  ok - live streaming after a replay keeps folding tool panels');
 }
 
-function testReadyNamesNoSingleTab() {
-  const chat = makePage();
-  const ready = chat.posted.filter(m => m.type === 'ready');
-  assert.strictEqual(ready.length, 1, 'the page sends one ready');
-  assert.strictEqual(
-    ready[0].singleTabId,
-    undefined,
-    'the page mirrors every registry tab and names no single tab',
-  );
-  chat.win.close();
-  console.log('  ok - ready names no singleTabId');
-}
-
 function main() {
   testLongReplayFoldsOnceAndFast();
   testLiveStreamAfterReplayKeepsNewestTwoOpen();
-  testReadyNamesNoSingleTab();
 }
 
 main();

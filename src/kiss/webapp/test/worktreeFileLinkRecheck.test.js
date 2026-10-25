@@ -15,7 +15,11 @@ const {
   click,
   answerCheckPaths,
 } = require('./simplify2_harness');
-const {findLinks, findMissing} = require('./file_link_helpers');
+const {
+  findLinks,
+  findMissing,
+  existsOnRealFs,
+} = require('./file_link_helpers');
 
 // A real temp workspace; each test creates the files it links to.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtrecheck-'));
@@ -29,14 +33,7 @@ function checkPathsOnRealFs(msg) {
     } else if (!path.isAbsolute(p)) {
       abs = path.resolve(msg.workDir || tmpDir, p);
     }
-    let ok = false;
-    try {
-      const st = fs.statSync(abs);
-      ok = st.isFile() || st.isDirectory();
-    } catch {
-      ok = false;
-    }
-    results[p] = ok;
+    results[p] = existsOnRealFs(abs);
   }
   return results;
 }

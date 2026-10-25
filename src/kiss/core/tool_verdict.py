@@ -47,3 +47,29 @@ def refuse(text: str) -> Verdict:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("refuse() needs the non-blank text the model reads as the tool result")
     return Verdict(False, text)
+
+
+REFUSED_PREFIX = "REFUSED: the {name} call did NOT run and had no effect. "
+"""The start of every refused call's tool result, before the refusal's own text."""
+
+REISSUE_REMINDER = (
+    "\n\nReminder: your earlier {name} call was REFUSED and never ran; "
+    "re-issue it now if it is still needed."
+)
+"""Appended to the first allowed result after a refusal (not the refused tool's, not finish's)."""
+
+
+def refusal_result(name: str, text: str) -> str:
+    """Return the tool result the model reads for a refused call of *name*.
+
+    Every refusal (a hook's ``refuse(text)`` or a guard's string)
+    reaches the model through this, so a refusal can never read like
+    a success: the result opens with :data:`REFUSED_PREFIX`, naming
+    the tool and stating that it did not run, and the refusal's own
+    *text* (the reason and what to do instead) follows.
+
+    Args:
+        name: The refused tool's name.
+        text: The refusal's text.
+    """
+    return REFUSED_PREFIX.format(name=name) + text

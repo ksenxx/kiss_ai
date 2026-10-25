@@ -8,9 +8,8 @@
 // api.js + main.js:
 //  - only one composer popup is open at a time (the "..." menu and the
 //    model dropdown close each other),
-//  - Escape closes the menu and hands focus back to #more-btn instead
-//    of stranding it on a hidden menu item,
-//  - outside clicks close the menu,
+//  - outside clicks close the menu (Escape closing it and handing focus
+//    back to #more-btn is pinned by escapeClosesTopmostPopup.test.js),
 //  - every required action lives in the menu (mic, share, attach,
 //    Git Commit, Settings, theme toggle) and clicking an item closes
 //    the menu even when the item's own handler stops propagation
@@ -93,36 +92,6 @@ function testOnlyOneComposerPopupAtATime() {
   console.log('  ok - only one composer popup is open at a time');
 }
 
-function testEscapeClosesMenuAndRestoresFocus() {
-  const {win} = makePage();
-  const doc = win.document;
-  const moreBtn = doc.getElementById('more-btn');
-  const moreMenu = doc.getElementById('more-menu');
-
-  click(win, moreBtn);
-  assert.ok(moreMenu.classList.contains('open'), 'menu opens');
-  const voiceBtn = doc.getElementById('voice-btn');
-  voiceBtn.focus();
-  assert.strictEqual(doc.activeElement, voiceBtn, 'item focused (setup)');
-
-  doc.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
-  );
-  assert.ok(
-    !moreMenu.classList.contains('open'),
-    'Escape must close the "..." menu',
-  );
-  assert.strictEqual(moreBtn.getAttribute('aria-expanded'), 'false');
-  assert.strictEqual(
-    doc.activeElement,
-    moreBtn,
-    'Escape must hand focus back to the "..." button, not strand it ' +
-      'on a hidden menu item',
-  );
-  win.close();
-  console.log('  ok - Escape closes the menu and restores focus');
-}
-
 function testOutsideClickAndItemClickCloseMenu() {
   const {win} = makePage();
   const doc = win.document;
@@ -155,7 +124,6 @@ function main() {
   testMenuHoldsEveryMovedAction();
   testSettingsIsTheLastMenuItem();
   testOnlyOneComposerPopupAtATime();
-  testEscapeClosesMenuAndRestoresFocus();
   testOutsideClickAndItemClickCloseMenu();
   console.log('all ok');
 }

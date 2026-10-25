@@ -13,7 +13,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, snapshotEntry} = require('./simplify2_harness');
 
 function tabBarIds(win) {
   // Every open tab, in tab order.  Chat tabs have no row of their own
@@ -21,15 +21,6 @@ function tabBarIds(win) {
   // source; Array.from re-creates the list in this realm so that
   // deepStrictEqual's prototype check passes.
   return Array.from(win._testApi.openTabs(), t => t.id);
-}
-
-function snapshotEntry(tabId, title, chatId) {
-  return {
-    tabId: tabId,
-    chatId: chatId || '',
-    title: title || 'new chat',
-    workDir: '',
-  };
 }
 
 function testDuplicateChatBindingsRenderOneTab() {

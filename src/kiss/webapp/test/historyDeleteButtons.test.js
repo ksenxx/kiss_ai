@@ -19,32 +19,12 @@ const {
   click,
   ofType,
 } = require('./simplify2_harness');
+const {makeSession, loadHistory} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
   send(win, {type: 'daemonStatus', connected: true});
   return {win, posted};
-}
-
-function makeSession(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-1',
-      task_id: 'task-1',
-      title: 'refactor the parser',
-      preview: 'refactor the parser',
-      has_events: true,
-      timestamp: 1700000000,
-      work_dir: '/home/user/proj',
-      model: 'test-model',
-      is_favorite: false,
-    },
-    overrides || {},
-  );
-}
-
-function loadHistory(win, sessions) {
-  send(win, {type: 'history', offset: 0, generation: 0, sessions});
 }
 
 function testTaskRowDelete() {

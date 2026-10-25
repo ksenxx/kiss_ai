@@ -20,6 +20,7 @@ const {
   stubRaf,
   fakeMatchMedia,
   fakeIntervals,
+  lastMsg,
 } = require('./simplify2_harness');
 
 const WD = '/ws/repo';
@@ -87,18 +88,13 @@ function statusReply(token, mainCount, wtCount, taskWorktree) {
   };
 }
 
-function lastStatus(posted) {
-  const st = posted.filter(m => m.type === 'gitStatus');
-  return st[st.length - 1];
-}
-
 function badge(win) {
   return win.document.getElementById('scm-hdr-count').textContent;
 }
 
 function testBadgeCountsTheTaskWorktreeOnly() {
   const {win, posted} = makePage();
-  const req = lastStatus(posted);
+  const req = lastMsg(posted, 'gitStatus');
   assert.ok(req, 'the page asked for the git status');
   assert.ok(
     req.tabId,
@@ -161,7 +157,7 @@ function testBadgeCountsTheTaskWorktreeOnly() {
 
 function testSingleWorktreeReplyKeepsCounting() {
   const {win, posted} = makePage();
-  const req = lastStatus(posted);
+  const req = lastMsg(posted, 'gitStatus');
   // An older daemon: no worktrees, no taskWorktree.
   send(win, {
     type: 'gitStatus',

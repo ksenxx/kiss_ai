@@ -42,6 +42,7 @@ from kiss.tests.agents.seas.sea_contract import (
     assert_no_removed_getters,
     system_message,
     tool_names,
+    tool_result_text,
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -115,17 +116,6 @@ def test_autorouter_is_a_model_picker_sea() -> None:
     """``register_as_model()`` lists the SEA under its command name in the picker registry."""
     assert sea_commands.model_seas()["autorouter"] == _SEA_PATH
     assert sea_commands.model_sea("autorouter") == _SEA_PATH
-
-
-def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
-    """``/autorouter <task>`` resolves to the task text and this file (run directly)."""
-    assert sea_commands.get_command("autorouter") == _SEA_PATH
-    assert sea_commands.slash_command_task("/autorouter add a --json flag") == (
-        "add a --json flag",
-        _SEA_PATH,
-    )
-    assert sea_commands.sea_settings(_SEA_PATH) == AutorouterSea().settings({})
-    assert sea_commands.help_text_if_command("/autorouter help") == AutorouterSea().description()
 
 
 def test_agent_file_loader_stages_the_sea_tools() -> None:
@@ -204,12 +194,21 @@ def test_model_menu_prices_every_candidate_from_the_catalog() -> None:
 
 
 def test_pick_model_returns_the_first_runnable_candidate_and_honours_exclude() -> None:
-    """The pick is the first configured candidate; excluded models are skipped in order."""
+    """The pick is the first configured candidate; excluded models are skipped in order.
+
+    A tier with no configured provider credential yields the "no runnable
+    model" error instead; the unknown-tier error never depends on credentials.
+    """
+    assert autorouter_sea.pick_model("huge") == (
+        "Error: unknown tier 'huge'; use one of small, medium, frontier."
+    )
     for tier in autorouter_sea.TIER_NAMES:
         runnable = runnable_candidates(autorouter_sea.TIERS, tier)
+        picked = autorouter_sea.pick_model(tier, 1_000_000, 100_000)
         if not runnable:
-            pytest.skip(f"no provider credential configured for any {tier} candidate")
-        pick = json.loads(autorouter_sea.pick_model(tier, 1_000_000, 100_000))
+            assert picked.startswith(f"Error: no runnable model in tier {tier!r}"), picked
+            continue
+        pick = json.loads(picked)
         assert pick["model"] == runnable[0]
         assert pick["tier"] == tier
         assert "runnable" not in pick
@@ -226,9 +225,6 @@ def test_pick_model_returns_the_first_runnable_candidate_and_honours_exclude() -
         message = autorouter_sea.pick_model(tier, exclude=everyone)
         assert message.startswith(f"Error: no runnable model in tier {tier!r}")
         assert everyone in message
-    assert autorouter_sea.pick_model("huge") == (
-        "Error: unknown tier 'huge'; use one of small, medium, frontier."
-    )
 
 
 def test_estimate_cost_uses_catalog_prices_and_rejects_unknown_models() -> None:
@@ -387,17 +383,16 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         assert autorouter_sea.SYSTEM_PROMPT in system, system[:200]
         assert system.startswith("<identity>"), system[:200]
     # Step 2 carries the real pick; step 3 carries the ledger path.
-    # Tool results carry a "Steps: ..." status footer after a blank line.
     pick_result = tool_results(agentic[1])
     assert len(pick_result) == 1, agentic[1]["messages"]
-    pick_text = pick_result[0].split("\n\nSteps:")[0]
+    pick_text = tool_result_text(pick_result[0])
     if runnable:
         assert json.loads(pick_text)["model"] == model
     else:
         assert pick_text.startswith("Error: no runnable model in tier 'medium'")
     ledger = home / "MODEL_DECISIONS.md"
     log_result = tool_results(agentic[2])
-    assert log_result[-1].split("\n\nSteps:")[0] == f"logged to {ledger}"
+    assert tool_result_text(log_result[-1]) == f"logged to {ledger}"
     task_id = agent.last_task_id
     assert task_id
     rows = ledger.read_text(encoding="utf-8").splitlines()

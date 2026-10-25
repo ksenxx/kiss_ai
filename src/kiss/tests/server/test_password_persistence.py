@@ -67,11 +67,11 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
         )
 
     def test_password_write_uses_local_storage(self) -> None:
-        """The auth_required handler persists the password to localStorage."""
+        """The auth_ok handler persists the accepted password to localStorage."""
         self.assertIn(
-            "localStorage.setItem('sorcar-remote-pwd', pwd)",
+            "localStorage.setItem('sorcar-remote-pwd', _authPassword)",
             _TRANSPORT_JS,
-            "Shim must write the user-provided password to localStorage so "
+            "Shim must write the accepted password to localStorage so "
             "subsequent visits skip the prompt.",
         )
 

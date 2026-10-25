@@ -10,20 +10,19 @@ from __future__ import annotations
 from typing import Any, cast
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.web_use_tool import WebUseTool
 
 
 class TestSorcarAgentCallbackWiring:
     def test_ask_user_question_without_callback(self) -> None:
         agent = SorcarAgent("test")
-        agent.web_use_tool = WebUseTool(user_data_dir=None, headless=True)
         try:
             tools = agent._get_tools()
             ask_tool = next(t for t in tools if t.__name__ == "ask_user_question")
             result = ask_tool("hello?")
             assert "not available" in result
         finally:
-            agent.web_use_tool.close()
+            if agent.web_use_tool is not None:
+                agent.web_use_tool.close()
 
     def test_run_sets_callbacks_temporarily(self) -> None:
         agent = SorcarAgent("test")

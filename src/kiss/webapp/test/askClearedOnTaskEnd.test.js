@@ -17,17 +17,10 @@ function makePage() {
   return harness.makePage({beforeScripts: harness.stubRaf}).win;
 }
 
-const {send} = harness;
+const {send, clickTab} = harness;
 
 function tabRecord(win, tabId) {
   return win._testApi.openTabs().find(t => t.id === tabId) || null;
-}
-
-// There is no row of chat tabs: the user picks a chat in the Chats panel,
-// which is what switchToTab stands in for.
-function clickTab(win, tabId) {
-  assert.ok(tabRecord(win, tabId), `tab ${tabId} must be open`);
-  win._testApi.switchToTab(tabId);
 }
 
 // The composer is in answer mode while the tab on screen has a question.
@@ -237,38 +230,8 @@ function testSameChatIdSiblingKeepsItsQuestion() {
   console.log('  ok - ending one task keeps a same-chat sibling question');
 }
 
-// Submitting an answer is a property of the backend CHAT, not of one task, so
-// it must still retire the prompt in every tab bound to that chat.
-function testSubmittingAnswerStillClearsSameChatIdSiblings() {
-  const win = makePage();
-  const api = win._testApi;
-  const firstTab = api.getActiveTabId();
-  send(win, {type: 'clear', chat_id: 'shared-chat-id', tabId: firstTab});
-  api.createNewTab();
-  const secondTab = api.getActiveTabId();
-  send(win, {type: 'clear', chat_id: 'shared-chat-id', tabId: secondTab});
-
-  send(win, {type: 'askUser', question: 'Which branch?', tabId: firstTab});
-  send(win, {type: 'askUser', question: 'Which remote?', tabId: secondTab});
-
-  win.document.getElementById('task-input').value = 'origin';
-  win.document.getElementById('send-btn').click();
-
-  assert.strictEqual(
-    attentionGlyph(win, firstTab),
-    '',
-    'answering must still clear a sibling tab sharing the backend chat id',
-  );
-  clickTab(win, firstTab);
-  assert.strictEqual(
-    askModalVisible(win),
-    false,
-    'no stale sibling prompt may be remounted after an accepted answer',
-  );
-
-  win.close();
-  console.log('  ok - answering still clears same-chat sibling prompts');
-}
+// Submitting an answer retiring the prompt in every tab bound to the same
+// backend chat is pinned by ask_user_same_chat_tabs_clear.test.js.
 
 // A terminal event for a tab with no outstanding question changes nothing.
 function testTerminalEventWithoutQuestionIsHarmless() {
@@ -303,18 +266,17 @@ function testTerminalEventWithoutQuestionIsHarmless() {
   console.log('  ok - terminal events without a question are harmless');
 }
 
-function runTests() {
-  testActiveTabAskClearedOnEachTerminalEvent();
-  testBackgroundAskClearedOnEachTerminalEvent();
-  testUnrelatedTabKeepsItsQuestion();
-  testSameChatIdSiblingKeepsItsQuestion();
-  testSubmittingAnswerStillClearsSameChatIdSiblings();
-  testTerminalEventWithoutQuestionIsHarmless();
-}
+const TESTS = [
+  testActiveTabAskClearedOnEachTerminalEvent,
+  testBackgroundAskClearedOnEachTerminalEvent,
+  testUnrelatedTabKeepsItsQuestion,
+  testSameChatIdSiblingKeepsItsQuestion,
+  testTerminalEventWithoutQuestionIsHarmless,
+];
 
 try {
-  runTests();
-  console.log('\n6 passed, 0 failed');
+  for (const test of TESTS) test();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

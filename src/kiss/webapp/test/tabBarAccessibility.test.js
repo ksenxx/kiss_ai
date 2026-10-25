@@ -22,26 +22,13 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send} = harness;
+const {send, snapshotEntry} = harness;
+const {tabEl} = require('./subagent_tab_helpers');
 
-// The web server injects class="remote-chat" into the body before
-// any script runs (BODY_CLASS_ATTR in web_server.py), so adding it
-// before main.js is evaluated reproduces the served page.
-function addRemoteChatClass(win) {
-  win.document.body.classList.add('remote-chat');
-}
-
+// The web server injects class="remote-chat" into the body before any
+// script runs (BODY_CLASS_ATTR in web_server.py): the served page.
 function makePage() {
-  return harness.makePage({beforeScripts: addRemoteChatClass});
-}
-
-function snapshotEntry(tabId, title, chatId) {
-  return {
-    tabId: tabId,
-    chatId: chatId || '',
-    title: title || 'new chat',
-    workDir: '',
-  };
+  return harness.makePage({bodyClass: 'remote-chat'});
 }
 
 // The ids on the group strip, in order: the chat on screen and its
@@ -63,13 +50,6 @@ function activeTabId(win) {
   // The strip's active entry is the tab on screen.
   const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
-}
-
-// A tab's entry on the group strip.
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
 }
 
 // A chat "parent" on screen with one sub-agent tab per *subIds* entry,

@@ -19,6 +19,7 @@ const {
   clickTab,
   answering,
 } = require('./simplify2_harness');
+const {makeRunner} = require('./ui_antipattern_harness');
 
 const pages = [];
 
@@ -63,41 +64,14 @@ function pressEnter(win) {
   );
 }
 
-let passed = 0;
-const failures = [];
+const runner = makeRunner();
+// An async test (fn returns a promise) reports when it settles; the
+// summary waits for all of them.
 const pending = [];
 
-function pass(name) {
-  passed++;
-  console.log(`  \u2713 ${name}`);
-}
-
-function fail(name, e) {
-  failures.push({name, error: e});
-  console.log(`  \u2717 ${name}`);
-  console.log(`      ${e.message}`);
-}
-
-// Synchronous tests report at once; an async test (fn returns a promise)
-// reports when it settles, and the summary waits for all of them.
 function test(name, fn) {
-  let r;
-  try {
-    r = fn();
-  } catch (e) {
-    fail(name, e);
-    return;
-  }
-  if (r && typeof r.then === 'function') {
-    pending.push(
-      r.then(
-        () => pass(name),
-        e => fail(name, e),
-      ),
-    );
-  } else {
-    pass(name);
-  }
+  const settled = runner.test(name, fn);
+  if (settled) pending.push(settled);
 }
 
 test('the ask_user_question tool call renders as the Question panel', () => {
@@ -169,9 +143,8 @@ test('askUser marks the panel pending and puts the composer into answer mode', (
   assert.ok(answering(win), 'body.ask-answering is set');
   assert.strictEqual(inp.placeholder, 'Type your answer and press Enter');
   assert.strictEqual(win.document.activeElement, inp, 'composer is focused');
-  // A duplicate replay of the same question changes nothing.
-  send(win, {type: 'askUser', question: 'Which branch?', tabId: tab});
-  assert.strictEqual(panel.querySelectorAll('.tc-question-hint').length, 1);
+  // (A duplicate replay of the same question is
+  // ask_user_duplicate_replay_preserves_draft.test.js.)
 });
 
 test('Enter in the composer posts the text as the userAnswer, not a prompt', () => {
@@ -534,10 +507,9 @@ test('the parked prompt and the answer in progress both survive a reload', () =>
   );
 });
 
-test('a send that waits for an attachment keeps its route', async () => {
-  const {win, posted, tab} = makePage(true);
-  win._testApi.endLaunch();
-  // The HEIC decoder the page asks the browser for, parked forever.
+// Paste a HEIC photo whose decode (the createImageBitmap the page asks
+// the browser for) is parked forever, so its attachment chip stays busy.
+async function pasteHeic(win) {
   win.createImageBitmap = () => new Promise(() => {});
   const inp = win.document.getElementById('task-input');
   const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
@@ -549,6 +521,13 @@ test('a send that waits for an attachment keeps its route', async () => {
   });
   inp.dispatchEvent(paste);
   await new Promise(r => setTimeout(r, 50));
+  return {inp, paste};
+}
+
+test('a send that waits for an attachment keeps its route', async () => {
+  const {win, posted, tab} = makePage(true);
+  win._testApi.endLaunch();
+  const {inp, paste} = await pasteHeic(win);
   // A prompt parked behind the conversion: a question arriving during
   // the wait must not turn it into an answer.
   inp.value = 'a prompt with a photo';
@@ -683,17 +662,7 @@ test('answers stay out of the prompt history, and history recall is off while an
 test('the Send button works for an answer while a photo is still converting', async () => {
   const {win, posted, tab} = makePage(true);
   win._testApi.endLaunch();
-  win.createImageBitmap = () => new Promise(() => {});
-  const inp = win.document.getElementById('task-input');
-  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
-    type: 'image/heic',
-  });
-  const paste = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(paste, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => heic}]},
-  });
-  inp.dispatchEvent(paste);
-  await new Promise(r => setTimeout(r, 50));
+  const {inp} = await pasteHeic(win);
   const sendBtn = win.document.getElementById('send-btn');
   assert.ok(sendBtn.disabled, 'a prompt waits for the photo');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
@@ -737,7 +706,6 @@ test('the floating modal is gone from the markup', () => {
 });
 
 Promise.all(pending).then(() => {
-  console.log(`\n${passed} passed, ${failures.length} failed`);
   for (const win of pages) win.close();
-  if (failures.length) process.exitCode = 1;
+  runner.report('askQuestionPanel');
 });

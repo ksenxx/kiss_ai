@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const {inlineDesignTokens} = require('./designTokens');
 const {makePage: makeChatPage, MEDIA} = require('./simplify2_harness');
+const {loadHistory, makeSession} = require('./history_helpers');
 
 // The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
 // padding and no explicit min-width/min-height.  A history task panel
@@ -84,35 +85,6 @@ function makePage() {
   return makeChatPage({bodyClass: 'remote-chat', beforeScripts: loadRemoteCss});
 }
 
-function makeSession(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-1',
-      task_id: 'task-1',
-      title: 'refactor the parser',
-      preview: 'refactor the parser',
-      has_events: true,
-      tokens: 1234,
-      cost: 0.5678,
-      steps: 7,
-      timestamp: 1700000000,
-      work_dir: '/home/user/proj',
-      model: 'test-model',
-      is_parallel: false,
-      is_favorite: false,
-    },
-    overrides || {},
-  );
-}
-
-function loadHistory(win, sessions) {
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {type: 'history', offset: 0, generation: 0, sessions: sessions},
-    }),
-  );
-}
-
 function historyRow(win) {
   return win.document.querySelector('#history-list .sidebar-item');
 }
@@ -121,8 +93,6 @@ function px(value) {
   const n = parseFloat(String(value));
   return isNaN(n) ? 0 : n;
 }
-
-const label = 'webapp';
 
 // ---------------------------------------------------------------------------
 // 1. The buttons live on their own line.
@@ -133,13 +103,13 @@ function testActionsOnSeparateLine() {
   loadHistory(win, [makeSession()]);
 
   const row = historyRow(win);
-  assert.ok(row, `${label}: history row rendered`);
+  assert.ok(row, `history row rendered`);
 
   const actions = row.querySelector('.sidebar-item-actions');
-  assert.ok(actions, `${label}: action strip rendered`);
+  assert.ok(actions, `action strip rendered`);
 
   const text = row.querySelector('.sidebar-item-text');
-  assert.ok(text, `${label}: task text rendered`);
+  assert.ok(text, `task text rendered`);
 
   // The row is a wrapping flex container; a child only gets its own line
   // when it is forced to span the full content width.
@@ -147,25 +117,25 @@ function testActionsOnSeparateLine() {
   assert.strictEqual(
     rowStyle.display,
     'flex',
-    `${label}: the task panel must stay a flex container`,
+    `the task panel must stay a flex container`,
   );
   assert.strictEqual(
     rowStyle.flexWrap,
     'wrap',
-    `${label}: the task panel must wrap so the actions can break to a new line`,
+    `the task panel must wrap so the actions can break to a new line`,
   );
 
   const actionsStyle = win.getComputedStyle(actions);
   assert.strictEqual(
     actionsStyle.flexBasis,
     '100%',
-    `${label}: the action strip must claim a full-width line of its own; ` +
+    `the action strip must claim a full-width line of its own; ` +
       `got flex-basis=${actionsStyle.flexBasis}`,
   );
   assert.strictEqual(
     px(actionsStyle.marginLeft),
     0,
-    `${label}: the action strip must not keep the inline left gutter; ` +
+    `the action strip must not keep the inline left gutter; ` +
       `got margin-left=${actionsStyle.marginLeft}`,
   );
 
@@ -174,7 +144,7 @@ function testActionsOnSeparateLine() {
   const textStyle = win.getComputedStyle(text);
   assert.ok(
     px(textStyle.flexGrow) >= 1,
-    `${label}: the task text must still grow to fill its line`,
+    `the task text must still grow to fill its line`,
   );
   // Regression guard: the title needs its own full-width basis too. With the
   // default flex-basis of 0 it is squeezed to zero width beside the
@@ -182,7 +152,7 @@ function testActionsOnSeparateLine() {
   assert.strictEqual(
     textStyle.flexBasis,
     '100%',
-    `${label}: the task text must claim a full-width line of its own, ` +
+    `the task text must claim a full-width line of its own, ` +
       `otherwise the full-width action strip collapses it; ` +
       `got flex-basis=${textStyle.flexBasis}`,
   );
@@ -192,21 +162,21 @@ function testActionsOnSeparateLine() {
   const children = Array.prototype.slice.call(row.children);
   assert.ok(
     children.indexOf(text) < children.indexOf(actions),
-    `${label}: the action strip must come after the task text`,
+    `the action strip must come after the task text`,
   );
   const info = row.querySelector('.running-item-info');
   assert.ok(
     children.indexOf(actions) < children.indexOf(info),
-    `${label}: the action strip must come before the metadata block`,
+    `the action strip must come before the metadata block`,
   );
   assert.strictEqual(
     win.getComputedStyle(actions).order,
     win.getComputedStyle(text).order,
-    `${label}: no CSS 'order' trickery may re-shuffle the action strip`,
+    `no CSS 'order' trickery may re-shuffle the action strip`,
   );
 
   win.close();
-  console.log(`  ok - ${label}: action buttons sit on their own line`);
+  console.log(`  ok - action buttons sit on their own line`);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +194,7 @@ function testActionsKeepCompactSize() {
 
   ACTION_BUTTON_SELECTORS.forEach(sel => {
     const btn = row.querySelector(sel);
-    assert.ok(btn, `${label}: ${sel} rendered`);
+    assert.ok(btn, `${sel} rendered`);
 
     const btnStyle = win.getComputedStyle(btn);
     // No min-width/min-height override may survive: the box has to be
@@ -232,25 +202,25 @@ function testActionsKeepCompactSize() {
     assert.strictEqual(
       px(btnStyle.minWidth),
       0,
-      `${label}: ${sel} must not force a wider box; the reverted rule set ` +
+      `${sel} must not force a wider box; the reverted rule set ` +
         `min-width=${REVERTED_BUTTON_W_PX}px, got ${btnStyle.minWidth}`,
     );
     assert.strictEqual(
       px(btnStyle.minHeight),
       0,
-      `${label}: ${sel} must not force a taller box; the reverted rule set ` +
+      `${sel} must not force a taller box; the reverted rule set ` +
         `min-height=${REVERTED_BUTTON_H_PX}px, got ${btnStyle.minHeight}`,
     );
     assert.strictEqual(
       px(btnStyle.paddingTop),
       2,
-      `${label}: ${sel} must keep the compact "2px 0" padding so the box ` +
+      `${sel} must keep the compact "2px 0" padding so the box ` +
         `stays ${BUTTON_H_PX}px tall; got padding-top=${btnStyle.paddingTop}`,
     );
     assert.strictEqual(
       px(btnStyle.paddingLeft),
       0,
-      `${label}: ${sel} must keep the compact "2px 0" padding so the box ` +
+      `${sel} must keep the compact "2px 0" padding so the box ` +
         `stays ${BUTTON_W_PX}px wide; got padding-left=${btnStyle.paddingLeft}`,
     );
     // Every declaration must match a plain compact sidebar button, so no
@@ -261,19 +231,19 @@ function testActionsKeepCompactSize() {
         assert.strictEqual(
           btnStyle[prop],
           compactStyle[prop],
-          `${label}: ${sel} must render exactly like a compact sidebar ` +
+          `${sel} must render exactly like a compact sidebar ` +
             `button; ${prop} differs (${btnStyle[prop]} vs ${compactStyle[prop]})`,
         );
       },
     );
 
     const svg = btn.querySelector('svg');
-    assert.ok(svg, `${label}: ${sel} renders an icon`);
-    assertCompactIcon(win, svg, `${label}: ${sel}`);
+    assert.ok(svg, `${sel} renders an icon`);
+    assertCompactIcon(win, svg, `${sel}`);
   });
 
   win.close();
-  console.log(`  ok - ${label}: action buttons keep the compact size`);
+  console.log(`  ok - action buttons keep the compact size`);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,20 +260,20 @@ function testIconSizeSurvivesStateChanges() {
   fav.click();
   assert.ok(
     fav.classList.contains('favorited'),
-    `${label}: clicking the star favourites the task`,
+    `clicking the star favourites the task`,
   );
   assert.ok(
     posted.some(m => m.type === 'setFavorite'),
-    `${label}: favouriting still reaches the backend`,
+    `favouriting still reaches the backend`,
   );
-  assertCompactIcon(win, fav.querySelector('svg'), `${label}: filled star`);
+  assertCompactIcon(win, fav.querySelector('svg'), `filled star`);
 
   fav.click();
   assert.ok(
     !fav.classList.contains('favorited'),
-    `${label}: clicking again unfavourites the task`,
+    `clicking again unfavourites the task`,
   );
-  assertCompactIcon(win, fav.querySelector('svg'), `${label}: outline star`);
+  assertCompactIcon(win, fav.querySelector('svg'), `outline star`);
 
   // The copy button swaps in a check mark after a successful copy.
   const copy = row.querySelector('.sidebar-item-copy');
@@ -320,15 +290,15 @@ function testIconSizeSurvivesStateChanges() {
     assert.strictEqual(
       copied,
       'refactor the parser',
-      `${label}: the copy button still copies the task text`,
+      `the copy button still copies the task text`,
     );
     assert.ok(
       copy.classList.contains('copied'),
-      `${label}: the copy button flashes its success state`,
+      `the copy button flashes its success state`,
     );
-    assertCompactIcon(win, copy.querySelector('svg'), `${label}: check mark`);
+    assertCompactIcon(win, copy.querySelector('svg'), `check mark`);
     win.close();
-    console.log(`  ok - ${label}: icon size survives every state swap`);
+    console.log(`  ok - icon size survives every state swap`);
   });
 }
 
@@ -350,35 +320,31 @@ function testRowWithoutTaskIdKeepsOwnLine() {
   ]);
   const row = historyRow(win);
   const actions = row.querySelector('.sidebar-item-actions');
-  assert.ok(actions, `${label}: action strip rendered without a task id`);
+  assert.ok(actions, `action strip rendered without a task id`);
   assert.strictEqual(
     row.querySelector('.sidebar-item-favorite'),
     null,
-    `${label}: no favourite button without a task id`,
+    `no favourite button without a task id`,
   );
   assert.strictEqual(
     row.querySelector('.sidebar-item-copy'),
     null,
-    `${label}: no copy button without a task id`,
+    `no copy button without a task id`,
   );
   assert.strictEqual(
     win.getComputedStyle(actions).flexBasis,
     '100%',
-    `${label}: the lone collapse toggle still gets its own line`,
+    `the lone collapse toggle still gets its own line`,
   );
   const toggle = actions.querySelector('.sidebar-item-collapse');
-  assertCompactIcon(
-    win,
-    toggle.querySelector('svg'),
-    `${label}: lone collapse toggle`,
-  );
+  assertCompactIcon(win, toggle.querySelector('svg'), `lone collapse toggle`);
   assert.strictEqual(
     px(win.getComputedStyle(toggle).minHeight),
     0,
-    `${label}: the lone collapse toggle keeps the compact box too`,
+    `the lone collapse toggle keeps the compact box too`,
   );
   win.close();
-  console.log(`  ok - ${label}: task-id-less rows keep the layout`);
+  console.log(`  ok - task-id-less rows keep the layout`);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,25 +359,25 @@ function testBehaviourUnchanged() {
   const toggle = row.querySelector('.sidebar-item-collapse');
   assert.ok(
     row.classList.contains('collapsed'),
-    `${label}: the task panel is still collapsed by default`,
+    `the task panel is still collapsed by default`,
   );
   toggle.click();
   assert.ok(
     !row.classList.contains('collapsed'),
-    `${label}: the chevron still expands the panel`,
+    `the chevron still expands the panel`,
   );
   assert.ok(
     !posted.some(m => m.type === 'resumeSession'),
-    `${label}: button clicks must not bubble into the row click handler`,
+    `button clicks must not bubble into the row click handler`,
   );
 
   row.click();
   assert.ok(
     posted.some(m => m.type === 'resumeSession'),
-    `${label}: clicking the row body still opens the chat`,
+    `clicking the row body still opens the chat`,
   );
   win.close();
-  console.log(`  ok - ${label}: row behaviour is unchanged`);
+  console.log(`  ok - row behaviour is unchanged`);
 }
 
 // ---------------------------------------------------------------------------

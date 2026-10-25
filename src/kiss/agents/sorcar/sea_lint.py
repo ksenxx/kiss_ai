@@ -104,10 +104,10 @@ from kiss.agents.sorcar.sea_commands import (
     defines,
     get_command,
     inherited_settings,
-    list_commands,
     load_sea,
     model_sea,
     own_settings,
+    registered_entries,
     sea_script_in,
 )
 from kiss.agents.sorcar.sea_docs import GENERATED_FILES, REPO_ROOT
@@ -178,7 +178,7 @@ def bundled_seas() -> list[Path]:
 
 def registered_commands() -> dict[Path, str]:
     """Return ``script -> /command name`` of every registered command (bundled and user folders)."""
-    return {path: name for name in list_commands() if (path := get_command(name))}
+    return {path: name for name, path in registered_entries()}
 
 
 def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path]:

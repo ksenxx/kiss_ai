@@ -108,22 +108,14 @@ def backend(ha_server):
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
+def test_check_auth_unauthenticated_message() -> None:
+    """check_homeassistant_auth explains how to configure when unauthenticated.
+
+    The unauthenticated state and the auth-tool trio of a fresh agent are
+    pinned for every channel by ``test_base_channel_agent.py``.
+    """
     agent = HomeAssistantAgent()
     assert agent.name == "Home Assistant Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == [
-        "check_homeassistant_auth",
-        "authenticate_homeassistant",
-        "clear_homeassistant_auth",
-    ]
-
-
-def test_check_auth_unauthenticated_message() -> None:
-    """check_homeassistant_auth explains how to configure when unauthenticated."""
-    agent = HomeAssistantAgent()
     tools = tools_by_name(agent)
     msg = tools["check_homeassistant_auth"]()
     assert "authenticate_homeassistant" in msg

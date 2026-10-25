@@ -76,7 +76,7 @@ def test_parent_repo_guard_refuses_parent_and_allows_worktree(tmp_path: Path) ->
     err = _bash_parent_repo_guard(f"echo x > {repo}/README.md", str(wt))
     assert err is not None
     assert f"{repo}/README.md" in err and str(wt) in err
-    assert f"Suggested command: echo x > {wt}/README.md" in err
+    assert f"Copy this rewritten command as is: echo x > {wt}/README.md" in err
     assert _bash_parent_repo_guard(f"echo x > {wt}/README.md", str(wt)) is None
     assert _bash_parent_repo_guard(f"echo {repo}-other/x", str(wt)) is None
     assert _bash_parent_repo_guard("echo hi", None) is None
@@ -93,7 +93,8 @@ def test_parent_repo_guard_terminators_match_rewrite(tmp_path: Path) -> None:
     ):
         err = _bash_parent_repo_guard(cmd, str(wt))
         assert err is not None, cmd
-        assert "Suggested command: " + rewrite_parent_repo_paths(cmd, str(wt)) in err
+        rewritten = rewrite_parent_repo_paths(cmd, str(wt))
+        assert "Copy this rewritten command as is: " + rewritten in err
     assert _bash_parent_repo_guard(f"ls {wt}/a,{wt}/b", str(wt)) is None
 
 
@@ -143,7 +144,7 @@ def test_docker_edit_python_fallback_preserves_crlf(tmp_path: Path) -> None:
     path = tmp_path / "crlf.txt"
     path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
     result = DockerTools(_local_bash).Edit(str(path), "beta", "BETA")
-    assert result.strip() == f"Successfully replaced 1 occurrence(s) in {path}"
+    assert result.startswith(f"Successfully replaced 1 occurrence(s) in {path}\n")
     assert path.read_bytes() == b"alpha\r\nBETA\r\ngamma\r\n"
 
 
@@ -153,5 +154,5 @@ def test_docker_edit_python_fallback_matches_lf_old_string_in_crlf_file(tmp_path
     path = tmp_path / "crlf.txt"
     path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
     result = DockerTools(_local_bash).Edit(str(path), "alpha\nbeta", "one\ntwo")
-    assert result.strip() == f"Successfully replaced 1 occurrence(s) in {path}"
+    assert result.startswith(f"Successfully replaced 1 occurrence(s) in {path}\n")
     assert path.read_bytes() == b"one\r\ntwo\r\ngamma\r\n"

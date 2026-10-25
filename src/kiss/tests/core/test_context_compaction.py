@@ -18,6 +18,7 @@ import pytest
 
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
+    COMPACTION_MIN_STEP_GAP,
     COMPACTION_START_TOKENS,
     COMPACTION_STEP_TOKENS,
     STUB_PREFIX,
@@ -248,6 +249,42 @@ def test_agent_compaction_replaces_old_outputs_but_not_writes() -> None:
     assert sent[5]["content"].startswith("written ")
     # The agent's own trajectory keeps the full text.
     assert any("line\nline\n" in str(m.get("content", "")) for m in agent.messages)
+
+
+def bigger_output() -> str:
+    """Return a 20k-character tool output."""
+    return "line\n" * 4000
+
+
+def test_second_compaction_waits_for_the_step_gap() -> None:
+    # The first compaction fires before step 32 (as above).  From step 32
+    # on every response reports 210k context, past the next 200.1k
+    # threshold, and by step 48 the aged-out outputs would already be a
+    # quarter of the context -- but the second compaction is not
+    # considered before 30 steps passed, so it fires before step 62.
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.extend(tool_call_body("bigger_output", {}, 210_000) for _ in range(35))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    agent = KISSAgent("compaction-gap-test")
+    agent.context_reset_hook = lambda: hook_calls.append(agent.step_count)
+    with serve(script) as (url, _requests):
+        agent.run(
+            model_name=MODEL,
+            prompt_template="Call the outputs repeatedly.",
+            tools=[big_output, bigger_output],
+            max_steps=len(script) + 5,
+            max_budget=50.0,
+            verbose=False,
+            model_config={"base_url": url, "api_key": "local"},
+        )
+    assert hook_calls == [32, 32 + COMPACTION_MIN_STEP_GAP]
+    stubbed = _stubbed(agent)
+    # Steps 1..24 went in the first batch, 25..54 in the second; the newest
+    # six seen results (55..60) and the unseen 61st stay whole.
+    assert all(stubbed[:54])
+    assert not any(stubbed[54:])
 
 
 def test_compaction_disabled_by_config(monkeypatch: pytest.MonkeyPatch) -> None:

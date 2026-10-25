@@ -79,7 +79,7 @@ def default_models_dir() -> Path:
     :func:`kiss.core.config.kiss_home` contract) so a ``KISS_HOME``
     override — profile isolation, tests — is honoured instead of
     always downloading hundreds of MB of models into the real
-    ``~/.kiss/models``.
+    ``$KISS_HOME/models``.
     """
     from kiss.core.config import kiss_home
 
@@ -627,7 +627,7 @@ def _ensure_downloaded_model(
     """Return the local directory of *model_name*, downloading it once.
 
     W2-F12: safe against concurrent callers — including SEPARATE
-    PROCESSES sharing ``~/.kiss/models`` (two daemons, or the
+    PROCESSES sharing ``$KISS_HOME/models`` (two daemons, or the
     wake-model download at startup racing the speaker-model lazy
     download in the worker).  The whole check → download → extract
     sequence is serialised via an exclusive file lock on a lock

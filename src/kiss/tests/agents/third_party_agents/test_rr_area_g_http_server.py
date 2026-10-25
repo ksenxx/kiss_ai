@@ -156,8 +156,8 @@ def _port_arg_backends() -> list[tuple[Any, str]]:
 class TestPortArgumentBackends:
     """The four backends passing an explicit port to their start method."""
 
-    @pytest.mark.parametrize("backend_cls,prefix", _port_arg_backends())
-    def test_start_and_stop(self, backend_cls: Any, prefix: str) -> None:
+    @pytest.mark.parametrize("backend_cls", [cls for cls, _ in _port_arg_backends()])
+    def test_start_and_stop(self, backend_cls: Any) -> None:
         """Starting on an ephemeral port succeeds and serves a thread."""
         backend = backend_cls()
         try:

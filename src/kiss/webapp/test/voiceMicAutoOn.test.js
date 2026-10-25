@@ -6,39 +6,26 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {micBtn, makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
+const CFG = {
+  voskSrc: '/media/vosk.js',
+  modelUrl: 'https://models.example.com/model.tar.gz',
+};
 
 // The in-page pipeline's engine loads from a script tag the page injects;
 // it never arrives in jsdom, so the mic parks in "loading" and nothing is
 // posted to the daemon (only a captured round's audio ever is).
 function makeWindow(storedEnabled) {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
-  );
-  const win = dom.window;
-  if (storedEnabled !== undefined) {
-    win.localStorage.setItem('kissVoiceEnabled', storedEnabled);
-  }
-  win.__VOICE__ = {
-    voskSrc: '/media/vosk.js',
-    modelUrl: 'https://models.example.com/model.tar.gz',
-  };
   const posted = [];
-  win.addEventListener('kiss-voice-post', e => posted.push(e.detail));
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
+  const win = makeBareVoiceWindow(CFG, w => {
+    if (storedEnabled !== undefined) {
+      w.localStorage.setItem('kissVoiceEnabled', storedEnabled);
+    }
+    w.addEventListener('kiss-voice-post', e => posted.push(e.detail));
+  });
   return {win, posted};
 }
 

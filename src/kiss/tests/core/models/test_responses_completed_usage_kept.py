@@ -92,7 +92,7 @@ def test_stop_in_trailing_token_callback_keeps_the_billed_usage(
     assert seen == ["hel", "lo"]
     partial = m.take_partial_usage_response()
     assert partial is not None
-    assert m.extract_input_output_token_counts_from_response(partial) == (1000, 100, 0, 0)
+    assert m.extract_input_output_token_counts_from_response(partial) == (1000, 100, 0, 0, 0)
     assert m.take_partial_usage_response() is None
 
     # The same stream completing normally leaves nothing to double count.
@@ -122,7 +122,7 @@ def test_stop_in_closing_thinking_callback_keeps_the_billed_usage(
     with pytest.raises(KeyboardInterrupt):
         m.generate()
     partial = m.take_partial_usage_response()
-    assert m.extract_input_output_token_counts_from_response(partial) == (1000, 100, 0, 0)
+    assert m.extract_input_output_token_counts_from_response(partial) == (1000, 100, 0, 0, 0)
     assert m.take_partial_usage_response() is None
 
 
@@ -138,7 +138,7 @@ def test_tool_call_validation_failure_keeps_the_billed_usage(
     with pytest.raises(KISSError, match="function_call without name"):
         m.generate_and_process_with_tools({"echo": _echo})
     partial = m.take_partial_usage_response()
-    assert m.extract_input_output_token_counts_from_response(partial) == (3, 5, 0, 0)
+    assert m.extract_input_output_token_counts_from_response(partial) == (3, 5, 0, 0, 0)
     assert m.take_partial_usage_response() is None
 
     # Non-streaming: the same validation failure, then a clean call leaves nothing.
@@ -148,7 +148,7 @@ def test_tool_call_validation_failure_keeps_the_billed_usage(
     with pytest.raises(KISSError, match="function_call without name"):
         m.generate_and_process_with_tools({"echo": _echo})
     partial = m.take_partial_usage_response()
-    assert m.extract_input_output_token_counts_from_response(partial) == (5, 4, 0, 0)
+    assert m.extract_input_output_token_counts_from_response(partial) == (5, 4, 0, 0, 0)
     m.initialize("hi")
     _CapturingHandler.next_response_body = _tool_call_response_json().encode()
     calls, _content, _resp = m.generate_and_process_with_tools({"echo": _echo})

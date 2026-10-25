@@ -21,10 +21,15 @@ hands back what the tools answered as JSON.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from kiss.agents.third_party_agents.matrix.matrix_sea import _config as mx_config
 from kiss.tests.agents.third_party_agents.recording_http import recording_server
@@ -85,23 +90,92 @@ def _write_nio_shim(root: Path) -> Path:
     return root
 
 
-def _run_child(shim: Path, server: _AuthServer) -> dict[str, Any]:
-    """Run the sign-in in a nio-less interpreter against *server*; return its answers."""
-    with subprocess.Popen(
-        [sys.executable, "-c", _CHILD, str(shim), server.base_url],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    ) as child:
+def _read_line(fd: int, timeout: float) -> str | None:
+    """Read one line from *fd* within *timeout* seconds.
+
+    Returns ``None`` on timeout and whatever was read (possibly ``""``) when
+    the writer closes the pipe first.
+
+    A daemon thread does the blocking reads (``select()`` does not watch
+    pipes on Windows) and accumulates whatever arrives until a newline
+    shows up, so a partial line stalls the thread, not the parent, which
+    gives up at the deadline.
+    """
+    chunks: list[bytes] = []
+    done = threading.Event()
+    threading.Thread(target=_read_until_newline, args=(fd, chunks, done), daemon=True).start()
+    if not done.wait(timeout):
+        return None
+    return b"".join(chunks).split(b"\n", 1)[0].decode()
+
+
+def _read_until_newline(fd: int, chunks: list[bytes], done: threading.Event) -> None:
+    """Append reads of *fd* to *chunks* until a newline or EOF, then set *done*."""
+    try:
+        while True:
+            chunk = os.read(fd, 4096)
+            chunks.append(chunk)
+            if not chunk or b"\n" in chunk:
+                break
+    except OSError:  # the pipe was closed under a read that outlived its deadline
+        pass
+    done.set()
+
+
+def _run_child(
+    shim: Path, server: _AuthServer, script: str = _CHILD, start_timeout: float = 60
+) -> dict[str, Any]:
+    """Run the sign-in in a nio-less interpreter against *server*; return its answers.
+
+    Both waits are bounded (pytest-timeout is disabled project-wide): a child
+    that has not printed a full ``started`` line after *start_timeout* seconds
+    is killed, as is one that has not finished 120 s after being approved.
+    Its stderr goes to a file so a chatty child cannot fill a pipe nobody
+    drains while the parent waits for ``started``.
+    """
+    stderr_path = shim.parent / "child.stderr"
+    with (
+        stderr_path.open("w") as stderr,
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(shim), server.base_url],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            text=True,
+        ) as child,
+    ):
         assert child.stdout is not None and child.stdin is not None
-        assert child.stdout.readline().strip() == "started", child.stderr and child.stderr.read()
-        server.approve()
-        child.stdin.write("approved\n")
-        child.stdin.flush()
-        out, err = child.communicate(timeout=120)
-    assert child.returncode == 0, err
+        try:
+            line = _read_line(child.stdout.fileno(), start_timeout)
+            assert line is not None, f"the child did not print 'started' within {start_timeout} s"
+            assert line.strip() == "started", stderr_path.read_text()
+            server.approve()
+            child.stdin.write("approved\n")
+            child.stdin.flush()
+            out, _ = child.communicate(timeout=120)
+        except BaseException:
+            child.kill()
+            raise
+    assert child.returncode == 0, stderr_path.read_text()
     return dict(json.loads(out))
+
+
+def test_run_child_is_bounded(tmp_path: Path) -> None:
+    """A child that never prints ``started`` is killed at the deadline; a crash shows its stderr.
+
+    A child that flushes only part of the line and then stalls must hit the
+    same deadline instead of blocking the parent until the line completes.
+    """
+    partial = "import sys, time; sys.stdout.write('sta'); sys.stdout.flush(); time.sleep(1000)"
+    with recording_server(_AuthHandler, _AuthServer) as server:
+        with pytest.raises(AssertionError, match="did not print 'started' within 1 s"):
+            _run_child(tmp_path, server, script="import time; time.sleep(1000)", start_timeout=1)
+        with pytest.raises(AssertionError, match="boom"):
+            _run_child(tmp_path, server, script="import sys; sys.exit('boom')")
+        t0 = time.monotonic()
+        with pytest.raises(AssertionError, match="did not print 'started' within 0.5 s"):
+            _run_child(tmp_path, server, script=partial, start_timeout=0.5)
+        assert time.monotonic() - t0 < 5, "a partial line stalled the parent past the deadline"
 
 
 def test_matrix_sign_in_without_nio(isolated_kiss_home: Path, tmp_path: Path) -> None:

@@ -135,14 +135,14 @@ class TestPorcelainPathsFallbackParser:
 
         status = _git("status", "--porcelain", cwd=str(repo))
         assert status.returncode == 0
-        files = _porcelain_paths(status.stdout, rename_both_sides=True)
+        files = _porcelain_paths(status.stdout)
 
         assert "a.txt" in files
         assert "b.txt" in files
         assert "a.txt -> b.txt" not in files
         assert " padded .txt" in files
 
-    def test_default_reports_new_side_only(self, tmp_path: Path) -> None:
+    def test_rename_lists_both_sides_in_order(self, tmp_path: Path) -> None:
         from kiss.server.merge_flow import _porcelain_paths
 
         repo = tmp_path / "repo"
@@ -152,7 +152,7 @@ class TestPorcelainPathsFallbackParser:
         status = _git("status", "--porcelain", cwd=str(repo))
         files = _porcelain_paths(status.stdout)
 
-        assert files == ["b.txt"]
+        assert files == ["a.txt", "b.txt"]
 
     @posix_only('a double quote is not a valid NTFS file-name character')
     def test_quoted_path_unquoted_once(self, tmp_path: Path) -> None:

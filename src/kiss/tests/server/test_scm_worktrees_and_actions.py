@@ -20,8 +20,10 @@ against a REAL git repository with a REAL linked worktree — no mocks.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -30,16 +32,34 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.client import connect
 
 from kiss.server.explorer import git_worktrees
 from kiss.server.fs_actions import FIND_MAX_MATCHES, fs_action
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
+from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _git,
     _request,
     harness,  # noqa: F401  (module fixture used by param name)
 )
+
+
+async def _open_file_unbounded(harness: ExplorerHarness, name: str) -> dict:
+    """``openFile`` *name* on a client with no frame-size limit (a
+    browser has none; the harness client's 1 MiB default would drop a
+    reply at the display cap)."""
+    async with connect(harness.ws_url, ssl=no_verify_ssl(), max_size=None) as ws:
+        await ws.send(json.dumps({"type": "auth", "password": ""}))
+        while json.loads(await asyncio.wait_for(ws.recv(), 30)).get("type") != "auth_ok":
+            pass
+        await ws.send(json.dumps({"type": "openFile", "path": name}))
+        while True:
+            msg: dict = json.loads(await asyncio.wait_for(ws.recv(), 60))
+            if msg.get("type") == "fileContent":
+                return msg
+
 
 _PDF_BYTES = (
     b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
@@ -852,6 +872,41 @@ class TestOpenBinaryFiles:
             assert reply["error"].startswith("File too large")
         finally:
             big.unlink()
+
+    def test_caps_are_enforced_on_the_bytes_read(self, harness) -> None:
+        """A file of exactly the cap opens; one byte more is refused.
+
+        The cap is applied to what ``openFile`` actually reads, not to
+        the size ``stat`` reported a moment earlier.  The race the old
+        stat-then-read order left open (a file appended to between the
+        two calls being sent whole) has a microsecond window and cannot
+        be reproduced deterministically end to end, so this pins the
+        boundary the read-limited path enforces for text and for
+        inline binaries.
+        """
+        from kiss.server import web_server
+
+        cases = (
+            ("edge.txt", web_server._OPEN_FILE_MAX_BYTES, b"x"),
+            ("edge.png", web_server._OPEN_BINARY_MAX_BYTES, b"\x89"),
+        )
+        for name, cap, byte in cases:
+            path = harness.work_dir / name
+            try:
+                path.write_bytes(byte * cap)
+                reply = harness.run(_open_file_unbounded(harness, name))
+                assert "error" not in reply, reply
+                if name.endswith(".png"):
+                    assert reply["size"] == cap
+                    assert len(base64.b64decode(reply["base64"])) == cap
+                else:
+                    assert len(reply["content"]) == cap
+                with open(path, "ab") as f:
+                    f.write(byte)
+                reply = harness.run(_open_file_unbounded(harness, name))
+                assert reply["error"] == f"File too large to display: {name}"
+            finally:
+                path.unlink()
 
     def test_background_flag_is_echoed(self, harness) -> None:
         reply = _request(

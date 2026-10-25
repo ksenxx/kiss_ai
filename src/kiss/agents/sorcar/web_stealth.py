@@ -40,7 +40,6 @@ import random
 import re
 import select
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -50,7 +49,7 @@ from types import ModuleType
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 from kiss.agents.sorcar._concurrency import locked
-from kiss.core.processes import kill_process_group
+from kiss.core.processes import terminate_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,90 @@ def playwright_api() -> ModuleType:
             _API_MODULE = import_module("patchright.sync_api")
         except ImportError:  # pragma: no cover — patchright is a declared dependency
             _API_MODULE = import_module("playwright.sync_api")
+        _guard_sync_api_against_dead_driver(_API_MODULE)
     return _API_MODULE
+
+
+DRIVER_EXITED_MESSAGE = "Playwright driver exited; the browser must be relaunched"
+
+
+class _DispatcherGuard:
+    """Stand-in for the sync API's dispatcher greenlet during one ``_sync`` call.
+
+    The sync API runs its asyncio loop in a *dispatcher* greenlet and
+    waits for a call's task with ``while not task.done(): dispatcher.switch()``.
+    When the driver process exits, the loop's main coroutine returns, the
+    dispatcher greenlet finishes, and from then on ``switch()`` returns at
+    once without running anything: the wait becomes a busy spin that
+    never ends (seen in the full-suite run of 2026-10-25 after a driver
+    crash, 900 s in ``BrowserContext.close``).  This guard switches like
+    the greenlet and raises as soon as it is found dead.  It replaces a
+    wrapper object's reference to the greenlet for good (never nested,
+    never restored): sync calls on one object can overlap across
+    greenlets -- an event handler's call while a navigation is pending
+    -- and finish in any order, so a per-call swap would leak.
+    """
+
+    __slots__ = ("_fiber",)
+
+    def __init__(self, fiber: object) -> None:
+        self._fiber = fiber
+
+    def switch(self, *args: object, **kwargs: object) -> object:
+        """Run the dispatcher; raise instead of returning once it has finished."""
+        fiber: object = self._fiber
+        result = fiber.switch(*args, **kwargs)  # type: ignore[attr-defined]
+        if getattr(fiber, "dead", False):
+            raise _sync_api_error(DRIVER_EXITED_MESSAGE)
+        return result
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._fiber, name)
+
+
+def _sync_api_error(message: str) -> Exception:
+    """The sync API's own ``Error`` (so callers' ``except`` clauses see the usual type)."""
+    pkg = playwright_api().__name__.split(".")[0]
+    error: Exception = import_module(f"{pkg}._impl._errors").Error(message)
+    return error
+
+
+def _guard_sync_api_against_dead_driver(api: ModuleType) -> None:
+    """Make every sync API call fail fast, not spin forever, once its driver has exited.
+
+    Wraps ``SyncBase._sync`` of *api*'s package: the wrapper object's
+    dispatcher reference is replaced, once, by a :class:`_DispatcherGuard`
+    (``_sync`` and ``EventInfo.value`` reach the greenlet through it), so
+    a driver exit noticed mid-call raises, and a call finding the
+    greenlet already dead raises at once.  Without this, only the first
+    call after the exit fails (the read of the closed pipe fails its
+    request) and every later one hangs the calling thread for good,
+    which no watchdog on the browser process can unwedge.  Applied once
+    per process; the tool then discards the dead driver and relaunches.
+    """
+    pkg = api.__name__.split(".")[0]
+    try:
+        sync_base = import_module(f"{pkg}._impl._sync_base").SyncBase
+    except (ImportError, AttributeError):  # pragma: no cover — another API layout
+        logger.debug("No SyncBase to guard in %s", pkg, exc_info=True)
+        return
+    if getattr(sync_base, "_kiss_dead_driver_guard", False):
+        return
+    original = sync_base._sync
+
+    def _sync(self: object, coro: object) -> object:
+        fiber = self._dispatcher_fiber  # type: ignore[attr-defined]
+        if not isinstance(fiber, _DispatcherGuard):
+            fiber = self._dispatcher_fiber = _DispatcherGuard(fiber)  # type: ignore[attr-defined]
+        if getattr(fiber, "dead", False):
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
+            raise _sync_api_error(DRIVER_EXITED_MESSAGE)
+        return original(self, coro)
+
+    sync_base._sync = _sync
+    sync_base._kiss_dead_driver_guard = True
 
 
 def playwright_package() -> str:
@@ -191,6 +273,8 @@ def virtual_display() -> str | None:
     if not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
         return None
     read_fd, write_fd = os.pipe()
+    proc: subprocess.Popen[bytes] | None = None
+    display = None
     try:
         try:
             proc = subprocess.Popen(
@@ -214,8 +298,13 @@ def virtual_display() -> str | None:
         if write_fd >= 0:
             os.close(write_fd)
         os.close(read_fd)
+        if proc is not None and display is None:
+            # Timed out, exited early, or a Stop injected into the task
+            # thread while the display number was awaited: the wrapper
+            # (and its Xvfb) must not outlive this call unowned, since
+            # ``_XVFB_PROC`` is still ``None`` and nothing could reap it.
+            terminate_process_group(proc)
     if display is None:
-        _killpg(proc)
         logger.warning("Xvfb did not start; falling back to headless Chromium")
         return None
     _XVFB_PROC, _XVFB_DISPLAY = proc, display
@@ -248,31 +337,6 @@ def _read_display_number(read_fd: int, proc: subprocess.Popen[bytes]) -> str | N
     return ":" + data.decode().strip()
 
 
-def _killpg(proc: subprocess.Popen[bytes]) -> None:
-    """Terminate the wrapper shell and its Xvfb child together.
-
-    Args:
-        proc: Wrapper started with ``start_new_session=True``.
-    """
-    try:
-        kill_process_group(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:  # pragma: no cover — group already reaped
-        pass
-    try:
-        proc.wait(timeout=5)
-        return
-    except subprocess.TimeoutExpired:  # pragma: no cover — Xvfb ignores SIGTERM only when wedged
-        pass
-    try:  # pragma: no cover — reached only when SIGTERM was ignored
-        kill_process_group(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)  # reap: no zombie wrapper until Popen GC
-    except subprocess.TimeoutExpired:
-        logger.debug("Xvfb wrapper %s did not exit after SIGKILL", proc.pid)
-
-
 def stop_virtual_display() -> None:
     """Stop the process-wide Xvfb, if one is running.
 
@@ -284,7 +348,7 @@ def stop_virtual_display() -> None:
     with _XVFB_LOCK:
         proc, _XVFB_PROC, _XVFB_DISPLAY = _XVFB_PROC, None, None
     if proc is not None:
-        _killpg(proc)
+        terminate_process_group(proc)
 
 
 atexit.register(stop_virtual_display)

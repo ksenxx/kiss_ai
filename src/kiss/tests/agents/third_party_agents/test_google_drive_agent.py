@@ -19,6 +19,7 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -436,21 +437,26 @@ def test_path_unsafe_ids_rejected_before_any_request(backend, tmp_path) -> None:
     assert server.requests == []
 
 
+def _call_every_tool(b: GoogleDriveChannelBackend, tmp_path: Path) -> list[str]:
+    """Invoke every backend tool once with valid arguments; return the results."""
+    return [
+        b.gdrive_search_files(),
+        b.gdrive_get_file("bin1"),
+        b.gdrive_read_file("bin1"),
+        b.gdrive_download_file("bin1", str(tmp_path / "out")),
+        b.gdrive_create_folder("x"),
+        b.gdrive_share_file("bin1", "a@example.com"),
+        b.gdrive_move_file("bin1", "f"),
+        b.gdrive_trash_file("bin1"),
+    ]
+
+
 def test_wrong_token_returns_ok_false(backend, composio, tmp_path) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
     b, _ = backend
     composio.token = "wrong-token"
-    for call in (
-        b.gdrive_search_files,
-        lambda: b.gdrive_get_file("bin1"),
-        lambda: b.gdrive_read_file("bin1"),
-        lambda: b.gdrive_download_file("bin1", str(tmp_path / "out")),
-        lambda: b.gdrive_create_folder("x"),
-        lambda: b.gdrive_share_file("bin1", "a@example.com"),
-        lambda: b.gdrive_move_file("bin1", "f"),
-        lambda: b.gdrive_trash_file("bin1"),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b, tmp_path):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert "401" in result["error"]
 
@@ -514,16 +520,7 @@ def test_connection_refused_returns_ok_false(backend, tmp_path, refusing_port: i
     """Tools return ok:false when the server is unreachable — never raise."""
     b, _ = backend
     b._base_url = f"http://127.0.0.1:{refusing_port}"
-    for call in (
-        b.gdrive_search_files,
-        lambda: b.gdrive_get_file("bin1"),
-        lambda: b.gdrive_read_file("bin1"),
-        lambda: b.gdrive_download_file("bin1", str(tmp_path / "out")),
-        lambda: b.gdrive_create_folder("x"),
-        lambda: b.gdrive_share_file("bin1", "a@example.com"),
-        lambda: b.gdrive_move_file("bin1", "f"),
-        lambda: b.gdrive_trash_file("bin1"),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b, tmp_path):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert result["error"]

@@ -23,7 +23,8 @@ model.
 from __future__ import annotations
 
 from kiss.agents.sorcar.commit_message import (
-    _append_task_result,
+    FALLBACK_SUBJECT,
+    fallback_commit_message,
     generate_commit_message_from_diff,
 )
 from kiss.tests.agents.sorcar.test_autocommit_task_result_in_message import (  # noqa: F401
@@ -31,25 +32,25 @@ from kiss.tests.agents.sorcar.test_autocommit_task_result_in_message import (  #
 )
 
 
-class TestAppendTaskResultHelper:
-    """Pure-function tests for ``_append_task_result``."""
+class TestTaskResultTrailer:
+    """The ``Result:`` trailer ``fallback_commit_message`` appends."""
 
     def test_appends_under_result_heading(self) -> None:
-        msg = _append_task_result("subject", "Fixed the bug in foo.py")
-        assert msg == "subject\n\nResult:\nFixed the bug in foo.py"
+        msg = fallback_commit_message(None, "Fixed the bug in foo.py")
+        assert msg == f"{FALLBACK_SUBJECT}\n\nResult:\nFixed the bug in foo.py"
 
     def test_trims_whitespace_around_result(self) -> None:
-        msg = _append_task_result("subject", "   done\n  ")
-        assert msg == "subject\n\nResult:\ndone"
+        msg = fallback_commit_message(None, "   done\n  ")
+        assert msg == f"{FALLBACK_SUBJECT}\n\nResult:\ndone"
 
     def test_empty_result_returns_message_unchanged(self) -> None:
-        assert _append_task_result("subject", "") == "subject"
-        assert _append_task_result("subject", "   \n  ") == "subject"
+        assert fallback_commit_message(None, "") == FALLBACK_SUBJECT
+        assert fallback_commit_message(None, "   \n  ") == FALLBACK_SUBJECT
 
     def test_multiline_result_preserved(self) -> None:
         result = "did X\n- step 1\n- step 2"
-        msg = _append_task_result("subject", result)
-        assert msg == f"subject\n\nResult:\n{result}"
+        msg = fallback_commit_message(None, result)
+        assert msg == f"{FALLBACK_SUBJECT}\n\nResult:\n{result}"
 
 
 class TestGenerateCommitMessageIncludesTaskResult:

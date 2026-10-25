@@ -4,7 +4,8 @@
 # add your name here
 """Recall evaluation of the memoryfield index on real past Sorcar tasks.
 
-The evaluation turns finished tasks from ``~/.kiss/history.db`` into memory
+The evaluation turns finished tasks from the daemon's ``history.db`` (in the
+KISS home directory, ``~/.s10s`` on a Seamless Loop install) into memory
 pages (one page per task: the request plus the final result as text), then
 asks: given a later question, does retrieval surface the page of the task
 that answered it? Each probe query has exactly one gold page, so we report

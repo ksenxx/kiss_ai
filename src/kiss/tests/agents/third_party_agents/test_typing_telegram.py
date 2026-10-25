@@ -11,8 +11,7 @@ request that ``send_typing`` emits.  Failure paths (HTTP 500, an
 unreachable server, a missing token) are exercised against the same
 real server / a genuinely closed port.
 
-Config state is isolated by the session-wide temp ``KISS_HOME`` set in
-the root conftest; each test that persists a token clears it afterward.
+Config state is isolated by the per-test ``isolated_kiss_home`` fixture.
 """
 
 from __future__ import annotations
@@ -20,10 +19,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+import requests
 
 from kiss.agents.third_party_agents.telegram.telegram_sea import (
     TelegramChannelBackend,
     _config,
+    _TelegramBot,
 )
 from kiss.tests.agents.third_party_agents.telegram_bot_api import (
     TOKEN,
@@ -84,13 +85,9 @@ def test_send_typing_uses_live_bot_token_before_config(
     receiver: BotApiServer,
 ) -> None:
     """A token exposed by the connected Bot object wins over the stored config."""
-
-    class _TokenHolder:
-        token = "999:LIVE-bot-token"
-
     backend = TelegramChannelBackend()
     backend._api_base = receiver.base_url
-    backend._bot = _TokenHolder()
+    backend._bot = _TelegramBot(backend, "999:LIVE-bot-token", requests.Session())
     backend.send_typing("5")
     assert len(receiver.requests) == 1
     assert receiver.requests[0]["path"] == "/bot999:LIVE-bot-token/sendChatAction"

@@ -97,6 +97,25 @@ class TestMediaSymlinkLoop(IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, "hello media")
 
+    async def test_symlinks_are_checked_and_read_as_their_target(self) -> None:
+        """The bytes served are those of the path the check passed.
+
+        ``_read_media_file`` resolves once and both checks and reads the
+        resolved target; a link inside MEDIA_DIR is served, one pointing
+        outside is a 404.  A link retargeted between the containment
+        check and the read (the race the old resolve-then-read-unresolved
+        order allowed) has no deterministic end-to-end reproduction, so
+        this pins the behaviour of the single-resolve path.
+        """
+        (self._media_dir / "alias.txt").symlink_to(self._media_dir / "ok.txt")
+        outside = Path(tempfile.mkdtemp(prefix="kiss_media_outside_")) / "secret.txt"
+        outside.write_text("not yours")
+        (self._media_dir / "escape.txt").symlink_to(outside)
+        status, body = await self._http_get("/media/alias.txt")
+        self.assertEqual((status, body), (200, "hello media"))
+        status, _ = await self._http_get("/media/escape.txt")
+        self.assertEqual(status, 404)
+
     async def test_containment_check_runs_off_loop_thread(self) -> None:
         """``resolve()`` for the containment check must not run on the loop."""
         _ResolveRecordingPath.recorded = []

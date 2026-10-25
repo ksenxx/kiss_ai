@@ -6,11 +6,10 @@
 
 When ``_start_quick_tunnel`` fails to parse the URL from stderr, it
 falls back to the metrics ``/quicktunnel`` endpoint.  Pre-fix it went
-straight to ``_discover_tunnel_url_from_metrics``, which scans ALL
-running cloudflared processes plus a hardcoded port range
-(20240-20259) — and could therefore adopt a FOREIGN tunnel's URL.
-Post-fix the just-spawned process's own ``--metrics`` port is queried
-first.
+straight to a machine-wide scan of ALL running cloudflared processes
+plus a hardcoded port range (20240-20259) — and could therefore adopt
+a FOREIGN tunnel's URL.  Post-fix only the just-spawned process's own
+``--metrics`` port is queried (the scan is gone).
 
 A fake ``cloudflared`` (prepended to PATH, same pattern as
 ``test_named_tunnel_url.py``) parses its ``--metrics`` argument, closes
@@ -59,6 +58,21 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 ' "$port" 2>/dev/null
 """
 
+# Same fake, but its own ``/quicktunnel`` reports cloudflared's
+# pre-registration ``api.trycloudflare.com`` hostname for the first two
+# polls (what a slow or rate-limited cloudflared really answers) before
+# the real one.
+_FAKE_CLOUDFLARED_SLOW = _FAKE_CLOUDFLARED.replace(
+    "class H(http.server.BaseHTTPRequestHandler):\n",
+    "class H(http.server.BaseHTTPRequestHandler):\n    polls = 0\n",
+).replace(
+    '        body = json.dumps({"hostname": "own.trycloudflare.com"}).encode()\n',
+    '        H.polls += 1\n'
+    '        host = "api.trycloudflare.com" if H.polls <= 2 else "own.trycloudflare.com"\n'
+    '        body = json.dumps({"hostname": host}).encode()\n',
+)
+assert _FAKE_CLOUDFLARED_SLOW != _FAKE_CLOUDFLARED
+
 
 class _ForeignHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
@@ -76,11 +90,13 @@ class _ForeignHandler(http.server.BaseHTTPRequestHandler):
 class TestQuickTunnelPrefersOwnMetricsPort(unittest.TestCase):
     """The stderr-less fallback must return OUR URL, not a foreign one."""
 
+    fake_cloudflared = _FAKE_CLOUDFLARED
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         tmpdir = Path(self._tmp.name)
         script = tmpdir / "cloudflared"
-        script.write_text(_FAKE_CLOUDFLARED)
+        script.write_text(self.fake_cloudflared)
         script.chmod(
             script.stat().st_mode
             | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH,
@@ -133,6 +149,18 @@ class TestQuickTunnelPrefersOwnMetricsPort(unittest.TestCase):
             "instead of querying the just-spawned cloudflared's own "
             "metrics port",
         )
+
+
+class TestQuickTunnelWaitsForOwnMetricsPort(TestQuickTunnelPrefersOwnMetricsPort):
+    """An own port that is not ready yet must not fall back to the scan.
+
+    Pre-fix the polling loop asked the own port and, when that had no
+    hostname yet, ran the machine-wide scan in the same iteration, so
+    the first poll returned the FOREIGN tunnel's URL; post-fix only the
+    own port is polled until it answers.
+    """
+
+    fake_cloudflared = _FAKE_CLOUDFLARED_SLOW
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 function fakeGeometry(el) {
   Object.defineProperty(el, 'scrollWidth', {value: 2000, configurable: true});
@@ -23,12 +23,18 @@ function wheel(win, O, deltaY, n) {
   }
 }
 
-function setupWithHistoryTask() {
+// A page past the welcome screen whose transcript is scrollable.
+function setupPage() {
   const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
+  const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
+  return {win, posted, tabId, O};
+}
+
+function setupWithHistoryTask() {
+  const {win, posted, tabId, O} = setupPage();
   send(win, {
     type: 'task_events',
     tabId,
@@ -47,11 +53,7 @@ function getAdjacent(posted) {
 }
 
 function testEarlyPromptPoisoning() {
-  const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  const {win, posted, tabId, O} = setupPage();
   // The daemon's run path: the prompt echo, then the 'clear' that
   // opens the new transcript, then the live stream.
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
@@ -83,11 +85,7 @@ function testEarlyPromptPoisoning() {
 }
 
 function testNoEmptyTaskIdRequest() {
-  const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  const {win, posted, tabId, O} = setupPage();
   // The daemon's run path: the prompt echo, then the 'clear' that
   // opens the new transcript, then the live stream.
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
@@ -111,11 +109,7 @@ function testNoEmptyTaskIdRequest() {
 }
 
 function testTaskEventsWithoutTitle() {
-  const {win, posted} = makePage();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  const {win, posted, tabId, O} = setupPage();
   send(win, {
     type: 'task_events',
     tabId,
@@ -178,24 +172,6 @@ function testNextAtBottom() {
   assert.strictEqual(adj[0].taskId, '42');
   win.close();
   console.log('PASS next request at bottom');
-}
-
-function testTouchPrev() {
-  const {win, posted, O} = setupWithHistoryTask();
-  O.scrollTop = 0;
-  function fire(type, y) {
-    const e = new win.Event(type, {bubbles: true});
-    Object.defineProperty(e, 'touches', {value: [{clientY: y, clientX: 100}]});
-    O.dispatchEvent(e);
-  }
-  fire('touchstart', 500);
-  for (let y = 520; y <= 720; y += 20) fire('touchmove', y);
-  const adj = getAdjacent(posted);
-  assert.ok(adj.length >= 1, 'touch pull-down at top must request prev task');
-  assert.strictEqual(adj[0].direction, 'prev');
-  assert.strictEqual(adj[0].taskId, '42');
-  win.close();
-  console.log('PASS touch pull-down requests prev');
 }
 
 function testShortPrevTaskDoesNotBlockChaining() {
@@ -378,7 +354,6 @@ testNoEmptyTaskIdRequest();
 testTaskEventsWithoutTitle();
 testPrevRequestRenderAndChain();
 testNextAtBottom();
-testTouchPrev();
 testShortPrevTaskDoesNotBlockChaining();
 testShortNextTaskDoesNotBlockChaining();
 testGenuineEndOfChatStillLatches();

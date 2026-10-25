@@ -357,33 +357,34 @@
     if (el.parentNode) el.parentNode.removeChild(el);
   }
 
+  const SANITIZE_BAD_TAGS = new Set([
+    'SCRIPT',
+    'IFRAME',
+    'OBJECT',
+    'EMBED',
+    'FORM',
+    'META',
+    'LINK',
+    'STYLE',
+    'BASE',
+    'FRAME',
+    'FRAMESET',
+  ]);
+  const SANITIZE_URL_ATTRS = new Set([
+    'href',
+    'src',
+    'action',
+    'formaction',
+    'xlink:href',
+  ]);
+
   function kissSanitize(html) {
     const t = document.createElement('template');
     t.innerHTML = String(html == null ? '' : html);
-    const BAD_TAGS = new Set([
-      'SCRIPT',
-      'IFRAME',
-      'OBJECT',
-      'EMBED',
-      'FORM',
-      'META',
-      'LINK',
-      'STYLE',
-      'BASE',
-      'FRAME',
-      'FRAMESET',
-    ]);
-    const URL_ATTRS = new Set([
-      'href',
-      'src',
-      'action',
-      'formaction',
-      'xlink:href',
-    ]);
     const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
-        if (BAD_TAGS.has(el.tagName)) {
+        if (SANITIZE_BAD_TAGS.has(el.tagName)) {
           el.remove();
           continue;
         }
@@ -398,7 +399,7 @@
             el.removeAttribute(attr.name);
             continue;
           }
-          if (URL_ATTRS.has(name)) {
+          if (SANITIZE_URL_ATTRS.has(name)) {
             const value = attr.value || '';
             let schemeProbe = '';
             for (const char of value) {
@@ -540,29 +541,24 @@
     if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
   }
 
-  function scheduleNotificationDismiss(id, severity, sticky) {
+  /**
+   * (Re)arm the auto-dismiss of *toast*: the previous timer is always
+   * cancelled, and a new one is set only when the notice is transient
+   * and neither the pointer nor the focus holds the toast.
+   */
+  function scheduleNotificationDismiss(toast) {
+    const state = toast.kissNotificationState;
+    const id = state.id;
     clearNotificationTimer(id);
-    if (sticky) return;
+    if (state.sticky) return;
+    if (toast.kissPointerInside || toast.contains(document.activeElement))
+      return;
     // Errors never reach here: showNotification makes them sticky.
-    const delay = severity === 'warning' ? 6000 : 5000;
+    const delay = state.severity === 'warning' ? 6000 : 5000;
     notificationTimers.set(
       id,
       setTimeout(() => removeNotification(id), delay),
     );
-  }
-
-  /**
-   * The pointer or the focus left *toast*: its auto-dismiss timer
-   * restarts with the severity and stickiness of the notice it
-   * currently shows (the element is reused across repaints of one id).
-   */
-  function restartNotificationDismiss(toast, id) {
-    const state = toast.kissNotificationState || {
-      id: id,
-      severity: 'info',
-      sticky: false,
-    };
-    scheduleNotificationDismiss(state.id, state.severity, state.sticky);
   }
 
   function showNotification(ev) {
@@ -585,13 +581,21 @@
       toast.dataset.notificationId = String(id);
       toast.tabIndex = -1;
       container.insertBefore(toast, container.firstChild);
-      toast.addEventListener('mouseenter', () => clearNotificationTimer(id));
+      // The pointer on the toast holds its auto-dismiss (jsdom has no
+      // :hover, so the state is tracked here).
+      toast.addEventListener('mouseenter', () => {
+        toast.kissPointerInside = true;
+        clearNotificationTimer(id);
+      });
       toast.addEventListener('focusin', () => clearNotificationTimer(id));
-      toast.addEventListener('mouseleave', () =>
-        restartNotificationDismiss(toast, id),
-      );
+      // Leaving re-arms the auto-dismiss unless the other hold (focus
+      // or pointer) is still on the toast.
+      toast.addEventListener('mouseleave', () => {
+        toast.kissPointerInside = false;
+        scheduleNotificationDismiss(toast);
+      });
       toast.addEventListener('focusout', () =>
-        restartNotificationDismiss(toast, id),
+        scheduleNotificationDismiss(toast),
       );
     }
     toast.kissNotificationState = {id: id, severity: severity, sticky: sticky};
@@ -727,7 +731,11 @@
         liveRegion.textContent = titleText + ': ' + (ev.message || '');
       }, 0);
     }
-    scheduleNotificationDismiss(id, severity, sticky);
+    // A repaint drops the previous timer (a sticky replacement must not
+    // vanish on the transient one's clock) and re-arms only when neither
+    // the pointer nor the focus holds the toast; mouseleave/focusout
+    // re-arm it later.
+    scheduleNotificationDismiss(toast);
   }
 
   function updateNotification(ev) {
@@ -1042,10 +1050,14 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
-  // refreshHistory coalescing: the trailing-refetch timer of the current
-  // tick and whether a refresh was folded into it.
-  let historyRefreshTrailing = null;
+  // refreshHistory coalescing: when the page-one request in flight was
+  // sent (0 once its reply has arrived) and whether a refresh was
+  // folded into it (sent once that reply lands).
+  let historyPageOneSentAt = 0;
   let historyRefreshWanted = false;
+  // A page-one request older than this is no longer waited on: its
+  // reply is lost (a daemon-side failure on a live socket).
+  const HISTORY_FETCH_STALL_MS = 30000;
   let historyDateRangeUserSet = false;
   const historyLastRunningTaskIds = new Set();
   const historyJustCompletedTaskIds = new Set();
@@ -1677,11 +1689,7 @@
       inputAreaEl.insertBefore(worktreeBar, inputAreaEl.firstChild);
     }
     const hideInput = worktreeBar || (tab.isSubagentTab && !tab.isRunning);
-    if (hideInput) {
-      if (inputContainer) inputContainer.style.display = 'none';
-    } else {
-      if (inputContainer) inputContainer.style.display = '';
-    }
+    if (inputContainer) inputContainer.style.display = hideInput ? 'none' : '';
     updateInputDisabled();
     resetAdjacentState();
     syncAskComposer();
@@ -2639,10 +2647,20 @@
     return ids;
   }
 
+  /**
+   * The nearest ancestor of tab `id` that is not in `closing`, or null.
+   * @param {string} id A tab id.
+   * @param {Set<string>} closing The tab ids being closed.
+   * @returns {string|null} The surviving ancestor's id.
+   */
+  function survivingAncestor(id, closing) {
+    let up = (getTab(id) || {}).parentTabId;
+    while (up && closing.has(up)) up = (getTab(up) || {}).parentTabId;
+    return up || null;
+  }
+
   function closeTab(tabId, agentInitiated, fromServer) {
-    const origIdx = tabs.findIndex(t => {
-      return t.id === tabId;
-    });
+    const origIdx = tabs.findIndex(t => t.id === tabId);
     if (origIdx < 0) return;
     if (tabs[origIdx].isContentTab) {
       closeContentTab(tabId, false, fromServer);
@@ -2663,8 +2681,7 @@
       for (const child of liveDescendants) toClose.delete(child.id);
       for (const child of liveDescendants) {
         if (!toClose.has(child.parentTabId)) continue;
-        while (toClose.has(child.parentTabId))
-          child.parentTabId = getTab(child.parentTabId).parentTabId;
+        child.parentTabId = survivingAncestor(child.id, toClose);
         _rpTabPanel.delete(child.id);
       }
     }
@@ -2674,15 +2691,9 @@
     // to the nearest surviving ancestor, so it keeps its place in that
     // chat's group on the tab strip (a closed root's files turn into
     // top-level tabs; see rootTabOf).
-    const heirs = new Map();
-    for (const id of toClose) {
-      let up = (getTab(id) || {}).parentTabId;
-      while (up && toClose.has(up)) up = (getTab(up) || {}).parentTabId;
-      heirs.set(id, up || null);
-    }
     for (const t of tabs) {
-      if (t.isContentTab && heirs.get(t.ownerTabId))
-        t.ownerTabId = heirs.get(t.ownerTabId);
+      if (!t.isContentTab || !toClose.has(t.ownerTabId)) continue;
+      t.ownerTabId = survivingAncestor(t.ownerTabId, toClose) || t.ownerTabId;
     }
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
@@ -3534,9 +3545,7 @@
    * save", or the save that precedes the close just succeeded).
    */
   function closeContentTab(tabId, discardEdits, fromServer) {
-    const idx = tabs.findIndex(t => {
-      return t.id === tabId;
-    });
+    const idx = tabs.findIndex(t => t.id === tabId);
     if (idx < 0) return;
     const tab = tabs[idx];
     if (tab.contentDirty && !discardEdits) {
@@ -4454,6 +4463,7 @@
       holder,
       tab.contentIsMarkdown ? markdownReportToHtml(src) : src,
       true,
+      tab,
     );
     wireContentPreviewSaveKey(tab, iframe);
   }
@@ -4850,14 +4860,20 @@
   // only, i.e. an opaque origin), with the Copy / Select All context
   // menu shipped into the document (see withContentContextMenu) and,
   // for an editable preview, the Ctrl/Cmd+S bridge. Returns the
-  // iframe so the caller can wire its save port.
-  function appendContentHtmlFrame(view, html, saveKeyBridge) {
+  // iframe so the caller can wire its save port.  The pictures the
+  // document names by file path (relative to content tab *tab*'s
+  // file) are fetched first, so the document appears once they are
+  // in (see inlinePreviewImages); an opaque origin could not load
+  // them itself.
+  function appendContentHtmlFrame(view, html, saveKeyBridge, tab) {
     const iframe = document.createElement('iframe');
     iframe.className = 'content-html-frame';
     iframe.setAttribute('sandbox', 'allow-scripts');
     if (saveKeyBridge) html = withContentSaveKeyBridge(html || '');
-    iframe.srcdoc = withMobileSwipe(withContentContextMenu(html));
     view.appendChild(iframe);
+    inlinePreviewImages(html, tab, ready => {
+      iframe.srcdoc = withMobileSwipe(withContentContextMenu(ready));
+    });
     return iframe;
   }
 
@@ -4870,23 +4886,30 @@
     if (typeof MessageChannel !== 'function') return;
     // The port of the iframe this one replaces is done with.
     closeContentPreviewPort(tab);
-    // eslint-disable-next-line no-undef -- MessageChannel is a browser global
-    const channel = new MessageChannel();
-    tab.contentPreviewPort = channel.port1;
+    // Every load of the frame gets a fresh channel: a transferred
+    // port2 is spent, and the frame loads again when a picture of
+    // the document arrives late (see inlinePreviewImages).
     iframe.addEventListener('load', () => {
+      // A frame already replaced must not take over the port of the
+      // one that replaced it.
+      if (!iframe.isConnected) return;
+      closeContentPreviewPort(tab);
+      // eslint-disable-next-line no-undef -- MessageChannel is a browser global
+      const channel = new MessageChannel();
+      tab.contentPreviewPort = channel.port1;
+      channel.port1.onmessage = () => {
+        // Saves only while this tab is the one on screen and still
+        // shows THIS iframe (a re-rendered preview gets a new port).
+        if (shownContentTabId() !== tab.id || !tab.contentEditor) return;
+        if (!iframe.isConnected) return;
+        saveContentTab(tab, false);
+      };
       try {
         iframe.contentWindow.postMessage({kissPreviewSavePort: true}, '*', [
           channel.port2,
         ]);
       } catch (_e) {}
     });
-    channel.port1.onmessage = () => {
-      // Saves only while this tab is the one on screen and still
-      // shows THIS iframe (a re-rendered preview gets a new port).
-      if (shownContentTabId() !== tab.id || !tab.contentEditor) return;
-      if (!iframe.isConnected) return;
-      saveContentTab(tab, false);
-    };
   }
 
   /** Close a previewable tab's save port (its iframe is going away). */
@@ -4914,6 +4937,8 @@
         isMarkdown
           ? markdownReportToHtml(tab.contentSourceText)
           : tab.contentSourceText,
+        false,
+        tab,
       );
       return;
     }
@@ -4943,6 +4968,46 @@
     // Not a file on disk (a commit's patch, search results, a folder
     // listing): never "the file open in the editor" (editorContext).
     tab.contentNotAFile = ev.isVirtual === true || ev.isDirectory === true;
+    renderContentBody(tab, view, ev);
+    // Everything that lives on disk (a file of any kind, a folder
+    // listing) can be re-read from it; a commit's patch or a search
+    // result cannot.
+    if (!ev.isVirtual) appendContentRefreshBtn(tab, view);
+  }
+
+  /**
+   * Add the refresh button at the top right of a content tab's *view*:
+   * a click re-reads the tab's file from disk (``reloadContentTab``).
+   * A view with a Save bar gets it at the bar's right end, after Save;
+   * any other view (a PDF, an image, a report, a read-only preview, a
+   * folder listing) gets it floating in its top right corner.
+   *
+   * @param {Object} tab The content tab.
+   * @param {Element} view The tab's `.content-tab-view` element.
+   */
+  function appendContentRefreshBtn(tab, view) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'content-refresh-btn';
+    btn.setAttribute('aria-label', 'Reload from disk');
+    btn.setAttribute('data-tooltip', 'Reload from disk');
+    btn.innerHTML =
+      '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<polyline points="23 4 23 10 17 10"/>' +
+      '<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
+    btn.addEventListener('click', () => reloadContentTab(tab));
+    const bar = view.querySelector('.content-save-bar');
+    if (bar) {
+      bar.appendChild(btn);
+      return;
+    }
+    btn.classList.add('content-refresh-overlay');
+    view.appendChild(btn);
+  }
+
+  function renderContentBody(tab, view, ev) {
     const lower = (ev.name || '').toLowerCase();
     // A directory listing is plain text no matter what the directory is
     // named: without this guard a directory named foo.md or foo.html
@@ -5005,7 +5070,7 @@
       // the buffer, never the converted HTML.
       tab.contentSourceText = ev.source || '';
       tab.contentHasText = true;
-      appendContentHtmlFrame(view, ev.content || '');
+      appendContentHtmlFrame(view, ev.content || '', false, tab);
       return;
     }
     if (lower.endsWith('.html') || lower.endsWith('.htm')) {
@@ -5393,6 +5458,28 @@
   }
   tabCtxMenu.addEventListener('keydown', onTabCtxMenuKey);
 
+  /**
+   * Close the tabs *ids*, the one on screen last, so only that final
+   * close picks a successor: closing the active tab earlier would bring
+   * the next tab on screen (restore its transcript, fetch a deferred
+   * replay) only to close it on the next iteration.  A close takes the
+   * tab's descendants along, so the ids whose close removes the active
+   * tab (itself and its ancestors in the batch) go after the others,
+   * and only the outermost of them is closed: it removes the rest.
+   * @param {string[]} ids Tab ids.
+   */
+  function closeTabsActiveLast(ids) {
+    const removesActive = id =>
+      addDescendantTabs(new Set([id])).has(activeTabId);
+    const last = ids.filter(removesActive);
+    ids.filter(id => !removesActive(id)).forEach(id => closeTab(id));
+    if (last.length === 0) return;
+    const outermost = last.reduce((a, b) =>
+      addDescendantTabs(new Set([b])).has(a) ? b : a,
+    );
+    closeTab(outermost);
+  }
+
   function showTabContextMenu(x, y, tabId, anchorEl) {
     tabCtxMenu.innerHTML = '';
     tabCtxMenuAnchor = anchorEl || null;
@@ -5406,43 +5493,30 @@
       {
         label: 'Close Others',
         action: function () {
-          const ids = tabs
-            .filter(t => {
-              return t.id !== tabId;
-            })
-            .map(t => {
-              return t.id;
-            });
+          // Closing a chat takes its descendants along, so the kept
+          // tab's ancestors are spared too (or a sub-agent tab would
+          // close itself through its parent).
+          const keep = new Set([tabId]);
+          let anc = getTab(tabId);
+          while (anc && anc.parentTabId) {
+            keep.add(anc.parentTabId);
+            anc = getTab(anc.parentTabId);
+          }
+          const ids = tabs.filter(t => !keep.has(t.id)).map(t => t.id);
           if (tabId !== activeTabId) switchToTab(tabId);
-          ids.forEach(id => {
-            closeTab(id);
-          });
+          ids.forEach(id => closeTab(id));
         },
       },
       {
         label: 'Close All',
         action: function () {
-          const ids = tabs.map(t => {
-            return t.id;
-          });
-          ids.forEach(id => {
-            closeTab(id);
-          });
+          closeTabsActiveLast(tabs.map(t => t.id));
         },
       },
       {
         label: 'Close Inactive',
         action: function () {
-          const ids = tabs
-            .filter(t => {
-              return !t.isRunning;
-            })
-            .map(t => {
-              return t.id;
-            });
-          ids.forEach(id => {
-            closeTab(id);
-          });
+          closeTabsActiveLast(tabs.filter(t => !t.isRunning).map(t => t.id));
         },
       },
     ];
@@ -5738,7 +5812,6 @@
     renderTabBar();
     persistTabState();
     setRunningState(false);
-    t0 = null;
     registerTab(tab);
     api.newChat({tabId: tab.id});
     api.getWelcomeInfo();
@@ -5874,11 +5947,7 @@
   // (file views are per-user surfaces on every client, so they are
   // not mirrored).
   function reconcileTabs(list) {
-    const byId = new Map(
-      tabs.map(t => {
-        return [t.id, t];
-      }),
-    );
+    const byId = new Map(tabs.map(t => [t.id, t]));
     const inSnapshot = new Set();
     const next = [];
     // One tab per chat: the daemon's registry enforces the invariant,
@@ -5981,7 +6050,10 @@
     removedIds.forEach(forgetClosedTabState);
     tabs = next;
     if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
-    tabs.forEach(t => {
+    // placeSubagentTabAfterParent splices `tabs`, so walk a copy: each
+    // sub-agent is visited once, in its current order, and sibling
+    // blocks are rebuilt in that order instead of being shuffled.
+    tabs.slice().forEach(t => {
       if (t.isSubagentTab && t.parentTabId) {
         placeSubagentTabAfterParent(t, t.parentTabId);
       }
@@ -6065,14 +6137,16 @@
   // the user never folded.
   let inputDrawerCollapsed = false;
   let inputDrawerUserSet = false;
+  // The state the host persisted before this load (null on a first
+  // boot); read once for the drawer, draft and machine-pick blocks.
+  const bootState = transport.getState();
   {
-    const _saved = transport.getState();
     const _drawersTrusted =
-      _saved &&
-      typeof _saved === 'object' &&
-      _saved.drawersVersion >= DRAWERS_VERSION;
-    if (_drawersTrusted && _saved.inputDrawerUserSet) {
-      inputDrawerCollapsed = !!_saved.inputDrawerCollapsed;
+      bootState &&
+      typeof bootState === 'object' &&
+      bootState.drawersVersion >= DRAWERS_VERSION;
+    if (_drawersTrusted && bootState.inputDrawerUserSet) {
+      inputDrawerCollapsed = !!bootState.inputDrawerCollapsed;
       inputDrawerUserSet = true;
     }
   }
@@ -6104,7 +6178,7 @@
   // answer had arrived after all.
   let savedAskDrafts = null;
   (function () {
-    const saved = transport.getState();
+    const saved = bootState;
     const drafts = saved && saved.inputDrafts;
     if (drafts && typeof drafts === 'object') {
       savedInputDrafts = {};
@@ -6675,17 +6749,16 @@
   // metasections-coverage:end
 
   // The info subpanel of the task-info panel (#meta-info) shows the
-  // TASK UPDATE: the /ask agent's (src/kiss/agents/seas/ask/ask_sea.py)
-  // short answer to "what has this task done so far, and what are its
-  // partial results?" for the task running in the visible tab.  The
-  // daemon owns the update (kiss.server.task_update): it runs the
-  // agent once the tab's task is a minute old, again every 10 minutes
-  // while the panel keeps polling, and at once when the subpanel's
-  // refresh button is pressed.  So the client polls getTaskUpdate every
+  // TASK UPDATE for the task running in the visible tab: the daemon
+  // (kiss.server.task_update) renders it from the task's own events —
+  // its latest summary and the tool calls since — on every poll, with
+  // no model call; only the subpanel's refresh button runs the /ask
+  // agent (src/kiss/agents/seas/ask/ask_sea.py) on "what has this task
+  // done so far, and what are its partial results?", whose answer then
+  // sits above the digest.  So the client polls getTaskUpdate every
   // META_INFO_POLL_MS while the task runs; the reply's sig makes an
-  // unchanged update cost one small message per poll, a task younger
-  // than a minute renders as the subpanel's "first update due" state
-  // and a run in flight as its "updating" state.
+  // unchanged update cost one small message per poll, and a run in
+  // flight renders as the subpanel's "updating" state.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
@@ -6744,13 +6817,12 @@
 
   /**
    * Paint one task-update state into the info subpanel: the answer
-   * body, the status line under the header ("Updating…", the time the
-   * first update is due, or the time and cost of the last run, plus
-   * the last run's failure) and the refresh button's spinning /
-   * disabled state.
+   * body, the status line under the header ("Updating…" or the time
+   * and cost of the last run, plus the last run's failure) and the
+   * refresh button's spinning / disabled state.
    *
-   * @param {object|null} state {content, running, updatedAt, dueAt,
-   *   cost, error}, or null to empty and hide the subpanel.
+   * @param {object|null} state {content, running, updatedAt, cost,
+   *   error}, or null to empty and hide the subpanel.
    */
   function renderTaskUpdate(state) {
     if (!metaInfoContent) return;
@@ -6758,13 +6830,7 @@
       state && typeof state.content === 'string' ? state.content : '';
     const running = !!(state && state.running);
     const error = state && typeof state.error === 'string' ? state.error : '';
-    // The daemon dates the first run a minute after the task started;
-    // until it has run the subpanel says so instead of staying blank.
-    const firstDueAt =
-      state && !state.updatedAt && Number(state.dueAt) > 0
-        ? Number(state.dueAt)
-        : 0;
-    if (!content.trim() && !running && !error && !firstDueAt) {
+    if (!content.trim() && !running && !error) {
       setMetaInfoHTML('');
       if (metaInfoStatus) metaInfoStatus.textContent = '';
       if (metaInfoRefreshBtn) {
@@ -6783,8 +6849,6 @@
         status = 'Updated ' + shortClockTime(state.updatedAt);
         const cost = Number(state.cost);
         if (cost > 0) status += ' \u00b7 ' + fmtCost(cost);
-      } else if (firstDueAt) {
-        status = 'First update at ' + shortClockTime(firstDueAt);
       }
       if (error) {
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
@@ -6793,14 +6857,15 @@
     }
     if (content.trim()) {
       setMetaInfoHTML(taskUpdateBodyHTML(content));
+      // The update is the polled task's own report: its pictures are
+      // files of that task's work dir.
+      loadInlineImages(
+        metaInfoContent,
+        workDirForTab(metaInfoTabId) || '',
+        metaInfoTabId,
+      );
     } else {
-      let pending = 'No update yet.';
-      if (running) pending = 'Preparing the first update\u2026';
-      else if (firstDueAt) {
-        pending =
-          'The first update is asked a minute after the task starts; ' +
-          'press refresh to ask now.';
-      }
+      const pending = running ? 'Asking the task\u2026' : 'No update yet.';
       setMetaInfoHTML('<p class="meta-info-pending">' + pending + '</p>');
     }
     if (metaInfoRefreshBtn) {
@@ -6866,12 +6931,19 @@
       return;
     }
     if (!metaInfoTabId) return;
+    // A tab bound to a remote machine runs its task there, under the
+    // same tab id: the poll names the machine (the daemon's own
+    // `tabMachine` binding, never the drop-down's unsent pick) and
+    // the daemon forwards it to that machine's daemon, which owns the
+    // update.  '' is this machine.
+    const machine = tabBoundMachine(metaInfoTabId);
     try {
       api.getTaskUpdate({
         tabId: metaInfoTabId,
         knownSig: metaInfoSig,
         token: String(metaInfoGen),
         refresh: !!refresh,
+        machine: machine,
       });
     } catch (_e) {
       // Not connected yet; the next poll retries.
@@ -6945,7 +7017,6 @@
       content: typeof ev.content === 'string' ? ev.content : '',
       running: !!ev.running,
       updatedAt: Number(ev.updatedAt) || 0,
-      dueAt: Number(ev.dueAt) || 0,
       cost: Number(ev.cost) || 0,
       error: typeof ev.error === 'string' ? ev.error : '',
     });
@@ -7221,8 +7292,8 @@
    */
   function syncSidebarPanelsMachine() {
     if (sidebarMachine() === panelsMachine) return;
+    retargetSidebarPanels();
     if (daemonConnected) requestSidebarPanels(false);
-    else retargetSidebarPanels();
   }
 
   /** Point the subpanels at the chat header's machine, emptied if it changed. */
@@ -7949,12 +8020,14 @@
             }),
         ),
       );
-      const copyBtn = makeSidebarCopyButton(
-        task,
-        'Copy the scheduled ' + kind + ' to clipboard',
+      top.appendChild(
+        makeCopyButton(
+          task,
+          'sidebar-item-copy',
+          'the scheduled ' + kind,
+          true,
+        ),
       );
-      copyBtn.dataset.tooltip = 'Copy the scheduled ' + kind;
-      top.appendChild(copyBtn);
       const del = makeSidebarDeleteConfirm({
         ariaLabel: 'Delete the job',
         onConfirm: () => cronAction({action: 'remove', jobId: job.id}),
@@ -8102,12 +8175,14 @@
       );
       if (m.local)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'local'));
-      const copyBtn = makeSidebarCopyButton(
-        String(m.address),
-        'Copy the machine address to clipboard',
+      top.appendChild(
+        makeCopyButton(
+          String(m.address),
+          'sidebar-item-copy',
+          'the machine address',
+          true,
+        ),
       );
-      copyBtn.dataset.tooltip = 'Copy the machine address';
-      top.appendChild(copyBtn);
       const del = makeSidebarDeleteConfirm({
         ariaLabel: 'Delete the machine',
         onConfirm: () => api.machineAction({action: 'remove', name: m.name}),
@@ -8309,8 +8384,7 @@
    */
   function renderChatMachine() {
     if (!chatMachineSelect) return;
-    const tab = getTab(activeTabId);
-    const chosen = tab && !tab.isContentTab ? tabMachine(tab.id) : '';
+    const chosen = activeMachine();
     const reachable = reachableMachines || [];
     chatMachineSelect.textContent = '';
     if (localMachineName || reachable.length || chosen) {
@@ -8647,22 +8721,6 @@
   let spendScrollFromRight = 0;
 
   /**
-   * "YYYY-MM-DD" of a local date, the key of the reply's days.
-   *
-   * @param {Date} d The date.
-   * @returns {string} The key.
-   */
-  function spendDateKey(d) {
-    return (
-      d.getFullYear() +
-      '-' +
-      String(d.getMonth() + 1).padStart(2, '0') +
-      '-' +
-      String(d.getDate()).padStart(2, '0')
-    );
-  }
-
-  /**
    * A short dollar amount: cents below $1000 ("$4.20"), then the
    * three-significant-digit K/M/B form of fmtTokens ("$2.04K").
    *
@@ -8824,7 +8882,7 @@
         cell.classList.add('blank');
         continue;
       }
-      const key = spendDateKey(
+      const key = isoDateOf(
         new Date(
           start.getFullYear(),
           start.getMonth(),
@@ -9295,20 +9353,19 @@
    * @param {string} workDir The workspace folder it belongs to ('' for
    *     the one the side views browse).
    * @param {string} machine The machine the file is on ('' for this one).
+   * @param {boolean} [background] Open the tab without leaving the
+   *     current one ("Open to the Side"); the drawer then stays.
    */
-  function openWorkspaceFile(path, workDir, machine) {
-    api.send(
-      onMachine(
-        {
-          type: 'openFile',
-          path: path,
-          workDir: workDir || sidebarWorkDir(),
-          tabId: activeTabId,
-        },
-        machine,
-      ),
-    );
-    closeMetaDrawerForContent();
+  function openWorkspaceFile(path, workDir, machine, background) {
+    const msg = {
+      type: 'openFile',
+      path: path,
+      workDir: workDir || sidebarWorkDir(),
+      tabId: activeTabId,
+    };
+    if (background) msg.background = true;
+    api.send(onMachine(msg, machine));
+    if (!background) closeMetaDrawerForContent();
   }
 
   /** The phone layout's task-info drawer closes so a content tab
@@ -9321,19 +9378,18 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  /** A 16px stroke icon: `d` is one or more SVG path strings. */
-  function svgIcon(cls, paths, fill) {
+  /** A 16px stroke icon: *paths* is one or more SVG path strings. */
+  function svgIcon(paths) {
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('viewBox', '0 0 16 16');
     svg.setAttribute('width', '16');
     svg.setAttribute('height', '16');
-    svg.setAttribute('fill', fill ? 'currentColor' : 'none');
-    svg.setAttribute('stroke', fill ? 'none' : 'currentColor');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
     svg.setAttribute('stroke-width', '1.3');
     svg.setAttribute('stroke-linecap', 'round');
     svg.setAttribute('stroke-linejoin', 'round');
     svg.setAttribute('aria-hidden', 'true');
-    if (cls) svg.setAttribute('class', cls);
     paths.forEach(d => {
       const p = document.createElementNS(SVG_NS, 'path');
       p.setAttribute('d', d);
@@ -9479,8 +9535,8 @@
     return machine ? roots : dedupeRoots(roots.concat(explorerExtraRoots));
   }
 
-  function explorerToken(path) {
-    return explorerGeneration + ':' + path;
+  function explorerToken(key) {
+    return explorerGeneration + ':' + key;
   }
 
   /**
@@ -9491,20 +9547,23 @@
    */
   function refreshExplorer(force) {
     if (!explorerTree) return;
-    const wd = sidebarWorkDir();
-    const machine = sidebarMachine();
-    const roots = explorerRoots(wd, machine);
-    const key = JSON.stringify(roots);
-    if (
-      wd === explorerRoot &&
-      machine === explorerMachine &&
-      key === explorerRootsKey &&
-      explorerDirs.size
-    ) {
+    if (explorerTreeInSync()) {
       if (force) reloadExplorerDirs();
       return;
     }
-    buildExplorerRoot(wd, roots, '', machine);
+    const wd = sidebarWorkDir();
+    const machine = sidebarMachine();
+    buildExplorerRoot(wd, explorerRoots(wd, machine), '', machine);
+  }
+
+  /** Re-list the Explorer's folders now, or when the view next shows. */
+  function reloadExplorerNow() {
+    if (!workspaceViewShown(explorerSection)) {
+      explorerDirty = true;
+      return;
+    }
+    explorerDirty = false;
+    refreshExplorer(true);
   }
 
   /**
@@ -9527,7 +9586,6 @@
   function buildExplorerRoot(wd, roots, expandRoot, machine) {
     explorerRoot = wd;
     if (machine !== undefined) explorerMachine = machine;
-    roots = roots || explorerRoots(wd, explorerMachine);
     setExplorerRootsKey(roots);
     // The added folders are this machine's: a remote machine's tree
     // offers no "Add Folder".
@@ -9577,7 +9635,7 @@
       mark.className = 'explorer-root-mark';
       mark.title = 'Current working directory';
       mark.setAttribute('aria-label', 'Current working directory');
-      mark.appendChild(svgIcon('', ICON_CHECK));
+      mark.appendChild(svgIcon(ICON_CHECK));
       actions.appendChild(mark);
       return actions;
     }
@@ -9587,7 +9645,7 @@
     setBtn.title = 'Set as Working Directory';
     setBtn.setAttribute('aria-label', 'Set ' + dir + ' as working directory');
     setBtn.tabIndex = -1;
-    setBtn.appendChild(svgIcon('', ICON_CHECK));
+    setBtn.appendChild(svgIcon(ICON_CHECK));
     setBtn.addEventListener('click', e => {
       e.stopPropagation();
       setExplorerWorkDir(dir);
@@ -9599,7 +9657,7 @@
     removeBtn.title = 'Remove Folder from Explorer';
     removeBtn.setAttribute('aria-label', 'Remove ' + dir + ' from Explorer');
     removeBtn.tabIndex = -1;
-    removeBtn.appendChild(svgIcon('', ICON_CLOSE));
+    removeBtn.appendChild(svgIcon(ICON_CLOSE));
     removeBtn.addEventListener('click', e => {
       e.stopPropagation();
       removeExplorerRoot(dir);
@@ -9856,11 +9914,11 @@
     row.title = entry.path;
     const chevron = document.createElement('span');
     chevron.className = 'explorer-chevron';
-    chevron.appendChild(svgIcon('', ICON_CHEVRON));
+    chevron.appendChild(svgIcon(ICON_CHEVRON));
     row.appendChild(chevron);
     const icon = document.createElement('span');
     icon.className = 'explorer-icon';
-    icon.appendChild(svgIcon('', entry.isDir ? ICON_FOLDER : ICON_FILE));
+    icon.appendChild(svgIcon(entry.isDir ? ICON_FOLDER : ICON_FILE));
     row.appendChild(icon);
     const name = document.createElement('span');
     name.className = 'explorer-name';
@@ -9938,7 +9996,7 @@
     const icon = row.querySelector('.explorer-icon');
     if (icon) {
       icon.textContent = '';
-      icon.appendChild(svgIcon('', open ? ICON_FOLDER_OPEN : ICON_FOLDER));
+      icon.appendChild(svgIcon(open ? ICON_FOLDER_OPEN : ICON_FOLDER));
     }
     if (open && !node.loaded && !node.loading) {
       if (explorerIsCycle(node)) {
@@ -10506,7 +10564,7 @@
       (status === 'D' ? ' (deleted)' : '');
     const icon = document.createElement('span');
     icon.className = 'explorer-icon';
-    icon.appendChild(svgIcon('', ICON_FILE));
+    icon.appendChild(svgIcon(ICON_FILE));
     row.appendChild(icon);
     const name = document.createElement('span');
     name.className = 'scm-path';
@@ -10687,7 +10745,7 @@
    * the repository: their changes belong to other tasks.
    */
   function scmBadgeWorktree(status, worktrees) {
-    const task = String(status.taskWorktree || '').replace(/[/\\]+$/, '');
+    const task = String(status.taskWorktree || '');
     if (task) {
       // The task's folder may sit below the worktree root (a task run in
       // a sub-folder of the repository): the deepest worktree whose path
@@ -10695,13 +10753,9 @@
       let own = null;
       let ownLen = 0;
       for (const wt of worktrees) {
-        const path = String(wt.path || '').replace(/[/\\]+$/, '');
+        const path = normalizeRootPath(wt.path);
         if (!path) continue;
-        const inside =
-          task === path ||
-          task.startsWith(path + '/') ||
-          task.startsWith(path + '\\');
-        if (inside && path.length > ownLen) {
+        if (pathWithin(task, path) && path.length > ownLen) {
           own = wt;
           ownLen = path.length;
         }
@@ -10729,7 +10783,7 @@
     hdr.setAttribute('aria-expanded', open ? 'true' : 'false');
     const chevron = document.createElement('span');
     chevron.className = 'explorer-chevron';
-    chevron.appendChild(svgIcon('', ICON_CHEVRON));
+    chevron.appendChild(svgIcon(ICON_CHEVRON));
     hdr.appendChild(chevron);
     const name = document.createElement('span');
     name.className = 'scm-worktree-name';
@@ -11545,9 +11599,7 @@
         : null;
     }
     // Both views (may) have changed; one out of sight reloads when shown.
-    explorerDirty = true;
-    scmDirty = true;
-    refreshSidebarDataViews(false);
+    refreshSidebarDataViews(true);
     // The folder that received the entry opens so the result is seen
     // (VS Code reveals a pasted / created entry the same way).
     const target =
@@ -11679,7 +11731,7 @@
       host.appendChild(chevron);
       const icon = document.createElement('span');
       icon.className = 'explorer-icon';
-      icon.appendChild(svgIcon('', isDir ? ICON_FOLDER : ICON_FILE));
+      icon.appendChild(svgIcon(isDir ? ICON_FOLDER : ICON_FILE));
       host.appendChild(icon);
       const name = document.createElement('span');
       name.className = 'explorer-name';
@@ -11722,22 +11774,6 @@
   }
 
   // ---- Explorer context menu ----
-
-  /** Open a file as a content tab without leaving the current tab. */
-  function openWorkspaceFileToSide(path, root) {
-    api.send(
-      onMachine(
-        {
-          type: 'openFile',
-          path: path,
-          workDir: root || explorerRoot || sidebarWorkDir(),
-          tabId: activeTabId,
-          background: true,
-        },
-        explorerMachine,
-      ),
-    );
-  }
 
   /** Whether *row* is a top-level Explorer folder. */
   function explorerRowIsRoot(row) {
@@ -11877,7 +11913,12 @@
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
         run: () => {
           files.forEach(r => {
-            openWorkspaceFileToSide(r.dataset.explorerPath, explorerRowRoot(r));
+            openWorkspaceFile(
+              r.dataset.explorerPath,
+              explorerRowRoot(r) || explorerRoot,
+              explorerMachine,
+              true,
+            );
           });
         },
       });
@@ -11960,7 +12001,8 @@
         id: 'open-to-side',
         label: 'Open to the Side',
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
-        run: () => openWorkspaceFileToSide(path, root),
+        run: () =>
+          openWorkspaceFile(path, root || explorerRoot, explorerMachine, true),
       });
     }
     items.push({separator: true});
@@ -12253,8 +12295,7 @@
     }
     // The repository (may have) changed: reload both views.
     reloadSourceControlNow();
-    explorerDirty = true;
-    refreshSidebarDataViews(false);
+    reloadExplorerNow();
   }
 
   function handleGitShow(ev) {
@@ -12850,7 +12891,7 @@
       item.dataset.path = joinPath(folderPickerDir, en.name);
       item.title = item.dataset.path;
       item.setAttribute('aria-selected', 'false');
-      item.appendChild(svgIcon('', ICON_FOLDER));
+      item.appendChild(svgIcon(ICON_FOLDER));
       const name = document.createElement('span');
       name.textContent = en.name;
       item.appendChild(name);
@@ -12962,22 +13003,32 @@
 
   // ---- The working directories of remote machines --------------------
   // Per registered machine, from the daemon's machineWorkDirs reply:
-  // that machine's working directory (workDir) and the directories
+  // that machine's working directory (workDir), the directories
   // selected there so far (recent: {path, ts} rows, most recent
-  // first), or the error of a machine that could not be asked.  The
-  // chat header's drop-down lists these, not this daemon's, while the
-  // active tab runs its tasks on the machine.
+  // first) and its configured default task budget (maxBudget: what a
+  // task submitted there without one of its own runs under; null
+  // until known), or the error of a machine that could not be asked.
+  // The chat header's drop-down lists the directories, not this
+  // daemon's, while the active tab runs its tasks on the machine; the
+  // Task Info rows of a chat headed there show the directory and the
+  // budget until its task has settings of its own.
   const machineWorkDirs = new Map();
 
+  /** What a machine nothing is known of yet looks like in machineWorkDirs. */
+  function unknownMachineDirs() {
+    return {workDir: '', recent: [], maxBudget: null};
+  }
+
   /**
-   * What is known of *machine*'s directories.
+   * What is known of *machine*'s directories and default budget.
    *
    * @param {string} machine The registered machine's name.
-   * @returns {{workDir: string, recent: Array<{path: string, ts: number}>}}
-   *     The machine's directories; empty until its reply came.
+   * @returns {{workDir: string, recent: Array<{path: string, ts: number}>,
+   *     maxBudget: ?number}} The machine's directories and default task
+   *     budget; empty (null budget) until its reply came.
    */
   function machineDirs(machine) {
-    return machineWorkDirs.get(machine) || {workDir: '', recent: []};
+    return machineWorkDirs.get(machine) || unknownMachineDirs();
   }
 
   /**
@@ -12991,8 +13042,10 @@
 
   /**
    * The active tab's machine changed to *machine*: repaint the
-   * drop-down with its directories, and the Explorer and Source
-   * Control views with its working directory.  A list at hand is
+   * drop-down with its directories, the Explorer and Source Control
+   * views with its working directory, and the Task Info rows of a
+   * chat whose task has no settings yet (they describe the next task:
+   * its machine, directory and default budget).  A list at hand is
    * asked again (another surface may have selected a directory there
    * since the reply it came from); without one the repaint asks.
    *
@@ -13004,16 +13057,19 @@
       requestMachineWorkDirs(machine);
     renderChatWorkDir();
     refreshSidebarDataViews(false);
+    updateMetaTaskDetails(metaShownSettings);
   }
 
   /**
    * The daemon's `machineWorkDirs` reply: remember the machine's
-   * directories and repaint the drop-down when the active tab runs
-   * its tasks there.  The reply to a pick (`set`) that failed is
-   * reported like a refused local pick; a failed read is not (the
-   * drop-down shows no directory, "Choose ..." stays a pick away).
+   * directories and default budget, and repaint the drop-down (and
+   * the Task Info rows of a chat without task settings) when the
+   * active tab runs its tasks there.  The reply to a pick (`set`) that
+   * failed is reported like a refused local pick; a failed read is not
+   * (the drop-down shows no directory, "Choose ..." stays a pick away).
    *
-   * @param {Object} ev The reply (machine, workDir, recentWorkDirs, set, error).
+   * @param {Object} ev The reply (machine, workDir, recentWorkDirs,
+   *     maxBudget, set, error).
    */
   function handleMachineWorkDirs(ev) {
     const machine = String(ev.machine || '');
@@ -13021,14 +13077,21 @@
     if (ev.error) {
       if (ev.set) setWorkDirError(String(ev.error));
       if (!machineWorkDirs.has(machine))
-        machineWorkDirs.set(machine, {workDir: '', recent: []});
+        machineWorkDirs.set(machine, unknownMachineDirs());
       return;
     }
     machineWorkDirs.set(machine, {
       workDir: String(ev.workDir || ''),
       recent: workDirRows(ev.recentWorkDirs),
+      maxBudget: finiteBudget(ev.maxBudget),
     });
     if (activeMachine() === machine) renderChatWorkDir();
+    // The Task Info rows of the chat the panel describes (the visible
+    // chat, or the one a content tab left it on) show the directory
+    // and budget just reported while its task has no settings.
+    const metaChat = metaInfoChatTabId();
+    if (metaChat && tabMachine(metaChat) === machine)
+      updateMetaTaskDetails(metaShownSettings);
     // The side views of a chat bound to the machine browse the
     // directory just reported.
     if (sidebarMachine() === machine) refreshSidebarDataViews(false);
@@ -13805,15 +13868,17 @@
   }
 
   /**
-   * Show or hide the Parent task row: shown whenever the task names a
-   * parent (a subagent's task does; a top-level task does not).
+   * Paint an optional task-info row (Parent task, Agent): hidden when
+   * its text is the '—' placeholder, shown with the text otherwise.
    *
+   * @param {string} itemId The row element's id.
+   * @param {string} valueId The row's value element's id.
    * @param {string} text The row's value text ('—' when none).
    */
-  function setMetaParentTask(text) {
-    const item = document.getElementById('meta-parent-item');
+  function setMetaOptionalRow(itemId, valueId, text) {
+    const item = document.getElementById(itemId);
     if (item) item.hidden = text === '\u2014';
-    setMetaValue('meta-parent-id', text);
+    setMetaValue(valueId, text);
   }
 
   /**
@@ -13851,26 +13916,19 @@
   }
 
   /**
-   * Show or hide the Agent row: shown whenever the task ran an agent
-   * script or something replaced the caller's settings.
-   *
-   * @param {string} text The row's value text ('—' when none).
-   */
-  function setMetaAgent(text) {
-    const item = document.getElementById('meta-agent-item');
-    if (item) item.hidden = text === '\u2014';
-    setMetaValue('meta-agent', text);
-  }
-
-  /**
    * Paint the task-settings items of the task-info panel (#meta-panel:
    * the desktop dock or the phone drawer): Workdir, Max budget, Date,
    * Base model, Chat id, Task id
    * and — when the task has one — Parent task.  This is the choke point every task-settings repaint (tab
    * switch, task_settings event, scroll into a neighbouring task) goes
    * through, so the items always describe the task the tab label
-   * names.  A task without settings falls back to the tab's
-   * pinned workdir and the configured default budget, and shows '—'
+   * names.  The settings of a task that ran on a registered machine
+   * are that machine's daemon's (relayed with its transcript), so the
+   * rows need no machine stamp of their own.  A task without settings
+   * describes the tab's NEXT task instead (nextTaskDefaults): the
+   * machine it goes to, that machine's working directory and its
+   * configured default budget — this daemon's, or the picked
+   * machine's as its machineWorkDirs reply told them — and shows '—'
    * for the rest.  The info subpanel's poll target follows the same
    * tab (setMetaInfoTarget), keeping the rows and the task update on
    * the same task.
@@ -13882,28 +13940,37 @@
     s = metaShownSettings;
     reportVisibleTask(s);
     if (!metaWorkdirEl && !metaMaxBudgetEl) return;
+    // The chat the panel describes: the visible tab, or the chat a
+    // content tab (a file view) left it on (metaInfoChatTabId) — a
+    // content tab has no machine, binding or task of its own.
+    const chatTabId = metaInfoChatTabId() || activeTabId;
+    const next = nextTaskDefaults(chatTabId);
     // A filesystem root is never a real workspace (replayed historical
     // tasks are a known source of poisoned root paths — see
-    // workDirForTab): fall back exactly like workDirForTab does, and
-    // like the server's dispatch does for the poll, so the reply's
-    // workDir echo keeps matching the poll target.
+    // workDirForTab): fall back exactly like workDirForTab does.
     const rawWd = s && s.work_dir ? String(s.work_dir) : '';
-    const wd =
-      (rawWd && !isRootDir(rawWd) ? rawWd : '') || workDirForTab(activeTabId);
+    const wd = (rawWd && !isRootDir(rawWd) ? rawWd : '') || next.workDir;
     let budget = finiteBudget(s ? s.max_budget : null);
-    if (budget === null) budget = configMaxBudget;
+    if (budget === null) budget = next.maxBudget;
     if (metaWorkdirEl) metaWorkdirEl.textContent = wd || '\u2014';
     if (metaMaxBudgetEl) {
       metaMaxBudgetEl.textContent =
         budget === null ? '\u2014' : '$' + budget.toFixed(2);
     }
-    setMetaValue('meta-machine', metaText(taskMachineText(activeTabId)));
+    setMetaValue(
+      'meta-machine',
+      metaText(s ? taskMachineText(chatTabId) : machineText(next.machine)),
+    );
     setMetaValue('meta-date', metaText(s ? taskStartText(s.start_ts) : ''));
     setMetaValue('meta-model', metaText(s ? s.model : ''));
     setMetaValue('meta-chat-id', metaText(s ? s.chat_id : ''));
     setMetaValue('meta-task-id', metaTaskIdText(s));
-    setMetaParentTask(metaText(s ? s.parent_task_id : ''));
-    setMetaAgent(metaAgentText(s));
+    setMetaOptionalRow(
+      'meta-parent-item',
+      'meta-parent-id',
+      metaText(s ? s.parent_task_id : ''),
+    );
+    setMetaOptionalRow('meta-agent-item', 'meta-agent', metaAgentText(s));
     setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);
@@ -13932,8 +13999,44 @@
    * @returns {string} The machine's label.
    */
   function taskMachineText(tabId) {
-    const bound = tabBoundMachine(tabId);
-    return bound ? machineLabel(bound) : localMachineName;
+    return machineText(tabBoundMachine(tabId));
+  }
+
+  /**
+   * A machine as the Machine row shows it: the registered machine's
+   * label, or this daemon's own machine for '' ('' until its
+   * configData arrives).
+   *
+   * @param {string} machine The registered machine's name, '' for this machine.
+   * @returns {string} The machine's label.
+   */
+  function machineText(machine) {
+    return machine ? machineLabel(machine) : localMachineName;
+  }
+
+  /**
+   * What the next task of the chat `tabId` would run under — what the
+   * Task Info rows describe while the tab's task has no settings (a
+   * new chat; a task whose task_settings have not arrived yet): the
+   * machine it goes to (tabMachine: an unsent pick, else the daemon's
+   * binding, else the global pick), that machine's working directory
+   * (tabBrowseWorkDir; '' while a registered machine's is unknown)
+   * and that daemon's configured default task budget (configMaxBudget
+   * for this machine, the machine's machineWorkDirs reply's maxBudget
+   * otherwise; null until known).  The chat header's drop-downs and
+   * the Explorer follow the same machine and directory, so the panel
+   * never contradicts them.
+   *
+   * @param {string} tabId The chat tab.
+   * @returns {{machine: string, workDir: string, maxBudget: ?number}}
+   */
+  function nextTaskDefaults(tabId) {
+    const machine = tabMachine(tabId);
+    return {
+      machine: machine,
+      workDir: tabBrowseWorkDir(tabId),
+      maxBudget: machine ? machineDirs(machine).maxBudget : configMaxBudget,
+    };
   }
 
   /**
@@ -14514,11 +14617,20 @@
   tooltipEl.setAttribute('role', 'tooltip');
   document.body.appendChild(tooltipEl);
   let tooltipTimer = null;
+  // The element the open tooltip describes.  A re-render that replaces
+  // it (a sidebar list rebuilt by the panel poll) fires neither
+  // mouseout nor focusout, so the observer closes the tooltip instead.
+  let tooltipAnchor = null;
+  const tooltipAnchorWatch = new MutationObserver(() => {
+    if (tooltipAnchor && !tooltipAnchor.isConnected) hideTooltip();
+  });
   function showTooltipFor(target) {
     // The hover timer may fire after a re-render replaced the element
     // under the pointer; a detached node measures 0x0 at the origin and
     // would park the tooltip in the corner with no mouseout to hide it.
     if (!target.isConnected) return;
+    tooltipAnchor = target;
+    tooltipAnchorWatch.observe(document.body, {childList: true, subtree: true});
     tooltipEl.textContent = target.dataset.tooltip;
     const rect = target.getBoundingClientRect();
     // Measure at the origin first: a fixed box placed near the right
@@ -14549,6 +14661,8 @@
   }
   function hideTooltip() {
     clearTimeout(tooltipTimer);
+    tooltipAnchor = null;
+    tooltipAnchorWatch.disconnect();
     tooltipEl.classList.remove('visible');
   }
   document.addEventListener('mouseover', e => {
@@ -14906,6 +15020,11 @@
         _pendingFileLinkSpans.delete(span);
       }
     }
+    dropPendingPathChecksOf(owner);
+  }
+
+  /** Drop every in-flight path-check key of tab *owner*. */
+  function dropPendingPathChecksOf(owner) {
     const prefix = owner + '\u0000';
     for (const key of Array.from(_pendingPathChecks)) {
       if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
@@ -14954,10 +15073,7 @@
         el.setAttribute('data-link-tab', fresh);
       }
     }
-    const prefix = old + '\u0000';
-    for (const key of Array.from(_pendingPathChecks)) {
-      if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
-    }
+    dropPendingPathChecksOf(old);
     reissueFileLinkChecks(fresh);
   }
 
@@ -15004,28 +15120,50 @@
    *     omitted.
    */
   function reissueFileLinkChecks(tabId) {
-    const groups = new Map();
+    const byOwner = new Map();
     for (const span of _pendingFileLinkSpans) {
-      const raw = _fileLinkPath(span);
-      if (!raw) continue;
       const owner = span.getAttribute('data-path-tab') || '';
       if (tabId !== undefined && owner !== tabId) continue;
+      if (!byOwner.has(owner)) byOwner.set(owner, []);
+      byOwner.get(owner).push(span);
+    }
+    for (const [owner, spans] of byOwner) {
+      queueFileLinkChecks(owner, spans, true);
+    }
+  }
+
+  /**
+   * Ask the host about the paths of *spans*, all stamped with tab
+   * *owner*: each span's key goes into the in-flight set and the paths
+   * are sent grouped by the workDir / machine the span was checked
+   * under (a reply resolves only spans stamped with the same pair).
+   *
+   * @param {string} owner The tab id the spans are stamped with.
+   * @param {Iterable<Element>} spans The spans to check.
+   * @param {boolean} skipInFlight Leave out a span whose key is
+   *     already in flight (a reissue) instead of re-adding it.
+   */
+  function queueFileLinkChecks(owner, spans, skipInFlight) {
+    const groups = new Map();
+    for (const span of spans) {
+      const raw = _fileLinkPath(span);
+      if (!raw) continue;
       const wd = span.getAttribute('data-path-wd') || '';
       const machine = span.getAttribute('data-path-machine') || '';
       const p = _stripLineSuffix(raw);
       const key = _fileLinkCacheKey(owner, wd, p, machine);
-      if (_pendingPathChecks.has(key)) continue;
+      if (skipInFlight && _pendingPathChecks.has(key)) continue;
       _pendingPathChecks.add(key);
-      const groupKey = owner + '\u0000' + wd + '\u0000' + machine;
+      const groupKey = wd + '\u0000' + machine;
       let group = groups.get(groupKey);
       if (!group) {
-        group = {owner, wd, machine, paths: []};
+        group = {wd, machine, paths: []};
         groups.set(groupKey, group);
       }
-      group.paths.push(p);
+      if (group.paths.indexOf(p) < 0) group.paths.push(p);
     }
     for (const g of groups.values()) {
-      sendCheckPaths(g.owner, g.wd, g.machine, g.paths);
+      sendCheckPaths(owner, g.wd, g.machine, g.paths);
     }
   }
 
@@ -15052,33 +15190,20 @@
     if (id === activeTabId) roots.push(O);
     const tab = getTab(id);
     if (tab && tab.outputFragment) roots.push(tab.outputFragment);
-    const groups = new Map();
+    const spans = [];
     for (const root of roots) {
       if (!root || !root.querySelectorAll) continue;
-      const spans = root.querySelectorAll(
+      const found = root.querySelectorAll(
         '[data-path], [data-path-candidate], [data-path-missing]',
       );
-      for (const span of spans) {
+      for (const span of found) {
         if ((span.getAttribute('data-path-tab') || '') !== owner) continue;
-        const raw = _fileLinkPath(span);
-        if (!raw) continue;
-        const wd = span.getAttribute('data-path-wd') || '';
-        const machine = span.getAttribute('data-path-machine') || '';
-        const p = _stripLineSuffix(raw);
+        if (!_fileLinkPath(span)) continue;
         _pendingFileLinkSpans.add(span);
-        _pendingPathChecks.add(_fileLinkCacheKey(owner, wd, p, machine));
-        const groupKey = wd + '\u0000' + machine;
-        let group = groups.get(groupKey);
-        if (!group) {
-          group = {wd, machine, paths: []};
-          groups.set(groupKey, group);
-        }
-        if (group.paths.indexOf(p) < 0) group.paths.push(p);
+        spans.push(span);
       }
     }
-    for (const g of groups.values()) {
-      sendCheckPaths(id, g.wd, g.machine, g.paths);
-    }
+    queueFileLinkChecks(owner, spans, false);
   }
 
   /**
@@ -16217,7 +16342,10 @@
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
     const rcBody = rc.querySelector('.rc-body');
-    if (rcBody) linkifyFilePaths(rcBody, workDir, ownerTabId);
+    if (rcBody) {
+      linkifyFilePaths(rcBody, workDir, ownerTabId);
+      loadInlineImages(rcBody, workDir, ownerTabId);
+    }
     return rc;
   }
 
@@ -16265,6 +16393,7 @@
     addCollapse(el, el.querySelector('.ask-answer-h'), ev.ts);
     hlBlock(el);
     linkifyFilePaths(body, workDir, ownerTabId);
+    loadInlineImages(body, workDir, ownerTabId);
     return el;
   }
 
@@ -16414,6 +16543,268 @@
       panel.classList.remove('collapsed');
       collapsePreview(panel);
     }
+  }
+
+  // ---- Pictures the agent wrote to disk ------------------------------
+  // A result (`<img src="tmp/plot.png">`), an answer, a Markdown panel
+  // or a previewed .html/.md file names its pictures by file path.
+  // The page's origin serves no files (and a sandboxed preview has no
+  // origin at all), so such a src never loads.  Each one is fetched
+  // over the authenticated connection with a tokened openFile and
+  // shown as a data: URI; the daemon echoes the token, so the reply
+  // settles that picture instead of opening a content tab.
+  const pendingInlineImages = new Map();
+  let inlineImageSeq = 0;
+
+  /**
+   * Whether an image *src* names a file (relative, absolute, `~/`
+   * or a Windows drive path) rather than a URL (`https:`, `data:`,
+   * `blob:`, `//cdn`, `#id`).
+   */
+  function isFilePathImageSrc(src) {
+    const s = String(src || '').trim();
+    if (!s) return false;
+    if (/^[a-z]:[\\/]/i.test(s)) return true;
+    return !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(s);
+  }
+
+  /**
+   * The directory part of *filePath*: '' when it has none, '/' for a
+   * file of the root directory.
+   */
+  function fileParentDir(filePath) {
+    const p = String(filePath || '');
+    const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    if (cut < 0) return '';
+    return cut === 0 ? p[0] : p.slice(0, cut);
+  }
+
+  /**
+   * *src*, a file path of an image, resolved against *baseDir*: its
+   * query and fragment (`chart.png?v=2`, `sprite.svg#view`) dropped,
+   * then percent-decoded (`my%20plot.png`), so a `%23` stays a `#` of
+   * the file name.  The join uses the separator *baseDir* itself uses
+   * (a backslash for a Windows path), so the daemon gets one native path
+   * rather than `C:\\repo\\reports/fig.png`.
+   */
+  function imageFilePath(src, baseDir) {
+    let s = String(src)
+      .trim()
+      .replace(/[?#].*$/, '');
+    try {
+      s = decodeURIComponent(s);
+    } catch (_e) {}
+    if (!baseDir || /^(?:[\\/]|~|[a-z]:[\\/])/i.test(s)) return s;
+    const sep =
+      baseDir.indexOf('\\') >= 0 && baseDir.indexOf('/') < 0 ? '\\' : '/';
+    return baseDir.replace(/[\\/]+$/, '') + sep + s.replace(/\//g, sep);
+  }
+
+  /** The base64 of *text*'s UTF-8 bytes. */
+  function utf8ToBase64(text) {
+    const bytes = new window.TextEncoder().encode(text);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return window.btoa(bin);
+  }
+
+  /**
+   * The data: URI of the picture a tokened openFile reply carries:
+   * the bytes of a binary image, or the text of an SVG (which the
+   * daemon serves as text, like any UTF-8 file); null for anything
+   * else (a missing file, a PDF, a text file).
+   */
+  function inlineImageDataUri(ev) {
+    if (
+      ev.binary &&
+      typeof ev.mime === 'string' &&
+      ev.mime.indexOf('image/') === 0 &&
+      ev.base64
+    ) {
+      return 'data:' + ev.mime + ';base64,' + ev.base64;
+    }
+    if (
+      typeof ev.content === 'string' &&
+      /\.svg$/i.test(String(ev.path || ''))
+    ) {
+      return 'data:image/svg+xml;base64,' + utf8ToBase64(ev.content);
+    }
+    return null;
+  }
+
+  /**
+   * Fetch the picture at file *path* for tab *owner*: `onDone` gets
+   * its data: URI, or null when the daemon has no image there.
+   *
+   * @param {string} path The file path (relative to *workDir*).
+   * @param {string} workDir The work dir relative paths resolve against.
+   * @param {string} owner The tab the file belongs to (its pending
+   *   worktree is searched too).
+   * @param {string} machine The registered machine the file is on, or ''.
+   * @param {Function} onDone Called once with the data: URI or null.
+   */
+  function requestInlineImage(path, workDir, owner, machine, onDone) {
+    const token = 'img-' + ++inlineImageSeq;
+    pendingInlineImages.set(token, onDone);
+    api.send(
+      onMachine(
+        {
+          type: 'openFile',
+          path: path,
+          workDir: workDir || '',
+          tabId: owner,
+          token: token,
+        },
+        machine,
+      ),
+    );
+  }
+
+  /**
+   * Whether a fileContent reply answers a picture request (see
+   * requestInlineImage); if so it is settled here and never opens a
+   * tab.
+   */
+  function handleInlineImageContent(ev) {
+    const onDone = ev.token ? pendingInlineImages.get(ev.token) : undefined;
+    if (!onDone) return false;
+    pendingInlineImages.delete(ev.token);
+    onDone(inlineImageDataUri(ev));
+    return true;
+  }
+
+  /**
+   * The connection dropped: its picture replies never come, so each
+   * pending picture is settled as unavailable (its alt text shows, a
+   * waiting preview renders) and forgotten.
+   */
+  function forgetInFlightInlineImages() {
+    const waiting = Array.from(pendingInlineImages.values());
+    pendingInlineImages.clear();
+    waiting.forEach(onDone => onDone(null));
+  }
+
+  /**
+   * Load the pictures of the `<img>` elements under *root* whose src
+   * is a file path (relative to *workDir*), the work dir of the task
+   * that produced the panel.  A picture the daemon cannot serve keeps
+   * its alt text and says why in its tooltip.
+   *
+   * @param {Element} root The rendered (sanitized) panel body.
+   * @param {string} workDir The owning task's work dir.
+   * @param {string} ownerTabId The tab that owns the transcript.
+   */
+  function loadInlineImages(root, workDir, ownerTabId) {
+    if (!root || !root.querySelectorAll) return;
+    const wd =
+      typeof workDir === 'string' ? workDir : workDirForTab(activeTabId) || '';
+    const owner = String(ownerTabId === undefined ? activeTabId : ownerTabId);
+    const machine = tabBoundMachine(owner);
+    const imgs = root.querySelectorAll('img[src]');
+    // One request per distinct src; the images that share it.
+    const bySrc = new Map();
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i];
+      const src = img.getAttribute('src');
+      if (!isFilePathImageSrc(src)) continue;
+      // The file src is taken off the element: left in place, the
+      // browser would request it from the page's origin and draw the
+      // broken-image icon until the picture arrives.
+      img.removeAttribute('src');
+      img.dataset.fileSrc = src;
+      if (!img.getAttribute('alt')) img.alt = src;
+      if (!bySrc.has(src)) bySrc.set(src, []);
+      bySrc.get(src).push(img);
+    }
+    bySrc.forEach((sharing, src) => {
+      requestInlineImage(imageFilePath(src, ''), wd, owner, machine, uri => {
+        sharing.forEach(img => {
+          if (uri) {
+            // Property assignment (never innerHTML): a data: URI in an
+            // <img> cannot run scripts, and kissSanitize already ran.
+            img.src = uri;
+          } else {
+            img.title = 'Cannot show ' + src;
+            img.classList.add('inline-img-missing');
+          }
+        });
+      });
+    });
+  }
+
+  // A preview whose pictures the daemon has not answered yet (a slow
+  // or absent machine) appears, with the pictures it has, after this;
+  // a picture answered later is painted in by another render.
+  const PREVIEW_IMAGES_WAIT_MS = 10000;
+
+  /** The serialized document *doc* (DOMParser's), doctype included. */
+  function serializeDocument(doc) {
+    const dt = doc.doctype ? '<!DOCTYPE ' + doc.doctype.name + '>' : '';
+    return dt + doc.documentElement.outerHTML;
+  }
+
+  /**
+   * Hand *onReady* the preview *html* of content tab *tab* with every
+   * `<img>` whose src is a file path (relative to the previewed
+   * file's own directory) rewritten to a data: URI of the picture:
+   * synchronously, and *html* untouched, when there is none to fetch;
+   * else once the daemon has answered for all of them, or after
+   * PREVIEW_IMAGES_WAIT_MS with the pictures answered so far (and
+   * once more for a picture answered later).  A picture the daemon
+   * cannot serve keeps its src.  The document is parsed (never
+   * searched as text, which would rewrite `<img` inside a script)
+   * and serialized again, scripts left as they were.
+   *
+   * @param {string} html The preview document.
+   * @param {Object|null} tab The content tab (its contentPath,
+   *   ownerTabId, ownerBrowseWorkDir and ownerBrowseMachine locate
+   *   the pictures).
+   * @param {Function} onReady Called with the document to show; again
+   *   when a late picture arrives.
+   */
+  function inlinePreviewImages(html, tab, onReady) {
+    const doc = new window.DOMParser().parseFromString(html, 'text/html');
+    const imgs = tab
+      ? Array.from(doc.querySelectorAll('img[src]')).filter(img =>
+          isFilePathImageSrc(img.getAttribute('src')),
+        )
+      : [];
+    if (!imgs.length) {
+      onReady(html);
+      return;
+    }
+    const baseDir = fileParentDir(tab.contentPath);
+    const owner = String(tab.ownerTabId || activeTabId);
+    // One request per distinct src; the images that share it.
+    const bySrc = new Map();
+    imgs.forEach(img => {
+      const src = img.getAttribute('src');
+      if (!bySrc.has(src)) bySrc.set(src, []);
+      bySrc.get(src).push(img);
+    });
+    let left = bySrc.size;
+    let shown = false;
+    const show = () => {
+      shown = true;
+      onReady(serializeDocument(doc));
+    };
+    const timer = setTimeout(show, PREVIEW_IMAGES_WAIT_MS);
+    bySrc.forEach((sharing, src) => {
+      requestInlineImage(
+        imageFilePath(src, baseDir),
+        tab.ownerBrowseWorkDir || '',
+        owner,
+        tab.ownerBrowseMachine || '',
+        uri => {
+          if (uri) sharing.forEach(img => img.setAttribute('src', uri));
+          left--;
+          if (left === 0) clearTimeout(timer);
+          // Once the timer showed the preview, only a picture that
+          // arrived (not a failed one) is worth another render.
+          if (shown ? uri : left === 0) show();
+        },
+      );
+    });
   }
 
   // Auto-scroll: the chat follows the tail of the latest event panel
@@ -16666,6 +17057,7 @@
       el.innerHTML = kissSanitize(marked.parse(raw));
       hlBlock(el);
       linkifyFilePaths(el, workDir, ownerTabId);
+      loadInlineImages(el, workDir, ownerTabId);
     } else {
       el.textContent = raw;
     }
@@ -16785,6 +17177,7 @@
             tState.txtNode.appendData(tState.txtPending);
           }
           linkifyFilePaths(tState.txtEl, evWorkDir, evOwnerTab);
+          loadInlineImages(tState.txtEl, evWorkDir, evOwnerTab);
           tState.txtEl = null;
           tState.txtBuf = '';
           tState.txtNode = null;
@@ -16871,57 +17264,6 @@
           c.classList.add('tc-path');
         if (ev.description && DESCRIPTION_TITLED_TOOLS.has(ev.name))
           c.classList.add('tc-desc');
-        let b = '';
-        if (ev.path) {
-          const ep = esc(ev.path).replace(/"/g, '&quot;');
-          b +=
-            '<div class="tc-arg tc-arg-path"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
-            ep +
-            '">' +
-            esc(ev.path) +
-            '</span></div>';
-        }
-        if (ev.description && !isSummary)
-          b +=
-            '<div class="tc-arg tc-arg-desc"><span class="tc-arg-name">description:</span> <span class="tc-arg-val">' +
-            esc(ev.description) +
-            '</span></div>';
-        if (ev.command)
-          b +=
-            '<pre><code class="language-bash">' +
-            esc(ev.command) +
-            '</code></pre>';
-        if (ev.content) {
-          const lc = ev.lang ? 'language-' + esc(ev.lang) : '';
-          b +=
-            '<pre><code class="' +
-            lc +
-            '">' +
-            esc(ev.content) +
-            '</code></pre>';
-        }
-        if (ev.old_string !== undefined && ev.new_string !== undefined) {
-          b += renderDiff(ev.old_string, ev.new_string);
-        } else {
-          if (ev.old_string !== undefined)
-            b += '<div class="diff-old">- ' + esc(ev.old_string) + '</div>';
-          if (ev.new_string !== undefined)
-            b += '<div class="diff-new">+ ' + esc(ev.new_string) + '</div>';
-        }
-        if (ev.extras) {
-          for (const k in ev.extras) {
-            if (k === 'audioB64' || k === 'audioMime') continue;
-            b +=
-              '<div class="extra">' +
-              esc(k) +
-              ': ' +
-              esc(ev.extras[k]) +
-              '</div>';
-          }
-        }
-        const tcBody = mkEl('div', 'tc-b');
-        tcBody.innerHTML =
-          b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
         if (isQuestion) {
           const rawQ = (ev.extras && ev.extras.question) || '';
@@ -16944,6 +17286,59 @@
             ),
           );
         } else {
+          // The argument rows (path, description, command, content,
+          // diff, extras); a Question or a summary renders its own body.
+          let b = '';
+          if (ev.path) {
+            const ep = esc(ev.path).replace(/"/g, '&quot;');
+            b +=
+              '<div class="tc-arg tc-arg-path"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
+              ep +
+              '">' +
+              esc(ev.path) +
+              '</span></div>';
+          }
+          if (ev.description)
+            b +=
+              '<div class="tc-arg tc-arg-desc"><span class="tc-arg-name">description:</span> <span class="tc-arg-val">' +
+              esc(ev.description) +
+              '</span></div>';
+          if (ev.command)
+            b +=
+              '<pre><code class="language-bash">' +
+              esc(ev.command) +
+              '</code></pre>';
+          if (ev.content) {
+            const lc = ev.lang ? 'language-' + esc(ev.lang) : '';
+            b +=
+              '<pre><code class="' +
+              lc +
+              '">' +
+              esc(ev.content) +
+              '</code></pre>';
+          }
+          if (ev.old_string !== undefined && ev.new_string !== undefined) {
+            b += renderDiff(ev.old_string, ev.new_string);
+          } else {
+            if (ev.old_string !== undefined)
+              b += '<div class="diff-old">- ' + esc(ev.old_string) + '</div>';
+            if (ev.new_string !== undefined)
+              b += '<div class="diff-new">+ ' + esc(ev.new_string) + '</div>';
+          }
+          if (ev.extras) {
+            for (const k in ev.extras) {
+              if (k === 'audioB64' || k === 'audioMime') continue;
+              b +=
+                '<div class="extra">' +
+                esc(k) +
+                ': ' +
+                esc(ev.extras[k]) +
+                '</div>';
+            }
+          }
+          const tcBody = mkEl('div', 'tc-b');
+          tcBody.innerHTML =
+            b || '<em style="color:var(--dim)">No arguments</em>';
           c.appendChild(tcBody);
           verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
@@ -17239,6 +17634,7 @@
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
           linkifyFilePaths(bodyEl, evWorkDir, evOwnerTab);
+          loadInlineImages(bodyEl, evWorkDir, evOwnerTab);
         }
         break;
       }
@@ -17316,28 +17712,22 @@
         renderActionProgress(target, ev.message || ev.text || '');
         break;
       }
-      case 'autocommit_done': {
-        clearActionProgress(target);
-        // A successful manual Git Commit is reported by a toast
-        // notification instead; only failures earn transcript text.
-        if (ev && ev.manual && ev.success) break;
-        appendActionResultInto(target, ev);
+      case 'autocommit_done':
+        settleAutocommitDone(target, ev);
         break;
-      }
-      case 'warning': {
-        const warnDiv = mkEl('div', 'ev tr warn');
-        warnDiv.innerHTML =
-          '<strong>Warning:</strong> ' + esc(ev.message || ev.text || '');
-        target.appendChild(warnDiv);
+      case 'notice':
+        target.appendChild(mkBanner('note', 'Note:', ev.text || ''));
         break;
-      }
-      case 'error': {
-        const errDiv = mkEl('div', 'ev tr err');
-        errDiv.innerHTML =
-          '<strong>Error:</strong> ' + esc(ev.text || ev.message || '');
-        target.appendChild(errDiv);
+      case 'warning':
+        target.appendChild(
+          mkBanner('warn', 'Warning:', ev.message || ev.text || ''),
+        );
         break;
-      }
+      case 'error':
+        target.appendChild(
+          mkBanner('err', 'Error:', ev.text || ev.message || ''),
+        );
+        break;
     }
   }
 
@@ -17432,6 +17822,18 @@
   function streamCountStep(ctx) {
     ctx.stepCount += 1;
     if (ctx.onStep) ctx.onStep(ctx.stepCount);
+  }
+
+  /**
+   * Close the open thoughts panel of *ctx* against the local clock (the
+   * task ended); the next stream event opens a fresh one.
+   */
+  function streamSealPanel(ctx) {
+    if (ctx.llmPanel && ctx.llmPanel._provisional)
+      discardProvisionalPanel(ctx.llmPanel);
+    else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+    ctx.llmPanel = null;
+    ctx.pendingPanel = true;
   }
 
   function streamOpenThoughts(ctx, ts, provisional) {
@@ -18428,6 +18830,10 @@
     // same generation (whose late reply would re-order pagination).
     historyLoading = true;
     historyGeneration++;
+    historyPageOneSentAt = Date.now();
+    // A fresh generation makes the old in-flight reply stale; a
+    // refresh folded into it goes out again after THIS reply instead.
+    historyRefreshWanted = false;
   }
 
   /**
@@ -18482,18 +18888,35 @@
     requestHistory(historyOffset);
   }
 
-  // A burst of task news (the daemon replays one `status` per tab after
-  // every `ready`; a task end is a `status` plus a `tasks_updated`) must
-  // not cost one history.db query per event: the first refresh of a
-  // tick goes out at once and the rest fold into ONE trailing refetch
-  // at the end of the tick, so a late change is still picked up.
+  /**
+   * Whether page one of the current view is in flight: its reply has
+   * not arrived (whether or not an earlier one is still parked for a
+   * held press, see renderHistory) and is not given up on as lost.
+   */
+  function historyPageOneInFlight() {
+    return (
+      historyPageOneSentAt > 0 &&
+      Date.now() - historyPageOneSentAt < HISTORY_FETCH_STALL_MS
+    );
+  }
+
+  // Task news (the daemon replays one `status` per tab after every
+  // `ready`; a task end is a `status` plus a `tasks_updated`) must not
+  // cost one history query per event, nor starve the panel: every
+  // refetch opens a new generation and only the newest generation's
+  // reply is rendered, and a reply takes a second or more once it fans
+  // out to the remote machines, so a burst of refetches would discard
+  // every reply but the last (and a steady stream of them every reply).
+  // So a refresh is single-flight: while page one is in flight the
+  // refresh is folded into it and ONE refetch goes out when its reply
+  // lands (see the `history` handler), so a late change is still
+  // picked up and every reply sent is shown.
   function refreshHistory() {
     if (sidebar.classList.contains('open')) {
-      if (historyRefreshTrailing) {
+      if (historyPageOneInFlight()) {
         historyRefreshWanted = true;
       } else {
         requestHistoryFromStart();
-        historyRefreshTrailing = setTimeout(flushHistoryRefresh, 0);
       }
     }
     // Task news (a run started or finished, a commit landed) may have
@@ -18504,9 +18927,8 @@
     refreshSidebarDataViews(true);
   }
 
-  /** End of the tick: one refetch for every refresh folded into it. */
+  /** Page one landed: send the refresh folded into it, if any. */
   function flushHistoryRefresh() {
-    historyRefreshTrailing = null;
     if (!historyRefreshWanted) return;
     historyRefreshWanted = false;
     if (sidebar.classList.contains('open')) requestHistoryFromStart();
@@ -18669,15 +19091,13 @@
     'task_settings',
   ]);
 
-  // Every type handleOutputEvent renders: the streaming set above plus
-  // the task-lifecycle notices. This is the whitelist for handleEvent's
-  // default branch — anything else must never reach processOutputEvent.
+  // The whitelist for handleEvent's default branch: the streaming set
+  // above plus the task-lifecycle notices without a `case` of their own
+  // (autocommit_done, warning and error have one and never reach the
+  // default) — anything else must never reach processOutputEvent.
   const TRANSCRIPT_EVENT_TYPES = new Set([
     ...TASK_SCOPED_STREAM_TYPES,
-    'autocommit_done',
     'worktree_progress',
-    'warning',
-    'error',
     // The finished `/ask` answer, emitted by the daemon's side-channel
     // worker into the OWNER task's transcript (tabId + taskId stamped).
     'ask_answer',
@@ -18981,6 +19401,7 @@
         setServerLoading(!ev.connected, ev.reconnecting === true);
         if (!ev.connected) {
           forgetInFlightPathChecks();
+          forgetInFlightInlineImages();
           stopSidebarRefreshSpins();
           releaseSidebarFormSaves();
           abandonExplorerListings();
@@ -19002,6 +19423,9 @@
           // fs/git requests awaiting a reply are equally dead.
           adjacentLoading = false;
           removeAdjacentLoader();
+          // Nor may a history page asked for before the outage hold
+          // the refresh the reconnect asks for (refreshHistory).
+          historyPageOneSentAt = 0;
           // A promptlet add's confirmation is equally dead: left
           // pending, the next unrelated error after the reconnect
           // would show under the Add box as its rejection.  The typed
@@ -19106,6 +19530,9 @@
         updateNotification(ev);
         break;
       case 'fileContent':
+        // A picture of a result, answer or preview (a tokened request):
+        // it goes into its <img>, never into a tab.
+        if (handleInlineImageContent(ev)) return;
         // tableak-coverage:start
         // A file opened for a background task must never pull the user away
         // from the conversation they are reading. It is still the user's
@@ -19279,10 +19706,8 @@
         // — otherwise a task ending behind a file view would leave the
         // clock ticking and the task update stale until
         // the user switched back.
-        const activeIsContent = (() => {
-          const act = getTab(activeTabId);
-          return Boolean(act && act.isContentTab);
-        })();
+        const act = getTab(activeTabId);
+        const activeIsContent = !!(act && act.isContentTab);
         const mirrorsActive =
           ev.tabId !== undefined &&
           ev.tabId !== activeTabId &&
@@ -19555,16 +19980,16 @@
           const machine = ev.machine ? String(ev.machine) : '';
           if (machine) tabBoundMachines.set(ev.tabId, machine);
           else tabBoundMachines.delete(ev.tabId);
-          // The Task Info panel's Machine row names the bound machine.
-          if (ev.tabId === activeTabId)
-            updateMetaTaskDetails(metaShownSettings);
           if (tabMachinePicks.get(ev.tabId) === machine) {
             tabMachinePicks.delete(ev.tabId);
           }
           persistTabState();
           renderChatMachine();
           // The directory drop-down follows: a chat of a remote machine
-          // opened from CHATS shows that machine's directories.
+          // opened from CHATS shows that machine's directories.  So do
+          // the Task Info rows (the Machine row names the bound
+          // machine; without task settings the Workdir and Max budget
+          // rows show the machine's).
           showMachineWorkDirs(ev.tabId === activeTabId ? machine : '');
         }
         break;
@@ -19596,6 +20021,14 @@
         if ((ev.generation || 0) === historyGeneration) {
           refreshHistoryMachineOptions(ev.machines, ev.localMachine);
           refreshHistoryWorkDirOptions(ev.workDirs);
+        }
+        // Page one has arrived (on screen, or parked for a held press):
+        // the refresh folded into its flight (refreshHistory) goes out
+        // now.  Not after a filter rebuild that refetched: that opened
+        // a newer generation, which fetches afresh anyway.
+        if ((ev.generation || 0) === historyGeneration && !(ev.offset || 0)) {
+          historyPageOneSentAt = 0;
+          flushHistoryRefresh();
         }
         break;
       case 'files': {
@@ -20255,10 +20688,7 @@
               bgWrTab.worktreeBarEl = null;
             }
             // retrybar-coverage:end
-            clearActionProgress(bgWrTab.outputFragment);
-            if (!isSilentDiscardMessage(ev)) {
-              appendActionResultInto(bgWrTab.outputFragment, ev);
-            }
+            settleWorktreeResult(bgWrTab.outputFragment, ev);
           }
           break;
         }
@@ -20271,17 +20701,10 @@
         setAutocommitInFlight(false);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
-          if (bgAdTab) {
-            // A pending WORKTREE bar stays: a Git Commit on the main
-            // tree says nothing about the still-undecided worktree
-            // branch.
-            clearActionProgress(bgAdTab.outputFragment);
-            // A successful manual Git Commit is reported by a toast
-            // notification instead; only failures earn transcript text.
-            if (!(ev && ev.manual && ev.success)) {
-              appendActionResultInto(bgAdTab.outputFragment, ev);
-            }
-          }
+          // A pending WORKTREE bar stays: a Git Commit on the main
+          // tree says nothing about the still-undecided worktree
+          // branch.
+          if (bgAdTab) settleAutocommitDone(bgAdTab.outputFragment, ev);
           break;
         }
         handleAutocommitResult(ev);
@@ -20319,19 +20742,18 @@
         // sealTabPanelTimes below would otherwise stamp it with the
         // event's endTs.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
-          if (llmPanel && llmPanel._provisional)
-            discardProvisionalPanel(llmPanel);
-          else if (llmPanel) finalizePanelTime(llmPanel);
-          llmPanel = null;
-          pendingPanel = true;
+          const endCtx = liveStreamCtx();
+          streamSealPanel(endCtx);
+          saveLiveStreamCtx(endCtx);
         } else {
           const endTab = getTab(ev.tabId);
-          if (endTab && endTab.streamLlmPanel) {
-            if (endTab.streamLlmPanel._provisional)
-              discardProvisionalPanel(endTab.streamLlmPanel);
-            else finalizePanelTime(endTab.streamLlmPanel);
-            endTab.streamLlmPanel = null;
-            endTab.streamPendingPanel = true;
+          if (endTab) {
+            const endCtx = loadStreamCtxFrom(
+              endTab,
+              mkStreamCtx(null, endTab.id),
+            );
+            streamSealPanel(endCtx);
+            saveStreamCtxTo(endTab, endCtx);
           }
         }
         const label =
@@ -20622,7 +21044,6 @@
   }
 
   function updateInputDisabled() {
-    inp.disabled = false;
     // A photo still being converted must not be raced by a send: block the
     // button until every attachment slot holds real bytes. An answer to a
     // pending question is text only and never waits for one.
@@ -20830,9 +21251,15 @@
     renderTabBar();
   }
 
-  function addBanner(cls, label, text) {
+  /** A diagnostic banner row (`Note:` / `Warning:` / `Error:` + text). */
+  function mkBanner(cls, label, text) {
     const div = mkEl('div', 'ev tr ' + cls);
     div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
+    return div;
+  }
+
+  function addBanner(cls, label, text) {
+    const div = mkBanner(cls, label, text);
     O.appendChild(div);
     autoScrollLatestEventPanel(div);
     return div;
@@ -20905,19 +21332,7 @@
    * @returns {number} Its UTF-8 encoding's byte length.
    */
   function utf8ByteLength(str) {
-    let bytes = 0;
-    for (let i = 0; i < str.length; i++) {
-      const c = str.charCodeAt(i);
-      if (c < 0x80) bytes += 1;
-      else if (c < 0x800) bytes += 2;
-      else if (c >= 0xd800 && c < 0xdc00) {
-        // A surrogate pair encodes as one 4-byte sequence; count it
-        // here and skip its low half.
-        bytes += 4;
-        i++;
-      } else bytes += 3;
-    }
-    return bytes;
+    return new window.TextEncoder().encode(str).length;
   }
 
   /**
@@ -21364,13 +21779,6 @@
     });
   }
 
-  /**
-   * Flash the share button green (saved) or red (failed) for a
-   * moment, so the click visibly landed even when the transcript's
-   * banner is off screen.
-   *
-   * @param {boolean} ok Whether the daemon saved the shared page.
-   */
   // One export at a time: a click while the daemon has not answered the
   // last one (`share_tasks`, then `share_done`) would serialize and write
   // the same page twice.  `shareInFlight` holds a failsafe timer so a
@@ -21390,6 +21798,13 @@
   // timer end a later flash early, and adding the new class without
   // removing the old one could leave ok and err stacked.
   let shareFlashTimer = null;
+  /**
+   * Flash the share button green (saved) or red (failed) for a
+   * moment, so the click visibly landed even when the transcript's
+   * banner is off screen.
+   *
+   * @param {boolean} ok Whether the daemon saved the shared page.
+   */
   function flashShareBtn(ok) {
     setShareInFlight(false);
     if (!shareBtn) return;
@@ -21954,9 +22369,27 @@
     return div;
   }
 
-  function appendActionResult(ev) {
-    const div = appendActionResultInto(O, ev);
-    autoScrollLatestEventPanel(div);
+  /**
+   * Settle a `worktree_result` in *target*: the progress line goes and
+   * the result lands, unless it is a silent discard.
+   * @returns {Element|null} The result row appended, if any.
+   */
+  function settleWorktreeResult(target, ev) {
+    clearActionProgress(target);
+    if (isSilentDiscardMessage(ev)) return null;
+    return appendActionResultInto(target, ev);
+  }
+
+  /**
+   * Settle an `autocommit_done` in *target*: the progress line goes; a
+   * successful manual Git Commit is reported by a toast notification
+   * instead, so only failures earn transcript text.
+   * @returns {Element|null} The result row appended, if any.
+   */
+  function settleAutocommitDone(target, ev) {
+    clearActionProgress(target);
+    if (ev && ev.manual && ev.success) return null;
+    return appendActionResultInto(target, ev);
   }
 
   /**
@@ -22102,18 +22535,13 @@
     if (ev.retryable) setActionBarBtnsDisabled(worktreeBar, false);
     else clearWorktreeBar();
     // retrybar-coverage:end
-    clearActionProgress(O);
-    if (isSilentDiscardMessage(ev)) {
-      return;
-    }
-    appendActionResult(ev);
+    const div = settleWorktreeResult(O, ev);
+    if (div) autoScrollLatestEventPanel(div);
   }
 
   function handleAutocommitResult(ev) {
-    clearActionProgress(O);
-    // A successful manual Git Commit is reported by a toast
-    // notification instead; only failures earn transcript text.
-    if (!(ev && ev.manual && ev.success)) appendActionResult(ev);
+    const div = settleAutocommitDone(O, ev);
+    if (div) autoScrollLatestEventPanel(div);
     focusInputWithRetry();
   }
 
@@ -22320,11 +22748,9 @@
         acceptGhost();
         return;
       }
-      if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
-        if (cycleHistoryUp()) {
-          e.preventDefault();
-          return;
-        }
+      if (e.key === 'ArrowUp' && cycleHistoryUp()) {
+        e.preventDefault();
+        return;
       }
       if (e.key === 'ArrowDown' && histIdx >= 0) {
         e.preventDefault();
@@ -22547,10 +22973,7 @@
 
     if (inputClearBtn) {
       inputClearBtn.addEventListener('click', () => {
-        inp.value = '';
-        inp.style.height = 'auto';
-        inputClearBtn.style.display = 'none';
-        clearGhost();
+        clearComposerText();
         hideAC();
         inp.focus();
       });
@@ -22784,7 +23207,12 @@
         !document.body.classList.contains('remote-desktop')
       ) {
         setMetaDrawerOpen(false);
-      } else if (sidebar.classList.contains('open')) {
+      } else if (
+        sidebar.classList.contains('open') &&
+        !document.body.classList.contains('remote-desktop')
+      ) {
+        // The phone layout's Chats drawer; the desktop sidebar is
+        // always `open` and Escape leaves it alone.
         closeSidebar();
       } else {
         return;
@@ -23295,6 +23723,15 @@
         historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
     wireSearchClear(historySearch, historySearchClear);
+    // The Chats row's refresh button reloads the whole app page: the
+    // browser's reload, reachable from inside the standalone app window
+    // (which has no address bar) and the phone's home-screen app.
+    const chatsRefreshBtn = document.getElementById('chats-refresh-btn');
+    if (chatsRefreshBtn) {
+      chatsRefreshBtn.addEventListener('click', () => {
+        window.location.reload();
+      });
+    }
     const historyViewToggle = document.getElementById('history-view-toggle');
     if (historyViewToggle) {
       applyHistoryViewToggle(historyViewToggle);
@@ -23936,15 +24373,23 @@
    * two can never drift apart again.
    */
   function resetComposerAfterSend() {
-    inp.value = '';
-    inp.style.height = 'auto';
+    clearComposerText();
     attachments = [];
     attachErrors = [];
     updateInputDisabled();
     renderFileChips();
+  }
+
+  /**
+   * Empty the composer's text: its height, ghost text, prompt-history
+   * cursor and clear button follow (the attachments stay).
+   */
+  function clearComposerText() {
+    inp.value = '';
+    inp.style.height = 'auto';
     clearGhost();
     histIdx = -1;
-    if (inputClearBtn) inputClearBtn.style.display = 'none';
+    syncClearBtn();
   }
 
   async function sendMessage() {
@@ -23971,7 +24416,7 @@
     // settles its height, ghost text, history index and clear button;
     // the parked prompt then comes back the same way (retireAskForTab).
     const tab = getTab(activeTabId);
-    if (tab && !tab.isContentTab && tab.askPendingQuestion !== null) {
+    if (!tab.isContentTab && tab.askPendingQuestion !== null) {
       setComposerTextOf(tab, '');
       clearGhost();
       submitAskForTab(tab, prompt);
@@ -24018,7 +24463,6 @@
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
-    const curTab = getTab(activeTabId);
     const wireAttachments = attachments
       .filter(a => a.data)
       .map(a => {
@@ -24028,10 +24472,8 @@
     // A message added to a running task carries its files too: the
     // daemon shows them to the running agent with the text.
     if (isRunning) {
-      if (curTab) {
-        curTab.unackedPrompt = prompt;
-        curTab.unackedAttachments = attachments;
-      }
+      tab.unackedPrompt = prompt;
+      tab.unackedAttachments = attachments;
       api.appendUserMessage({
         prompt: prompt,
         tabId: activeTabId,
@@ -24066,29 +24508,27 @@
     api.send(msg);
     t0 = Date.now();
     endTs = 0;
-    if (curTab) {
-      curTab.t0 = t0;
-      curTab.endTs = 0;
-      // tableak-coverage:start
-      // Claim the task before its id exists. Until the daemon replies with a
-      // real task id, this marker is what makes the submitting tab -- and
-      // only it -- a legitimate owner of the output that is about to arrive.
-      if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
-      // tableak-coverage:end
-      curTab.unackedPrompt = prompt;
-      curTab.unackedAttachments = attachments;
-      // Sent: the machine stays the chat's pick until the daemon's
-      // binding confirms it (`tabMachine` clears the pick) -- a refused
-      // run leaves the pick standing for the retry, and the chat's
-      // binding as it was.  A chat now showing a task of its own
-      // machine needs no pick.
-      if (msg.machine === tabChatMachine(curTab)) {
-        tabMachinePicks.delete(curTab.id);
-      } else {
-        tabMachinePicks.set(curTab.id, msg.machine);
-      }
-      persistTabState();
+    tab.t0 = t0;
+    tab.endTs = 0;
+    // tableak-coverage:start
+    // Claim the task before its id exists. Until the daemon replies with a
+    // real task id, this marker is what makes the submitting tab -- and
+    // only it -- a legitimate owner of the output that is about to arrive.
+    if (!tab.currentTaskId) tab.pendingTaskId = 'pending:' + tab.id;
+    // tableak-coverage:end
+    tab.unackedPrompt = prompt;
+    tab.unackedAttachments = attachments;
+    // Sent: the machine stays the chat's pick until the daemon's
+    // binding confirms it (`tabMachine` clears the pick) -- a refused
+    // run leaves the pick standing for the retry, and the chat's
+    // binding as it was.  A chat now showing a task of its own
+    // machine needs no pick.
+    if (msg.machine === tabChatMachine(tab)) {
+      tabMachinePicks.delete(tab.id);
+    } else {
+      tabMachinePicks.set(tab.id, msg.machine);
     }
+    persistTabState();
     resetComposerAfterSend();
   }
 
@@ -24648,16 +25088,9 @@
    */
   function makeLaunchedAgoLabel(session) {
     const endMs = validEpochMs(session.endTs);
-    if (!isFinite(endMs)) {
-      return makeLaunchedAgoLabelFor(taskLaunchMs(session));
-    }
-    return makeFinishedAgoLabel(endMs);
-  }
-
-  /** A "3 hours ago" label counting from the completion instant *ms*. */
-  function makeFinishedAgoLabel(ms) {
-    const span = makeLaunchedAgoLabelFor(ms);
-    span.title = 'Finished ' + new Date(ms).toLocaleString();
+    if (!isFinite(endMs)) return makeLaunchedAgoLabelFor(taskLaunchMs(session));
+    const span = makeLaunchedAgoLabelFor(endMs);
+    span.title = 'Finished ' + new Date(endMs).toLocaleString();
     return span;
   }
 
@@ -24813,7 +25246,6 @@
     const options = [['', 'All']];
     for (const p of paths) options.push([p, p]);
     rebuildFilterSelect(hfWorkDir, options, true);
-    hfWorkDir.parentElement.classList.toggle('active', !!hfWorkDir.value);
   }
 
   // Keep every on-screen "... ago" launch-age label current: history
@@ -24844,28 +25276,21 @@
   }
 
   /**
-   * A sidebar row's copy-to-clipboard button for *text*.
+   * A copy-to-clipboard button for *text*: "Copy <what> to clipboard"
+   * for screen readers and, when *tooltip* is set, "Copy <what>" on hover.
    *
    * @param {string} text What the click copies.
-   * @param {string} [ariaLabel] Screen-reader label; defaults to the
-   *   task-row wording.
+   * @param {string} cls The button's class list.
+   * @param {string} what What the labels name ("task", "the machine address").
+   * @param {boolean} [tooltip] Whether the button shows a tooltip.
    */
-  function makeSidebarCopyButton(text, ariaLabel) {
+  function makeCopyButton(text, cls, what, tooltip) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'sidebar-item-copy';
-    btn.setAttribute('aria-label', ariaLabel || 'Copy task to clipboard');
+    btn.className = cls;
+    if (tooltip) btn.dataset.tooltip = 'Copy ' + what;
+    btn.setAttribute('aria-label', 'Copy ' + what + ' to clipboard');
     wireCopyButton(btn, text);
-    return btn;
-  }
-
-  function makeIdCopyButton(idText, kind) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'ids-copy-btn ids-copy-' + kind;
-    btn.dataset.tooltip = 'Copy ' + kind + ' id';
-    btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    wireCopyButton(btn, idText);
     return btn;
   }
 
@@ -25599,7 +26024,7 @@
 
   /** Where a chat panel's task rows live: its body container. */
   function historyGroupBody(group) {
-    return group.querySelector(':scope > .history-chat-body') || group;
+    return group.querySelector(':scope > .history-chat-body');
   }
 
   function historyDaySeparator(ts) {
@@ -26205,8 +26630,9 @@
           : 'completed';
       // The date filter's instant: completion time, as the sort uses
       // (an undated row counts as epoch zero, as it always has).
-      div.dataset.timestamp = String(historyTimestamp(s) || 0);
-      div.dataset.ts = String(historyTimestamp(s));
+      const ts = historyTimestamp(s);
+      div.dataset.timestamp = String(ts || 0);
+      div.dataset.ts = String(ts);
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       // '1' for a task the cron scheduler launched (hidden unless the
       // Cron chip is on).
@@ -26277,8 +26703,9 @@
         actions.appendChild(favBtn);
       }
       if (s.task_id) {
-        const copyBtn = makeSidebarCopyButton(s.preview || itemText);
-        actions.appendChild(copyBtn);
+        actions.appendChild(
+          makeCopyButton(s.preview || itemText, 'sidebar-item-copy', 'task'),
+        );
       }
       // Delete the task from history.db (its sub-tasks go with it).
       // A running task keeps its row (the daemon refuses anyway), and
@@ -26391,7 +26818,14 @@
           }
           idsSpan.appendChild(document.createTextNode(seg.text));
           if (seg.copy) {
-            idsSpan.appendChild(makeIdCopyButton(seg.copy, seg.kind));
+            idsSpan.appendChild(
+              makeCopyButton(
+                seg.copy,
+                'ids-copy-btn ids-copy-' + seg.kind,
+                seg.kind + ' id',
+                true,
+              ),
+            );
           }
         });
         idsSpan.title = idSegments.map(seg => seg.text).join(' • ');
@@ -27489,7 +27923,7 @@
 
   /**
    * Post the Add box's promptlet as `addTrick`: the daemon appends it
-   * to ~/.kiss/MY_INJECTION.md and answers every window with a
+   * to <brand home>/MY_INJECTION.md and answers every window with a
    * `tricksData` list (or the sender alone with an `error`).  The box
    * is cleared only when that confirmation arrives (`confirmTrickAdd`);
    * a rejection is shown under the box (`relayTrickAddError`) and the
@@ -27534,7 +27968,7 @@
   /**
    * Post `deleteTrick` for the user-owned promptlet at *index* and drop
    * it from the page's list right away: the daemon removes its section
-   * from ~/.kiss/MY_INJECTION.md and answers every window with a fresh
+   * from <brand home>/MY_INJECTION.md and answers every window with a fresh
    * `tricksData` (or the sender alone with an `error`).
    */
   function deleteTrick(index) {
@@ -27589,7 +28023,7 @@
   /**
    * Post `editTrick` for the user-owned promptlet at *index* so it reads
    * *newText*, and show the new text right away: the daemon rewrites
-   * its section of ~/.kiss/MY_INJECTION.md in place and answers every
+   * its section of <brand home>/MY_INJECTION.md in place and answers every
    * window with a fresh `tricksData` (or the sender alone with an
    * `error` followed by the list on disk, which puts the old text
    * back).  An unchanged or emptied text only closes the editor.
@@ -27684,7 +28118,7 @@
    * empty).  Clicking a row injects it at the composer's caret; every
    * row ends with a copy button, and the first
    * `window.__MY_TRICKS_COUNT__` rows (the user's own, from
-   * ~/.kiss/MY_INJECTION.md) also with an edit (pencil) and a delete
+   * <brand home>/MY_INJECTION.md) also with an edit (pencil) and a delete
    * button.  The row at `editingTrickIndex` is painted as the in-place
    * editor instead.
    */
@@ -27716,24 +28150,18 @@
       textSpan.className = 'sidebar-item-text';
       textSpan.textContent = text;
       div.appendChild(textSpan);
-      const copyBtn = makeSidebarCopyButton(
-        text,
-        'Copy promptlet to clipboard',
+      div.appendChild(
+        makeCopyButton(text, 'sidebar-item-copy', 'promptlet', true),
       );
-      copyBtn.dataset.tooltip = 'Copy promptlet';
-      div.appendChild(copyBtn);
       if (index < userCount) {
-        const editBtn = document.createElement('button');
-        editBtn.type = 'button';
-        editBtn.className = 'sidebar-item-edit';
-        editBtn.dataset.tooltip = 'Edit promptlet';
-        editBtn.setAttribute('aria-label', 'Edit promptlet');
-        editBtn.innerHTML = SIDEBAR_EDIT_SVG;
-        editBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          openTrickEditor(index);
-        });
-        div.appendChild(editBtn);
+        div.appendChild(
+          sidebarRowButton(
+            'sidebar-item-edit',
+            SIDEBAR_EDIT_SVG,
+            'Edit promptlet',
+            () => openTrickEditor(index),
+          ),
+        );
         // Two-step inline confirm: the trash icon only reveals
         // Delete / Cancel, nothing is posted yet.
         const del = makeSidebarDeleteConfirm({
@@ -27777,11 +28205,14 @@
     }
   }
 
-  function setupPasswordToggle(toggleId, inputId, secretName) {
-    const btn = document.getElementById(toggleId);
-    const inp = document.getElementById(inputId);
-    if (!btn || !inp) return;
-    const noun = secretName || 'password';
+  /**
+   * Make *btn* reveal and hide the secret in *inp* (a password box).
+   *
+   * @param {HTMLButtonElement} btn The eye toggle.
+   * @param {HTMLInputElement} inp The secret's input.
+   * @param {string} noun What the toggle's accessible name reveals.
+   */
+  function setupPasswordToggle(btn, inp, noun) {
     btn.addEventListener('click', () => {
       const showing = inp.type === 'text';
       inp.type = showing ? 'password' : 'text';
@@ -27829,7 +28260,7 @@
     if (eye) eye.style.display = '';
     if (eyeOff) eyeOff.style.display = 'none';
     wrap.appendChild(btn);
-    setupPasswordToggle(btn.id, inputId, noun);
+    setupPasswordToggle(btn, inp, noun);
   }
 
   // ---- Settings > Remote password: eye toggle + refresh button ----
@@ -27944,7 +28375,7 @@
     });
   }
 
-  // ---- Custom Models subpanel (~/.kiss/MY_MODELS.json) ----
+  // ---- Custom Models subpanel (<brand home>/MY_MODELS.json) ----
 
   // The daemon's last myModelsData list: one row per custom model.
   let myModels = [];
@@ -28127,7 +28558,7 @@
   /**
    * Send the boxes to the daemon: Add a new model, or Save an edit.
    *
-   * The daemon writes ~/.kiss/MY_MODELS.json and answers every client
+   * The daemon writes <brand home>/MY_MODELS.json and answers every client
    * with a fresh myModelsData, which repaints the list.
    */
   function submitCustomModel() {
@@ -28521,17 +28952,8 @@
     const slashCtx = getSlashCtx();
     if (!slashCtx) return;
     const cursor = inp.selectionStart || inp.value.length;
-    const before = inp.value.substring(0, slashCtx.start);
-    const after = inp.value.substring(cursor);
-    const sep = /^\s/.test(after) ? '' : ' ';
-    const inserted = '/' + name + sep;
-    inp.value = before + inserted + after;
-    syncClearBtn();
-    const np = before.length + inserted.length;
-    inp.setSelectionRange(np, np);
-    autosizeComposer();
-    hideAC();
-    inp.focus();
+    const sep = /^\s/.test(inp.value.substring(cursor)) ? '' : ' ';
+    replaceComposerSpan(slashCtx.start, cursor, '/' + name + sep);
   }
 
   /**
@@ -28615,10 +29037,9 @@
   function _acIcon(type) {
     if (type === 'recent') return _acSvg.clock;
     if (type === 'frequent') return _acSvg.star;
-    if (type === 'task') return _acSvg.bolt;
+    if (type === 'task' || type === 'command') return _acSvg.bolt;
     if (type === 'trick') return _acSvg.spark;
     if (type === 'identifier') return _acSvg.code;
-    if (type === 'command') return _acSvg.bolt;
     return _acSvg.file;
   }
   function hlMatch(text, query) {
@@ -28655,7 +29076,6 @@
 
   function renderAcDropdown(data, order, labels, itemHtml, onAccept) {
     autocomplete.innerHTML = '';
-    acIdx = -1;
     const groups = {};
     data.forEach(item => {
       const t = item.type;
@@ -28715,30 +29135,37 @@
       data,
       ['frequent', 'file', 'home'],
       {frequent: 'Frequent', file: 'Files', home: 'Home'},
-      item =>
-        searchQ && searchQ.length > 0
-          ? hlMatch(item.text, searchQ)
-          : _acPathHtml(item.text),
+      item => (searchQ ? hlMatch(item.text, searchQ) : _acPathHtml(item.text)),
       insertAtMention,
     );
   }
 
-  function insertAtMention(file) {
-    const atCtx = getAtCtx();
-    if (atCtx) {
-      const before = inp.value.substring(0, atCtx.start);
-      const after = inp.value.substring(inp.selectionStart || inp.value.length);
-      const sep = /^\s/.test(after) ? '' : ' ';
-      // The daemon already prefixed the mention ("./" or "~/").
-      const mention = file;
-      inp.value = before + mention + sep + after;
-      syncClearBtn();
-      const np = before.length + mention.length + sep.length;
-      inp.setSelectionRange(np, np);
-      api.recordFileUsage({path: file, workDir: workDirForTab(activeTabId)});
-    }
+  /**
+   * Replace the composer text between *start* and *end* with *text*,
+   * put the caret after it and settle the composer: clear button,
+   * height, popup closed, focus.
+   */
+  function replaceComposerSpan(start, end, text) {
+    inp.value = inp.value.substring(0, start) + text + inp.value.substring(end);
+    syncClearBtn();
+    autosizeComposer();
+    inp.setSelectionRange(start + text.length, start + text.length);
     hideAC();
     inp.focus();
+  }
+
+  function insertAtMention(file) {
+    const atCtx = getAtCtx();
+    if (!atCtx) {
+      hideAC();
+      inp.focus();
+      return;
+    }
+    const cursor = inp.selectionStart || inp.value.length;
+    const sep = /^\s/.test(inp.value.substring(cursor)) ? '' : ' ';
+    // The daemon already prefixed the mention ("./" or "~/").
+    replaceComposerSpan(atCtx.start, cursor, file + sep);
+    api.recordFileUsage({path: file, workDir: workDirForTab(activeTabId)});
   }
 
   function acceptCompletion(full) {
@@ -28747,15 +29174,10 @@
     while (overlap > 0 && !cur.endsWith(full.slice(0, overlap))) {
       overlap -= 1;
     }
-    inp.value = cur.slice(0, cur.length - overlap) + full;
-    if (/\S$/.test(inp.value)) inp.value += ' ';
+    const keep = cur.length - overlap;
+    const text = full + (/\S$/.test(cur.slice(0, keep) + full) ? ' ' : '');
     clearGhost();
-    syncClearBtn();
-    autosizeComposer();
-    const np = inp.value.length;
-    inp.setSelectionRange(np, np);
-    hideAC();
-    inp.focus();
+    replaceComposerSpan(keep, cur.length, text);
   }
 
   function renderCompletions(data) {

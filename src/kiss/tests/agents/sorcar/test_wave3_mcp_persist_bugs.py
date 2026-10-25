@@ -270,4 +270,5 @@ class TestReadMaxLinesValidation:
         tools, path = self._tools(tmp_path)
         out = tools.Read(path, max_lines=2)
         assert out.startswith("l1\nl2\n"), out
-        assert "[truncated: 3 more lines]" in out
+        note = "[truncated: 3 more lines; Read(file_path, start_line=3, max_lines=N) continues]"
+        assert note in out

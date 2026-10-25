@@ -443,6 +443,35 @@ class TestRegistry:
         assert len(builds) == 1, [r.getMessage() for r in builds]
         reg.stop()
 
+    def test_stale_requests_during_a_refresh_do_not_rescan_again(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Picker requests keep arriving while the refresh a stale index
+        # triggered is still walking the tree; the index they are served
+        # is still the stale one, which must not queue a second walk
+        # behind the running one (nobody asked for newer content).
+        root = tmp_path / "root"
+        touch(root, *(f"d{i}/f.py" for i in range(2000)))
+        reg = _registry(tmp_path, tmp_path / "home")
+        _build(reg, str(root))
+        stale = reg._indexes[str(root)]
+        stale.built_at -= file_index.STALE_AFTER + 1
+
+        with caplog.at_level(logging.INFO, logger="kiss.server.file_index"):
+            deadline = time.monotonic() + 10.0
+            while reg._indexes[str(root)] is stale:
+                assert time.monotonic() < deadline, "no refresh"
+                reg.picker_for(str(root))
+                time.sleep(0.001)
+            # Queued behind any job the requests above left: when it
+            # has run, so has every rescan of ``root``.
+            idle = threading.Event()
+            reg.ensure(str(tmp_path / "other"), idle.set)
+            assert idle.wait(10.0)
+        builds = [r for r in caplog.records if r.getMessage().startswith(f"file index of {root}")]
+        assert len(builds) == 1, [r.getMessage() for r in builds]
+        reg.stop()
+
     def test_callback_exception_does_not_kill_the_worker(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
         touch(root, "a.py")

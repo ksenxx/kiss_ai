@@ -13,6 +13,7 @@ verifies the auth-trio config persistence.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -29,6 +30,7 @@ from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
     DingTalkAgent,
     DingTalkChannelBackend,
 )
+from kiss.tests.agents.third_party_agents.conftest import connect_on_ephemeral_port
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
@@ -39,19 +41,16 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 _AUTH_TRIO = {"check_dingtalk_auth", "authenticate_dingtalk", "clear_dingtalk_auth"}
 
 
-def _connected_backend(config: dict[str, Any]) -> tuple[DingTalkChannelBackend, int]:
-    """Persist *config* and connect via the public path on an ephemeral port.
-
-    A persisted ``"port": "0"`` makes the public ``connect()`` bind an
-    OS-assigned port in the server that keeps it (no reserve-close-rebind
-    race); the really bound port is read back from the live server.
-    """
-    dingtalk_mod._config.save({**config, "port": "0"})
+@contextlib.contextmanager
+def _connected_backend(config: dict[str, Any]) -> Iterator[tuple[DingTalkChannelBackend, int]]:
+    """Persist *config*, connect via the public path on an ephemeral port, disconnect on exit."""
+    dingtalk_mod._config.save(config)
     backend = DingTalkChannelBackend()
-    assert backend.connect() is True
-    assert backend._port == 0
-    assert backend._webhook_server is not None
-    return backend, int(backend._webhook_server.server_address[1])
+    port = connect_on_ephemeral_port(dingtalk_mod._config, backend, "_webhook_server")
+    try:
+        yield backend, port
+    finally:
+        backend.disconnect()
 
 
 def _dingtalk_sign(key: str, timestamp_ms: str) -> str:
@@ -214,14 +213,13 @@ def _post_callback(port: int, payload: dict[str, Any], headers: dict[str, str]) 
 
 def test_inbound_callback_signed_queue_and_poll() -> None:
     """A correctly signed callback is queued, normalized, and pollable."""
-    backend, port = _connected_backend(
+    with _connected_backend(
         {
             "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x",
             "secret": "",
             "outgoing_token": "OUTtoken",
         }
-    )
-    try:
+    ) as (backend, port):
         ts = str(int(time.time() * 1000))
         payload = {
             "createAt": 1700000000000,
@@ -247,16 +245,13 @@ def test_inbound_callback_signed_queue_and_poll() -> None:
                 "channel_id": "cidABC",
             }
         ]
-    finally:
-        backend.disconnect()
 
 
 def test_inbound_callback_bad_sign_and_stale_timestamp_rejected() -> None:
     """Wrong signatures and >1h-old timestamps get 401 and are not queued."""
-    backend, port = _connected_backend(
+    with _connected_backend(
         {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": "OUTtoken"}
-    )
-    try:
+    ) as (backend, port):
         payload = {"conversationId": "c", "text": {"content": "hi"}}
         ts = str(int(time.time() * 1000))
         assert _post_callback(port, payload, {"timestamp": ts, "sign": "bogus"}) == 401
@@ -270,16 +265,13 @@ def test_inbound_callback_bad_sign_and_stale_timestamp_rejected() -> None:
         )
         messages, _ = backend.poll_messages("", "0")
         assert messages == []
-    finally:
-        backend.disconnect()
 
 
 def test_inbound_callback_unverified_when_no_token_and_channel_filter() -> None:
     """Without outgoing_token callbacks are accepted; poll filters by channel."""
-    backend, port = _connected_backend(
+    with _connected_backend(
         {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": ""}
-    )
-    try:
+    ) as (backend, port):
         for cid, sender in (("c1", "u1"), ("c2", "u2")):
             payload = {
                 "createAt": 1,
@@ -292,8 +284,6 @@ def test_inbound_callback_unverified_when_no_token_and_channel_filter() -> None:
         messages, _ = backend.poll_messages("c2", "0")
         assert [m["channel_id"] for m in messages] == ["c2"]
         assert messages[0]["user"] == "u2"
-    finally:
-        backend.disconnect()
 
 
 def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> None:
@@ -303,10 +293,9 @@ def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> No
     rejected before the body is read, and the server keeps serving valid
     signed callbacks afterwards.
     """
-    backend, port = _connected_backend(
+    with _connected_backend(
         {"webhook_url": "https://x?access_token=1", "secret": "", "outgoing_token": "OUTtoken"}
-    )
-    try:
+    ) as (backend, port):
         assert raw_post_status(port, "Content-Length: -1\r\n") == 400
         assert raw_post_status(port, "Content-Length: nope\r\n") == 400
         assert raw_post_status(port, "") == 400  # no Content-Length at all
@@ -326,8 +315,6 @@ def test_inbound_callback_bad_content_length_handled_and_server_stays_up() -> No
         assert status == 200
         messages, _ = backend.poll_messages("c1", "0")
         assert [m["text"] for m in messages] == ["still alive"]
-    finally:
-        backend.disconnect()
 
 
 def test_connect_fails_without_config() -> None:

@@ -3,6 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// End-to-end (jsdom page) tests of the checkPaths -> pathsExist -> click
+// -> openFile chain in media/main.js: a path the agent mentions is
+// clickable only once the daemon confirmed it exists.  The daemon end of
+// the chain is src/kiss/tests/server/test_file_link_resolution.py.
+
 'use strict';
 
 const assert = require('assert');
@@ -11,7 +16,7 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks} = require('./file_link_helpers');
+const {findLinks, existsOnRealFs} = require('./file_link_helpers');
 
 // A real temp workspace with one real file and no "missing" file.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-filelink-'));
@@ -29,14 +34,7 @@ function checkPathsOnRealFs(msg) {
     } else if (!path.isAbsolute(p)) {
       abs = path.resolve(msg.workDir || tmpDir, p);
     }
-    let ok = false;
-    try {
-      const st = fs.statSync(abs);
-      ok = st.isFile() || st.isDirectory();
-    } catch {
-      ok = false;
-    }
-    results[p] = ok;
+    results[p] = existsOnRealFs(abs);
   }
   return results;
 }
@@ -566,6 +564,14 @@ function testBackgroundTabResolvesAgainstItsOwnWorkDir() {
   assert.strictEqual(api.getActiveTabId(), tab2Id);
   assert.strictEqual(findLinks(win, 'bgsub/bg.txt').length, 1);
   assert.strictEqual(findLinks(win, 'bgsub/none.txt').length, 0);
+  // The click names the owner tab and its work dir, so the daemon can
+  // resolve the relative path.
+  clickEl(win, findLinks(win, 'bgsub/bg.txt')[0]);
+  const opens = posted.filter(m => m.type === 'openFile');
+  assert.strictEqual(opens.length, 1);
+  assert.strictEqual(opens[0].path, 'bgsub/bg.txt');
+  assert.strictEqual(opens[0].workDir, wd3);
+  assert.strictEqual(opens[0].tabId, tab2Id);
   win.close();
   console.log('  ok - background tab panels resolve against their workDir');
 }

@@ -241,7 +241,7 @@ def _scan_folder(folder: Path) -> dict[str, Path]:
     out: dict[str, Path] = {}
     try:
         entries = list(folder.iterdir())
-    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+    except OSError:
         return out
     for sea_dir in entries:
         command = sea_dir.name
@@ -319,7 +319,7 @@ def _read_seas_md_folders() -> list[Path]:
     path = seas_md_path()
     try:
         text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, PermissionError, OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError):
         return []
     folders: list[Path] = []
     for raw in text.splitlines():
@@ -451,6 +451,18 @@ def list_commands() -> list[str]:
     daemon watcher has run its first pass.
     """
     return _registered_names() or refresh_registry()
+
+
+def registered_entries() -> list[tuple[str, Path]]:
+    """Return the sorted ``(name, script)`` entries of every registered command.
+
+    One registry read; rebuilds an empty registry like :func:`list_commands`.
+    """
+    entries = _registered_entries()
+    if not entries:
+        refresh_registry()
+        entries = _registered_entries()
+    return entries
 
 
 def get_command(name: str) -> Path | None:
@@ -736,7 +748,14 @@ def _call(method: Callable[..., Any], *args: Any) -> Any:
 
 def _fold[T](seas: list[BaseSea], name: str, value: T, check: Callable[[str, Any], T]) -> T:
     """Thread *value* through every *name* method of *seas*, checking each result with *check*."""
-    for method in _chain(seas, name):
+    return _fold_methods(_chain(seas, name), value, check)
+
+
+def _fold_methods[T](
+    methods: list[Callable[..., Any]], value: T, check: Callable[[str, Any], T]
+) -> T:
+    """Thread *value* through *methods* in order, checking each result with *check*."""
+    for method in methods:
         value = check(_label(method), _call(method, value))
     return value
 
@@ -773,10 +792,7 @@ def inherited_settings(sea: BaseSea) -> dict[str, Any]:
     methods = _chain([sea], "settings")
     if "settings" in vars(type(sea)):
         methods.pop()  # the chain ends with the SEA's own class
-    settings: dict[str, Any] = {}
-    for method in methods:
-        settings = _check_dict(_label(method), _call(method, settings))
-    return settings
+    return _fold_methods(methods, {}, _check_dict)
 
 
 def is_channel(seas: list[BaseSea]) -> bool:
@@ -1350,12 +1366,41 @@ def help_text_if_command(prompt: str) -> str | None:
     return sea_description(load_sea(sea_path))
 
 
-def slash_command_task(prompt: str) -> tuple[str, Path] | None:
+def slash_command(prompt: str) -> tuple[str, Path] | None:
     """Split a ``/xxx text`` prompt into the SEA to run and its task.
 
     The daemon runs the SEA directly on the trailing text — the same
     run ``run_agent(agent="xxx", task=text)`` makes, with the SEA's
-    ``settings()`` and getters applied by ``apply_sea``.
+    ``settings()`` and getters applied by ``apply_sea``.  The SEA file
+    is not executed here: a bare ``/xxx`` comes back as ``("", path)``
+    and the caller, which loads the SEA anyway, decides whether its
+    ``prompt()`` supplies a default task (see :func:`slash_command_task`).
+
+    Args:
+        prompt: The raw user prompt (as submitted by the client).
+
+    Returns:
+        ``(task_text, sea_path)`` when *prompt* starts with a registered
+        command followed by text other than ``help`` or ``check`` (which
+        :func:`help_text_if_command` answers), or by nothing; else
+        ``None`` — the prompt runs as an ordinary task.
+    """
+    if not isinstance(prompt, str):
+        return None
+    parsed = _split_slash_command(prompt)
+    if parsed is None:
+        return None
+    command, task_text = parsed
+    if task_text.lower() in RESERVED_SUBCOMMANDS:
+        return None
+    sea_path = get_command(command)
+    if sea_path is None:
+        return None
+    return task_text, sea_path
+
+
+def slash_command_task(prompt: str) -> tuple[str, Path] | None:
+    """:func:`slash_command`, with a bare ``/xxx`` resolved by executing its SEA.
 
     A bare ``/xxx`` runs the SEA on the empty task when its ``prompt()``
     turns that into text (the SEA has a default task, as ``/sync`` has);
@@ -1369,30 +1414,18 @@ def slash_command_task(prompt: str) -> tuple[str, Path] | None:
         prompt: The raw user prompt (as submitted by the client).
 
     Returns:
-        ``(task_text, sea_path)`` when *prompt* starts with a registered
-        command followed by non-empty text other than ``help`` or
-        ``check`` (which :func:`help_text_if_command` answers), or by
-        nothing when the SEA has a default task; else ``None`` — the
-        prompt runs as an ordinary task.
+        As :func:`slash_command`, except ``None`` for a bare command
+        whose SEA has no default task.
 
     Raises:
         SeaError: Propagated from :func:`load_sea` / :func:`base_prompt`
             when the SEA of a bare command is broken.
     """
-    if not isinstance(prompt, str):
+    parsed = slash_command(prompt)
+    if parsed is not None and not parsed[0] and not base_prompt([load_sea(parsed[1])], ""):
         return None
-    parsed = _split_slash_command(prompt)
-    if parsed is None:
-        return None
-    command, task_text = parsed
-    if task_text.lower() in RESERVED_SUBCOMMANDS:
-        return None
-    sea_path = get_command(command)
-    if sea_path is None:
-        return None
-    if not task_text and not base_prompt([load_sea(sea_path)], ""):
-        return None
-    return task_text, sea_path
+    return parsed
+
 
 def start_registry_watcher(
     poll_interval: float = _WATCHER_POLL_SECONDS,

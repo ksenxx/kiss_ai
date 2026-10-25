@@ -294,26 +294,19 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
         }))
         return coding_sea.ContainerHarness(str(config))
 
+    # The spellings of the patterns themselves are pinned in
+    # ``sorcar/test_shell_guards.py``; here only the harness wiring: the
+    # container work dir (``/app``, not the host's) is the protected one.
     plain = harness()
     blocked = coding_sea.DESTRUCTIVE_VERDICT
-    for command in ("kill -9 -1", "sleep 1; kill -1", "pkill -9 -f .", "pkill -f '.' && ls",
-                    "rm -rf /app", "cd /tmp && rm -rf /app/*", "rm -rf /", "(rm -r /app)",
-                    "/bin/kill -9 -1", "kill -9 -1 >/dev/null", "kill -9 -1 # stop all",
-                    "kill -s KILL -1", "/usr/bin/pkill -f .", "pkill -f . 2>/dev/null",
-                    "pkill --full .", "pkill -f '.*'", "rm -rf '/app'", "/bin/rm -rf /app",
-                    "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
-                    "FOO=1 kill -9 -1"):
+    for command in ("kill -9 -1", "pkill -f .", "rm -rf /app", "sudo rm -rf /app/", "rm -rf /"):
         assert plain.on_tool_call("Bash", {"command": command}) == refuse(blocked), command
     parallel = {"commands": '["ls", "kill -9 -1"]'}
     assert plain.on_tool_call("run_commands_parallel", parallel) == refuse(blocked)
     assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == refuse(
         blocked
     )
-    for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
-                    "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
-                    "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
-                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md",
-                    "echo ok # rm -rf /app"):
+    for command in ("kill -9 1234", "rm -rf /app/build", "rm -rf /apps", "rm -rf /tmp/x"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
@@ -322,14 +315,8 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 1800
     args = {"command": "make -j4", "timeout_seconds": "bad"}
     assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900
-    for command in ("cd /x && make", "sudo apt-get update", "python3 -m pip install x",
-                    "DEBIAN_FRONTEND=noninteractive apt-get -y install x", "cmake .. && make"):
-        args = {"command": command, "timeout_seconds": 60}
-        assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900, command
-    for command in ("ls -la", "grep -R make .", "python3 -c \"print('cmake')\"", "npm get registry",
-                    "echo make", "cat Makefile"):
-        args = {"command": command, "timeout_seconds": 30}
-        assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 30, command
+    args = {"command": "ls -la", "timeout_seconds": 30}
+    assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 30
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
     assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900

@@ -82,17 +82,11 @@ from kiss.server.json_printer import (
 )
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.tab_registry import TabRegistry
-from kiss.server.task_runner import (
-    _TaskRunnerMixin,
-    parse_task_tags,
-)
+from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.server.task_update import mark_legacy_updates_as_side_channels
 from kiss.server.terminal_tab import TerminalService
 
-__all__ = [
-    "AgentServer",
-    "parse_task_tags",
-]
+__all__ = ["AgentServer"]
 
 logger = logging.getLogger(__name__)
 
@@ -952,6 +946,17 @@ class AgentServer(
         """Under ``_state_lock``: *tab_id*'s pick or the default model."""
         return self._tab_models.get(tab_id, "") or self._default_model
 
+    def _tab_chat_id_locked(self, tab_id: str) -> str:
+        """Under ``_state_lock``: the chat *tab_id* shows, or ``""``.
+
+        The running task's chat when the tab is bound to one, else the
+        chat a resumed (finished) session associated with the tab
+        (``_tab_chat_views``).
+        """
+        state = agent_state.find_by_tab(tab_id) if tab_id else None
+        chat_id = state.chat_id if state is not None else ""
+        return chat_id or self._tab_chat_views.get(tab_id, "")
+
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a client command to the appropriate handler."""
         for field in ("tabId", "workDir", "connId"):
@@ -1354,7 +1359,7 @@ class AgentServer(
                 query or "",
                 tag,
                 offset,
-                50,
+                HISTORY_PAGE,
             )
             sessions, min_ts, max_ts = page.rows, page.date_min, page.date_max
         event: dict[str, Any] = {
@@ -1379,20 +1384,18 @@ class AgentServer(
         """Return the directories the history panel's WORKDIR filter offers.
 
         The same list as the chat header's working-directory drop-down:
-        the daemon's current working directory first, then every
-        directory adopted before (``config.json`` ``recent_work_dirs``,
-        :func:`kiss.core.user_config.recent_work_dirs`), most recently
-        adopted first.  Directories that no longer exist are left out,
-        except the current one, which is the one in use.  The directories
-        the history merely ran in (sub-agent worktrees, cron run
+        every directory adopted before (``config.json``
+        ``recent_work_dirs``, :func:`kiss.core.user_config.recent_work_dirs`),
+        most recently adopted first.  Directories that no longer exist
+        are left out.  The daemon's current working directory is added
+        at the front when it is not already listed (never recorded, or
+        no longer existing): it is the one in use.  The directories the
+        history merely ran in (sub-agent worktrees, cron run
         directories) are not offered: a filter on those would be noise.
         """
         from kiss.core.user_config import recent_work_dirs
 
-        paths = [
-            str(entry["path"])
-            for entry in sorted(recent_work_dirs(), key=lambda e: -float(e["ts"]))
-        ]
+        paths = [str(entry["path"]) for entry in recent_work_dirs()]
         current = self.work_dir
         listed = {os.path.normpath(p) for p in paths}
         if current and os.path.normpath(current) not in listed:
@@ -2327,7 +2330,7 @@ class AgentServer(
                 parent_task_id=parent_tid,
                 chat_id=chat_id,
                 sub_tab_id=tab_id,
-                sub_task_id=_coerce_id(result.get("task_id")) or "",
+                sub_task_id=rebound_task_id or "",
             )
             # A client asked for this sub-agent's tab by name: a tab the
             # user had closed while it ran is open again.  Committed and
@@ -2437,7 +2440,7 @@ class AgentServer(
         # connection-scoped replay (a ready, a deferred tab's fetch)
         # announces the children and defers their transcripts; a
         # history click replays them in full for every window.
-        if isinstance(rebound_task_id, str) and rebound_task_id:
+        if rebound_task_id:
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
@@ -2941,11 +2944,11 @@ class AgentServer(
         with self._state_lock:
             if task_id is not None:
                 candidate = agent_state.get(task_id)
-                # thread_alive() (C-R4) additionally counts a created-
-                # but-not-yet-started worker as live: a task in the
-                # run-startup window is real, and a viewer resuming
-                # its chat must attach to it rather than be treated
-                # as opening a finished session.
+                # ``running()`` counts a created-but-not-yet-started
+                # worker as live: a task in the run-startup window is
+                # real, and a viewer resuming its chat must attach to
+                # it rather than be treated as opening a finished
+                # session.
                 if candidate is not None and candidate.running():
                     source = candidate
             if source is None and chat_id and not is_subagent:

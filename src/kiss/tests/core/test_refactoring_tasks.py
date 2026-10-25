@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for refactoring tasks: _ArtifactDirProxy and related helpers.
+"""Tests for refactoring tasks: the process-wide artifact directory.
 
 Split out of ``tests/agents/third_party_agents/test_refactoring_tasks.py``:
 these methods depend only on ``kiss.core.config``, so they belong in
@@ -15,18 +15,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.core.config import (
-    _ArtifactDirProxy,
-    get_artifact_dir,
-)
+from kiss.core.config import get_artifact_dir
 
 
-class TestArtifactDirProxy:
-    """Tests for _ArtifactDirProxy lazy directory creation and thread-safety."""
-
-    def test_proxy_hash(self) -> None:
-        proxy = _ArtifactDirProxy()
-        assert hash(proxy) == hash(str(proxy))
+class TestArtifactDir:
+    """``get_artifact_dir`` creates the directory lazily, once per process."""
 
     def test_artifact_dir_is_stable_for_the_process(self) -> None:
         """The artifact directory is resolved once and never changes.
@@ -38,4 +31,3 @@ class TestArtifactDirProxy:
         """
         assert get_artifact_dir() == get_artifact_dir()
         assert Path(get_artifact_dir()).is_dir()
-        assert str(_ArtifactDirProxy()) == get_artifact_dir()

@@ -20,6 +20,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {click} = require('./share_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const SHARE_JS = fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8');
@@ -50,15 +51,6 @@ function makeSharePage(initialTheme) {
   }
   win.eval(SHARE_JS + '\n//# sourceURL=share.js');
   return win;
-}
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
 }
 
 function assertDark(win) {

@@ -21,6 +21,7 @@ const {
   MEDIA,
   sendEmptyWorkDir,
 } = require('./simplify2_harness');
+const {makeRow, rowByTitle} = require('./history_helpers');
 
 // main.css with its design tokens inlined (jsdom resolves no var()), so
 // the "?" mark's computed display can be asserted.
@@ -48,39 +49,6 @@ function tick() {
 
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
-}
-
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + overrides.task_id,
-      task_id: overrides.task_id,
-      title: overrides.title,
-      timestamp: 1_700_000_000,
-      preview: overrides.title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      awaiting_answer: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 0,
-    },
-    overrides,
-  );
-}
-
-function rowByTitle(win, title) {
-  const rows = win.document.querySelectorAll('#history-list .sidebar-item');
-  for (const r of rows) {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t && t.textContent === title) return r;
-  }
-  return null;
 }
 
 function statusMark(row) {

@@ -248,22 +248,8 @@ function testCollapsedTextPanelExpandLinksWholePaths() {
   console.log('  ok - expanded collapsed panel links whole paths');
 }
 
-function testUnsplitPathsUntouched() {
-  // A block hljs leaves intact (no token boundary inside the path) must
-  // link the same way as before; the merge step is a no-op there.
-  const {win} = makePage();
-  send(win, {
-    type: 'result',
-    summary: '<pre><code>' + apiFile + '\n' + missingFile + '\n</code></pre>',
-    success: true,
-  });
-  assert.strictEqual(findLinks(win, apiFile).length, 1);
-  assert.strictEqual(findLinks(win, missingFile).length, 0);
-  const code = win.document.querySelector('#output .rc-body pre code');
-  assert.strictEqual(code.textContent, apiFile + '\n' + missingFile + '\n');
-  win.close();
-  console.log('  ok - unsplit paths link as before');
-}
+// A block hljs leaves intact (no token boundary inside the path) is
+// resultCodeBlockFileLinks.test.js's testLiveResultCodeBlockPathsClickable.
 
 function testShellVariablePathsKeepHighlighting() {
   // "$HOME/kiss" is a shell expansion, not a path named HOME/kiss.  The
@@ -308,7 +294,6 @@ function runTests() {
   testLiveLsListingPathsClickable();
   testReplayedLsListingPathsClickable();
   testCollapsedTextPanelExpandLinksWholePaths();
-  testUnsplitPathsUntouched();
   testShellVariablePathsKeepHighlighting();
 }
 

@@ -22,9 +22,17 @@ const harness = require('./simplify2_harness');
 
 const {send} = harness;
 
+// The page's clock is frozen at NOW so every label is exact.
+const NOW = 1_700_000_000_000;
+
 // The sourceURL is what audit0902_main_done_label.coverage.js keys on.
 function makePage() {
-  return harness.makePage({sourceUrl: 'audit0902-donelabel-main.js'});
+  return harness.makePage({
+    sourceUrl: 'audit0902-donelabel-main.js',
+    beforeScripts(win) {
+      win.Date.now = () => NOW;
+    },
+  });
 }
 
 // The Chats-panel pick: chat tabs have no row of their own any more.
@@ -53,7 +61,7 @@ function startTask(win, tabId, startTs) {
 function testSpanOnTheEventWins() {
   const {win} = makePage();
   const tabId = win._testApi.getActiveTabId();
-  const now = Date.now();
+  const now = NOW;
   startTask(win, tabId, now - 3000);
   send(win, {
     type: 'task_done',
@@ -70,10 +78,10 @@ function testSpanOnTheEventWins() {
   // is used instead of a clamped zero.
   startTask(win, tabId, now - 30000);
   send(win, {type: 'task_done', tabId, startTs: now, endTs: now - 1000});
-  assert.ok(
-    /^Done \(30s\)$/.test(statusText(win)) ||
-      /^Done \(31s\)$/.test(statusText(win)),
-    `an inverted span falls back to the tab's clock, got "${statusText(win)}"`,
+  assert.strictEqual(
+    statusText(win),
+    'Done (30s)',
+    "an inverted span falls back to the tab's clock",
   );
   win.close();
   console.log('  ok - the span on the event wins');
@@ -84,7 +92,7 @@ function testFallbackUsesTheFinishedTabsClock() {
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
-  const now = Date.now();
+  const now = NOW;
   // A has been running for a minute in the background; B, on screen,
   // started five seconds ago.
   startTask(win, tabA, now - 60000);
@@ -98,15 +106,16 @@ function testFallbackUsesTheFinishedTabsClock() {
   send(win, {type: 'task_done', tabId: tabA});
   assert.strictEqual(win._testApi.getActiveTabId(), tabB);
   clickTab(win, tabA);
-  const label = statusText(win);
-  assert.ok(
-    /^Done \(1m 0s\)$/.test(label) || /^Done \(1m 1s\)$/.test(label),
-    `a background tab's label is measured from ITS start, got "${label}"`,
+  assert.strictEqual(
+    statusText(win),
+    'Done (1m 0s)',
+    "a background tab's label is measured from ITS start",
   );
   // B is still running its own five-second-old task.
   clickTab(win, tabB);
-  assert.ok(
-    /^Running \d+s$/.test(statusText(win)),
+  assert.strictEqual(
+    statusText(win),
+    'Running 5s',
     'the visible tab keeps its own clock',
   );
   win.close();
@@ -116,18 +125,21 @@ function testFallbackUsesTheFinishedTabsClock() {
 function testFallbackOnTheVisibleTab() {
   const {win} = makePage();
   const tabId = win._testApi.getActiveTabId();
-  const now = Date.now();
-  startTask(win, tabId, now - 70000);
+  startTask(win, tabId, NOW - 70000);
   send(win, {type: 'task_done', tabId});
-  const label = statusText(win);
-  assert.ok(
-    /^Done \(1m 1?0?s\)$/.test(label) || /^Done \(1m 1[01]s\)$/.test(label),
-    `the visible tab measures from its own start, got "${label}"`,
+  assert.strictEqual(
+    statusText(win),
+    'Done (1m 10s)',
+    'the visible tab measures from its own start',
   );
-  // A tab id the page does not know: nothing to measure from, so
-  // the label reads as an instant finish rather than throwing.
+  // A tab id the page does not know is ignored: the label on screen
+  // stays as it is rather than throwing.
   send(win, {type: 'task_done', tabId: 'no-such-tab'});
-  assert.strictEqual(statusText(win), label, 'an unknown tab changes nothing');
+  assert.strictEqual(
+    statusText(win),
+    'Done (1m 10s)',
+    'an unknown tab changes nothing',
+  );
   win.close();
   console.log('  ok - the fallback on the visible tab');
 }

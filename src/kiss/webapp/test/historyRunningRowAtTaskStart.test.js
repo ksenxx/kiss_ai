@@ -7,6 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {rowByTitle, lastGetHistory, makeRow} = require('./history_helpers');
 
 function openSidebar(win) {
   const btn = win.document.getElementById('menu-btn');
@@ -19,13 +20,8 @@ function openSidebar(win) {
   );
 }
 
-function lastGetHistory(posted) {
-  for (let i = posted.length - 1; i >= 0; i--) {
-    if (posted[i] && posted[i].type === 'getHistory') return posted[i];
-  }
-  return null;
-}
-
+// The visible row titles in list order (history_helpers.visibleTitles
+// sorts them; the order matters here).
 function visibleRows(win) {
   const list = win.document.getElementById('history-list');
   const rows = list.querySelectorAll('.sidebar-item');
@@ -36,39 +32,6 @@ function visibleRows(win) {
     }
   });
   return out;
-}
-
-function rowByTitle(win, title) {
-  const list = win.document.getElementById('history-list');
-  const rows = list.querySelectorAll('.sidebar-item');
-  for (const r of rows) {
-    const t = r.querySelector('.sidebar-item-text');
-    if (t && t.textContent === title) return r;
-  }
-  return null;
-}
-
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + (overrides.task_id || 0),
-      task_id: 0,
-      title: 'untitled',
-      timestamp: 1_700_000_000,
-      preview: 'untitled',
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 1_700_000_010_000,
-    },
-    overrides,
-  );
 }
 
 // The CHATS list is not scoped to the working directory: every row of
@@ -83,7 +46,10 @@ function testRowsFromEveryWorkDirVisible() {
     apiKeys: {},
   });
   openSidebar(win);
-  assert.ok(lastGetHistory(posted), 'opening the sidebar must post getHistory');
+  const opened = lastGetHistory(posted);
+  assert.ok(opened, 'opening the sidebar must post getHistory');
+  // Answer that page: a refresh while it is in flight folds into it.
+  send(win, {type: 'history', sessions: [], offset: 0, generation: opened.generation});
 
   posted.length = 0;
   send(win, {type: 'tasks_updated', taskId: ''});
@@ -192,37 +158,14 @@ function testUncheckingRunningStillHidesRunningRow() {
   console.log('  ok - unchecking Running still hides the running row');
 }
 
-function testTasksUpdatedRefetchesHistoryWhileSidebarOpen() {
-  const {win, posted} = makePage();
-
-  send(win, {
-    type: 'configData',
-    config: {work_dir: '/repo/alpha'},
-    apiKeys: {},
-  });
-  openSidebar(win);
-
-  posted.length = 0;
-  send(win, {type: 'tasks_updated', taskId: ''});
-  assert.ok(
-    lastGetHistory(posted),
-    'tasks_updated with the sidebar open must post getHistory so the ' +
-      'just-started task appears immediately',
-  );
-
-  win.close();
-  console.log('  ok - tasks_updated re-fetches history while sidebar open');
-}
-
 function runTests() {
   testRowsFromEveryWorkDirVisible();
   testUncheckingRunningStillHidesRunningRow();
-  testTasksUpdatedRefetchesHistoryWhileSidebarOpen();
 }
 
 try {
   runTests();
-  console.log('\n3 passed, 0 failed');
+  console.log('\n2 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

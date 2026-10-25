@@ -328,6 +328,32 @@ def _to_task_result(
     )
 
 
+@dataclass
+class _Observed:
+    """What a run's event stream has reported so far (the state of :func:`run`'s wait).
+
+    Attributes:
+        chat_id: The chat session id: the one requested, then the one
+            the run's ``clear`` event names.
+        task_id: The persisted ``task_history`` row id the stream
+            named, or ``""``.
+        result: The last ``result`` event for the task's tab, or ``None``.
+        settings: The ``settings`` payload of the run's
+            ``task_settings`` event, or ``None``.
+        totals: The latest spend totals (:func:`_net_totals`), or ``None``.
+    """
+
+    chat_id: str = ""
+    task_id: str = ""
+    result: dict[str, Any] | None = None
+    settings: dict[str, Any] | None = None
+    totals: dict[str, Any] | None = None
+
+    def task_result(self) -> TaskResult:
+        """Return the :class:`TaskResult` of what was observed (:func:`_to_task_result`)."""
+        return _to_task_result(self.result, self.chat_id, self.task_id, self.totals, self.settings)
+
+
 def resolve_sea_path(sea_path: str | None) -> str:
     """Validate a client-supplied SEA path and resolve it.
 
@@ -1044,11 +1070,8 @@ def run(
     deadline = None if timeout is None else time.monotonic() + timeout
     ws: ClientConnection | None = None
     aborted: BaseException | None = None
-    result_event: dict[str, Any] | None = None
-    settings_event: dict[str, Any] | None = None  # the run's task_settings payload
-    totals_event: dict[str, Any] | None = None  # latest spend totals
+    seen = _Observed(chat_id=chat_id)
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
-    task_id = ""
     try:
         ws = local_endpoint.connect(
             path,
@@ -1168,9 +1191,7 @@ def run(
                         if cancelled:
                             raise CancelledError(
                                 "the stop was sent but not confirmed",
-                                _to_task_result(
-                            result_event, chat_id, task_id, totals_event, settings_event,
-                        ),
+                                seen.task_result(),
                                 confirmed=False,
                             )
                         raise StopUnconfirmedTimeoutError(timeout_msg)
@@ -1198,22 +1219,22 @@ def run(
                 continue
             etype = event.get("type")
             if etype == "clear":
-                chat_id = str(event.get("chat_id", "") or "") or chat_id
+                seen.chat_id = str(event.get("chat_id", "") or "") or seen.chat_id
             elif etype != "status" and event.get("taskId"):
-                task_id = str(event["taskId"])
+                seen.task_id = str(event["taskId"])
             if etype in ("result", "usage_info") and "cost" in event:
-                totals_event = _net_totals(event, charged)
+                seen.totals = _net_totals(event, charged)
             if etype == "result":
-                result_event = event
+                seen.result = event
             elif etype == "task_settings" and isinstance(event.get("settings"), dict):
-                settings_event = event["settings"]
+                seen.settings = event["settings"]
             elif etype == "status":
                 if event.get("running"):
                     started = True
                     if running is not None:
                         running.set()
                 elif stopping:
-                    if result_event is not None and result_event.get("success"):
+                    if seen.result is not None and seen.result.get("success"):
                         # The task finished ON ITS OWN while the client
                         # was declaring the timeout: its successful
                         # result and terminal status were already on
@@ -1227,9 +1248,7 @@ def run(
                         # completion — return it instead of discarding
                         # the completed work behind a ``TimeoutError``
                         # that falsely claims the task "was stopped".
-                        return _to_task_result(
-                            result_event, chat_id, task_id, totals_event, settings_event,
-                        )
+                        return seen.task_result()
                     # The terminal status confirms the
                     # stopped-on-timeout task is dead; the run still
                     # timed out.  ``started`` is deliberately not
@@ -1244,30 +1263,21 @@ def run(
                     if cancelled:
                         raise CancelledError(
                             "the task was stopped by the caller",
-                            _to_task_result(
-                            result_event, chat_id, task_id, totals_event, settings_event,
-                        ),
+                            seen.task_result(),
                             confirmed=True,
                         )
-                    raise StoppedOnTimeoutError(
-                        timeout_msg,
-                        _to_task_result(
-                            result_event, chat_id, task_id, totals_event, settings_event,
-                        ),
-                    )
-                elif started or result_event is not None:
+                    raise StoppedOnTimeoutError(timeout_msg, seen.task_result())
+                elif started or seen.result is not None:
                     # A result before any ``running=true`` means the
                     # task failed during the daemon's setup (chat /
                     # work-dir resolution, a stop injected before the
                     # initial status): ``_run_task`` broadcasts its
                     # failure ``result`` and then the terminal status
-                    # from its ``finally``.  Without ``result_event``
+                    # from its ``finally``.  Without ``seen.result``
                     # in this condition that terminal status would be
                     # ignored and the loop would wait out the whole
                     # timeout (forever with ``timeout=None``).
-                    return _to_task_result(
-                            result_event, chat_id, task_id, totals_event, settings_event,
-                        )
+                    return seen.task_result()
     except BaseException as exc:
         aborted = exc
         if ws is not None and not isinstance(exc, (TimeoutError, CancelledError)):
@@ -1275,9 +1285,7 @@ def run(
             # already spent stays spent: hand the caller the latest
             # totals so it can still charge them (``run_agent`` folds
             # them into the stopped calling task).
-            exc.task_result = _to_task_result(  # type: ignore[attr-defined]
-                result_event, chat_id, task_id, totals_event, settings_event,
-            )
+            exc.task_result = seen.task_result()  # type: ignore[attr-defined]
         raise
     finally:
         # Nothing to cascade or close when the connect itself failed:

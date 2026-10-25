@@ -69,7 +69,6 @@ class AgentState:
         "agent",
         "chat_id",
         "tab_id",
-        "conn_id",
         "parent_task_id",
         "server_owned",
         "stop_event",
@@ -101,7 +100,6 @@ class AgentState:
         agent: ChatSorcarAgent | None = None,
         chat_id: str = "",
         tab_id: str = "",
-        conn_id: str = "",
         parent_task_id: str | None = None,
         server_owned: bool = False,
         stop_event: threading.Event | None = None,
@@ -112,7 +110,6 @@ class AgentState:
         self.agent: ChatSorcarAgent | None = agent
         self.chat_id: str = chat_id
         self.tab_id: str = tab_id
-        self.conn_id: str = conn_id
         self.parent_task_id: str | None = parent_task_id
         self.server_owned: bool = server_owned
         self.stop_event: threading.Event | None = stop_event
@@ -126,10 +123,13 @@ class AgentState:
         # Read/written under the server's ``_state_lock``.
         self.pending_ask_question: str = ""
         self.pending_user_messages: list[str] = []
-        # The files attached to the queued steering messages, drained
-        # with them (under :data:`STATE_LOCK`) and shown to the model
-        # as one user message right after the texts.
-        self.pending_user_attachments: list[Attachment] = []
+        # The files attached to the queued steering messages, one list
+        # per message (index-aligned with ``pending_user_messages``),
+        # drained with them under :data:`STATE_LOCK`: the live agent
+        # shows them all as one user message right after the texts,
+        # the re-run of a message queued after the run's last step
+        # carries only that message's own files.
+        self.pending_user_attachments: list[list[Attachment]] = []
         self.unattributed_prompt_echoes: list[str] = []
         # Follow-up tasks the user queued mid-run by sending a
         # steering message wrapped in ``<task>...</task>`` tags.

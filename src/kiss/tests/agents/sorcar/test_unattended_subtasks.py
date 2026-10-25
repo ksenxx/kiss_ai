@@ -25,21 +25,24 @@ local OpenAI-compatible HTTP server:
 Detection looks at the current task only (after the chat history's
 ``# Task`` heading) and at the preamble's position, so an earlier result
 that quotes the sentence, or a task that merely mentions it, is not
-treated as unattended.
+treated as unattended.  The daemon decides on the text as submitted and
+stamps ``is_unattended`` on the agent, so a SEA ``prompt()`` that drops
+the preamble cannot undo the verdict (``DaemonStampsTheVerdict``).
 """
 
 from __future__ import annotations
 
 import json
 import tempfile
+import uuid
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar import cron_agent, local_endpoint
 from kiss.agents.sorcar.agent_dispatch import make_run_parallel_tool
 from kiss.agents.sorcar.cron_agent import (
     PROMPT_PREAMBLE,
@@ -49,6 +52,7 @@ from kiss.agents.sorcar.cron_agent import (
     unattended_child_suffix,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
@@ -57,6 +61,7 @@ from kiss.tests.core.test_budget_enforcement_e2e import (
     _start_server,
     _tool_call_response,
 )
+from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
 def _finish_args(message: dict) -> str:
@@ -177,8 +182,9 @@ def test_run_parallel_children_of_attended_run_are_untouched(
 
 
 class _Agent:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, is_unattended: bool | None = None) -> None:
         self.task_description = text
+        self.is_unattended = is_unattended
 
 
 def test_unattended_helpers() -> None:
@@ -217,3 +223,93 @@ def test_is_unattended_rejects_quotes_and_history() -> None:
     assert not is_unattended(_Agent(history))
     assert not is_unattended(object())
     assert not is_unattended(None)
+
+
+def test_is_unattended_prefers_the_daemons_verdict() -> None:
+    """A stamped ``is_unattended`` wins over the current text: a cron prompt job
+    whose SEA ``prompt()`` replaced the preamble by a constant stays unattended,
+    and an attended task that happens to carry the text does not become one."""
+    assert is_unattended(_Agent("Produce the recommendations report.", is_unattended=True))
+    assert not is_unattended(_Agent(PROMPT_PREAMBLE + "job", is_unattended=False))
+
+
+class DaemonStampsTheVerdict(DaemonRunApiHarness):
+    """A real daemon decides ``is_unattended`` on the task text as SUBMITTED and
+    stamps it on the agent, so ``ask_user_question`` refuses in a scheduled
+    slash command whose SEA ``prompt()`` dropped the preamble, and still asks
+    in the same command typed by a user."""
+
+    _REPLACING_SEA = '''
+        """SEA that ignores the task text."""
+
+        from kiss.agents.seas.base.base_sea import BaseSea
+
+
+        class Sea(BaseSea):
+            def prompt(self, task: str) -> str:
+                """Replace the task, keeping its last word to tell runs apart."""
+                return "fresh text, no preamble: " + task.rsplit(" ", 1)[-1]
+        '''
+
+    def _run_asking(self, prompt: str, sea_path: str) -> tuple[list[str], list[str]]:
+        """Run *prompt* with an executor stub that calls ``ask_user_question``.
+
+        Every ``askUser`` event the connection sees is answered ``yes``.
+
+        Returns:
+            ``(tool results the stub saw, questions the connection saw)``.
+        """
+        results: list[str] = []
+        questions: list[str] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            if kwargs.get("is_agentic") is False:
+                return ""
+            tools = {getattr(t, "__name__", ""): t for t in kwargs.get("tools") or []}
+            results.append(str(tools["ask_user_question"]("May I post?")))
+            self_agent.step_count = 1
+            return "success: true\nis_continue: false\nsummary: agent ok\n"
+
+        cast(Any, KISSAgent).run = stub_run
+        tab_id = f"ask-{uuid.uuid4().hex}"
+        ws = local_endpoint.connect(Path(self.endpoint_file), open_timeout=60)
+        try:
+            ws.send(json.dumps({
+                "type": "run",
+                "prompt": prompt,
+                "seaPath": sea_path,
+                "tabId": tab_id,
+                "taskId": uuid.uuid4().hex,
+                "workDir": self.repo,
+                "model": "",
+                "useWebTools": False,
+                "classifyTasks": False,
+            }))
+            started = False
+            while True:
+                event = json.loads(ws.recv(timeout=60))
+                if event.get("type") == "askUser":
+                    questions.append(str(event.get("question")))
+                    ws.send(json.dumps(
+                        {"type": "userAnswer", "tabId": tab_id, "answer": "yes"}
+                    ))
+                if event.get("tabId") != tab_id or event.get("type") != "status":
+                    continue
+                if event.get("running"):
+                    started = True
+                elif started:
+                    return results, questions
+        finally:
+            ws.close()
+
+    def test_scheduled_run_refuses_and_typed_run_asks(self) -> None:
+        sea_path = self._write_py("replaces_prompt_sea.py", self._REPLACING_SEA)
+        results, questions = self._run_asking(
+            PROMPT_PREAMBLE + "/replaces_prompt_sea scheduled", sea_path,
+        )
+        self.assertEqual(questions, [])
+        self.assertEqual(len(results), 1)
+        self.assertIn("runs unattended", results[0])
+        results, questions = self._run_asking("/replaces_prompt_sea typed", sea_path)
+        self.assertEqual(questions, ["May I post?"])
+        self.assertEqual(results, ["yes"])

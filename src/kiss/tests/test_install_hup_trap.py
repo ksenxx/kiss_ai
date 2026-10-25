@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -70,6 +71,10 @@ def _run_in_pty_and_hang_up(script: Path, outcome: Path) -> None:
 
     pid, master = pty.fork()
     if pid == 0:  # pragma: no cover - child process
+        # An ignored SIGHUP survives exec (pytest under ``nohup`` ignores it):
+        # the leader would then outlive the hang-up and bash, which cannot
+        # trap a signal ignored at entry, would never see it.
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
         os.execv(sys.executable, [sys.executable, "-c", leader])
     seen = b""
     deadline = time.time() + 20

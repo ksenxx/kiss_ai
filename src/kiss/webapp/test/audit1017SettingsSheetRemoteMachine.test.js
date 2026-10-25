@@ -23,8 +23,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, pickMachine} = require('./simplify2_harness');
-const {byId, click} = require('./settings_helpers');
+const {makePage, send, pickMachine, ofType} = require('./simplify2_harness');
+const {byId, click, typeInto} = require('./settings_helpers');
 
 const MACHINES = [
   {name: 'laptop', status: 'reachable', local: true},
@@ -51,12 +51,6 @@ const GPU_CONFIG = {
   apiKeys: {OPENAI_API_KEY: 'sk-gpu'},
 };
 
-function typeInto(win, id, value) {
-  const node = byId(win, id);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
-
 /** The form's text boxes that could leak another machine's values. */
 function formValues(win) {
   return {
@@ -75,10 +69,6 @@ const LAPTOP = {
   endpoint: 'http://laptop:8080/v1',
 };
 const GPU = {password: 'gpu-pw', openai: 'sk-gpu', budget: '42', endpoint: ''};
-
-function msgsOfType(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
 
 /** A page showing laptop's settings values, with a chat tab open. */
 function pageWithLaptopValues() {
@@ -146,10 +136,10 @@ function testRemoteSheetStartsBlankAndErrorKeepsItBlank() {
 
   // The form was never populated: a close must not flush its blanks
   // over gpu-box's password and endpoint.
-  const saves = msgsOfType(posted, 'saveConfig').length;
+  const saves = ofType(posted, 'saveConfig').length;
   click(win, byId(win, 'settings-overlay'));
   assert.strictEqual(
-    msgsOfType(posted, 'saveConfig').length,
+    ofType(posted, 'saveConfig').length,
     saves,
     'closing a blank sheet posts no saveConfig',
   );
@@ -175,7 +165,7 @@ function testTypedValueIsTheOnlySave() {
   assert.strictEqual(byId(win, 'cfg-key-OPENAI_API_KEY').value, '');
 
   click(win, byId(win, 'settings-overlay'));
-  const saves = msgsOfType(posted, 'saveConfig');
+  const saves = ofType(posted, 'saveConfig');
   assert.strictEqual(saves.length, 1, 'the edit is saved on close');
   assert.strictEqual(saves[0].machine, 'gpu-box');
   assert.strictEqual(

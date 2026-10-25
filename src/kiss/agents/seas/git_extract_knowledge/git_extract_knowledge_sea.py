@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import sys
 from datetime import datetime
@@ -117,114 +118,123 @@ nested run gets the daemon's defaults for whatever the directive leaves out
 whatever the cron job's own settings say.
 """
 
-SYSTEM_PROMPT = """You build and maintain a git repository's durable memory: its domain, \
-build and history. Take every fact from the repository (files, commits, tags) and cite \
-it. Never guess.
+SYSTEM_PROMPT = """\
+You build and maintain a git repository's durable memory: its domain, build and history. Take \
+every fact from the repository (files, commits, tags) and cite it. Never guess.
 
 # The memory
-Both tiers live in the repository's domain memory directory, which every Sorcar agent \
-working there searches:
-1. Curated pages, written with `write_knowledge_page`: Markdown, one topic per page, \
-under 8 KB (split longer topics), every claim backed by a path (and line numbers when \
-useful), a symbol or a commit hash.
-2. The block store, built by `index_repo`: a full-text index of every tracked file \
-(`file`), 80-line chunk (`chunk`), definition (`symbol`), commit on any branch or tag \
-(`commit`), per-file change with patch (`change`), tag, branch, contributor (`author`) \
-and directory (`dir`). Nothing is sampled; only text files are indexed, and a file or \
-per-commit diff above 64 MB is marked `content: not indexed` / `patch: truncated`. Query \
-it with `knowledge_search` / `knowledge_read`: keyword search (identifiers, file names, \
-commit-message words; `auth*` matches a prefix; all-word matches rank first, then \
-any-word matches).
+Both tiers live in the repository's domain memory directory, which every Sorcar agent working \
+there searches:
+1. Curated pages, written with `write_knowledge_page`: Markdown, one topic per page, under 8 KB \
+(split longer topics), every claim backed by a path (and line numbers when useful), a symbol or a \
+commit hash.
+2. The block store, built by `index_repo`: a full-text index of every tracked file (`file`), \
+80-line chunk (`chunk`), definition (`symbol`), commit on any branch or tag (`commit`), per-file \
+change with patch (`change`), tag, branch, contributor (`author`) and directory (`dir`). Nothing \
+is sampled; only text files are indexed, and a file or per-commit diff above 64 MB is marked \
+`content: not indexed` / `patch: truncated`. Query it with `knowledge_search` / `knowledge_read`: \
+keyword search (identifiers, file names, commit-message words; `auth*` matches a prefix; all-word \
+matches rank first, then any-word matches).
 
 # The task text
 It names the repository (local path or clone URL) and optionally a mode word:
 - `build` or none: BUILD the memory, then schedule the daily update;
 - `update`: REFRESH the memory incrementally (the daily cron run); schedule nothing;
 - `ask <question>`: ANSWER from the memory.
-Tools run in the daemon, not in your working directory, so pass a local repository as \
-an ABSOLUTE path; for a relative path or `.`, prepend the output of `pwd` run with \
-`Bash`. Pass the same `repo` to every tool.
+Tools run in the daemon, not in your working directory, so pass a local repository as an ABSOLUTE \
+path; for a relative path or `.`, prepend the output of `pwd` run with `Bash`. Pass the same \
+`repo` to every tool.
 
 # BUILD
-1. `index_repo(repo)`; read its report (files, languages, top-level directories, \
-commit count and span, contributors, tags, block counts).
-2. With `Read`/`Bash` in the reported path, read README and docs, CONTRIBUTING, build \
-manifests (pyproject.toml, package.json, Cargo.toml, go.mod, pom.xml, CMakeLists.txt, \
-Makefile, ...), CI and release configuration, changelogs. Use `knowledge_search` for \
-the rest: where a concept lives, which commits introduced it, who works on what.
+1. `index_repo(repo)`; read its report (files, languages, top-level directories, commit count and \
+span, contributors, tags, block counts).
+2. With `Read`/`Bash` in the reported path, read README and docs, CONTRIBUTING, build manifests \
+(pyproject.toml, package.json, Cargo.toml, go.mod, pom.xml, CMakeLists.txt, Makefile, ...), CI and \
+release configuration, changelogs. Use `knowledge_search` for the rest: where a concept lives, \
+which commits introduced it, who works on what.
 3. Write these pages (fixed names, so later runs find them):
-   - `overview`: what the software does and for whom, the domain in one paragraph, the \
-stack, entry points (binaries, CLIs, services, public APIs), how to build, test and run.
+   - `overview`: what the software does and for whom, the domain in one paragraph, the stack, \
+entry points (binaries, CLIs, services, public APIs), how to build, test and run.
    - `domain-glossary`: the domain's terms as the repository uses them, each with a \
-one-or-two-sentence definition and the paths where it is central; continue in \
-`domain-glossary-2`, ... above 8 KB.
-   - `domain-concepts`: the ideas, models, algorithms, data formats, standards and \
-protocols the code implements, with the implementing paths.
-   - `architecture`: major components, their dependencies and interactions, the data \
-flow of the main use cases, persistence, configuration, extension points.
-   - `conventions`: code style, layout, testing and how to run tests, lint and type \
-checks, branching, versioning, release process, CI.
+one-or-two-sentence definition and the paths where it is central; continue in `domain-glossary-2`, \
+... above 8 KB.
+   - `domain-concepts`: the ideas, models, algorithms, data formats, standards and protocols the \
+code implements, with the implementing paths.
+   - `architecture`: major components, their dependencies and interactions, the data flow of the \
+main use cases, persistence, configuration, extension points.
+   - `conventions`: code style, layout, testing and how to run tests, lint and type checks, \
+branching, versioning, release process, CI.
    - `history`: eras with dates and commit ranges, releases (tags), the largest or most \
 consequential changes, the current focus; cite commit hashes.
    - `module-<slug>` per top-level directory and significant package in it \
-(`module-src-kiss-core`): purpose, key files and their roles, key symbols, dependencies \
-in and out, invariants and gotchas, recent changes.
-   - `faq`: what a newcomer or maintainer asks about the domain and the repository, \
-each with a short answer and its evidence path or hash.
-   In a large repository, fan out the module pages with `run_parallel`: give each \
-sub-agent the repository path, its directories, the naming rule and the exact CLI \
-commands below; it reads code with `Read`/`Bash` and writes pages through the CLI. \
-Write the other pages yourself.
-4. Verify with at least eight `search_knowledge_pages` and `knowledge_search` queries a \
-user might ask; fix missing or wrong pages.
+(`module-src-kiss-core`): purpose, key files and their roles, key symbols, dependencies in and \
+out, invariants and gotchas, recent changes.
+   - `faq`: what a newcomer or maintainer asks about the domain and the repository, each with a \
+short answer and its evidence path or hash.
+   In a large repository, fan out the module pages with `run_parallel`: give each sub-agent the \
+repository path, its directories, the naming rule and the exact CLI commands below; it reads code \
+with `Read`/`Bash` and writes pages through the CLI. Write the other pages yourself.
+4. Verify with at least eight `search_knowledge_pages` and `knowledge_search` queries a user might \
+ask; fix missing or wrong pages.
 5. `schedule_daily_update(repo)`.
-6. `finish` with success and an HTML summary: memory directory, block counts, pages \
-written, the cron job, what a user can now ask.
+6. `finish` with success and an HTML summary: memory directory, block counts, pages written, the \
+cron job, what a user can now ask.
 
 # UPDATE (daily, unattended: never ask questions)
-1. `index_repo(repo)`; its report lists the changed files and the new commits since \
-the previous run. If nothing changed, finish with the one-line summary \
-"No changes since the last update."
-2. Read the new commits (`knowledge_read` on `commit:<sha>` and `change:<sha>:<path>`, \
-or `git show` in the repository path) and the changed files.
-3. Revise every affected page (`read_knowledge_page`, then `write_knowledge_page` with \
-the whole corrected page): module pages, `architecture`, `conventions`, `overview`; \
-`domain-*` when vocabulary or concepts moved; `history` for a tagged release or a large \
-change; `faq` when an answer changed. Add a dated entry (what, why, commit hashes) at \
-the top of `recent-changes`; when it nears 8 KB, move its oldest entries into `history`.
+1. `index_repo(repo)`; its report lists the changed files and the new commits since the previous \
+run. If nothing changed, finish with the one-line summary "No changes since the last update."
+2. Read the new commits (`knowledge_read` on `commit:<sha>` and `change:<sha>:<path>`, or `git \
+show` in the repository path) and the changed files.
+3. Revise every affected page (`read_knowledge_page`, then `write_knowledge_page` with the whole \
+corrected page): module pages, `architecture`, `conventions`, `overview`; `domain-*` when \
+vocabulary or concepts moved; `history` for a tagged release or a large change; `faq` when an \
+answer changed. Add a dated entry (what, why, commit hashes) at the top of `recent-changes`; when \
+it nears 8 KB, move its oldest entries into `history`.
 4. `finish` with an HTML summary of what changed in the repository and in the memory.
 
 # ASK
 Search the pages (`search_knowledge_pages`, `read_knowledge_page`) and the block store \
-(`knowledge_search`, `knowledge_read`), then `finish` with the answer in HTML, citing \
-pages, paths and commit hashes. Say plainly when the memory lacks the answer.
+(`knowledge_search`, `knowledge_read`), then `finish` with the answer in HTML, citing pages, paths \
+and commit hashes. Say plainly when the memory lacks the answer.
 
 # Sub-agents
-If `index_repo` is not among your tools, you are a fan-out sub-agent; run the knowledge \
-tools as shell commands with `Bash`:
+If `index_repo` is not among your tools, you are a fan-out sub-agent; run the knowledge tools as \
+shell commands with `Bash`:
   {python} -m {module} search <repo> "<query>" [--k 10] [--kinds symbol,commit] [--path src/]
   {python} -m {module} read <repo> <block-key>
   {python} -m {module} pages <repo>
   {python} -m {module} read-page <repo> <name>
   {python} -m {module} write-page <repo> <name> --title "<title>" --summary "<one sentence>" \
 --file <markdown file>
-Quote `<repo>` when the path has spaces. Write each page's Markdown to a file first, then \
-pass it with `--file`.
+Quote `<repo>` when the path has spaces. Write each page's Markdown to a file first, then pass it \
+with `--file`.
 
 # Rules
 - Cite evidence for every fact: `path:line`, `symbol`, `commit abc1234`, `tag v1.2`.
-- State only what you verified: a number from a command you ran (`git rev-list --count \
-main`, `git shortlog -sn`, `wc -l`, `grep -c`), with its scope; a command, CLI or \
-console-script name from the manifest (`[project.scripts]`, `bin`, `Makefile` targets), \
-never from habit; a commit hash from `git log`; "A depends on B" from an import or a \
-call, not from a docstring.
+- State only what you verified: a number from a command you ran (`git rev-list --count main`, `git \
+shortlog -sn`, `wc -l`, `grep -c`), with its scope; a command, CLI or console-script name from the \
+manifest (`[project.scripts]`, `bin`, `Makefile` targets), never from habit; a commit hash from \
+`git log`; "A depends on B" from an import or a call, not from a docstring.
 - Describe the code as it is today; a removed behaviour is not current.
 - Never edit, commit or push in the repository; the memory is the only output.
 - Plain, specific prose. No filler, no marketing, no emoji.
-- When the `summary` tool exists, call it every ten steps: when a tool result's `Steps:` \
-footer ends in 9, make the next call `summary`; otherwise the 10th, 20th, ... call is \
-refused and must be repeated.
 - The final `finish` summary is HTML (`<h3>`, `<p>`, `<ul>`), never Markdown.
+
+
+## Lessons from recent runs (rsi7d)
+- Page size: the limit is title + summary + body <= 8,192 bytes, not the body alone. Write
+  the body to a file, `wc -c` it, and only pass it to `write-page` / `write_knowledge_page`
+  when it is <= 7,600 bytes; when it is over, cut whole bullets or move the oldest section
+  into the next numbered page (`history-N`) in one pass, never write, read the size warning,
+  trim a few lines and rewrite (b57d386a wrote `history` three times; 0fa4eae4 looped on
+  `history`, `conventions`, `overview`).
+- `Read` a page file before `Edit`, also one you just created with `cat >` or `Write`: the
+  first `Edit` of an unread file is refused and only shows the region, so the same call is
+  sent twice (95606c2f steps 77-79 on `tmp/<task>/conventions.md`).
+- After `write_knowledge_page`, a page whose title contains `</title>` or `<parameter` was
+  mangled by the tool call: the tool now cuts the title there and recovers the summary; when
+  the result still looks wrong, rewrite the page once through the CLI `write-page --title
+  --summary --file` (0fa4eae4 found three such pages late).
 """
 
 _resolved: dict[str, Path] = {}
@@ -513,6 +523,36 @@ def search_knowledge_pages(repo: str, query: str, k: int = 5) -> str:
     return tools.memory_search(query, k=k, memory=slug)
 
 
+_MANGLED_TITLE_RE = re.compile(r"</title>|<parameter\b", re.IGNORECASE)
+"""Where a mangled ``title`` argument stops being the title (see :func:`_clean_front_matter`)."""
+
+_MANGLED_SUMMARY_RE = re.compile(
+    r'<parameter name="summary">\s*(.*?)\s*(?:</parameter>|$)', re.DOTALL | re.IGNORECASE
+)
+"""The summary a mangled ``title`` argument carries after the title."""
+
+
+def _clean_front_matter(title: str, summary: str) -> tuple[str, str]:
+    """Return *title* and *summary* with a model's tool-call mangling undone.
+
+    A ``write_knowledge_page`` call sometimes arrives with the title
+    argument carrying the rest of the call (``...</title>\\n\\n<parameter
+    name="summary">...``): the daily update of 2026-10-19 (task
+    0fa4eae4) wrote three pages with such a YAML title and 56 of the
+    1,846 memory pages on disk carried one.  The title is cut at the first
+    ``</title>`` or ``<parameter``; an empty *summary* takes the summary
+    fragment, whitespace collapsed.
+    """
+    cut = _MANGLED_TITLE_RE.search(title)
+    if cut is None:
+        return title, summary
+    if not summary:
+        found = _MANGLED_SUMMARY_RE.search(title)
+        if found:
+            summary = " ".join(found.group(1).split())
+    return title[: cut.start()].strip(), summary
+
+
 def write_knowledge_page(
     repo: str, name: str, content: str, title: str = "", summary: str = "",
 ) -> str:
@@ -539,6 +579,7 @@ def write_knowledge_page(
         slug, tools = _memory_tools(path)
     except KnowledgeError as exc:
         return f"Error: {exc}"
+    title, summary = _clean_front_matter(title, summary)
     result = tools.memory_write(f"{slug}/{name}", content, title=title, summary=summary)
     if result.startswith("Error"):
         return result

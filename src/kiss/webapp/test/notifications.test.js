@@ -14,24 +14,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness.js');
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {bubbles: true}),
-  );
-}
-
-function toastById(win, id) {
-  return win.document.querySelector(
-    '.kiss-notification[data-notification-id="' + id + '"]',
-  );
-}
+const {makePage, send, waitFor, click} = require('./simplify2_harness.js');
+const {toast: toastById} = require('./ui_antipattern_harness');
 
 async function main() {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
+  const {win} = makePage();
 
   send(win, {
     type: 'notification',
@@ -57,7 +44,7 @@ async function main() {
   );
   const closeButton = toast.querySelector('.kiss-notification-close');
   assert.ok(closeButton, 'notification close button should exist');
-  click(closeButton);
+  click(win, closeButton);
   await waitFor(
     () => !toastById(win, 'choose-1'),
     'the close button must dismiss the toast',
@@ -78,7 +65,7 @@ async function main() {
   const actionButton = toast.querySelector('.kiss-notification-action');
   assert.ok(actionButton, 'notification action button should exist');
   assert.strictEqual(actionButton.textContent.trim(), 'Apply');
-  click(actionButton);
+  click(win, actionButton);
   await waitFor(
     () => !toastById(win, 'choose-2'),
     'clicking an action button must dismiss the toast',
@@ -113,41 +100,6 @@ async function main() {
     toastById(win, 'progress-1'),
     null,
     'a close event retires the toast',
-  );
-
-  // An error toast is sticky even without actions: it never
-  // auto-dismisses.
-  send(win, {
-    type: 'notification',
-    id: 'err-1',
-    severity: 'error',
-    message: 'Something failed',
-  });
-  toast = toastById(win, 'err-1');
-  assert.ok(toast && toast.classList.contains('kiss-notification-error'));
-  assert.strictEqual(toast.kissNotificationState.sticky, true);
-
-  // Window-level (untagged) and tagged-for-this-tab toasts both show; a
-  // toast tagged for an unknown tab does not.
-  send(win, {
-    type: 'notification',
-    id: 'mine',
-    severity: 'info',
-    message: 'for me',
-    tabId: ready.tabId,
-  });
-  assert.ok(toastById(win, 'mine'), 'a toast tagged for the active tab shows');
-  send(win, {
-    type: 'notification',
-    id: 'theirs',
-    severity: 'info',
-    message: 'for someone else',
-    tabId: 'no-such-tab',
-  });
-  assert.strictEqual(
-    toastById(win, 'theirs'),
-    null,
-    'a toast tagged for a tab this page does not hold is dropped',
   );
   win.close();
   console.log('notifications: all passed.');

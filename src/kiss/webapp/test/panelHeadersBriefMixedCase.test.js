@@ -19,13 +19,15 @@
 // serialized DOM the way a shared page toggles it.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const harness = require('./simplify2_harness');
-const {readyTabId, output} = harness;
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {
+  readyTabId,
+  output,
+  headerText,
+  collapsedHeaderText,
+  shareTranscript,
+  foldedShareHeaders,
+} = harness;
 
 /** The harness page with main.css applied; `win.__posted` is its ledger. */
 function makePage() {
@@ -69,15 +71,7 @@ function sendStep(win, i) {
 }
 
 function startTask(win, task) {
-  send(win, {
-    type: 'task_events',
-    events: [],
-    task,
-    tabId: readyTabId(win.__posted),
-    chat_id: 'chat-' + task.replace(/\W+/g, '-'),
-  });
-  send(win, {type: 'status', running: true});
-  send(win, {type: 'prompt', text: task});
+  harness.startTask(win, win.__posted, task);
 }
 
 function assertThoughtsVisible(win, where) {
@@ -235,25 +229,6 @@ function testThoughtsFoldOnlyByClick() {
   console.log('  ok - only a header click folds a Thoughts panel');
 }
 
-/**
- * What a header reads as: its title and its preview span, which the
- * stylesheet sets apart with a margin, joined by one space.
- */
-function headerText(hdr) {
-  return Array.from(hdr.childNodes)
-    .map(n => n.textContent.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join(' ');
-}
-
-function collapsedHeaderText(panel) {
-  const hdr = panel.querySelector('.collapse-header');
-  // The streaming sweep may have folded an older panel already.
-  if (!panel.classList.contains('collapsed')) hdr.click();
-  assert.ok(panel.classList.contains('collapsed'));
-  return headerText(hdr);
-}
-
 function testBashCollapsedHeaderIsDescription() {
   const win = makePage();
   startTask(win, 'Bash header');
@@ -374,35 +349,12 @@ function testSharePagePreviewMatches() {
     new_string: 'b',
   });
   // A shared page is the serialized transcript, re-driven by share.js.
-  const html =
-    '<!doctype html><html><body><div id="output">' +
-    output(win).innerHTML +
-    '</div></body></html>';
-  win.close();
-  const dom = new JSDOM(html, {
-    runScripts: 'dangerously',
-    url: 'https://localhost/',
-  });
-  const sw = dom.window;
-  sw.eval(fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8'));
-  const panels = Array.from(sw.document.querySelectorAll('.tc'));
-  assert.strictEqual(panels.length, 3);
-  const expect = [
-    'Bash list files',
-    'Write /tmp/w.txt',
-    'Edit path: /tmp/e.txt - a + b',
-  ];
-  panels.forEach((p, i) => {
-    const hdr = p.querySelector('.collapse-header');
-    // Open a panel the live sweep had folded, then fold it again so the
-    // preview is share.js's own, not the serialized one.
-    if (p.classList.contains('collapsed')) hdr.click();
-    hdr.querySelector('.collapse-preview').textContent = 'stale';
-    hdr.click();
-    assert.ok(p.classList.contains('collapsed'), 'share.js folds the panel');
-    const txt = headerText(hdr);
-    assert.strictEqual(txt, expect[i], 'shared page header ' + i);
-  });
+  const sw = shareTranscript(win);
+  assert.deepStrictEqual(
+    foldedShareHeaders(sw),
+    ['Bash list files', 'Write /tmp/w.txt', 'Edit path: /tmp/e.txt - a + b'],
+    'shared page headers',
+  );
   sw.close();
   console.log('  ok - a shared page folds panels to the same headers');
 }

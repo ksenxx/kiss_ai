@@ -27,6 +27,7 @@ const {
   clickTab,
   send,
   stubRaf,
+  twoTabs,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
@@ -105,17 +106,6 @@ function ghostText(win) {
 function toastText(win) {
   const container = win.document.getElementById('kiss-notification-container');
   return container ? container.textContent : '';
-}
-
-// Open a second chat tab and hand back both ids, with `second` on screen.
-function twoTabs(win) {
-  const api = win._testApi;
-  assert.ok(api, '_testApi must be exposed by main.js');
-  const first = api.getActiveTabId();
-  api.createNewTab();
-  const second = api.getActiveTabId();
-  assert.ok(second && second !== first, 'a fresh second tab must be active');
-  return {api, first, second};
 }
 
 // Every test is queued and run in order by the runner at the bottom: the
@@ -1447,9 +1437,14 @@ test('a notification for a same-chat different-task tab never shows', () => {
 // Genuinely global messages must keep working.
 // ---------------------------------------------------------------------------
 
-test('daemonStatus still drives the connection UI', () => {
-  const {win} = makePage();
-  twoTabs(win);
+// One page for all of them: each has its own suite (the loading
+// overlay, #remote-url, #model-name, the history sidebar, #new-chat-btn,
+// focusInput, #stop-btn); this only checks the ownership guards left
+// the app-global paths alone with two tabs open.
+test('app-global messages and buttons still work with two tabs open', () => {
+  const {win, posted} = makePage();
+  const {first, second} = twoTabs(win);
+
   send(win, {type: 'daemonStatus', connected: false});
   const overlay = win.document.getElementById('kiss-server-loading');
   assert.strictEqual(
@@ -1463,24 +1458,15 @@ test('daemonStatus still drives the connection UI', () => {
     'none',
     'reconnecting must still drop the loading overlay',
   );
-  win.close();
-});
 
-test('remote_url still renders the server address', () => {
-  const {win} = makePage();
-  twoTabs(win);
   send(win, {type: 'remote_url', url: 'https://global-url-QK69.example'});
-  const bar = win.document.getElementById('remote-url');
   assert.ok(
-    bar.textContent.includes('global-url-QK69'),
+    win.document
+      .getElementById('remote-url')
+      .textContent.includes('global-url-QK69'),
     'the remote URL is app-global and must keep rendering',
   );
-  win.close();
-});
 
-test('models still updates the model picker', () => {
-  const {win} = makePage();
-  twoTabs(win);
   send(win, {
     type: 'models',
     models: [
@@ -1498,12 +1484,7 @@ test('models still updates the model picker', () => {
     'model-QK70',
     'the model list is app-global and must keep rendering',
   );
-  win.close();
-});
 
-test('history still renders in the sidebar', () => {
-  const {win} = makePage();
-  twoTabs(win);
   send(win, {
     type: 'history',
     offset: 0,
@@ -1524,12 +1505,25 @@ test('history still renders in the sidebar', () => {
       .textContent.includes('history-entry-QK72'),
     'the history sidebar is shared by design and must keep rendering',
   );
-  win.close();
-});
 
-test('the New chat button still opens a new conversation', () => {
-  const {win} = makePage();
-  const {first, second} = twoTabs(win);
+  taskInput(win).blur();
+  send(win, {type: 'focusInput'});
+  assert.strictEqual(
+    win.document.activeElement,
+    taskInput(win),
+    'the Focus Chat command must still focus the input',
+  );
+
+  posted.length = 0;
+  win.document.getElementById('stop-btn').click();
+  const stops = posted.filter(m => m.type === 'stop');
+  assert.strictEqual(stops.length, 1, JSON.stringify(posted));
+  assert.strictEqual(
+    stops[0].tabId,
+    second,
+    'the Stop button must still target the tab the user is looking at',
+  );
+
   // The New chat button reuses a chat that is still new, so the
   // daemon's task-text echo makes both chats "used" first.
   send(win, {type: 'setTaskText', text: 'first task', tabId: first});
@@ -1540,34 +1534,6 @@ test('the New chat button still opens a new conversation', () => {
   assert.ok(
     now !== first && now !== second,
     'the New chat button must still create a tab',
-  );
-  win.close();
-});
-
-test('focusInput still focuses the visible input', () => {
-  const {win} = makePage();
-  twoTabs(win);
-  taskInput(win).blur();
-  send(win, {type: 'focusInput'});
-  assert.strictEqual(
-    win.document.activeElement,
-    taskInput(win),
-    'the Focus Chat command must still focus the input',
-  );
-  win.close();
-});
-
-test('the Stop button still stops the visible tab', () => {
-  const {win, posted} = makePage();
-  const {second} = twoTabs(win);
-  posted.length = 0;
-  win.document.getElementById('stop-btn').click();
-  const stops = posted.filter(m => m.type === 'stop');
-  assert.strictEqual(stops.length, 1, JSON.stringify(posted));
-  assert.strictEqual(
-    stops[0].tabId,
-    second,
-    'the Stop button must still target the tab the user is looking at',
   );
   win.close();
 });
@@ -1601,6 +1567,25 @@ test('a notice for a background tab never prints in the visible output', () => {
     !visibleText(win).includes('bg_notice_QK76'),
     "another task's notice must not be printed into this conversation",
   );
+
+  win.close();
+});
+
+test('diagnostics for a background tab reach that tab', () => {
+  // Routed to the background tab's parked transcript, not dropped: a
+  // notice, a warning and an error all show once the tab comes on screen.
+  const {win} = makePage();
+  const {first} = twoTabs(win);
+
+  send(win, {type: 'notice', tabId: first, text: 'bg_notice_QK79'});
+  send(win, {type: 'warning', tabId: first, message: 'bg_warning_QK79'});
+  send(win, {type: 'error', tabId: first, text: 'bg_error_QK79'});
+  win._testApi.switchToTab(first);
+
+  const shown = visibleText(win);
+  assert.ok(shown.includes('Note: bg_notice_QK79'), 'the notice reached its tab');
+  assert.ok(shown.includes('Warning: bg_warning_QK79'), 'the warning did');
+  assert.ok(shown.includes('Error: bg_error_QK79'), 'the error did');
 
   win.close();
 });

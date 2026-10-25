@@ -63,6 +63,18 @@ function assertNoToast(win, where) {
   assert.strictEqual(toasts(win).length, 0, 'no toast ' + where);
 }
 
+// The daemon's connect-time snapshot of two open chat tabs, t1 and t2.
+function mirrorTwoTabs(win) {
+  send(win, {type: 'daemonStatus', connected: true});
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
+      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
+    ],
+  });
+}
+
 function testNewQuestionSwitchesTabWithoutToast() {
   const {win, posted} = makePage();
   const api = win._testApi;
@@ -89,10 +101,6 @@ function testNewQuestionSwitchesTabWithoutToast() {
   assert.ok(answering(win), 'the composer answers the question at once');
   assert.ok(askPending(win, questionTab));
   assertNoToast(win, 'when the question arrives');
-  assert.ok(
-    !posted.some(m => m.type === 'askWaiting' || m.type === 'askWaitingDone'),
-    'the retired waiting-notice messages are never posted',
-  );
 
   // The user goes back to their own tab: the waiting tab stays flagged
   // and nothing else nags them.
@@ -139,7 +147,7 @@ function testTaskEndAndAskUserDoneRaiseNoToast() {
     {type: 'task_done', success: true},
     {type: 'task_error', error: 'boom'},
   ]) {
-    const {win, posted} = makePage();
+    const {win} = makePage();
     const api = win._testApi;
     const tab = api.getActiveTabId();
     send(win, {type: 'askUser', question: 'Which branch?', tabId: tab});
@@ -149,17 +157,13 @@ function testTaskEndAndAskUserDoneRaiseNoToast() {
     send(win, Object.assign({tabId: tab}, retire));
     assert.ok(!answering(win), retire.type + ' retires the question');
     assertNoToast(win, retire.type + ': after the question is retired');
-    assert.ok(
-      !posted.some(m => m.type === 'askWaitingDone'),
-      retire.type + ': nothing to tell the daemon',
-    );
     win.close();
   }
   console.log('  ok - answering or ending the task raises no toast either');
 }
 
 function testClosingTheAskingTabPostsNothingExtra() {
-  const {win, posted} = makePage();
+  const {win} = makePage();
   const api = win._testApi;
   const askTab = api.getActiveTabId();
   api.createNewTab();
@@ -172,7 +176,6 @@ function testClosingTheAskingTabPostsNothingExtra() {
   assert.strictEqual(tabRecord(win, askTab), null, 'the tab is gone');
   assert.ok(!answering(win));
   assertNoToast(win, 'after closing the asking tab');
-  assert.ok(!posted.some(m => m.type === 'askWaitingDone'));
   win.close();
   console.log('  ok - closing the asking tab leaves nothing behind');
 }
@@ -201,14 +204,7 @@ function testAskUserForUnknownTabIsIgnored() {
 // on.
 function testReloadWithAnswerDraftRestoresInPlace() {
   const first = makePage();
-  send(first.win, {type: 'daemonStatus', connected: true});
-  send(first.win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  mirrorTwoTabs(first.win);
   send(first.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(first.win._testApi.getActiveTabId(), 't1');
   first.win.document.getElementById('task-input').value = 'yes, to staging';
@@ -218,14 +214,7 @@ function testReloadWithAnswerDraftRestoresInPlace() {
   first.win.close();
 
   const second = makePage({initialState: persisted});
-  send(second.win, {type: 'daemonStatus', connected: true});
-  send(second.win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  mirrorTwoTabs(second.win);
   assert.strictEqual(second.win._testApi.getActiveTabId(), 't2');
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(
@@ -247,14 +236,7 @@ function testReloadWithAnswerDraftRestoresInPlace() {
 // recognised as seen, so the user stays on their tab.
 function testReloadWithoutAnswerDraftDoesNotSwitch() {
   const first = makePage();
-  send(first.win, {type: 'daemonStatus', connected: true});
-  send(first.win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  mirrorTwoTabs(first.win);
   send(first.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   clickTab(first.win, 't2');
   first.win.dispatchEvent(new first.win.Event('pagehide'));
@@ -262,14 +244,7 @@ function testReloadWithoutAnswerDraftDoesNotSwitch() {
   first.win.close();
 
   const second = makePage({initialState: persisted});
-  send(second.win, {type: 'daemonStatus', connected: true});
-  send(second.win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  mirrorTwoTabs(second.win);
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(second.win._testApi.getActiveTabId(), 't2');
   assertNoToast(second.win, 'after a reload without a draft');
@@ -285,15 +260,8 @@ function testReloadWithoutAnswerDraftDoesNotSwitch() {
 // A tab closed from another surface arrives as a tabs_state snapshot
 // without it.
 function testMirroredCloseRemovesTheTab() {
-  const {win, posted} = makePage();
-  send(win, {type: 'daemonStatus', connected: true});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  const {win} = makePage();
+  mirrorTwoTabs(win);
   send(win, {type: 'askUser', tabId: 't1', question: 'Still there?'});
   assert.ok(answering(win));
   send(win, {
@@ -303,21 +271,13 @@ function testMirroredCloseRemovesTheTab() {
   assert.strictEqual(tabRecord(win, 't1'), null, 'the tab was removed');
   assert.ok(!answering(win), 'and its question with it');
   assertNoToast(win, 'after a mirrored close');
-  assert.ok(!posted.some(m => m.type === 'askWaitingDone'));
   win.close();
   console.log('  ok - a close mirrored from another surface removes the tab');
 }
 
 function testQuestionPostsNothingToTheDaemon() {
   const {win, posted} = makePage();
-  send(win, {type: 'daemonStatus', connected: true});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 't1', chatId: 'c1', title: 't1', workDir: ''},
-      {tabId: 't2', chatId: 'c2', title: 't2', workDir: ''},
-    ],
-  });
+  mirrorTwoTabs(win);
   clickTab(win, 't2');
   const before = posted.length;
   send(win, {type: 'askUser', tabId: 't1', question: 'Remote?'});

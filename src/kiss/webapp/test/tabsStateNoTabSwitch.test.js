@@ -21,12 +21,11 @@ const {
   send,
   stubRaf,
   clickTab,
+  snapshotEntry,
 } = require('./simplify2_harness');
 
 function makePage() {
-  const {win, posted} = makeSharedPage({beforeScripts: stubRaf});
-  win._sentMessages = posted;
-  return win;
+  return makeSharedPage({beforeScripts: stubRaf});
 }
 
 // Chats are no longer rendered as a row of tabs (the chat on screen is
@@ -41,10 +40,6 @@ function tabTitle(win, tabId) {
   const tab = win._testApi.openTabs().find(t => t.id === tabId);
   assert.ok(tab, `tab ${tabId} must be open`);
   return tab.title;
-}
-
-function snapshotEntry(tabId, title, chatId) {
-  return {tabId: tabId, chatId: chatId || '', title: title || '', workDir: ''};
 }
 
 // The registry resync a reconnect triggers: the canonical snapshot plus a
@@ -75,7 +70,7 @@ function endLaunch(win) {
 // A reconnect that restores one running task must leave the user where they
 // were, and must open that task in its own (background) tab.
 function testRestoredRunningTaskDoesNotStealFocus() {
-  const win = makePage();
+  const {win, posted} = makePage();
   const api = win._testApi;
   endLaunch(win);
   const userTab = api.getActiveTabId();
@@ -109,7 +104,7 @@ function testRestoredRunningTaskDoesNotStealFocus() {
     'the restored tab must be titled after its task',
   );
   assert.strictEqual(
-    win._sentMessages.filter(m => m && m.type === 'resumeSession').length,
+    posted.filter(m => m && m.type === 'resumeSession').length,
     0,
     'the daemon replays registry tabs itself; the client resumes nothing',
   );
@@ -127,7 +122,7 @@ function testRestoredRunningTaskDoesNotStealFocus() {
 
 // Several restored tasks must each get their own tab, none of them active.
 function testManyRestoredTasksEachGetTheirOwnTab() {
-  const win = makePage();
+  const {win} = makePage();
   const api = win._testApi;
   endLaunch(win);
   const userTab = api.getActiveTabId();
@@ -138,7 +133,7 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
       snapshotEntry('tab-user', 'my chat', 'chat-user'),
       snapshotEntry('tab-a', 'alpha', 'chat-a'),
       snapshotEntry('tab-b', 'beta', 'chat-b'),
-      snapshotEntry('tab-c', '', 'chat-c'),
+      {tabId: 'tab-c', chatId: 'chat-c', title: '', workDir: ''},
     ],
     ['tab-a', 'tab-b', 'tab-c'],
   );
@@ -167,7 +162,7 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
 // A task already shown in a tab must not be duplicated, and must not be
 // switched to either.
 function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
-  const win = makePage();
+  const {win} = makePage();
   const api = win._testApi;
   endLaunch(win);
 
@@ -201,45 +196,18 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   console.log('  ok - an already-open running task is left alone');
 }
 
-// Junk snapshots must not disturb the tab bar, and junk running statuses
-// must not create or focus anything.
-function testMalformedPayloadsAreIgnored() {
-  const win = makePage();
-  const api = win._testApi;
-  endLaunch(win);
-  const userTab = api.getActiveTabId();
-  const before = tabIds(win);
-
-  send(win, {type: 'tabs_state', tabs: 'not-an-array'});
-  send(win, {type: 'tabs_state'});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      null,
-      {},
-      {taskId: 'x'},
-      snapshotEntry('tab-user', 'my chat', 'chat-user'),
-    ],
-  });
-  send(win, {type: 'status', running: true, tabId: 'tab-ghost'});
-
-  assert.deepStrictEqual(tabIds(win), before, 'no tab may appear or vanish');
-  assert.strictEqual(api.getActiveTabId(), userTab, 'the active tab is kept');
-
-  win.close();
-  console.log('  ok - malformed tabs_state payloads are ignored');
-}
+// Junk snapshots and junk running statuses are
+// launchTabSwitch.testMalformedSnapshotDoesNotSwitch's.
 
 function runTests() {
   testRestoredRunningTaskDoesNotStealFocus();
   testManyRestoredTasksEachGetTheirOwnTab();
   testAlreadyOpenTaskIsNeitherDuplicatedNorFocused();
-  testMalformedPayloadsAreIgnored();
 }
 
 try {
   runTests();
-  console.log('\n4 passed, 0 failed');
+  console.log('\ntabsStateNoTabSwitch.test.js: all tests passed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

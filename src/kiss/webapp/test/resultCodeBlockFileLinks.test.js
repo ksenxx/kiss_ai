@@ -20,7 +20,7 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks} = require('./file_link_helpers');
+const {findLinks, existsOnRealFs} = require('./file_link_helpers');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-rescode-'));
 const realFile = path.join(tmpDir, 'API.md');
@@ -38,14 +38,7 @@ function checkPathsOnRealFs(msg) {
     } else if (!path.isAbsolute(p)) {
       abs = path.resolve(msg.workDir || tmpDir, p);
     }
-    let ok = false;
-    try {
-      const st = fs.statSync(abs);
-      ok = st.isFile() || st.isDirectory();
-    } catch {
-      ok = false;
-    }
-    results[p] = ok;
+    results[p] = existsOnRealFs(abs);
   }
   return results;
 }
@@ -147,45 +140,9 @@ function testReplayedResultCodeBlockPathsClickable() {
   console.log('  ok - replayed result code-block paths are clickable');
 }
 
-function testCollapsedPanelExpandKeepsLinks() {
-  // Code blocks inside collapsed panels are highlighted lazily on
-  // expand (highlightPending); the links must survive that too.  A
-  // replay folds the prompt panel (a Thoughts panel is never auto-folded).
-  const {win} = makePage();
-  send(win, {
-    type: 'task_events',
-    task: 'replayed task',
-    extra: JSON.stringify({work_dir: tmpDir}),
-    events: [
-      {
-        type: 'prompt',
-        text: 'listing:\n```\n-rw-r--r--  1 u  g  5  ' + realFile + '\n```\n',
-      },
-      {
-        type: 'result',
-        summary: summaryHtml(),
-        success: true,
-        total_tokens: 1,
-        cost: '$0.01',
-      },
-    ],
-  });
-  const collapsed = Array.from(
-    win.document.querySelectorAll('#output .collapsible.collapsed'),
-  );
-  assert.ok(collapsed.length >= 1, 'replay must collapse non-result panels');
-  for (const panel of collapsed) {
-    const header = panel.querySelector('.collapse-header');
-    if (header) clickEl(win, header);
-  }
-  const links = findLinks(win, realFile);
-  assert.ok(
-    links.some(el => el.closest('.collapsible')),
-    'expanding a collapsed panel must keep its code-block links',
-  );
-  win.close();
-  console.log('  ok - expanding collapsed panels keeps code-block links');
-}
+// Code blocks inside collapsed panels are highlighted lazily on expand
+// (highlightPending): highlightSplitPathFileLinks.test.js's
+// testCollapsedTextPanelExpandLinksWholePaths covers that path.
 
 function testNoStaleSpansLeakInRegistryAfterRehighlight() {
   // The spans destroyed by re-highlighting must not linger in the
@@ -217,7 +174,6 @@ function testNoStaleSpansLeakInRegistryAfterRehighlight() {
 function runTests() {
   testLiveResultCodeBlockPathsClickable();
   testReplayedResultCodeBlockPathsClickable();
-  testCollapsedPanelExpandKeepsLinks();
   testNoStaleSpansLeakInRegistryAfterRehighlight();
 }
 

@@ -20,8 +20,9 @@ const {
   fakeMatchMedia,
   fakeIntervals,
   ofType,
+  lastMsg,
+  byId,
 } = require('./simplify2_harness');
-const {byId} = require('./ui_antipattern_harness');
 
 const WD = '/ws/repo';
 
@@ -30,7 +31,6 @@ function makePage(narrow) {
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
-    sourceUrl: 'scm-badge-main.js',
     beforeScripts(win) {
       clock = fakeIntervals(win);
       stubRaf(win);
@@ -182,8 +182,7 @@ function logReply(token) {
 }
 
 function lastToken(posted) {
-  const st = ofType(posted, 'gitStatus');
-  return st[st.length - 1].token;
+  return lastMsg(posted, 'gitStatus').token;
 }
 
 // Audit 2026-10-16 (mainjs-2 F2): a poll reply that repeats the status

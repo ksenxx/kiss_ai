@@ -22,6 +22,7 @@ const {
   click,
   ofType,
 } = require('./simplify2_harness');
+const {loadHistory, makeSession} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
@@ -29,21 +30,7 @@ function makePage() {
   return {win, posted};
 }
 
-function loadHistory(win, sessions) {
-  send(win, {type: 'history', offset: 0, generation: 0, sessions});
-}
-
-const SESSION = {
-  id: 'chat-1',
-  task_id: 'task-1',
-  title: 'refactor the parser',
-  preview: 'refactor the parser',
-  has_events: true,
-  timestamp: 1700000000,
-  work_dir: '/home/user/proj',
-  model: 'test-model',
-  is_favorite: false,
-};
+const SESSION = makeSession();
 
 /**
  * What a browser's hit test finds at the point where `el` was: `el`

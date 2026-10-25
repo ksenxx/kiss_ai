@@ -40,6 +40,13 @@ const {
   all,
   makeRunner,
   menuItem,
+  toast,
+  toastInput,
+  WD,
+  SHA_A,
+  openExplorer,
+  explorerRow,
+  openScm,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
@@ -74,18 +81,15 @@ function makePage() {
       'contentContextMenu.js',
       'treeContextMenu.js',
     ],
-    sourceUrl: 'sidebar-fixes-main.js',
   });
   return {win, posted, copied};
 }
 
 /** The in-page prompt toast *id* and its text input. */
 function promptToast(win, id) {
-  const toast = win.document.querySelector(
-    '[data-notification-id="' + id + '"]',
-  );
-  assert.ok(toast, 'the prompt ' + id + ' is on screen');
-  return {toast, input: toast.querySelector('.kiss-notification-input')};
+  const el = toast(win, id);
+  assert.ok(el, 'the prompt ' + id + ' is on screen');
+  return {toast: el, input: toastInput(el)};
 }
 
 /** Type *value* into the prompt toast *id* and press Enter. */
@@ -95,101 +99,8 @@ function answerPrompt(win, id, value) {
   key(win, input, 'Enter');
 }
 
-const WD = '/ws/repo';
-
 function pinWorkspace(win) {
   send(win, {type: 'configData', config: {work_dir: WD}});
-}
-
-/** Open the Explorer on WD and answer its root listing with *entries*. */
-function openExplorer(win, posted, entries) {
-  pinWorkspace(win);
-  showSection(win, 'meta-explorer');
-  const list = ofType(posted, 'listDir');
-  const req = list[list.length - 1];
-  send(win, {
-    type: 'dirListing',
-    token: req.token,
-    path: req.path,
-    root: req.path,
-    entries,
-  });
-  return req;
-}
-
-function explorerRow(win, p) {
-  return win.document.querySelector(
-    '.explorer-row[data-explorer-path="' + p + '"]',
-  );
-}
-
-const SHA_A = 'a'.repeat(40);
-const SHA_B = 'b'.repeat(40);
-
-function commit(sha, parents, subject, message) {
-  return {
-    sha,
-    shortSha: sha.slice(0, 7),
-    parents,
-    author: 'A',
-    date: new Date().toISOString(),
-    refs: [],
-    subject,
-    message,
-    files: [],
-  };
-}
-
-/** Open Source Control on WD with a two-commit history. */
-function openScm(win, posted) {
-  pinWorkspace(win);
-  showSection(win, 'meta-scm');
-  const st = ofType(posted, 'gitStatus');
-  const lg = ofType(posted, 'gitLog');
-  const token = st[st.length - 1].token;
-  send(win, {
-    type: 'gitStatus',
-    token,
-    workDir: WD,
-    repo: WD,
-    branch: 'main',
-    changes: [],
-    worktrees: [
-      {
-        path: WD,
-        name: 'repo',
-        head: SHA_A,
-        branch: 'main',
-        detached: false,
-        current: true,
-        changes: [],
-      },
-    ],
-  });
-  send(win, {
-    type: 'gitLog',
-    token: lg[lg.length - 1].token,
-    workDir: WD,
-    repo: WD,
-    head: SHA_A,
-    commits: [
-      commit(SHA_A, [SHA_B], 'Title line', 'Title line\n\nBody paragraph.'),
-      commit(SHA_B, [], 'root', 'root'),
-    ],
-    worktrees: [
-      {
-        path: WD,
-        name: 'repo',
-        head: SHA_A,
-        branch: 'main',
-        detached: false,
-        current: true,
-      },
-    ],
-  });
-  return all(win, '#scm-graph .scm-commit').find(
-    el => el.querySelector('.scm-commit-subject').textContent === 'Title line',
-  );
 }
 
 async function main() {
@@ -811,7 +722,8 @@ async function main() {
     const contentMenu = byId(win, 'sorcar-content-context-menu');
     assert.ok(contentMenu && !contentMenu.hidden, 'the content menu opened');
     rightClick(win, explorerRow(win, WD + '/a.txt'));
-    assert.ok(win.TreeContextMenu.isOpen(), 'the tree menu opened');
+    const treeMenu = byId(win, 'sidebar-context-menu');
+    assert.ok(treeMenu && !treeMenu.hidden, 'the tree menu opened');
     const stillOpen = byId(win, 'sorcar-content-context-menu');
     assert.ok(
       !stillOpen || stillOpen.hidden || stillOpen.style.display === 'none',

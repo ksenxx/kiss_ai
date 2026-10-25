@@ -24,6 +24,7 @@ const {
   send,
   stubRaf,
   clickTab,
+  twoTabs,
 } = require('./simplify2_harness');
 
 const USER_MODEL = 'claude-opus-5';
@@ -55,16 +56,6 @@ function label(win) {
 /** Deliver the daemon's model list with the user's pick as `selected`. */
 function sendModels(win, selected) {
   send(win, {type: 'models', models: MODEL_LIST, selected: selected});
-}
-
-/** Open a second chat tab; returns both ids with `second` on screen. */
-function twoTabs(win) {
-  const api = win._testApi;
-  const first = api.getActiveTabId();
-  api.createNewTab();
-  const second = api.getActiveTabId();
-  assert.ok(second && second !== first, 'a fresh second tab must be active');
-  return {api, first, second};
 }
 
 /** Open the picker and click *model*. */

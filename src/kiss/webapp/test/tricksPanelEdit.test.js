@@ -15,7 +15,12 @@
 // editor is closed when the list changes under it.
 
 const assert = require('assert');
-const {makePage, send, click} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  click,
+  typeInto: input,
+} = require('./simplify2_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -37,11 +42,6 @@ function key(win, el, keyName, init) {
       ...init,
     }),
   );
-}
-
-function input(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
 function editor(doc, row) {

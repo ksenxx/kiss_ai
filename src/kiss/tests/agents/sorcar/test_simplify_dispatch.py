@@ -60,7 +60,8 @@ def test_kill_agent_job_honours_the_tool_call_stop_while_waiting() -> None:
         target=_linger_after_cancel, args=(job.cancel, release), daemon=True,
     )
     job.thread.start()
-    token = tool_interrupt.begin_tool_call("agent_job")
+    token = tool_interrupt.new_tool_call("agent_job")
+    tool_interrupt.register_tool_call(token)
     stopper = threading.Thread(
         target=_interrupt_later, args=(threading.get_ident(), 0.3), daemon=True,
     )

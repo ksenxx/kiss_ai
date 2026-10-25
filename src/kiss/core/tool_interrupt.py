@@ -196,23 +196,6 @@ def register_tool_call(token: ToolCallToken) -> None:
     _RUNNING[token.thread_ident] = token
 
 
-def begin_tool_call(name: str) -> ToolCallToken:
-    """Create AND register a tool call on the calling thread.
-
-    Convenience for callers whose registration point need not be inside
-    a ``try`` (tests, tools that wrap a nested call).
-
-    Args:
-        name: The tool's name.
-
-    Returns:
-        The registered token.
-    """
-    token = new_tool_call(name)
-    register_tool_call(token)
-    return token
-
-
 def drain_pending_interrupt() -> None:
     """Give an already-injected :class:`ToolCallInterrupted` a place to land.
 
@@ -247,10 +230,10 @@ def unregister_tool_call(token: ToolCallToken) -> None:
     on never injects; then waits out an injection that is in progress
     (the interrupting side read ``closing`` before it was set), so
     ``token.injected`` is final when this returns; then drops the
-    registry entry.  Plain stores, reads and a spin — no lock is taken
-    on the tool thread.  Used from the ``except ToolCallInterrupted``
-    handler and as the ``finally`` safety net on every other exit path
-    of the tool call.
+    registry entry.  Plain stores, reads and a short sleep loop — no
+    lock is taken on the tool thread.  Used from the
+    ``except ToolCallInterrupted`` handler and as the ``finally`` safety
+    net on every other exit path of the tool call.
 
     Args:
         token: The token of the call on this thread.
@@ -258,7 +241,7 @@ def unregister_tool_call(token: ToolCallToken) -> None:
     token.closing = True
     deadline = time.monotonic() + _DRAIN_SECONDS
     while token.injecting and time.monotonic() < deadline:
-        pass
+        time.sleep(0.001)
     if _RUNNING.get(token.thread_ident) is token:
         _RUNNING.pop(token.thread_ident, None)
 

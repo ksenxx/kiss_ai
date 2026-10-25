@@ -17,7 +17,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings} = require('./settings_helpers');
+const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 // The full first-party inventory the daemon's key store supports (see
 // chat.html's cfg-key-* inputs).
@@ -38,13 +38,6 @@ const KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'CODEX_ACCESS_TOKEN',
 ];
-
-function typeInto(win, id, value) {
-  const node = win.document.getElementById(id);
-  assert.ok(node, `#${id} must exist`);
-  node.value = value;
-  node.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
 
 function main() {
   const {win, posted} = makePage();

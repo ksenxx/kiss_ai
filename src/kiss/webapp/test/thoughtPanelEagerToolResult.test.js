@@ -10,9 +10,9 @@ const {
   makePage,
   send,
   stubRaf,
-  sleep,
-  waitFor,
   fakeIntervals,
+  parsePanelTimeMs,
+  clickTab,
 } = require('./simplify2_harness');
 
 // A page whose 1 s panel-footer tick runs on a fake interval clock, so a
@@ -29,17 +29,6 @@ function makeTickedPage() {
   return {win: wv.win, clock};
 }
 
-function parsePanelTimeMs(text) {
-  const t = String(text || '').trim();
-  let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
-  if (m) return (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000;
-  m = t.match(/^(\d+(?:\.\d+)?)s$/);
-  if (m) return parseFloat(m[1]) * 1000;
-  m = t.match(/^(\d+)ms$/);
-  if (m) return parseInt(m[1], 10);
-  return NaN;
-}
-
 function llmPanels(root) {
   return root.querySelectorAll('.llm-panel');
 }
@@ -49,39 +38,13 @@ function panelFooter(panel) {
   return footers.length === 1 ? footers[0] : null;
 }
 
-// The footer of an active panel is repainted by main.js's 1 s
-// _activePanelTickIv; wait at most `timeoutMs` for it to show at least
-// `minMs`.
-async function waitForPanelTimeAtLeast(panel, minMs, message, timeoutMs) {
-  const footerMs = () => parsePanelTimeMs(panelFooter(panel).textContent);
-  try {
-    await waitFor(() => footerMs() >= minMs, '', timeoutMs);
-  } catch (e) {
-    throw new Error(message + ' (got ' + footerMs() + 'ms)');
-  }
-}
-
 function stepsText(win) {
   return win.document.getElementById('status-steps').textContent;
 }
 
-// Bring a background chat back on screen the way the Chats panel's
-// pick does it (a background chat has no entry on the tab strip).
-function switchBack(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    'tab ' + tabId + ' must still be open',
-  );
-  win._testApi.switchToTab(tabId);
-  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
-}
-
-async function testEagerPanelAfterToolResult() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const TAB = ready.tabId;
+function testEagerPanelAfterToolResult() {
+  const {win, clock} = makeTickedPage();
+  const TAB = win._testApi.getActiveTabId();
   const output = win.document.getElementById('output');
 
   send(win, {type: 'clear', chat_id: 'chat-eager', tabId: TAB});
@@ -148,11 +111,18 @@ async function testEagerPanelAfterToolResult() {
     'step count must not advance until model output lands in the panel',
   );
 
-  await waitForPanelTimeAtLeast(
-    eager,
-    1000,
+  // The footer of an active panel is repainted by main.js's 1 s
+  // _activePanelTickIv: one tick with the clock 1.15 s on must show the
+  // wait for the model.
+  const realNow = win.Date.now;
+  win.Date.now = () => realNow() + 1150;
+  clock.tick(1000);
+  assert.ok(
+    parsePanelTimeMs(panelFooter(eager).textContent) >= 1000,
     'BUG: the eager panel footer must keep ticking while waiting for ' +
-      'the model (expected >= 1000ms)',
+      'the model (expected >= 1000ms, got ' +
+      panelFooter(eager).textContent +
+      ')',
   );
 
   send(win, {type: 'thinking_start', tabId: TAB});
@@ -212,10 +182,9 @@ async function testEagerPanelAfterToolResult() {
   win.close();
 }
 
-async function testProvisionalPanelRemovedOnNextToolCall() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
-  const TAB = wv.posted.find(m => m.type === 'ready').tabId;
+function testProvisionalPanelRemovedOnNextToolCall() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const TAB = win._testApi.getActiveTabId();
   const output = win.document.getElementById('output');
 
   send(win, {type: 'clear', chat_id: 'chat-par', tabId: TAB});
@@ -274,10 +243,9 @@ async function testProvisionalPanelRemovedOnNextToolCall() {
   win.close();
 }
 
-async function testTextDeltaFillsEagerPanel() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
-  const TAB = wv.posted.find(m => m.type === 'ready').tabId;
+function testTextDeltaFillsEagerPanel() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const TAB = win._testApi.getActiveTabId();
   const output = win.document.getElementById('output');
 
   send(win, {type: 'clear', chat_id: 'chat-text', tabId: TAB});
@@ -316,7 +284,7 @@ async function testTextDeltaFillsEagerPanel() {
   win.close();
 }
 
-async function testEagerPanelBackgroundTab() {
+function testEagerPanelBackgroundTab() {
   const wv = makePage({beforeScripts: stubRaf});
   const win = wv.win;
   const api = win._testApi;
@@ -348,7 +316,7 @@ async function testEagerPanelBackgroundTab() {
     'background-tab events must not render in the active tab',
   );
 
-  switchBack(win, tab1);
+  clickTab(win, tab1);
   const output = win.document.getElementById('output');
   const panels = llmPanels(output);
   assert.strictEqual(
@@ -380,7 +348,7 @@ async function testEagerPanelBackgroundTab() {
   win.close();
 }
 
-async function testEagerPanelSurvivesTabSwitch() {
+function testEagerPanelSurvivesTabSwitch() {
   const wv = makePage({beforeScripts: stubRaf});
   const win = wv.win;
   const api = win._testApi;
@@ -397,7 +365,7 @@ async function testEagerPanelSurvivesTabSwitch() {
   assert.strictEqual(llmPanels(output).length, 2);
 
   api.createNewTab();
-  switchBack(win, tab1);
+  clickTab(win, tab1);
   assert.strictEqual(
     llmPanels(win.document.getElementById('output')).length,
     2,
@@ -417,7 +385,7 @@ async function testEagerPanelSurvivesTabSwitch() {
   win.close();
 }
 
-async function testEagerPanelFooterTicksAfterTabRestore() {
+function testEagerPanelFooterTicksAfterTabRestore() {
   const {win, clock} = makeTickedPage();
   const api = win._testApi;
   const tab1 = api.getActiveTabId();
@@ -438,7 +406,7 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   win.Date.now = () => realNow() + 1150;
   clock.tick(1000);
 
-  switchBack(win, tab1);
+  clickTab(win, tab1);
   const output = win.document.getElementById('output');
   const eager = llmPanels(output)[1];
   assert.ok(eager, 'eager panel must survive the tab round-trip');
@@ -473,10 +441,9 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   win.close();
 }
 
-async function testProvisionalPanelDiscardedOnTaskStop() {
-  const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
-  const TAB = wv.posted.find(m => m.type === 'ready').tabId;
+function testProvisionalPanelDiscardedOnTaskStop() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const TAB = win._testApi.getActiveTabId();
   const output = win.document.getElementById('output');
 
   send(win, {type: 'clear', chat_id: 'chat-stop', tabId: TAB});
@@ -510,7 +477,7 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
   win.close();
 }
 
-async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
+function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   const {win, clock} = makeTickedPage();
   const api = win._testApi;
   const tab1 = api.getActiveTabId();
@@ -520,7 +487,8 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   send(win, {type: 'status', running: true, tabId: tab1, startTs: Date.now()});
   send(win, {type: 'thinking_start', tabId: tab1});
   send(win, {type: 'thinking_delta', text: 'still thinking', tabId: tab1});
-  await sleep(60);
+  const realNow = win.Date.now;
+  win.Date.now = () => realNow() + 60;
   send(win, {type: 'task_error', tabId: tab1});
   const panel = llmPanels(output)[0];
   assert.ok(panel, 'the filled panel must remain after task_error');
@@ -528,7 +496,6 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   assert.ok(footer, 'the filled panel must keep its .panel-time footer');
   const frozenMs = parsePanelTimeMs(footer.textContent);
   // A tick with the clock 1.15 s on: a still-live footer would re-render.
-  const realNow = win.Date.now;
   win.Date.now = () => realNow() + 1150;
   clock.tick(1000);
   const laterMs = parsePanelTimeMs(panelFooter(panel).textContent);
@@ -550,7 +517,7 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab1});
   send(win, {type: 'tool_result', content: 'r\n', tabId: tab1});
   send(win, {type: 'task_stopped', tabId: tab1});
-  switchBack(win, tab1);
+  clickTab(win, tab1);
   const bgPanels = llmPanels(win.document.getElementById('output'));
   assert.strictEqual(
     bgPanels.length,
@@ -564,32 +531,24 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   win.close();
 }
 
-async function runTests() {
-  await testEagerPanelAfterToolResult();
-  console.log('ok - testEagerPanelAfterToolResult');
-  await testProvisionalPanelRemovedOnNextToolCall();
-  console.log('ok - testProvisionalPanelRemovedOnNextToolCall');
-  await testTextDeltaFillsEagerPanel();
-  console.log('ok - testTextDeltaFillsEagerPanel');
-  await testEagerPanelBackgroundTab();
-  console.log('ok - testEagerPanelBackgroundTab');
-  await testEagerPanelSurvivesTabSwitch();
-  console.log('ok - testEagerPanelSurvivesTabSwitch');
-  await testEagerPanelFooterTicksAfterTabRestore();
-  console.log('ok - testEagerPanelFooterTicksAfterTabRestore');
-  await testProvisionalPanelDiscardedOnTaskStop();
-  console.log('ok - testProvisionalPanelDiscardedOnTaskStop');
-  await testTaskEndFreezesFilledPanelAndCleansBgTab();
-  console.log('ok - testTaskEndFreezesFilledPanelAndCleansBgTab');
-}
+const TESTS = [
+  testEagerPanelAfterToolResult,
+  testProvisionalPanelRemovedOnNextToolCall,
+  testTextDeltaFillsEagerPanel,
+  testEagerPanelBackgroundTab,
+  testEagerPanelSurvivesTabSwitch,
+  testEagerPanelFooterTicksAfterTabRestore,
+  testProvisionalPanelDiscardedOnTaskStop,
+  testTaskEndFreezesFilledPanelAndCleansBgTab,
+];
 
-runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.message ? err.message : err);
-    process.exit(1);
-  },
-);
+try {
+  for (const fn of TESTS) {
+    fn();
+    console.log('ok - ' + fn.name);
+  }
+  console.log('\nAll tests passed');
+} catch (err) {
+  console.error('FAIL:', err && err.message ? err.message : err);
+  process.exit(1);
+}

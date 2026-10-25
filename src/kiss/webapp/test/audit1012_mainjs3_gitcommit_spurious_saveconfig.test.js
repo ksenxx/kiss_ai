@@ -23,10 +23,7 @@ const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
 
 function makePage() {
-  return makeChatPage({
-    bodyClass: 'remote-chat',
-    sourceUrl: 'audit1012-mainjs3-gitcommit-main.js',
-  });
+  return makeChatPage({bodyClass: 'remote-chat'});
 }
 
 function main() {

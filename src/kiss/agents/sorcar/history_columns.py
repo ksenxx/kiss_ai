@@ -46,6 +46,7 @@ ADDED_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("sea", "TEXT DEFAULT ''"),
     ("success", "INTEGER"),
     ("is_cron", "INTEGER DEFAULT 0"),
+    ("model_costs", "TEXT DEFAULT ''"),
 )
 """Columns of ``task_history`` added after the first release, oldest first.
 

@@ -13,8 +13,8 @@
 * A3 — the run's model is resolved once: a model-picker change landing
   while the run is still setting up cannot make the run execute on a
   model other than the one its history row and settings event record.
-* A4 — the trajectory summarizer's shell is killed by the stop event
-  bound to the task THREAD, not only by one set on the printer.
+* A4 — the hand-off summarizer is stopped by the stop event bound to
+  the task THREAD, not only by one set on the printer.
 * R3 — the auto-commit fallback message is the one
   :func:`fallback_commit_message` builds.
 
@@ -41,10 +41,8 @@ from kiss.agents.sorcar.sorcar_agent import (
     auto_commit_changes,
 )
 from kiss.core.base import Base
-from kiss.core.processes import pid_alive
 from kiss.core.stop_signal import set_thread_stop_event
 from kiss.core.tool_verdict import ALLOW, Verdict
-from kiss.tests.conftest import posix_only
 from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -198,7 +196,8 @@ def test_a_picker_change_during_setup_cannot_change_the_runs_model(
     assert "success: true" in result
     assert agent._launch_model_name == STANDIN_MODEL
     assert agent.model_name == STANDIN_MODEL
-    assert agent.task_settings["model"] == STANDIN_MODEL
+    (settings_event,) = printer.events_of_type("task_settings")
+    assert settings_event["settings"]["model"] == STANDIN_MODEL
     (task_id,) = allocated
     assert _row_model(task_id) == STANDIN_MODEL
 
@@ -206,36 +205,33 @@ def test_a_picker_change_during_setup_cannot_change_the_runs_model(
 # A4 ---------------------------------------------------------------------
 
 
-def _pid_recorded(pid_file: Path) -> bool:
-    return pid_file.exists() and bool(pid_file.read_text().strip())
-
-
-@posix_only("bash's $$ is an MSYS pid, not a Windows pid")
-def test_summarizer_bash_is_killed_by_a_stop_event_bound_only_to_the_thread(
+def test_summarizer_is_stopped_by_a_stop_event_bound_only_to_the_thread(
     env: IsolatedKissHome,
 ) -> None:
-    """The thread binding alone must reach the summarizer's ``UsefulTools``.
+    """The thread binding alone must stop the summarizer.
 
     The executor is starved of steps so it raises the recoverable
-    "exceeded N steps" error that spawns the summarizer; the summarizer's
-    only action is a long shell command.  The stop event is published
+    "exceeded N steps" error that spawns the summarizer, a tool-less
+    agent (``finish`` only) whose single model call is held open by
+    the stand-in until the test has pressed Stop; its plain-text reply
+    would otherwise earn it a second step.  The stop event is published
     through :func:`set_thread_stop_event` only, and the run has no
-    printer at all (``verbose=False``): ``JsonPrinter``'s thread-local
-    is a view over the same per-thread storage, so only a printer-less
-    (or non-JSON-printer) run exposes a summarizer that reads the stop
-    event off the printer instead of the thread.
+    printer at all (``verbose=False``), so only the thread binding can
+    reach the summarizer.
     """
-    pid_file = env.repo / "summarizer.pid"
+    summarizer_requests: list[dict[str, Any]] = []
+    summarizer_started = threading.Event()
+    release = threading.Event()
 
     def responder(request: dict[str, Any]) -> dict[str, Any]:
-        if "The executor's trajectory is saved at" in request_text(request):
-            return tool_call_response(
-                "Bash",
-                {
-                    "command": f"echo $$ > {pid_file}; sleep 120",
-                    "description": "long summarizer analysis",
-                },
-            )
+        if "# Summarizer" in request_text(request):
+            summarizer_requests.append(request)
+            summarizer_started.set()
+            release.wait(timeout=30)
+            body = tool_call_response("finish", {})
+            body["choices"][0]["message"] = {"role": "assistant", "content": "still reading"}
+            body["choices"][0]["finish_reason"] = "stop"
+            return body
         return tool_call_response(
             "Bash", {"command": "echo working", "description": "executor step"},
         )
@@ -266,21 +262,20 @@ def test_summarizer_bash_is_killed_by_a_stop_event_bound_only_to_the_thread(
     thread = threading.Thread(target=run_agent, daemon=True)
     thread.start()
     try:
-        assert wait_for(lambda: _pid_recorded(pid_file)), (
-            "the summarizer never started its shell command"
-        )
-        pid = int(pid_file.read_text().strip())
-        assert pid_alive(pid), "the shell exited before the stop"
+        assert wait_for(summarizer_started.is_set), "the summarizer never called the model"
         assert agent._stop_event is stop_event
         stop_event.set()
-        assert wait_for(lambda: not pid_alive(pid), timeout=10.0), (
-            "the summarizer's shell survived a stop bound only to the thread"
-        )
+        release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "the run survived a stop bound only to the thread"
     finally:
         stop_event.set()
+        release.set()
         thread.join(timeout=30)
         stand_in.stop()
-    assert not thread.is_alive()
+    assert len(summarizer_requests) == 1, "the summarizer took a step after the Stop"
+    assert [t["function"]["name"] for t in summarizer_requests[0]["tools"]] == ["finish"]
+    assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome
 
 
 # R3 ---------------------------------------------------------------------

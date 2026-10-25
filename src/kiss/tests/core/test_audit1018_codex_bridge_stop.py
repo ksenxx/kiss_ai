@@ -53,11 +53,12 @@ from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ServedCall, Too
 from kiss.core.models.model import _CLIProcess, _StreamReadTimeoutError
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
-    begin_tool_call,
     current_tool_interrupt_event,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
     raise_if_interrupted,
+    register_tool_call,
 )
 from kiss.core.utils import finish as structured_finish
 from kiss.tests.core.test_codex_mcp_bridge import (
@@ -179,7 +180,8 @@ def test_interrupt_by_call_id_reaches_a_call_on_another_thread() -> None:
     release = threading.Event()
 
     def run_tool() -> None:
-        token = begin_tool_call("bridged")
+        token = new_tool_call("bridged")
+        register_tool_call(token)
         tokens.append(token)
         started.set()
         release.wait(10)

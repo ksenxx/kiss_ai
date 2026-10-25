@@ -20,18 +20,9 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, clickTab, twoTabs} = require('./simplify2_harness');
 
 const WORK_DIR = '/tmp/kiss-owner-parity';
-
-// The Chats-panel pick: chats have no row of tabs to click any more.
-function clickTab(win, tabId) {
-  assert.ok(
-    win._testApi.openTabs().some(t => t.id === tabId),
-    `tab ${tabId} must be open`,
-  );
-  win._testApi.switchToTab(tabId);
-}
 
 // The commands are built inside the JSDOM realm, so their `paths` array
 // is a foreign Array; copy it into this realm before comparing.
@@ -48,16 +39,8 @@ function makeTwoTabs() {
   const {win, posted} = makePage();
   send(win, {type: 'configData', config: {work_dir: WORK_DIR}, apiKeys: {}});
   win._testApi.endLaunch();
-  const tabA = win._testApi.getActiveTabId();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  assert.notStrictEqual(tabA, tabB, 'a second tab must have been created');
+  const {first: tabA, second: tabB} = twoTabs(win);
   clickTab(win, tabA);
-  assert.strictEqual(
-    win._testApi.getActiveTabId(),
-    tabA,
-    'tab A must be the visible tab',
-  );
   posted.length = 0;
   return {win, posted, visible: tabA, hidden: tabB};
 }

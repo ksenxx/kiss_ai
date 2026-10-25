@@ -5,120 +5,51 @@
 
 'use strict';
 
+// The History filter's From and To controls each keep their label, date
+// box and calendar button on one line: the trio shares one parent that
+// the stylesheet lays out as a single non-wrapping inline flex item of
+// the filter bar.
+
 const assert = require('assert');
 const {loadMainCss, makePage} = require('./simplify2_harness');
 
-function assertGroupedTrio(win, which) {
+function assertTrioNeverWraps(win, which) {
   const doc = win.document;
-  const inputId = `hf-${which}`;
-  const btnId = `hf-${which}-btn`;
-  const label = doc.querySelector(`label[for="${inputId}"]`);
-  const input = doc.getElementById(inputId);
-  const button = doc.getElementById(btnId);
-
-  assert.ok(label, `"${which}" label[for="${inputId}"] must exist`);
-  assert.ok(input, `"${which}" #${inputId} input must exist`);
-  assert.ok(button, `"${which}" #${btnId} button must exist`);
-
-  assert.strictEqual(
-    label.parentElement,
-    input.parentElement,
-    `"${which}" label and input must share the same direct parent`,
-  );
-  assert.strictEqual(
-    input.parentElement,
-    button.parentElement,
-    `"${which}" input and button must share the same direct parent`,
-  );
-
+  const label = doc.querySelector(`label[for="hf-${which}"]`);
+  const input = doc.getElementById(`hf-${which}`);
+  const button = doc.getElementById(`hf-${which}-btn`);
+  assert.ok(label && input && button, `the "${which}" label, box and button exist`);
   const group = label.parentElement;
-  assert.ok(group, `"${which}" trio must have a direct parent element`);
-
-  assert.ok(
-    !group.classList.contains('history-filter-bar'),
-    `"${which}" trio must be wrapped in a grouping element ` +
-      'distinct from .history-filter-bar (so the three pieces ' +
-      'cannot wrap onto separate lines individually)',
-  );
-
-  assert.ok(
-    group.classList.contains('history-filter-date-group'),
-    `"${which}" trio's wrapper must have class ` +
-      `"history-filter-date-group" (got: "${group.className}")`,
-  );
-
-  const rangeWrap = group.parentElement;
-  assert.ok(
-    rangeWrap && rangeWrap.classList.contains('history-filter-daterange'),
-    `"${which}" date group must be a direct child of ` +
-      '.history-filter-daterange',
-  );
-  const bar = rangeWrap.parentElement;
-  assert.ok(
-    bar && bar.classList.contains('history-filter-bar'),
-    '.history-filter-daterange must be a direct child of ' +
-      '.history-filter-bar',
-  );
-
-  const kids = Array.from(group.children);
-  const idx = el => kids.indexOf(el);
-  assert.ok(
-    idx(label) < idx(input) && idx(input) < idx(button),
-    `"${which}" group children must be ordered: label, input, ` +
-      `button (got: [${kids.map(k => k.tagName + (k.id ? '#' + k.id : '')).join(', ')}])`,
-  );
-
   assert.strictEqual(
-    kids.length,
-    3,
-    `"${which}" date group must contain exactly 3 children ` +
-      `(label, input, button); got ${kids.length}`,
+    input.parentElement,
+    group,
+    `the "${which}" label and box share one parent`,
   );
-}
-
-function testFromAndToGroupsAreAtomic() {
-  const {win} = makePage();
-  assertGroupedTrio(win, 'from');
-  assertGroupedTrio(win, 'to');
-  win.close();
-  console.log(
-    '  ok - From and To label/input/button trios share a single ' +
-      '.history-filter-date-group parent inside .history-filter-bar',
-  );
-}
-
-function testDateGroupCssPreventsInternalWrap() {
-  const {win} = makePage();
-  loadMainCss(win);
-  const group = win.document.querySelector(
-    'label[for="hf-from"]',
-  ).parentElement;
-  assert.ok(
-    group.classList.contains('history-filter-date-group'),
-    'the From trio sits in a .history-filter-date-group',
+  assert.strictEqual(
+    button.parentElement,
+    group,
+    `the "${which}" box and button share one parent`,
   );
   const style = win.getComputedStyle(group);
   assert.ok(
     style.flexWrap === 'nowrap' || style.whiteSpace === 'nowrap',
-    'the date group never splits its label/input/button across lines; ' +
+    `the "${which}" trio never splits across lines; ` +
       `got flex-wrap=${style.flexWrap} white-space=${style.whiteSpace}`,
   );
   assert.ok(
     style.display === 'inline-flex' || style.display === 'inline-block',
-    'the date group behaves as a single flex item of .history-filter-bar; ' +
-      `got display=${style.display}`,
+    `the "${which}" trio is one item of the filter bar; got display=${style.display}`,
   );
+}
+
+function testFromAndToTriosStayOnOneLine() {
+  const {win} = makePage();
+  loadMainCss(win);
+  assertTrioNeverWraps(win, 'from');
+  assertTrioNeverWraps(win, 'to');
   win.close();
-  console.log(
-    '  ok - .history-filter-date-group CSS keeps label/input/button ' +
-      'on the same line',
-  );
+  console.log('  ok - the From and To label/box/button trios stay on one line');
 }
 
-function main() {
-  testFromAndToGroupsAreAtomic();
-  testDateGroupCssPreventsInternalWrap();
-  console.log('historyFilterDateGroup.test.js: all assertions passed.');
-}
-
-main();
+testFromAndToTriosStayOnOneLine();
+console.log('historyFilterDateGroup.test.js: all assertions passed.');

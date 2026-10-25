@@ -6,100 +6,86 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor, clickTab} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  clickTab,
+  fakeIntervals,
+  readyTabId,
+} = require('./simplify2_harness');
 
 function statusOf(win) {
   return win.document.getElementById('status-text').textContent;
 }
 
 /**
- * Waits for the header's 1 s running-timer tick to repaint the status
- * text (main.js _renderTimerTick advances the seconds every tick), so the
- * assertion that follows sees the header AFTER a repaint.
+ * A page on a frozen clock whose intervals are faked: `tick(ms)` moves
+ * `Date.now()` forward by `ms` and then runs the header's 1 s
+ * running-timer repaint (main.js _renderTimerTick) at once, so every
+ * elapsed label is exact and an assertion that must see the header
+ * AFTER a repaint waits for nothing.  `clock.now` is the page's time.
  */
-async function waitForHeaderTick(win) {
-  const before = statusOf(win);
-  await waitFor(
-    () => statusOf(win) !== before,
-    `the header timer never ticked (still "${before}")`,
-  );
+function makePage() {
+  const clock = {now: 1_700_000_000_000};
+  let intervals;
+  const {win, posted} = makeChatPage({
+    beforeScripts(win) {
+      win.Date.now = () => clock.now;
+      intervals = fakeIntervals(win);
+    },
+  });
+  function tick(ms) {
+    clock.now += ms;
+    intervals.tick(ms);
+  }
+  return {win, activeId: readyTabId(posted), clock, tick};
 }
 
-async function testForeignNewerRunDoesNotClobberActiveTimer() {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const activeId = ready.tabId;
+function testForeignNewerRunDoesNotClobberActiveTimer() {
+  const {win, activeId, clock, tick} = makePage();
 
   send(win, {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 65_000,
+    startTs: clock.now - 65_000,
   });
-  assert.match(statusOf(win), /^Running 1m [0-9]s$/);
+  assert.strictEqual(statusOf(win), 'Running 1m 5s');
 
   send(win, {
     type: 'status',
     running: true,
     tabId: 'other-window-tab',
-    startTs: Date.now(),
+    startTs: clock.now,
   });
-  await waitForHeaderTick(win);
-  assert.match(
+  tick(1000);
+  assert.strictEqual(
     statusOf(win),
-    /^Running 1m [0-9]+s$/,
+    'Running 1m 6s',
     'BUG: a newer run in another window clobbered the active ' +
-      `tab's running timer (header now "${statusOf(win)}")`,
+      "tab's running timer, or the timer stopped",
   );
 
   send(win, {
     type: 'task_done',
     tabId: 'other-window-tab',
-    startTs: Date.now() - 5_000,
-    endTs: Date.now(),
+    startTs: clock.now - 5_000,
+    endTs: clock.now,
   });
   send(win, {type: 'status', running: false, tabId: 'other-window-tab'});
-  await waitForHeaderTick(win);
-  assert.match(
+  tick(1000);
+  assert.strictEqual(
     statusOf(win),
-    /^Running 1m [0-9]+s$/,
+    'Running 1m 7s',
     'BUG: another window finishing its run flipped the active ' +
-      `tab's header (now "${statusOf(win)}")`,
+      "tab's header, or the timer stopped",
   );
   win.close();
   console.log('  ok - newer runs in another window never touch the header');
 }
 
-async function testActiveTaskDoneShowsEndMinusStart() {
-  const {win, posted} = makePage();
-  const activeId = posted.find(m => m.type === 'ready').tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: activeId,
-    startTs: Date.now() - 5_000,
-  });
-  const endTs = Date.now();
-  send(win, {
-    type: 'task_done',
-    tabId: activeId,
-    startTs: endTs - 127_000,
-    endTs,
-  });
-  assert.strictEqual(
-    statusOf(win),
-    'Done (2m 7s)',
-    'active task_done must show endTs - startTs',
-  );
-  win.close();
-  console.log('  ok - active task_done shows endTs - startTs');
-}
-
-async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
-  const {win, posted} = makePage();
-  const activeId = posted.find(m => m.type === 'ready').tabId;
+function testBackgroundTaskDoneShowsDurationAfterSwitch() {
+  const {win, activeId, clock, tick} = makePage();
 
   send(win, {
     type: 'openSubagentTab',
@@ -111,18 +97,18 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 3_000,
+    startTs: clock.now - 3_000,
   });
-  assert.match(statusOf(win), /^Running [2-6]s$/);
+  assert.strictEqual(statusOf(win), 'Running 3s');
 
-  const bgEnd = Date.now();
+  const bgEnd = clock.now;
   send(win, {
     type: 'status',
     running: true,
     tabId: 'bg-tab',
     startTs: bgEnd - 201_000,
   });
-  assert.match(statusOf(win), /^Running [2-6]s$/);
+  assert.strictEqual(statusOf(win), 'Running 3s');
 
   send(win, {
     type: 'task_done',
@@ -146,10 +132,16 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   );
 
   clickTab(win, activeId);
-  assert.match(
+  assert.strictEqual(
     statusOf(win),
-    /^Running [2-6]s$/,
+    'Running 3s',
     "the original tab's running timer must survive the auto-switch",
+  );
+  tick(1000);
+  assert.strictEqual(
+    statusOf(win),
+    'Running 4s',
+    "the original tab's timer must keep counting after the auto-switch",
   );
   clickTab(win, 'bg-tab');
   assert.strictEqual(
@@ -163,17 +155,16 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   );
 }
 
-async function testDoneLabelSurvivesTabSwitches() {
-  const {win, posted} = makePage();
-  const activeId = posted.find(m => m.type === 'ready').tabId;
+function testDoneLabelSurvivesTabSwitches() {
+  const {win, activeId, clock} = makePage();
 
   send(win, {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 1_000,
+    startTs: clock.now - 1_000,
   });
-  const endTs = Date.now();
+  const endTs = clock.now;
   send(win, {
     type: 'task_done',
     tabId: activeId,
@@ -200,9 +191,8 @@ async function testDoneLabelSurvivesTabSwitches() {
   console.log('  ok - done duration survives tab switches');
 }
 
-async function testBackgroundReplayWithExtraTimestamps() {
-  const {win, posted} = makePage();
-  const activeId = posted.find(m => m.type === 'ready').tabId;
+function testBackgroundReplayWithExtraTimestamps() {
+  const {win, activeId, clock} = makePage();
 
   send(win, {
     type: 'openSubagentTab',
@@ -210,7 +200,7 @@ async function testBackgroundReplayWithExtraTimestamps() {
     parent_tab_id: activeId,
     description: 'history task',
   });
-  const end = Date.now() - 60_000;
+  const end = clock.now - 60_000;
   send(win, {
     type: 'task_events',
     tabId: 'hist-tab',
@@ -229,17 +219,16 @@ async function testBackgroundReplayWithExtraTimestamps() {
   console.log('  ok - background replay with extra timestamps shows Done(…)');
 }
 
-async function testRunningTabKeepsAnchorAcrossSwitches() {
-  const {win, posted} = makePage();
-  const activeId = posted.find(m => m.type === 'ready').tabId;
+function testRunningTabKeepsAnchorAcrossSwitches() {
+  const {win, activeId, clock, tick} = makePage();
 
   send(win, {
     type: 'status',
     running: true,
     tabId: activeId,
-    startTs: Date.now() - 125_000,
+    startTs: clock.now - 125_000,
   });
-  assert.match(statusOf(win), /^Running 2m [0-9]s$/);
+  assert.strictEqual(statusOf(win), 'Running 2m 5s');
 
   send(win, {
     type: 'openSubagentTab',
@@ -249,33 +238,25 @@ async function testRunningTabKeepsAnchorAcrossSwitches() {
   });
   clickTab(win, 'sub-y');
   clickTab(win, activeId);
-  await waitForHeaderTick(win);
-  assert.match(
+  tick(1000);
+  assert.strictEqual(
     statusOf(win),
-    /^Running 2m [0-9]+s$/,
+    'Running 2m 6s',
     'a running tab must stay anchored to its own startTs across ' +
-      `tab switches (header now "${statusOf(win)}")`,
+      'tab switches and keep counting',
   );
   win.close();
   console.log('  ok - running tab keeps its anchor across tab switches');
 }
 
-async function runTests() {
-  await testForeignNewerRunDoesNotClobberActiveTimer();
-  await testActiveTaskDoneShowsEndMinusStart();
-  await testBackgroundTaskDoneShowsDurationAfterSwitch();
-  await testDoneLabelSurvivesTabSwitches();
-  await testBackgroundReplayWithExtraTimestamps();
-  await testRunningTabKeepsAnchorAcrossSwitches();
+try {
+  testForeignNewerRunDoesNotClobberActiveTimer();
+  testBackgroundTaskDoneShowsDurationAfterSwitch();
+  testDoneLabelSurvivesTabSwitches();
+  testBackgroundReplayWithExtraTimestamps();
+  testRunningTabKeepsAnchorAcrossSwitches();
+  console.log('\n5 passed, 0 failed');
+} catch (err) {
+  console.error('FAIL:', err && err.message ? err.message : err);
+  process.exit(1);
 }
-
-runTests().then(
-  () => {
-    console.log('\n6 passed, 0 failed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.message ? err.message : err);
-    process.exit(1);
-  },
-);

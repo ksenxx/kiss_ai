@@ -29,10 +29,6 @@ Findings covered (audit ``08-server-web.md`` / ``09-server-rest.md``):
 * **F08-6** — ``AgentServer._tab_opened_task_ids`` was a mutable
   **class** attribute shadowed by an instance attribute: dead, and a
   latent cross-instance shared-state hazard.
-* **F08-7** — ``_handle_submit`` rebuilt the ``run`` command without
-  ``connId``, so a task launched through ``submit`` recorded ``""``
-  while the identical task launched through ``run`` recorded the real
-  connection id.
 
 No test makes a paid LLM call: runs are submitted with a model name
 that is not in ``get_available_models()``, which makes the real worker
@@ -558,56 +554,6 @@ class TestNoSharedClassLevelTabMap(unittest.TestCase):
         first._tab_opened_task_ids["tab-a"] = "task-a"
         self.assertEqual(second._tab_opened_task_ids, {})
         self.assertEqual(first._tab_opened_task_ids, {"tab-a": "task-a"})
-
-
-class TestSubmitRecordsConnId(_ServerHarness):
-    """F08-7: ``submit`` and ``run`` must record the same connection."""
-
-    async def _launch(
-        self, writer: LocalWriter,
-        reader: LocalReader,
-        cmd_type: str,
-        tab_id: str,
-    ) -> agent_state.AgentState:
-        """Run one task to completion and return its agent state."""
-        await self._send(writer, {
-            "type": cmd_type,
-            "prompt": "record my connection",
-            "tabId": tab_id,
-            "model": _UNAVAILABLE_MODEL,
-        })
-        await self._drain_until(
-            reader,
-            lambda m: m.get("type") == "status"
-            and m.get("running") is False
-            and m.get("tabId") == tab_id,
-        )
-        state = agent_state.find_by_tab(tab_id)
-        assert state is not None, f"no state registered for {tab_id}"
-        return state
-
-    async def test_submit_and_run_agree_on_conn_id(self) -> None:
-        """Both dialects on one connection record that connection."""
-        reader, writer = await self._connect()
-        await self._send(writer, {"type": "ready", "tabId": "tab-run"})
-        await self._drain_until(
-            reader, lambda m: m.get("type") == "configData",
-        )
-
-        via_run = await self._launch(writer, reader, "run", "tab-run")
-        via_submit = await self._launch(
-            writer, reader, "submit", "tab-submit",
-        )
-
-        self.assertTrue(
-            via_run.conn_id, "the run dialect lost its connection id",
-        )
-        self.assertEqual(
-            via_submit.conn_id, via_run.conn_id,
-            "BUG F08-7: _handle_submit rebuilt the run command without "
-            "connId, so a submit-launched task records \"\" while an "
-            "identical run-launched task records the real id",
-        )
 
 
 if __name__ == "__main__":

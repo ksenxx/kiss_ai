@@ -53,12 +53,12 @@ class TestSlackChannelBackendMethods:
         self.backend._bot_user_id = "U_BOT_TEST"
         self._use_server(invalid_auth_server)
 
-    def test_find_channel_returns_none_on_api_error(self) -> None:
+    def test_find_channel_raises_on_api_error(self) -> None:
         """find_channel raises SlackApiError with invalid token."""
         with pytest.raises(SlackApiError):
             self.backend.find_channel("nonexistent")
 
-    def test_find_user_returns_none_on_api_error(self) -> None:
+    def test_find_user_raises_on_api_error(self) -> None:
         """find_user raises SlackApiError with invalid token."""
         with pytest.raises(SlackApiError):
             self.backend.find_user("nobody")
@@ -172,11 +172,8 @@ class TestSlackChannelBackendMethods:
             self.backend.poll_messages("C_FAKE", "0.000000")
 
     def test_send_message_raises_on_api_error(self) -> None:
-        """send_message raises SlackApiError with invalid token."""
+        """send_message raises SlackApiError with invalid token, with or without a thread."""
         with pytest.raises(SlackApiError):
             self.backend.send_message("C_FAKE", "test message")
-
-    def test_send_message_with_thread(self) -> None:
-        """send_message with thread_ts raises SlackApiError."""
         with pytest.raises(SlackApiError):
             self.backend.send_message("C_FAKE", "reply", thread_ts="1234.5678")

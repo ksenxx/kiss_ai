@@ -61,6 +61,7 @@ class TestRemoteWorkDirs(IsolatedAsyncioTestCase):
             start_remote_daemon, root / "remote-home", password="pw-remote",
             config={
                 "work_dir": str(self.box_work),
+                "max_budget": 123.5,
                 "recent_work_dirs": [
                     {"path": str(self.box_work), "ts": now},
                     {"path": str(self.box_other), "ts": now - 60},
@@ -128,6 +129,9 @@ class TestRemoteWorkDirs(IsolatedAsyncioTestCase):
             [row["path"] for row in reply["recentWorkDirs"]],
             [str(self.box_work), str(self.box_other)],
         )
+        # The machine's configured default task budget, for the
+        # task-info panel of a chat headed there (not this daemon's).
+        self.assertEqual(reply["maxBudget"], 123.5)
         self.assertNotIn("set", reply)
 
     async def test_set_work_dir_with_machine_adopts_on_the_machine_only(self) -> None:
@@ -189,6 +193,7 @@ class TestRemoteWorkDirs(IsolatedAsyncioTestCase):
         self.assertIn("no machine named 'nope'", dirs["error"])
         self.assertEqual(dirs["workDir"], "")
         self.assertEqual(dirs["recentWorkDirs"], [])
+        self.assertIsNone(dirs["maxBudget"])
         picked = await self._ask({
             "type": "setWorkDir", "workDir": str(self.box_other), "machine": "nope",
         }, "machineWorkDirs")

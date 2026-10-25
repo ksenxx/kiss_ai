@@ -42,8 +42,14 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _env_float(name: str, default: float) -> float:
-    """Read a finite float from the environment, falling back to *default* on junk."""
+def env_float(name: str, default: float) -> float:
+    """Read a finite float from the environment, falling back to *default* on junk.
+
+    Args:
+        name: The environment variable to read.
+        default: Returned when the variable is unset, empty, not a
+            number, or NaN/infinite.
+    """
     raw = os.environ.get(name, "").strip()
     try:
         value = float(raw) if raw else default
@@ -312,23 +318,6 @@ def _init_artifact_dir() -> None:
         _artifact_dir = _generate_artifact_dir()
 
 
-class _ArtifactDirProxy:
-    def __fspath__(self) -> str:
-        return get_artifact_dir()
-
-    def __str__(self) -> str:
-        return get_artifact_dir()
-
-    def __eq__(self, other: object) -> bool:
-        return str(self) == str(other)
-
-    def __hash__(self) -> int:
-        return hash(str(self))
-
-
-artifact_dir = _ArtifactDirProxy()
-
-
 class Config(BaseModel):
     GEMINI_API_KEY: str = Field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY", ""),
@@ -491,16 +480,34 @@ class Config(BaseModel):
             "considered (KISS_COMPACTION_STEP_TOKENS)."
         ),
     )
+    routine_turn_effort: str = Field(
+        default_factory=lambda: os.environ.get("KISS_ROUTINE_TURN_EFFORT", ""),
+        description=(
+            "Reasoning effort (low, medium, ...) of a routine turn: the one after a "
+            "refused tool call, a summary or memory tool, a bash_job / agent_job wait, "
+            "or an unchanged Read. Empty (default) keeps the model's effort on every "
+            "turn; set it only to measure (KISS_ROUTINE_TURN_EFFORT; cost_report "
+            "reports routine calls and their output tokens)."
+        ),
+    )
     tool_output_max_chars: int = Field(
         default_factory=lambda: _env_int("KISS_TOOL_OUTPUT_MAX_CHARS", 50_000),
         description=(
-            "Default cap on the characters one Bash result keeps in the "
-            "conversation (head and tail are kept when truncating; the model "
-            "may pass a different max_output_chars) (KISS_TOOL_OUTPUT_MAX_CHARS)."
+            "Ceiling on the characters one Bash / Read / memory_list result keeps "
+            "in the conversation: the model may raise max_output_chars up to it, "
+            "not beyond (KISS_TOOL_OUTPUT_MAX_CHARS)."
+        ),
+    )
+    tool_output_default_chars: int = Field(
+        default_factory=lambda: _env_int("KISS_TOOL_OUTPUT_DEFAULT_CHARS", 8_000),
+        description=(
+            "Default budget of characters one Bash / whole-file Read / memory_list "
+            "result keeps in the conversation (head and tail are kept; the rest is "
+            "spilled to tmp/tool-out/) (KISS_TOOL_OUTPUT_DEFAULT_CHARS)."
         ),
     )
     context_limit_fraction: float = Field(
-        default_factory=lambda: _env_float("KISS_CONTEXT_LIMIT_FRACTION", 0.7),
+        default_factory=lambda: env_float("KISS_CONTEXT_LIMIT_FRACTION", 0.7),
         description=(
             "Fraction of the model's context window at which an agent session "
             "hands off with a trajectory summary (KISS_CONTEXT_LIMIT_FRACTION)."

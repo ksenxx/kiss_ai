@@ -80,7 +80,12 @@ def test_blocked_tool_is_not_executed_and_prints_error() -> None:
         blocked="Error: a queued user message is pending.",
     )
     assert name == "finish"
-    assert response == "Error: a queued user message is pending."
+    # The result the model reads, and the one the UI shows, both open
+    # by saying the call did not run; the guard's reason follows.
+    assert response == (
+        "REFUSED: the finish call did NOT run and had no effect. "
+        "Error: a queued user message is pending."
+    )
     assert calls == [], "a blocked tool must not execute"
     results = [
         (content, kwargs)
@@ -88,7 +93,7 @@ def test_blocked_tool_is_not_executed_and_prints_error() -> None:
         if etype == "tool_result"
     ]
     assert len(results) == 1
-    assert results[0][0] == "Error: a queued user message is pending."
+    assert results[0][0] == response
     assert results[0][1].get("is_error") is True
 
     name, response = executor._execute_tool(

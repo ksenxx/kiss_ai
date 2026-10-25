@@ -132,7 +132,7 @@ def test_lanes_share_the_back_off(black_hole: mach.Machine) -> None:
     assert time.monotonic() - started < 0.5
     assert str(again.value) == str(first.value)
     # The back-off is one record: clearing it on either lane dials again.
-    panels._retry_at = 0.0
+    panels._health.retry_at = 0.0
     assert default._retry_at == 0.0
     # A lane made after the links were retired starts afresh.
     mach.close_links()

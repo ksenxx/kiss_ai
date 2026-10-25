@@ -15,9 +15,10 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     end_tool_call,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
@@ -123,7 +124,8 @@ class TestDockerRunCommandsParallel(unittest.TestCase):
         outcome: dict[str, object] = {}
 
         def run() -> None:
-            token = begin_tool_call("run_commands_parallel")
+            token = new_tool_call("run_commands_parallel")
+            register_tool_call(token)
             try:
                 try:
                     outcome["result"] = self.env.run_commands_parallel(

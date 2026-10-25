@@ -155,9 +155,11 @@ def cache_creation_tokens(usage: Any) -> tuple[int, int]:
     and as the aggregate ``cache_creation_input_tokens``.  Writes the
     split does not cover — no split at all, or an aggregate the SDK
     updated from a streamed ``message_delta`` while the ``message_start``
-    split stayed behind — are attributed to the one-hour bucket, the
-    more expensive of the two, so an unknown TTL is never under-billed.
-    The Claude Code CLI re-emits exactly this shape as JSON, so
+    split stayed behind — share the TTL of the split when it shows only
+    five-minute writes (a request's breakpoints all carry the same TTL,
+    and KISS requests the five-minute default); otherwise they go to the
+    one-hour bucket, the more expensive of the two, so an unknown TTL is
+    never under-billed.  The Claude Code CLI re-emits exactly this shape as JSON, so
     :mod:`kiss.core.models.claude_code_model` shares this parser —
     otherwise a change to Anthropic's cache tiers would have to be made
     twice.
@@ -175,8 +177,10 @@ def cache_creation_tokens(usage: Any) -> tuple[int, int]:
         five_m = _get_attr_or_key(cache_creation, "ephemeral_5m_input_tokens") or 0
         one_h = _get_attr_or_key(cache_creation, "ephemeral_1h_input_tokens") or 0
     total = _get_attr_or_key(usage, "cache_creation_input_tokens") or 0
-    one_h += max(0, total - five_m - one_h)
-    return five_m, one_h
+    unsplit = max(0, total - five_m - one_h)
+    if five_m and not one_h:
+        return five_m + unsplit, 0
+    return five_m, one_h + unsplit
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
@@ -392,28 +396,22 @@ def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-def _tool_calls_to_tool_use_blocks(tool_calls: list[Any]) -> list[dict[str, Any]]:
+def _tool_calls_to_tool_use_blocks(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert OpenAI ``tool_calls`` entries into Anthropic ``tool_use`` blocks.
 
     Args:
         tool_calls: The ``tool_calls`` list of an OpenAI-format assistant
-            message (dicts or SDK objects with ``id`` / ``function`` attrs).
+            message (dicts with ``id`` / ``function`` keys).
 
     Returns:
         The equivalent list of Anthropic ``tool_use`` block dicts.
     """
     blocks: list[dict[str, Any]] = []
     for tc in tool_calls:
-        if isinstance(tc, dict):
-            fn = tc.get("function") or {}
-            call_id = tc.get("id", "")
-            name = fn.get("name", "")
-            arguments = fn.get("arguments", "")
-        else:
-            fn = getattr(tc, "function", None)
-            call_id = getattr(tc, "id", "")
-            name = getattr(fn, "name", "") if fn is not None else ""
-            arguments = getattr(fn, "arguments", "") if fn is not None else ""
+        fn = tc.get("function") or {}
+        call_id = tc.get("id", "")
+        name = fn.get("name", "")
+        arguments = fn.get("arguments", "")
         input_dict = parse_tool_arguments(arguments)
         blocks.append({"type": "tool_use", "id": call_id, "name": name, "input": input_dict})
     return blocks
@@ -1351,13 +1349,7 @@ class AnthropicModel(Model):
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
-        kwargs = self._build_create_kwargs()
-        response = self._create_message(kwargs)
-        self._raise_on_refusal(response)
-
-        blocks = self._normalize_content_blocks(getattr(response, "content", None))
-        content = self._extract_text_from_blocks(blocks)
-        self._append_assistant_message(blocks, content)
+        _, content, response = self.generate_and_process_with_tools({})
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call

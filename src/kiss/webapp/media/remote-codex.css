@@ -157,9 +157,10 @@ body.remote-chat.high-contrast .more-menu-item:hover:not(:disabled) {
    (#tab-bar: the chat on screen and its sub-agents) sits on the editor
    background with smaller pills. */
 body.remote-chat #content-tab-bar,
-body.remote-chat #tab-bar {
+body.remote-chat #tab-bar { border-bottom: 1px solid var(--border); }
+
+body.remote-chat #content-tab-bar {
   background: var(--tabs-bg);
-  border-bottom: 1px solid var(--border);
   padding: var(--space-2) var(--space-2-5) var(--space-1);
 }
 
@@ -429,10 +430,9 @@ body.remote-chat .file-chip {
   color: var(--fg);
 }
 
-/* This selector has to repeat the mobile chip shape: the plain
-   `.file-chip.error` rule in main.css is less specific than the one above and
-   would otherwise lose to it, leaving a failed photo looking like a normal
-   attachment. */
+/* A file the browser could not decode (a HEIC outside Safari) is reported
+   here instead of vanishing; the selector outranks the chip rule above so
+   the red wins over the normal chip colours. */
 body.remote-chat .file-chip.error {
   background: color-mix(in srgb, var(--red) 12%, transparent);
   border-color: color-mix(in srgb, var(--red) 32%, transparent);
@@ -764,6 +764,12 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     display: none;
   }
 
+  /* With the x gone the Chats row no longer keeps a strip free for it
+     (main.css .sidebar-hdr.chats-hdr). */
+  body.remote-chat.remote-desktop .sidebar-hdr.chats-hdr {
+    padding-right: 0;
+  }
+
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));
@@ -1045,12 +1051,10 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
   body.remote-chat.remote-desktop #meta-resizer:focus-visible {
     background: var(--border-widget);
   }
-}
 
-/* The split layout's grid areas (see the #app rule above; the
-   transcript's own, `chat`, is set next to #output in main.css) and
-   the handle between its two panes. */
-@media (width >= 900px) {
+  /* The split layout's grid areas (see the #app rule above; the
+     transcript's own, `chat`, is set next to #output in main.css) and
+     the handle between its two panes. */
   body.remote-chat.remote-desktop #tab-bar { grid-area: strip; }
 
   /* The chat header ("machine: working directory") shares its row

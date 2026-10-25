@@ -47,3 +47,9 @@ exit_gcc_san.txt
 out_gcc_san.txt
 fable_sol.db
 papers/sesorcar/evidence/se_metrics_tasks.csv
+# HydraKV paper artifact: benchmark logs and model outputs are data, not build output
+!papers/kvstorepaper/artifact/logs/**/*.log
+!papers/kvstorepaper/artifact/logs/**/*.out
+!papers/kvstorepaper/artifact/control_arm/**/*.log
+!papers/kvstorepaper/artifact/baselines/**/*.log
+!papers/kvstorepaper/artifact/baselines/**/*.out

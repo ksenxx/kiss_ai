@@ -52,6 +52,7 @@ import pytest
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.agents.sorcar import rwlock_probe
 from kiss.tests.conftest import posix_only
 
 # ---------------------------------------------------------------------------
@@ -153,8 +154,8 @@ class TestRWLockRealAsyncInjection:
             "the injected stop stranded the condition's underlying mutex: "
             "every subsequent persistence operation would deadlock"
         )
-        assert lock._readers == 0 and not lock._writer
-        assert lock._pending_writers == 0
+        assert rwlock_probe.readers(lock) == 0 and not rwlock_probe.writer(lock)
+        assert rwlock_probe.pending_writers(lock) == 0
 
     def test_write_lock_survives_injection_after_c_acquire(self) -> None:
         """A writer stopped in the same window must neither strand the
@@ -167,8 +168,8 @@ class TestRWLockRealAsyncInjection:
             "condition mutex in its own finally"
         )
         assert _lock_usable(lock), "injected stop wedged the write path"
-        assert lock._readers == 0 and not lock._writer
-        assert lock._pending_writers == 0
+        assert rwlock_probe.readers(lock) == 0 and not rwlock_probe.writer(lock)
+        assert rwlock_probe.pending_writers(lock) == 0
 
     def test_stress_random_time_injections_never_deadlock(self) -> None:
         """Thousands of real acquisitions under hundreds of real
@@ -251,8 +252,8 @@ class TestRWLockRealAsyncInjection:
         assert not unraisable, f"unexpected unraisable errors: {unraisable!r}"
         assert not thread_errors, f"unexpected thread errors: {thread_errors!r}"
         assert _lock_usable(lock), "lock unusable after random injections"
-        assert lock._readers == 0 and not lock._writer
-        assert lock._pending_writers == 0
+        assert rwlock_probe.readers(lock) == 0 and not rwlock_probe.writer(lock)
+        assert rwlock_probe.pending_writers(lock) == 0
         assert sum(counts) > 1000, "stress made too little progress"
 
 

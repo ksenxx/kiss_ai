@@ -74,7 +74,7 @@ def held_workspace() -> str:
     return str(getattr(_HELD, "workspace", "") or "")
 
 
-def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
+def enter_workspace(workspace: str, timeout: float = WORKSPACE_WAIT_TIMEOUT_SECONDS) -> bool:
     """Mark a launch's workspace active and publish it to the env var.
 
     The env var is process-global, so a launch that exported a
@@ -88,7 +88,7 @@ def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
     Args:
         workspace: The launching agent's workspace identifier.
         timeout: Maximum seconds to wait for conflicting launches to
-            finish; ``None`` waits indefinitely.
+            finish.
 
     Returns:
         ``True`` when the workspace was entered, recorded as the calling
@@ -98,7 +98,7 @@ def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
         active (nothing was entered — the caller must not launch, and
         must not call :func:`exit_workspace`).
     """
-    deadline = None if timeout is None else time.monotonic() + timeout
+    deadline = time.monotonic() + timeout
     return locked_call(_WORKSPACE_COND, _enter_workspace_locked, workspace, deadline)
 
 
@@ -107,13 +107,12 @@ def _conflicting(workspace: str) -> bool:
     return any(active != workspace for active in _ACTIVE_WORKSPACES)
 
 
-def _enter_workspace_locked(workspace: str, deadline: float | None) -> bool:
+def _enter_workspace_locked(workspace: str, deadline: float) -> bool:
     """Body of :func:`enter_workspace`; the caller holds ``_WORKSPACE_COND``.
 
     Args:
         workspace: The launching agent's workspace identifier.
-        deadline: ``time.monotonic()`` instant to give up at, or
-            ``None`` to wait indefinitely.
+        deadline: ``time.monotonic()`` instant to give up at.
 
     Returns:
         Whether the workspace was entered (see :func:`enter_workspace`).
@@ -125,8 +124,8 @@ def _enter_workspace_locked(workspace: str, deadline: float | None) -> bool:
             sorted(_ACTIVE_WORKSPACES), workspace,
         )
     while _conflicting(workspace):
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             logger.error(
                 "timed out waiting for concurrent kiss-web launches "
                 "using workspaces %s to finish before publishing "
@@ -136,9 +135,7 @@ def _enter_workspace_locked(workspace: str, deadline: float | None) -> bool:
             )
             return False
         # Sliced so an injected Stop lands within one slice.
-        _WORKSPACE_COND.wait(
-            _WAIT_SLICE_SECONDS if remaining is None else min(remaining, _WAIT_SLICE_SECONDS)
-        )
+        _WORKSPACE_COND.wait(min(remaining, _WAIT_SLICE_SECONDS))
     # The count and the thread's record are two adjacent stores
     # with no call between them: an asynchronously injected stop
     # cannot land between the hold and its record.

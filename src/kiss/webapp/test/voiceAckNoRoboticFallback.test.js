@@ -6,61 +6,36 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {installSpeech, assertNoSpeech} = require('./speech_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {send: sendHostMessage} = require('./simplify2_harness');
+const {makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
-
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-
 
 function flush() {
   return new Promise(resolve => setTimeout(resolve, 25));
 }
 
 function makeWindow(cfg, {withAudio = true} = {}) {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
-  );
-  const win = dom.window;
-  win.__VOICE__ = cfg;
-
-  const record = {
-    audioUrls: [],
-    audioPlays: 0,
-    posts: [],
-    spoken: installSpeech(win),
-  };
-
-  if (withAudio) {
-    win.Audio = function Audio(url) {
-      record.audioUrls.push(String(url));
-      this.play = () => {
-        record.audioPlays++;
-        return Promise.reject(new Error('NotAllowedError: autoplay'));
+  const record = {audioUrls: [], audioPlays: 0, posts: [], spoken: null};
+  const win = makeBareVoiceWindow(cfg, w => {
+    record.spoken = installSpeech(w);
+    if (withAudio) {
+      w.Audio = function Audio(url) {
+        record.audioUrls.push(String(url));
+        this.play = () => {
+          record.audioPlays++;
+          return Promise.reject(new Error('NotAllowedError: autoplay'));
+        };
       };
-    };
-  } else {
-    win.Audio = undefined;
-  }
-  win.addEventListener('kiss-voice-post', event => {
-    record.posts.push(event.detail);
+    } else {
+      w.Audio = undefined;
+    }
+    w.addEventListener('kiss-voice-post', event => {
+      record.posts.push(event.detail);
+    });
   });
-
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
   return {win, record};
-}
-
-function sendHostMessage(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 async function main() {

@@ -23,11 +23,13 @@ immediately; with a cross-process file lock it never fails.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
 
@@ -53,6 +55,73 @@ for i in range(n):
         sys.exit(1)
 sys.exit(0)
 """
+
+_RECENT_WORKER = r"""
+import os, sys, time
+from kiss.core.user_config import record_recent_work_dir
+dirs = sys.argv[1].split(os.pathsep)
+rounds = int(sys.argv[2])
+start_file = sys.argv[3]
+open(sys.argv[4], "w").close()  # imported: ready to race
+deadline = time.time() + 10
+while not os.path.exists(start_file):
+    if time.time() > deadline:
+        sys.exit(2)
+    time.sleep(0.001)
+for _ in range(rounds):
+    for d in dirs:
+        record_recent_work_dir(d)
+sys.exit(0)
+"""
+
+
+class TestRecordRecentWorkDirCrossProcess(TestCase):
+    """``record_recent_work_dir`` must merge under the cross-process lock.
+
+    Two workers each record their own ten directories over and over
+    (twenty in all, under the thirty-row cap).  A record that reads
+    the list outside the file lock and then stores it whole replaces
+    the other worker's rows with its stale copy; in lock-step the two
+    processes keep clobbering each other, and the file ends up holding
+    one worker's rows only.  Every row of both must survive.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_two_processes_keep_each_others_entries(self) -> None:
+        env = dict(os.environ)
+        env["KISS_HOME"] = str(Path(self.tmpdir) / ".kiss")
+        start_file = str(Path(self.tmpdir) / "go")
+        procs = []
+        ready_files = []
+        for name in ("a", "b"):
+            dirs = [Path(self.tmpdir) / f"{name}{i}" for i in range(10)]
+            for d in dirs:
+                d.mkdir()
+            ready_files.append(Path(self.tmpdir) / f"ready-{name}")
+            procs.append(subprocess.Popen(
+                [sys.executable, "-c", _RECENT_WORKER,
+                 os.pathsep.join(str(d) for d in dirs), "300", start_file,
+                 str(ready_files[-1])],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ))
+        # Release both only once both have imported, so the loops overlap.
+        deadline = time.monotonic() + 60
+        while not all(f.exists() for f in ready_files) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        Path(start_file).touch()
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            self.assertEqual(proc.returncode, 0, f"stdout={out!r} stderr={err[-500:]!r}")
+        stored = json.loads((Path(env["KISS_HOME"]) / "config.json").read_text())
+        self.assertEqual(
+            sorted(e["path"] for e in stored["recent_work_dirs"]),
+            sorted(str(Path(self.tmpdir) / f"{name}{i}") for name in "ab" for i in range(10)),
+        )
 
 
 class TestSaveConfigCrossProcess(TestCase):

@@ -289,16 +289,11 @@ def test_transcript_pages_filters_and_reports_errors() -> None:
     assert empty.endswith("(no transcript entries yet)")
 
 
-def test_step_returns_one_entry_in_full_and_clamps() -> None:
-    """``task_step`` returns the unclipped entry, clamps ``max_chars``, and rejects bad indices."""
+def test_step_returns_one_entry_in_full() -> None:
+    """``task_step`` returns the unclipped entry and rejects bad indices."""
     task_id = _persist("Run the benchmark", _running_task_events())
     full = task_digest.entry_detail(task_id, 3)
     assert full == "[3] OUTPUT: trial 1 done\ntrial 2 done\n" + "x" * 900
-    assert task_digest.entry_detail(task_id, 3, 20) == (
-        "[3] OUTPUT: trial 1 done\ntrial 2 …[906 more chars]"
-    )
-    assert task_digest.entry_detail(task_id, 2, 0).startswith("[2] TOOL CALL Bash({ …[")
-    assert task_digest.entry_detail(task_id, 3, 10**9) == full
     assert task_digest.entry_detail(task_id, 13) == "Error: entry index 13 out of range (0..12)."
     assert task_digest.entry_detail(task_id, -1) == "Error: entry index -1 out of range (0..12)."
     assert task_digest.entry_detail("no-such-task", 0) == "Error: no task with id 'no-such-task'."

@@ -41,6 +41,13 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  click,
+  drawerOpen,
+  overlayOpen,
+  pollCount,
+  lastPoll,
+} = require('./remote_drawer_helpers');
 
 const {test, report} = makeRunner();
 
@@ -58,33 +65,6 @@ function makePage() {
     },
   });
   return {win, posted, tick: timers.tick, intervals: timers.intervals};
-}
-
-function click(win, id) {
-  win.document
-    .getElementById(id)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function drawerOpen(win) {
-  return win.document.getElementById('meta-panel').classList.contains('open');
-}
-
-function overlayOpen(win) {
-  return win.document.getElementById('meta-overlay').classList.contains('open');
-}
-
-function polls(wv) {
-  return wv.posted.filter(m => m.type === 'getTaskUpdate');
-}
-
-function pollCount(wv) {
-  return polls(wv).length;
-}
-
-function lastPoll(wv) {
-  const all = polls(wv);
-  return all[all.length - 1];
 }
 
 /** A taskUpdate reply answering *poll*, with the given overrides. */
@@ -250,24 +230,15 @@ async function main() {
         'the poll timer ticks every 5000 ms',
       );
       const poll = lastPoll(wv);
-      assert.deepStrictEqual(Object.keys(poll).sort(), [
-        'knownSig',
-        'refresh',
-        'tabId',
-        'token',
-        'type',
-      ]);
-      assert.ok(!('workDir' in poll), 'the poll names a tab, not a workdir');
-      assert.strictEqual(typeof poll.tabId, 'string');
       assert.ok(poll.tabId, 'the poll targets the visible chat tab');
-      assert.strictEqual(poll.knownSig, '');
-      assert.strictEqual(typeof poll.token, 'string');
-      assert.strictEqual(poll.refresh, false, 'a timer poll is not a refresh');
       wv.tick(POLL_MS - 1);
       assert.strictEqual(pollCount(wv), 1, 'no poll before the interval');
       wv.tick(1);
       assert.strictEqual(pollCount(wv), 2, 'the timer polls at 5000 ms');
 
+      // The poll's shape and the reply handling (sig, unchanged,
+      // sanitising, exists:false, the refresh button) are the same code
+      // as on the docked panel: remoteMetaPanelInfo.test.js.
       reply(win, poll, {
         sig: '5:9',
         content: 'working on **it**\n',
@@ -279,40 +250,8 @@ async function main() {
       assert.ok(info.classList.contains('visible'));
       assert.ok(
         content.innerHTML.includes('<strong>it</strong>'),
-        'markdown content goes through marked',
+        'the report renders in the drawer',
       );
-      const status =
-        win.document.getElementById('meta-info-status').textContent;
-      assert.ok(/^Updated \d/.test(status), status);
-      assert.ok(status.endsWith(' \u00b7 $0.12'), status);
-      wv.tick(POLL_MS);
-      assert.strictEqual(
-        lastPoll(wv).knownSig,
-        '5:9',
-        "the next poll carries the reply's sig",
-      );
-      reply(win, lastPoll(wv), {unchanged: true, sig: 'ignored'});
-      assert.ok(
-        content.innerHTML.includes('<strong>it</strong>'),
-        'an unchanged reply leaves the report alone',
-      );
-      reply(win, lastPoll(wv), {
-        sig: '6:0',
-        content:
-          '  <p>Report <b>html</b></p><img src=x onerror="alert(1)">' +
-          '<script>alert(2)</script>',
-        updatedAt: Date.now(),
-      });
-      assert.ok(content.innerHTML.includes('<b>html</b>'), 'HTML as-is');
-      assert.ok(!content.innerHTML.includes('<script'), 'scripts stripped');
-      assert.ok(
-        !content.innerHTML.includes('onerror'),
-        'event handlers are stripped',
-      );
-
-      reply(win, lastPoll(wv), {exists: false});
-      assert.ok(!info.classList.contains('visible'), 'exists:false hides it');
-      assert.strictEqual(content.innerHTML, '');
 
       click(win, 'meta-close');
       const count = pollCount(wv);
@@ -326,82 +265,23 @@ async function main() {
     },
   );
 
-  await test(
-    'the refresh button posts getTaskUpdate refresh:true and mirrors ' +
-      "the agent's running state",
-    () => {
-      const wv = makePage();
-      const win = wv.win;
-      send(win, {
-        type: 'configData',
-        config: {work_dir: '/cfg/dir', max_budget: 42},
-        apiKeys: {},
-      });
-      send(win, {type: 'status', running: true});
-      click(win, 'meta-drawer-btn');
-      const btn = win.document.getElementById('meta-info-refresh');
-      const status = win.document.getElementById('meta-info-status');
-      const content = win.document.getElementById('meta-info-content');
-      assert.ok(btn, 'the refresh button sits in the subpanel header');
-      assert.strictEqual(
-        btn.parentElement.parentElement.id,
-        'meta-info',
-        'the button belongs to the task-update subpanel',
-      );
-      const before = pollCount(wv);
-      click(win, 'meta-info-refresh');
-      assert.strictEqual(pollCount(wv), before + 1, 'the click polls at once');
-      const refresh = lastPoll(wv);
-      assert.strictEqual(refresh.type, 'getTaskUpdate');
-      assert.strictEqual(refresh.refresh, true, 'the click asks for a run');
-      assert.ok(!('workDir' in refresh));
-
-      reply(win, refresh, {sig: 'r1', running: true});
-      assert.strictEqual(btn.disabled, true, 'no second run while one runs');
-      assert.ok(btn.classList.contains('spinning'));
-      assert.strictEqual(status.textContent, 'Updating\u2026');
-      assert.ok(
-        win.document.getElementById('meta-info').classList.contains('visible'),
-      );
-      assert.ok(content.innerHTML.includes('Preparing the first update'));
-
-      wv.tick(POLL_MS);
-      assert.strictEqual(lastPoll(wv).refresh, false, 'timer polls are plain');
-      reply(win, lastPoll(wv), {
-        sig: 'r2',
-        running: false,
-        content: '<p>Half <em>done</em></p>',
-        updatedAt: Date.now(),
-        cost: 0.05,
-      });
-      assert.strictEqual(btn.disabled, false, 'the button is usable again');
-      assert.ok(!btn.classList.contains('spinning'));
-      assert.ok(/^Updated \d/.test(status.textContent), status.textContent);
-      assert.ok(status.textContent.endsWith(' \u00b7 $0.05'));
-      assert.ok(content.innerHTML.includes('<em>done</em>'));
-
-      reply(win, lastPoll(wv), {
-        sig: 'r3',
-        running: false,
-        content: '<p>Half <em>done</em></p>',
-        error: 'budget exceeded',
-        updatedAt: Date.now(),
-      });
-      assert.ok(
-        status.textContent.endsWith(' \u00b7 Last run failed: budget exceeded'),
-        status.textContent,
-      );
-      assert.strictEqual(btn.disabled, false);
-
-      send(win, {type: 'status', running: false});
-      assert.ok(
-        !win.document.getElementById('meta-info').classList.contains('visible'),
-        'the task ending empties the subpanel',
-      );
-      assert.strictEqual(status.textContent, '');
-      assert.strictEqual(btn.disabled, false);
-    },
-  );
+  await test('the refresh button in the drawer posts getTaskUpdate refresh:true', () => {
+    const wv = makePage();
+    const win = wv.win;
+    send(win, {type: 'status', running: true});
+    click(win, 'meta-drawer-btn');
+    const btn = win.document.getElementById('meta-info-refresh');
+    assert.ok(btn, 'the refresh button sits in the subpanel header');
+    assert.strictEqual(
+      btn.parentElement.parentElement.id,
+      'meta-info',
+      'the button belongs to the task-update subpanel',
+    );
+    const before = pollCount(wv);
+    click(win, 'meta-info-refresh');
+    assert.strictEqual(pollCount(wv), before + 1, 'the click polls at once');
+    assert.strictEqual(lastPoll(wv).refresh, true, 'the click asks for a run');
+  });
 
   await test('a history row click switches to the tab already bound to the chat', () => {
     const {win, posted} = makePage();

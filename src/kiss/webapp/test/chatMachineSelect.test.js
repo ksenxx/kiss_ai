@@ -32,7 +32,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeHarnessPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeHarnessPage,
+  send,
+  pickMachine: pick,
+} = require('./simplify2_harness');
+const {lastGetHistory, makeRow} = require('./history_helpers');
 
 function makePage(state) {
   const {win, posted, getState} = makeHarnessPage({
@@ -64,11 +69,6 @@ function select(win) {
 
 function options(win) {
   return Array.from(select(win).options).map(o => [o.value, o.textContent]);
-}
-
-function pick(win, value) {
-  select(win).value = value;
-  select(win).dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 function submit(win, text) {
@@ -615,8 +615,7 @@ function replay(win, tabId, chatId, task, machine) {
 
 function localHistory(win, posted, chatId, title) {
   win.document.getElementById('sidebar').classList.add('open');
-  const requests = posted.filter(m => m && m.type === 'getHistory');
-  const last = requests[requests.length - 1];
+  const last = lastGetHistory(posted);
   send(win, {
     type: 'history',
     offset: 0,
@@ -624,23 +623,7 @@ function localHistory(win, posted, chatId, title) {
     localMachine: 'laptop',
     machines: [],
     sessions: [
-      {
-        id: chatId,
-        task_id: 'task-' + chatId,
-        title,
-        preview: title,
-        timestamp: 1_700_000_000,
-        has_events: false,
-        failed: false,
-        is_running: false,
-        tokens: 0,
-        cost: 0,
-        steps: 0,
-        is_favorite: false,
-        work_dir: '',
-        startTs: 1_700_000_000_000,
-        endTs: 1_700_000_010_000,
-      },
+      makeRow({id: chatId, task_id: 'task-' + chatId, title, preview: title}),
     ],
   });
   return win.document.querySelector('#history-list .sidebar-item');
@@ -730,8 +713,56 @@ function testARefusedRunKeepsTheChatsMachineAndThePick() {
   console.log("  ok - a refused run keeps the chat's machine and the pick");
 }
 
+// A task on a machine fans out: the daemon announces the sub-agent's
+// tab (`new_tab`) and, once that tab joins the stream, its binding
+// (`tabMachine`), as it did the parent's.  Switching to the sub-agent
+// tab shows the machine the sub-agent runs on, not this machine.
+function testASubAgentTabShowsItsParentsMachine() {
+  const {win, state} = readyPage();
+  const api = win._testApi;
+  const tab = api.getActiveTabId();
+  replay(win, tab, 'chat-1', 'fan out', 'gpu-box');
+  send(win, {type: 'status', running: true, tabId: tab});
+  assert.strictEqual(select(win).value, 'gpu-box');
+  send(win, {
+    type: 'new_tab',
+    parent_tab_id: tab,
+    task_id: 'child-task',
+    task: 'the helper',
+  });
+  const sub = tab + '__sub_child-task';
+  assert.ok(
+    api.openTabs().some(t => t.id === sub && t.isSubagentTab),
+    'the sub-agent tab opened',
+  );
+  assert.strictEqual(api.getActiveTabId(), tab, 'in the background');
+  send(win, {type: 'tabMachine', tabId: sub, machine: 'gpu-box'});
+  send(win, {type: 'status', running: true, tabId: sub});
+  assert.strictEqual(select(win).value, 'gpu-box', 'the parent is unmoved');
+  api.switchToTab(sub);
+  assert.strictEqual(
+    select(win).value,
+    'gpu-box',
+    'the sub-agent tab shows the machine it runs on',
+  );
+  assert.deepStrictEqual(persistedPicks(state), {}, 'a binding is no pick');
+  api.switchToTab(tab);
+  assert.strictEqual(select(win).value, 'gpu-box');
+  // The sub-agent ends and its tab closes: nothing of it is left over.
+  send(win, {type: 'subagentDone', tab_id: sub});
+  assert.ok(
+    !api.openTabs().some(t => t.id === sub),
+    'the sub-agent tab closed',
+  );
+  assert.strictEqual(api.getActiveTabId(), tab);
+  assert.strictEqual(select(win).value, 'gpu-box');
+  win.close();
+  console.log("  ok - a sub-agent tab shows its parent's machine");
+}
+
 try {
   testListsThisMachineThenTheReachableOnes();
+  testASubAgentTabShowsItsParentsMachine();
   testAChatThatComesToShowATaskLeavesTheGlobalPick();
   testARefusedRunKeepsTheChatsMachineAndThePick();
   testAPickIsTheGlobalSettingOfEveryNewChat();

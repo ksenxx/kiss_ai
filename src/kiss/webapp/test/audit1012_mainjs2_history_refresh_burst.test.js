@@ -14,67 +14,27 @@
 // reply is ever rendered.  A window with N open tabs therefore fires N
 // identical history queries in one burst, N-1 of which are thrown
 // away on arrival.  The burst must coalesce: one leading request and
-// at most one trailing one per tick.
+// at most one trailing one, sent once the leading reply has landed;
+// historyRefreshSingleFlight.test.js pins the exact counts.  This test
+// pins the other side: the coalescing must not swallow a lone refresh.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-function historyRequests(posted) {
-  return posted.filter(m => m && m.type === 'getHistory');
-}
+const {makePage, send, ofType, sleep} = require('./simplify2_harness');
 
 function nextTick() {
-  return new Promise(resolve => setTimeout(resolve, 20));
-}
-
-async function testStatusBurstCoalescesIntoOneHistoryFetch() {
-  const {win, posted} = makePage();
-  win.document.getElementById('sidebar').classList.add('open');
-  send(win, {type: 'daemonStatus', connected: true});
-  const active = win.kissActiveTabId();
-  const ids = [active, 'tab-b', 'tab-c', 'tab-d', 'tab-e'];
-  send(win, {
-    type: 'tabs_state',
-    tabs: ids.map((id, i) => ({id, title: 'Task ' + i, chatId: 'chat-' + i})),
-  });
-  await nextTick();
-  posted.length = 0;
-  // The ready replay: one status per tab, all in the same tick.
-  const now = Date.now();
-  for (const id of ids) {
-    send(win, {type: 'status', running: true, attached: true, tabId: id, startTs: now});
-  }
-  await nextTick();
-  const n = historyRequests(posted).length;
-  assert.ok(
-    n <= 2,
-    'five replayed statuses in one tick must coalesce into at most a ' +
-      'leading and a trailing getHistory, got ' + n,
-  );
-  // The same holds for the task ends that follow a run.
-  posted.length = 0;
-  for (const id of ids) {
-    send(win, {type: 'status', running: false, tabId: id});
-    send(win, {type: 'tasks_updated'});
-  }
-  await nextTick();
-  const m = historyRequests(posted).length;
-  assert.ok(
-    m <= 2,
-    'five task ends in one tick must coalesce into at most two ' +
-      'getHistory requests, got ' + m,
-  );
-  win.close();
-  console.log('  ok - a burst of status events fetches history once');
+  return sleep(20);
 }
 
 async function testASingleStatusStillRefetches() {
   // The coalescing must not swallow the refresh itself: one status
-  // with the panel open still asks for page one.
+  // with the panel open (and no page one in flight) still asks for
+  // page one.
   const {win, posted} = makePage();
   win.document.getElementById('sidebar').classList.add('open');
   send(win, {type: 'daemonStatus', connected: true});
   await nextTick();
+  const pending = ofType(posted, 'getHistory').pop();
+  send(win, {type: 'history', sessions: [], offset: 0, generation: pending.generation});
   posted.length = 0;
   send(win, {
     type: 'status',
@@ -83,21 +43,16 @@ async function testASingleStatusStillRefetches() {
     startTs: Date.now(),
   });
   await nextTick();
-  const reqs = historyRequests(posted);
+  const reqs = ofType(posted, 'getHistory');
   assert.strictEqual(reqs.length, 1, 'exactly one getHistory');
   assert.strictEqual(reqs[0].offset, 0, 'page one');
   win.close();
   console.log('  ok - a single status still refetches page one');
 }
 
-async function runTests() {
-  await testStatusBurstCoalescesIntoOneHistoryFetch();
-  await testASingleStatusStillRefetches();
-}
-
-runTests().then(
+testASingleStatusStillRefetches().then(
   () => {
-    console.log('\n2 passed, 0 failed');
+    console.log('\n1 passed, 0 failed');
     process.exit(0);
   },
   err => {

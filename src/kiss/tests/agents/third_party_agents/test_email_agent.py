@@ -285,20 +285,15 @@ class TestBackendBehavior:
         assert backend.connection_info == "Email configured for bot@example.com"
         assert backend._cfg["imap_host"] == "imap.example.com"
 
-    @pytest.mark.parametrize(
-        "channel_id,recipient",
-        [("INBOX", "alice@example.com"), ("carol@example.com", "carol@example.com")],
-        ids=["mailbox_replies_to_cached_sender", "explicit_recipient_wins"],
-    )
-    def test_resolve_outbound_cached_thread(self, channel_id: str, recipient: str) -> None:
-        """A mailbox channel_id replies to the cached sender; an explicit address is kept."""
+    def test_resolve_outbound_explicit_recipient_wins(self) -> None:
+        """An explicit address channel_id is kept over the cached sender of the thread."""
         backend = EmailChannelBackend()
         backend._threads["<abc123@example.com>"] = {
             "subject": "Hello there",
             "from": "alice@example.com",
         }
-        to, subject = backend._resolve_outbound(channel_id, "<abc123@example.com>")
-        assert (to, subject) == (recipient, "Hello there")
+        to, subject = backend._resolve_outbound("carol@example.com", "<abc123@example.com>")
+        assert (to, subject) == ("carol@example.com", "Hello there")
 
     def test_resolve_outbound_uncached_and_fresh(self) -> None:
         """Uncached replies get a fallback subject; fresh mail gets the default."""

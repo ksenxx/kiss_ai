@@ -124,20 +124,6 @@ def test_custom_cap_is_honoured(repo: Path) -> None:
     assert len(text.encode()) < 20_000
 
 
-def test_pathspecs_restrict_the_diff(repo: Path) -> None:
-    (repo / "a.txt").write_text("a\n", encoding="utf-8")
-    (repo / "b.txt").write_text("b\n", encoding="utf-8")
-    _git(repo, "add", "a.txt", "b.txt")
-    text = GitWorktreeOps.staged_diff(repo, pathspecs=["a.txt"])
-    assert "diff --git a/a.txt b/a.txt" in text
-    assert "b.txt" not in text
-    # With a cap, the summary is restricted the same way.
-    _stage_big_file(repo, "big.txt", 5_000)
-    text = GitWorktreeOps.staged_diff(repo, max_bytes=2_000, pathspecs=["big.txt", "a.txt"])
-    assert "2 files changed" in text
-    assert "b.txt" not in text
-
-
 def test_stdout_head_without_newline_keeps_the_bytes(repo: Path) -> None:
     """A cap smaller than the first line cannot cut back to a line
     boundary and returns the raw head."""

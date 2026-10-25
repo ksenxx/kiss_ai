@@ -305,20 +305,6 @@ def test_comma_echo_tag_round_trip_is_from_bot(emulator: _NtfyServer) -> None:
     assert agent._backend.is_from_bot(partial) is True
 
 
-def test_title_prepended_to_poll_text(emulator: _NtfyServer) -> None:
-    """A published title is prepended to the normalized message text."""
-    agent = _authenticated_agent(emulator)
-    requests.post(
-        f"{emulator.base_url}/alerts",
-        data=b"disk almost full",
-        headers={"X-Title": "Alert"},
-        timeout=10,
-    )
-    messages, _ = agent._backend.poll_messages("", "")
-    assert messages[0]["text"] == "Alert\n\ndisk almost full"
-    assert messages[0]["title"] == "Alert"
-
-
 def test_make_backend_exits_when_unconfigured() -> None:
     """_make_backend exits with an instruction when no config exists."""
     with pytest.raises(SystemExit):

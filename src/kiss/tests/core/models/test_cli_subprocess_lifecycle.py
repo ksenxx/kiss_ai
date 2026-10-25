@@ -24,6 +24,15 @@ Findings covered (audit ``tmp/audit/03-core-models-c.md``):
   ``BrokenPipeError`` when the CLI exits early.
 * **I6** — the CLI adapters never reading the thread stop signal, and
   classifying a stall as a non-retryable ``KISSError``.
+
+Not reproduced here: ``_CLIProcess._abort_start`` (reached only when
+``Thread.start()`` fails with thread exhaustion inside ``__init__``)
+waited for the SIGKILLed child with an unbounded ``wait()``; it now
+reaps with the same bounded ``_reap(_REAP_GRACE_SECONDS)`` as
+``close()``.  Neither trigger is reachable end-to-end without a test
+double: thread exhaustion is a per-user process limit the test process
+shares with the whole suite, and a child that survives SIGKILL needs
+uninterruptible I/O (a hung network mount).
 """
 
 import os

@@ -334,42 +334,15 @@
     );
   }
 
-  function copyTextToClipboard(text) {
-    // Looked up at call time: chat.html loads panelCopy.js first, but a
-    // page that ships tips.js alone (tests) must still
-    // show its tips with a Copy button that merely fails.
-    const pc = window.PanelCopy;
-    return pc ? pc.copyText(text) : Promise.resolve(false);
-  }
-
-  // The revert timer lives on the button and is restarted on every
-  // copy: a bare setTimeout let a rapid second click's "Copied!" be
-  // wiped early by the first click's stale timer.
-  function flashCopyResult(btn, ok) {
-    btn.textContent = ok ? 'Copied!' : 'Failed';
-    if (btn._kissFlashTimer) clearTimeout(btn._kissFlashTimer);
-    btn._kissFlashTimer = setTimeout(() => {
-      btn._kissFlashTimer = null;
-      btn.textContent = 'Copy';
-    }, 1500);
-  }
-
-  function onCopyClick(event) {
-    const btn = event.currentTarget;
+  /** The text of the code block a tips Copy button sits next to. */
+  function codeBlockText(btn) {
     const code = btn.parentElement.querySelector('pre code');
-    const text = code ? code.textContent : '';
-    // Async clipboard writes can settle out of order: without an
-    // ownership check, a rapid first click failing AFTER a second
-    // click succeeded replaced the latest "Copied!" with "Failed" and
-    // restarted the revert timer from the stale operation.  Each click
-    // takes a new per-button generation; only the completion that
-    // still owns the latest generation may update the label.
-    const gen = (btn._kissCopyGen || 0) + 1;
-    btn._kissCopyGen = gen;
-    copyTextToClipboard(text).then(ok => {
-      if (btn._kissCopyGen !== gen) return;
-      flashCopyResult(btn, ok);
-    });
+    return code ? code.textContent : '';
+  }
+
+  /** Paint a tips Copy button: "Copy" when idle, else the outcome. */
+  function paintCopyButton(btn, ok) {
+    btn.textContent = ok === null ? 'Copy' : ok ? 'Copied!' : 'Failed';
   }
 
   class KissTipsPanel extends HTMLElement {
@@ -576,7 +549,13 @@
         btn.type = 'button';
         btn.textContent = 'Copy';
         btn.setAttribute('aria-label', 'Copy code to clipboard');
-        btn.addEventListener('click', onCopyClick);
+        // Looked up at call time: chat.html loads panelCopy.js first,
+        // but a page that ships tips.js alone (tests) must still show
+        // its tips, with a Copy button that does nothing.
+        const pc = window.PanelCopy;
+        if (pc) {
+          pc.wireCopyButton(btn, () => codeBlockText(btn), paintCopyButton);
+        }
         wrapper.appendChild(btn);
       }
     }
@@ -590,8 +569,6 @@
     document.body.appendChild(el);
     return el;
   }
-
-  window.__kissShowTipsPanel = showTipsPanel;
 
   function configuredTips() {
     const cfg = window.__TIPS__;

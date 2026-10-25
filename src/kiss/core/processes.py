@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 from kiss.core.locked import locked_call
@@ -326,6 +327,62 @@ def kill_process_tree(proc: subprocess.Popen[Any]) -> None:
         kill_process_group(proc.pid, SIGKILL)
     except OSError:
         proc.kill()
+
+
+def terminate_process_group(proc: subprocess.Popen[Any], grace: float = 5.0) -> None:
+    """``SIGTERM`` *proc*'s group, escalate to ``SIGKILL`` after *grace* seconds, reap.
+
+    The graceful first signal lets a child clean up (git removes its
+    ``.lock`` files, Xvfb its socket); a group with any member still
+    alive *grace* seconds later (the leader, or a descendant that
+    ignored the signal after the leader honoured it) is killed with
+    :func:`kill_process_tree` and given another *grace* seconds to be
+    reaped.  Windows has no ``SIGTERM``: both rounds terminate the Job
+    Object.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+        grace: Seconds to wait after each signal.
+    """
+    try:
+        kill_process_group(proc.pid, signal.SIGTERM)
+    except OSError:
+        proc.terminate()
+    if _group_exited(proc, grace):
+        return
+    kill_process_tree(proc)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace)
+
+
+def _group_exited(proc: subprocess.Popen[Any], grace: float) -> bool:
+    """Reap *proc* and wait for its whole group to be gone, at most *grace* seconds.
+
+    The leader is reaped first: an unreaped leader is a zombie that
+    still counts as a group member, so ``killpg(pgid, 0)`` could never
+    report the group empty.  Once it is reaped, POSIX keeps its pid
+    reserved as the group id for as long as any member lives, so the
+    probe names this group and nothing else; a ``ProcessLookupError``
+    means every member is gone.  On Windows the first round terminated
+    the whole Job Object, so the leader's exit is the group's.
+    """
+    deadline = time.monotonic() + grace
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        return False
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        return True
+    while True:
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:  # pragma: no cover — needs a setuid descendant
+            pass  # a member we may not signal still exists
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 # Seconds a killed child is given to exit before the caller stops waiting

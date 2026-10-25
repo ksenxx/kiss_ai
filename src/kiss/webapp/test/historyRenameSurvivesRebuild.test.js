@@ -13,48 +13,19 @@
 // Runs with: node test/historyRenameSurvivesRebuild.test.js
 
 const assert = require('assert');
-const {makePage: buildPage, send, ofType} = require('./simplify2_harness');
+const {
+  makePage: buildPage,
+  send,
+  ofType,
+  sleep,
+} = require('./simplify2_harness');
+const {sendHistory, makeRow} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = buildPage({bodyClass: 'remote-chat'});
   win.document.getElementById('sidebar').classList.add('open');
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
   return {win, posted};
-}
-
-function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + overrides.task_id,
-      task_id: overrides.task_id,
-      title: 'task ' + overrides.task_id,
-      timestamp: 1_700_000_000,
-      preview: 'task ' + overrides.task_id,
-      has_events: true,
-      failed: false,
-      is_running: false,
-      awaiting_answer: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 0,
-    },
-    overrides,
-  );
-}
-
-/** Reply to the latest getHistory request (or the first load). */
-function sendHistory(win, posted, sessions) {
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req ? req.generation : undefined,
-    sessions,
-  });
 }
 
 function group(win, chatId) {
@@ -75,7 +46,10 @@ function key(win, el, k) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
 }
 
-const tick = () => new Promise(r => setTimeout(r, 5));
+/** Let main.js's end-of-tick history rebuild coalescing settle. */
+function tick() {
+  return sleep(5);
+}
 
 async function testRenameBoxSurvivesChangedRows() {
   const {win, posted} = makePage();

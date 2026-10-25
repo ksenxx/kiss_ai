@@ -53,6 +53,7 @@ import pytest
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
+from kiss.tests.agents.sorcar import rwlock_probe
 
 # ---------------------------------------------------------------------------
 # Finding 2: _RWLock vs. asynchronously injected KeyboardInterrupt
@@ -155,8 +156,8 @@ def _sweep_injection_points(acquire_name: str) -> None:
         )
         assert _lock_usable(lock), (
             f"_RWLock permanently wedged by a KeyboardInterrupt "
-            f"delivered at line event {nth}: readers={lock._readers} "
-            f"writer={lock._writer} pending={lock._pending_writers}"
+            f"delivered at line event {nth}: readers={rwlock_probe.readers(lock)} "
+            f"writer={rwlock_probe.writer(lock)} pending={rwlock_probe.pending_writers(lock)}"
         )
         if not injected:
             return
@@ -212,7 +213,7 @@ class TestRWLockAsyncInterrupt:
                 holder.join(timeout=_ACQUIRE_TIMEOUT_S)
             assert _lock_usable(lock), (
                 f"contended write_lock wedged at line event {nth}: "
-                f"pending={lock._pending_writers} writer={lock._writer}"
+                f"pending={rwlock_probe.pending_writers(lock)} writer={rwlock_probe.writer(lock)}"
             )
             if not injected:
                 return

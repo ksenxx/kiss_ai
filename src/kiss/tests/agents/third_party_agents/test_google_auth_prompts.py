@@ -58,10 +58,10 @@ def test_prompt_describes_connect_link_hand_off(
     assert "'pending'" in prompt
 
 
-@pytest.mark.parametrize("agent_cls,service,label", _CASES, ids=[c[1] for c in _CASES])
-def test_prompt_references_only_real_tools(
-    agent_cls: type[BaseChannelAgent], service: str, label: str
-) -> None:
+@pytest.mark.parametrize(
+    "agent_cls,label", [(c[0], c[2]) for c in _CASES], ids=[c[1] for c in _CASES]
+)
+def test_prompt_references_only_real_tools(agent_cls: type[BaseChannelAgent], label: str) -> None:
     """Every tool the prompt names must exist among the agent's auth tools."""
     tool_names = {tool.__name__ for tool in agent_cls()._get_auth_tools()}
     referenced = set(re.findall(r"([a-z_]+)\(", agent_cls.channel_system_prompt))

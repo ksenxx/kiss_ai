@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -197,6 +197,49 @@ PROFILE_SEPARATOR = "+"
 
 
 
+PROGRESS_LOG_RELATIVE = Path("tmp") / "PROGRESS.md"
+
+
+def _read_progress_log(wt: GitWorktree) -> bytes | None:
+    """Return the bytes of the worktree's ``tmp/PROGRESS.md``, or ``None``.
+
+    Called before the merge, while the worktree directory still exists.
+
+    Args:
+        wt: The worktree about to be merged.
+    """
+    source = wt.wt_dir / PROGRESS_LOG_RELATIVE
+    try:
+        return source.read_bytes() if source.is_file() else None
+    except OSError:
+        logger.warning("Could not read %s", source, exc_info=True)
+        return None
+
+
+def _write_progress_log(wt: GitWorktree, content: bytes | None) -> str:
+    """Write a merged worktree's ``tmp/PROGRESS.md`` into the main checkout.
+
+    ``tmp/`` is git-ignored, so the merge does not carry the log the
+    task kept for the user; writing it here spares the model doing it
+    by hand.  Returns the note appended to the merge result (``""``
+    when there was no log or the write failed).
+
+    Args:
+        wt: The merged worktree (its directory may already be gone).
+        content: Bytes captured by :func:`_read_progress_log`.
+    """
+    if content is None:
+        return ""
+    target = wt.repo_root / PROGRESS_LOG_RELATIVE
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    except OSError:
+        logger.warning("Could not write %s", target, exc_info=True)
+        return ""
+    return f" Copied {PROGRESS_LOG_RELATIVE.as_posix()} to {target}."
+
+
 def canonical_tool_profile(name: str) -> str:
     """Return *name* with every part a :data:`TOOL_PROFILES` key, or raise.
 
@@ -226,6 +269,35 @@ def canonical_tool_profile(name: str) -> str:
             f"(several joined with '+'), got {name!r}.{hint}"
         )
     return canonical
+
+
+def classification_chooses_prompt(
+    allowed: frozenset[str] | None, append_basic_tools: bool,
+) -> bool:
+    """Return whether a run's task classification can affect its system prompt.
+
+    A run that cannot edit files — no built-in toolset (*append_basic_tools*
+    off: a script-only SEA such as a channel agent) or a profile without
+    the edit tools (``review``, ``shell``, ...) — has no use for the
+    coding, testing and research rules of SYSTEM.md: it runs on the
+    reduced SYSTEM_LITE.md prompt whatever the task, so classifying the
+    task would only cost a model call (P12 of the 2026-10-24 trajectory
+    audit: a three-tool channel child paid most of its budget for a
+    30k-character prompt).  Every run that does classify shares this
+    gate so none pays for a verdict it would ignore.
+
+    Args:
+        allowed: The run's tool names as :func:`resolve_tool_profile`
+            returns them (``None`` for every tool).
+        append_basic_tools: Whether the run offers the built-in toolset.
+
+    Returns:
+        ``True`` when the verdict chooses between SYSTEM.md and
+        SYSTEM_LITE.md, ``False`` when the run gets SYSTEM_LITE.md anyway.
+    """
+    return append_basic_tools and (
+        allowed is None or bool(allowed & TOOL_GROUPS["edit"])
+    )
 
 
 def resolve_tool_profile(name: str) -> frozenset[str] | None:
@@ -279,12 +351,15 @@ your own knowledge, and say so when a fact could be outdated.
 
 
 def summary(description: str) -> str:
-    """Every 10 steps: summarize your steps since the last `summary` call.
+    """Record a progress summary at a natural checkpoint (a plan made, a milestone reached).
+
+    The framework writes a recap of the tool calls every 10 steps on its
+    own; call this only when you have something the recap cannot say.
 
     Args:
         description: Natural language summary in 5-10 sentences of
-            what the agent since the last call to `summary`, written in
-            Markdown format (use bullet lists for the steps, and
+            what the agent did since the last call to `summary`, written
+            in Markdown format (use bullet lists for the steps, and
             ``**bold**`` / backtick code spans).
 
     Returns:
@@ -353,8 +428,7 @@ def _memory_settings() -> tuple[bool, Path]:
     the stored value — ``0``/``false``/``no``/``off`` (any case) disable,
     anything else enables — so one process or test can flip memory
     without editing the config file.  Pages live in the config's
-    ``memory_dir`` when set, else ``$KISS_HOME/memories``
-    (``$KISS_HOME/memories``).
+    ``memory_dir`` when set, else ``$KISS_HOME/memories``.
 
     Returns:
         ``(enabled, root)`` where *root* is the memory page directory
@@ -466,7 +540,6 @@ def _generate_commit_message(
         A commit message string.
     """
     from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
-    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     diff_text = GitWorktreeOps.staged_diff(commit_dir)
     return generate_commit_message_from_diff(
@@ -536,8 +609,6 @@ def auto_commit_changes(
     Returns:
         True if a commit was created, False if nothing to commit.
     """
-    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-
     GitWorktreeOps.stage_all(commit_dir)
     if not GitWorktreeOps.has_staged_changes(commit_dir):
         return False
@@ -1035,6 +1106,9 @@ class SorcarAgent(RelentlessAgent):
         # The run's file/shell tools; kept so ``create_worktree``, which
         # moves the work directory mid-run, can re-point them.
         self._useful_tools: UsefulTools | None = None
+        # Files written in every session of the current run (the tools
+        # instance is rebuilt per session), for the continuation message.
+        self._written_files: set[Path] = set()
         self._wts: dict[Path, GitWorktree] = {}
         # The warning pending for the user (a worktree kept for review,
         # a stash that could not be restored, ...), flushed as one
@@ -1246,7 +1320,7 @@ class SorcarAgent(RelentlessAgent):
         command: str,
         description: str,
         timeout_seconds: int = 30,
-        max_output_chars: int = 50000,
+        max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
     ) -> str:
         """Run *command* in the task's container, honouring both limits.
 
@@ -1294,10 +1368,7 @@ class SorcarAgent(RelentlessAgent):
             keys (see :func:`resolve_tool_profile`).
         """
         if self._tool_profile_name:
-            try:
-                return canonical_tool_profile(self._tool_profile_name)
-            except ValueError:
-                pass  # An unknown name falls through to the default rule.
+            return canonical_tool_profile(self._tool_profile_name)
         task = task or self.task_description
         if (
             DEFAULT_CONFIG.tool_profiles
@@ -1307,7 +1378,7 @@ class SorcarAgent(RelentlessAgent):
             return "review"
         return "full"
 
-    def _get_tools(self) -> list:
+    def _get_tools(self, taken_names: Iterable[str] = ()) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
 
         Must be called after docker_manager is set up (i.e., from perform_task,
@@ -1319,6 +1390,12 @@ class SorcarAgent(RelentlessAgent):
         skill, MCP, channel-dispatch and fan-out tools are built only
         where the profile names them, so a ``review`` or ``shell``
         sub-agent's every step carries only the schemas it can use.
+
+        Args:
+            taken_names: Names of the tools the run adds beyond the
+                built-ins (the caller's and the inherited ones); a
+                synthesized MCP tool name among them, or among the
+                built-ins actually built, gets a numeric suffix.
         """
         allowed = resolve_tool_profile(self._tool_profile())
 
@@ -1431,7 +1508,7 @@ class SorcarAgent(RelentlessAgent):
                 command: str,
                 description: str,
                 timeout_seconds: int = 30,
-                max_output_chars: int = 50000,
+                max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
                 background: bool = False,
             ) -> str:
                 """Runs a bash command in the task's Docker container and returns its output.
@@ -1488,7 +1565,6 @@ class SorcarAgent(RelentlessAgent):
         if (
             (allowed is None or allowed & BROWSER_TOOL_NAMES)
             and self._use_web_tools
-            and self.web_use_tool is None
         ):
             # Sub-agents run concurrently, so they get a throwaway profile
             # instead of contending for the shared profile's Chromium lock.
@@ -1653,19 +1729,13 @@ class SorcarAgent(RelentlessAgent):
             skill_tool = make_skill_tool(self.work_dir or ".")
             if skill_tool is not None:
                 tools.append(skill_tool)
-        # The MCP servers' tools carry server-specific names, so they
-        # are kept as a block, unfiltered, wherever the profile names
-        # the sign-in pair (the ``mcp`` group).
-        mcp_tools: list = []
         if allowed is None or allowed & MCP_AUTH_TOOL_NAMES:
             try:
                 from kiss.agents.sorcar.mcp_oauth import make_mcp_auth_tools
-                from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 
-                mcp_tools.extend(make_mcp_tools(self.work_dir or "."))
                 tools.extend(make_mcp_auth_tools(self.work_dir or "."))
             except Exception:
-                logger.warning("MCP tool setup failed", exc_info=True)
+                logger.warning("MCP sign-in tool setup failed", exc_info=True)
         if allowed is None or "run_agent" in allowed:
             # Scheduled automations (cron) are not a built-in tool: the
             # agent dispatches them via run_agent(agent="cron", ...), which
@@ -1703,7 +1773,21 @@ class SorcarAgent(RelentlessAgent):
             tools.append(number_of_cores)
         if allowed is not None:
             tools = [tool for tool in tools if tool.__name__ in allowed]
-        return tools + mcp_tools
+        # The MCP servers' tools carry server-specific names, so they
+        # are kept as a block, unfiltered, wherever the profile names
+        # the sign-in pair (the ``mcp`` group).  Built last, so a
+        # synthesized name is checked against the run's real toolset
+        # (plus the static built-in list, which keeps the names stable
+        # across profiles and covers ``finish``, added by the executor).
+        if allowed is None or allowed & MCP_AUTH_TOOL_NAMES:
+            try:
+                from kiss.agents.sorcar.mcp_servers import _RESERVED_TOOL_NAMES, make_mcp_tools
+
+                taken = {tool.__name__ for tool in tools} | set(taken_names)
+                tools.extend(make_mcp_tools(self.work_dir or ".", taken | _RESERVED_TOOL_NAMES))
+            except Exception:
+                logger.warning("MCP tool setup failed", exc_info=True)
+        return tools
 
     def _show_model_in_picker(self, model_name: str) -> None:
         """Display *model_name* in the picker of every tab watching this task.
@@ -1756,7 +1840,8 @@ class SorcarAgent(RelentlessAgent):
         # the caller's *tools*: the built-in toolset is never built, so
         # no web profile, MCP server, or run_agent/run_parallel wiring
         # is set up either.
-        built_in = self._get_tools() if self._append_basic_tools else []
+        extra_names = {tool.__name__ for tool in [*tools, *self._inherited_tools]}
+        built_in = self._get_tools(extra_names) if self._append_basic_tools else []
         # Tools inherited from the dispatching task come last, and only
         # under names this run does not have yet (the caller may lack a
         # built-in this run has, e.g. ``number_of_cores`` without
@@ -1860,6 +1945,9 @@ class SorcarAgent(RelentlessAgent):
         settings["Parallel mode"] = (
             "parallel" if self._is_parallel else "sequential"
         )
+        # A run without a task id (no chat) scratches in ./tmp/ itself;
+        # ``ChatSorcarAgent`` narrows this to ./tmp/<task-id>/.
+        settings["Scratch dir"] = "./tmp/"
         return settings
 
     def _reset_task_classification(self) -> None:
@@ -2234,7 +2322,7 @@ class SorcarAgent(RelentlessAgent):
         self._append_basic_tools = append_basic_tools
         self._inherited_tools = list(inherited_tools or [])
         self._tools_hook = tools_hook
-        self._prompt_suffix = prompt_suffix if prompt_suffix else ""
+        self._prompt_suffix = prompt_suffix
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.
@@ -2245,9 +2333,7 @@ class SorcarAgent(RelentlessAgent):
         # append-only *system_prompt* suffix to every sub-agent, so a
         # run's extra system instructions constrain its whole task
         # tree, exactly like a *base_system_prompt* replacement.
-        self._system_prompt_suffix = system_prompt if system_prompt else ""
-        self.web_use_tool = None
-        self._memory_tools = None
+        self._system_prompt_suffix = system_prompt or ""
         if not task_begun:
             self._begin_task(printer)
         # Resolved ONCE for the whole run (see _resolve_model_name):
@@ -2258,25 +2344,33 @@ class SorcarAgent(RelentlessAgent):
         # probe of the restricted-profile note and ``_reset`` (hence the
         # toolset) all see the directory the run executes in.
         work_dir = resolve_work_dir(work_dir or ".")
+        completed = False
         try:
             try:
-                # Pre-run task classification (idempotent per run: a driver
-                # may have pre-seeded the verdict).
-                # A task the classifier deems
-                # simple — no software development, no Internet search —
-                # runs on the reduced SYSTEM_LITE.md prompt; everything
-                # else (including a failed or disabled classification)
-                # keeps the full SYSTEM.md.  A caller-supplied
-                # *base_system_prompt* replaces both.
-                classification = self._classify_task_once(
-                    model_name, prompt_template, model_config,
-                    arguments=arguments,
-                )
-                default_base_prompt = (
-                    SYSTEM_PROMPT_LITE
-                    if classification is not None and classification.is_simple
-                    else SYSTEM_PROMPT
-                )
+                profile = self._tool_profile(prompt_template)
+                allowed = resolve_tool_profile(profile)
+                # A run that cannot edit files runs on SYSTEM_LITE.md
+                # without classifying the task (see
+                # :func:`classification_chooses_prompt`).  Otherwise the
+                # pre-run task classification (idempotent per run: a
+                # driver may have pre-seeded the verdict) decides: a
+                # task the classifier deems simple — no software
+                # development, no Internet search — runs on
+                # SYSTEM_LITE.md; everything else (including a failed or
+                # disabled classification) keeps the full SYSTEM.md.  A
+                # caller-supplied *base_system_prompt* replaces both.
+                if not classification_chooses_prompt(allowed, self._append_basic_tools):
+                    default_base_prompt = SYSTEM_PROMPT_LITE
+                else:
+                    classification = self._classify_task_once(
+                        model_name, prompt_template, model_config,
+                        arguments=arguments,
+                    )
+                    default_base_prompt = (
+                        SYSTEM_PROMPT_LITE
+                        if classification is not None and classification.is_simple
+                        else SYSTEM_PROMPT
+                    )
                 system_instructions = (
                     (self._base_system_prompt or default_base_prompt)
                     + (system_prompt if system_prompt else "")
@@ -2302,11 +2396,9 @@ class SorcarAgent(RelentlessAgent):
                     self._memory_tools = MemoryTools(
                         memory_root, domains=_repo_memory_domains(work_dir)
                     )
-                profile = self._tool_profile(prompt_template)
                 # No note without a built-in toolset to cut down: a run with
                 # ``append_basic_tools=False`` has only ``finish`` and the
                 # caller's tools, whatever profile it names.
-                allowed = resolve_tool_profile(profile)
                 if allowed is not None and self._append_basic_tools:
                     # The note lists what :meth:`_get_tools` will build,
                     # never a tool this run cannot have: the docker toolset
@@ -2345,6 +2437,16 @@ class SorcarAgent(RelentlessAgent):
                 if self._memory_tools is not None:
                     system_instructions += "\n\n" + self._memory_tools.protocol()
                 prompt = prompt_template
+                if self._memory_tools is not None:
+                    # The memory search the protocol used to demand as
+                    # the model's first turn, done here for free and
+                    # keyed by the whole task text (P2 of the 2026-10-24
+                    # trajectory audit).
+                    recalled = self._memory_tools.recall(
+                        substitute_prompt_args(prompt_template, arguments)
+                    )
+                    if recalled:
+                        prompt += "\n\n" + recalled
                 if attachments:
                     parts = _attachment_parts(attachments)
                     if parts:
@@ -2361,7 +2463,7 @@ class SorcarAgent(RelentlessAgent):
                         "\n\n- The path of the file open in the editor is "
                         f"{current_editor_file}"
                     )
-                return super().run(
+                result = super().run(
                     model_name=model_name,
                     system_prompt=system_instructions,
                     prompt_template=prompt,
@@ -2379,8 +2481,10 @@ class SorcarAgent(RelentlessAgent):
                     llm_call_hook=llm_call_hook,
                     tool_call_hook=tool_call_hook,
                 )
+                completed = True
+                return result
             finally:
-                self._finish_run(unwinding=sys.exc_info()[1] is not None)
+                self._finish_run(unwinding=not completed)
         except (KISSError, SeaError):
             # A broken SEA method (its ``system_prompt`` or ``tools``
             # run inside the agent) is a setup failure the caller must
@@ -2418,9 +2522,10 @@ class SorcarAgent(RelentlessAgent):
             self.set_printer(printer)
         self._unisolated_repos = set()
         self._worktree_finish_gate_used = False
+        self._written_files = set()
         if self._wts:
             self._retire_after_task_saved()
-        self._flush_warnings(printer)
+        self._flush_warnings(self.printer)
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -2544,8 +2649,42 @@ class SorcarAgent(RelentlessAgent):
 
     @_wt.setter
     def _wt(self, wt: GitWorktree | None) -> None:
-        """Make *wt* the only pending worktree (``None``: none)."""
+        """Make *wt* the only pending worktree (``None``: none).
+
+        Production code fills ``_wts`` directly; this setter is the
+        seam the worktree tests use to seed one pending worktree.
+        """
         self._wts = {} if wt is None else {_repo_key(wt): wt}
+
+    def _continuation_state(self) -> str:
+        """Return the worktree and written-files block of a continuation's first message.
+
+        Names the active worktree directory, that it is still unmerged
+        (``commit_and_merge`` is still owed) and the files the task has
+        written so far, so the resumed session neither opens with a
+        refused main-checkout command nor re-reads what it wrote.
+        """
+        lines: list[str] = []
+        for wt in self._wts.values():
+            lines.append(
+                f"- Active worktree (unmerged; call commit_and_merge when done): {wt.wt_dir} "
+                f"on branch {wt.branch} of {wt.repo_root}; edit files under it, not under "
+                f"the main checkout."
+            )
+        written = sorted(str(p) for p in self._files_written())
+        if written:
+            shown = written[:40]
+            more = f" (+{len(written) - len(shown)} more)" if len(written) > len(shown) else ""
+            lines.append("- Files written so far: " + ", ".join(shown) + more)
+        if not lines:
+            return ""
+        return "\n# Current state\n" + "\n".join(lines) + "\n"
+
+    def _files_written(self) -> set[Path]:
+        """Return every file the task's Write/Edit tools wrote, across its sessions."""
+        if self._useful_tools is not None:
+            self._written_files |= self._useful_tools.written_files
+        return self._written_files
 
     @property
     def worktrees(self) -> list[GitWorktree]:
@@ -3484,6 +3623,7 @@ class SorcarAgent(RelentlessAgent):
                 f"    git checkout <branch> && {merge_cmd}"
             )
 
+        progress_log = _read_progress_log(wt)
         if not self._finalize_worktree(wt):
             if self._last_preserve_outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
                 return (
@@ -3520,18 +3660,24 @@ class SorcarAgent(RelentlessAgent):
             )
 
         if result == MergeResult.STASH_FAILED:
+            blocking = GitWorktreeOps.status_porcelain(wt.repo_root).strip()
+            files = "\n".join("    " + line for line in blocking.splitlines()[:40])
             return (
                 "Cannot merge: your uncommitted changes in the main "
-                "repository could not be stashed (git stash push "
+                f"repository {wt.repo_root} could not be stashed (git stash push "
                 "failed), so the merge was aborted to avoid mixing "
-                "them into the merge commit.\n"
-                "Commit or clean up the changes, then retry the merge, "
+                "them into the merge commit. The worktree branch "
+                f"'{wt.branch}' is committed and safe. Blocking files "
+                "(git status --porcelain of the main checkout):\n"
+                f"{files or '    (none reported)'}\n"
+                "Commit or clean up those files, then retry commit_and_merge, "
                 "or discard the branch." + stash_suffix
             )
 
         if result == MergeResult.SUCCESS:
             self._wts.pop(_repo_key(wt), None)
-            return f"Successfully merged branch '{wt.branch}'." + stash_suffix
+            copied = _write_progress_log(wt, progress_log)
+            return f"Successfully merged branch '{wt.branch}'." + copied + stash_suffix
 
         stash_step = ""
         if stash_warning:
@@ -4173,8 +4319,12 @@ def main() -> None:
     # stdout gets exactly the raw YAML result and nothing else.
     verbose = sys.stdout.isatty()
     # The daemon's agent class (imported here: its module imports this
-    # one), minus the chat history: ``_skip_persistence`` keeps the
-    # run's result out of ``history.db``.
+    # one).  It allocates the run's ``history.db`` row before the run
+    # and, with nobody else persisting the outcome (the daemon does it
+    # for its own runs under ``_skip_persistence``), saves the result,
+    # verdict, usage and a replayable event stream on that row itself;
+    # a skipped save would leave the row's "Agent Failed Abruptly"
+    # sentinel behind for every CLI run.
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     agent = ChatSorcarAgent("Sorcar CLI")
@@ -4185,7 +4335,6 @@ def main() -> None:
         max_budget=args.max_budget,
         verbose=verbose,
         ask_user_question_callback=_ask_user_in_terminal,
-        _skip_persistence=True,
     )
     if not verbose:
         print(result)

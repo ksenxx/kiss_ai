@@ -5,7 +5,33 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sleep, waitFor} = require('./simplify2_harness');
+const {makePage, send, sleep} = require('./simplify2_harness');
+
+// The 1500 ms flash-revert timers (wireCopyButton in panelCopy.js) are
+// recorded instead of waited for and fired by hand, so no wall-clock
+// sleep decides whether the first click's timer lands before or after
+// the second click.  Same recorder as audit0903_panelcopy_flash_timer.
+function recordFlashTimers(win) {
+  const timers = [];
+  const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
+  win.setTimeout = function (fn, ms, ...args) {
+    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
+    const timer = {fn, cleared: false};
+    timers.push(timer);
+    return timer;
+  };
+  win.clearTimeout = function (handle) {
+    if (handle && typeof handle === 'object') handle.cleared = true;
+    else realClearTimeout(handle);
+  };
+  return timers;
+}
+
+/** Run every timer in *timers* that was not cleared, as the clock would. */
+function fireFlashTimers(timers) {
+  for (const timer of timers) if (!timer.cleared) timer.fn();
+}
 
 const SESSION = {
   id: 'chatABC',
@@ -28,6 +54,7 @@ const SESSION = {
 async function run() {
   const {win} = makePage();
   const doc = win.document;
+  const timers = recordFlashTimers(win);
 
   const copied = [];
   Object.defineProperty(win.navigator, 'clipboard', {
@@ -67,20 +94,17 @@ async function run() {
   );
   assert.ok(chatBtn.classList.contains('copied'), 'chat button flashes');
   assert.ok(taskBtn.classList.contains('copied'), 'task button flashes');
+  assert.strictEqual(timers.length, 3, 'one flash timer per button');
 
-  await sleep(1_000);
+  const firstClick = timers.slice();
   rowBtn.click();
   chatBtn.click();
   await sleep(0);
-  // The untouched task button's 1.5 s flash timer (wireCopyButton in
-  // main.js) was armed with the row/chat ones; once it has reverted,
-  // the first click's row/chat timers would have fired too.
-  await waitFor(
-    () => !taskBtn.classList.contains('copied'),
-    'untouched task flash never reverted',
-  );
   // audit0903: every copy button restarts its flash timer on re-click,
-  // so neither second flash is cut short by the first click's timer.
+  // so the first click's timers of the re-clicked buttons are cleared
+  // and firing them (as the clock would at 1.5 s) cuts no second flash
+  // short; only the untouched task button reverts.
+  fireFlashTimers(firstClick);
   assert.ok(
     rowBtn.classList.contains('copied'),
     'row second click resets its timer',
@@ -94,14 +118,9 @@ async function run() {
     'untouched task flash reverts',
   );
 
-  await waitFor(
-    () => !rowBtn.classList.contains('copied'),
-    'reset row timer eventually reverts',
-  );
-  await waitFor(
-    () => !chatBtn.classList.contains('copied'),
-    'reset id timer eventually reverts',
-  );
+  fireFlashTimers(timers.slice(3));
+  assert.ok(!rowBtn.classList.contains('copied'), 'reset row timer reverts');
+  assert.ok(!chatBtn.classList.contains('copied'), 'reset id timer reverts');
   assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
 
   win.close();

@@ -27,11 +27,10 @@ import time
 import urllib.parse
 import uuid
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from signal import SIGTERM
 from typing import IO, Any
 
 from kiss.agents.sorcar._concurrency import _race_delay, interruptible_locked_call
@@ -41,11 +40,11 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked_call
 from kiss.core.processes import (
     IS_WINDOWS,
-    SIGKILL,
-    kill_process_group,
+    kill_process_tree,
     pid_alive,
     popen_process_group,
     process_identity,
+    terminate_process_group,
 )
 
 logger = logging.getLogger(__name__)
@@ -552,7 +551,7 @@ def _git(
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        _kill_git(proc)
+        kill_process_tree(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -570,32 +569,8 @@ def _git(
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
     except BaseException:
-        _terminate_git(proc)
+        terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
         raise
-
-
-def _kill_git(proc: subprocess.Popen[Any]) -> None:
-    """Stop a running git process and its whole process group."""
-    with contextlib.suppress(OSError):  # group already gone
-        kill_process_group(proc.pid, SIGKILL)
-    if proc.poll() is None:
-        proc.kill()
-
-
-def _terminate_git(proc: subprocess.Popen[Any]) -> None:
-    """Stop *proc* and its process group and reap it, lock files cleaned up.
-
-    ``SIGTERM`` lets git remove its ``.lock`` files (and reaches a hook
-    and its children, which share the group); a group still alive five
-    seconds later is killed.
-    """
-    with contextlib.suppress(OSError):  # group already gone
-        kill_process_group(proc.pid, SIGTERM)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:  # pragma: no cover - a hook ignoring SIGTERM
-        _kill_git(proc)
-        proc.wait()
 
 
 def _kill_git_on_timeout(
@@ -607,7 +582,7 @@ def _kill_git_on_timeout(
     """Watchdog callback of :func:`_git_stdout_head`: record and kill."""
     timed_out.set()
     logger.warning("git %s timed out after %ss", args, timeout)
-    _kill_git(proc)
+    kill_process_tree(proc)
 
 
 def _git_stdout_head(
@@ -674,7 +649,7 @@ def _git_stdout_head(
             truncated = bool(_read_some(stdout, 1, give_up))
     finally:
         timer.cancel()
-        _kill_git(proc)
+        kill_process_tree(proc)
         stdout.close()
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=5)
@@ -1141,21 +1116,38 @@ class GitWorktreeOps:
     @staticmethod
     def _create_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
         """:meth:`create`'s body, run under ``repo_lock``."""
+        return GitWorktreeOps._add_worktree_locked(
+            repo, branch, wt_dir, ("-b", branch, str(wt_dir)), GitWorktreeOps.cleanup_partial,
+        )
+
+    @staticmethod
+    def _add_worktree_locked(
+        repo: Path,
+        branch: str,
+        wt_dir: Path,
+        add_args: tuple[str, ...],
+        teardown: Callable[[Path, str, Path], None],
+    ) -> bool:
+        """``git worktree add`` + owner stamp under the reclaim lock.
+
+        Shared body of :meth:`_create_locked` and
+        :meth:`_reattach_locked`: *add_args* follow ``git worktree add``
+        and *teardown*``(repo, branch, wt_dir)`` undoes the add when the
+        owner stamp fails.
+        """
         with _reclaim_process_lock(repo):
-            result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
+            result = _git("worktree", "add", *add_args, cwd=repo)
             if result.returncode != 0:
-                logger.warning(
-                    "Failed to create worktree: %s", result.stderr.strip(),
-                )
+                logger.warning("Failed to add worktree: %s", result.stderr.strip())
                 return False
             if not GitWorktreeOps.save_owner_pid(repo, branch):
                 logger.warning(
-                    "Removing freshly created worktree %s: its owner pid "
+                    "Removing freshly added worktree %s: its owner pid "
                     "could not be recorded, so another process's reclaim "
                     "would delete it under this one",
                     wt_dir,
                 )
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                teardown(repo, branch, wt_dir)
                 return False
         return True
 
@@ -1185,20 +1177,14 @@ class GitWorktreeOps:
     @staticmethod
     def _reattach_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
         """:meth:`reattach`'s body, run under ``repo_lock``."""
-        with _reclaim_process_lock(repo):
-            result = _git("worktree", "add", str(wt_dir), branch, cwd=repo)
-            if result.returncode != 0:
-                logger.warning("Failed to reattach worktree: %s", result.stderr.strip())
-                return False
-            if not GitWorktreeOps.save_owner_pid(repo, branch):
-                logger.warning(
-                    "Removing reattached worktree %s: its owner pid could "
-                    "not be recorded (the branch is kept)",
-                    wt_dir,
-                )
-                GitWorktreeOps.remove(repo, wt_dir)
-                return False
-        return True
+        return GitWorktreeOps._add_worktree_locked(
+            repo, branch, wt_dir, (str(wt_dir), branch), GitWorktreeOps._remove_keeping_branch,
+        )
+
+    @staticmethod
+    def _remove_keeping_branch(repo: Path, branch: str, wt_dir: Path) -> None:
+        """:meth:`remove` with the ``(repo, branch, wt_dir)`` teardown signature."""
+        GitWorktreeOps.remove(repo, wt_dir)
 
     @staticmethod
     def remove(repo: Path, wt_dir: Path) -> None:
@@ -1441,7 +1427,6 @@ class GitWorktreeOps:
     def staged_diff(
         wt_dir: Path,
         max_bytes: int = COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
-        pathspecs: Sequence[str] = (),
     ) -> str:
         """Return the staged diff text, bounded for use in an LLM prompt.
 
@@ -1457,22 +1442,16 @@ class GitWorktreeOps:
         Args:
             wt_dir: Worktree directory (must have staged changes).
             max_bytes: Cap on the patch text.
-            pathspecs: Literal paths to restrict the diff to (all staged
-                changes when empty).
 
         Returns:
             The diff text, or empty string if no staged changes.
         """
-        head = ("--literal-pathspecs", "diff", "--cached") if pathspecs else ("diff", "--cached")
-        tail = ("--", *pathspecs) if pathspecs else ()
-        patch, truncated = _git_stdout_head(
-            *head, *tail, cwd=wt_dir, max_bytes=max_bytes,
-        )
+        patch, truncated = _git_stdout_head("diff", "--cached", cwd=wt_dir, max_bytes=max_bytes)
         if not truncated:
             return patch.strip()
-        totals = _git(*head, "--shortstat", *tail, cwd=wt_dir).stdout.strip()
+        totals = _git("diff", "--cached", "--shortstat", cwd=wt_dir).stdout.strip()
         stat, _ = _git_stdout_head(
-            *head, "--stat", *tail, cwd=wt_dir, max_bytes=max_bytes // 4,
+            "diff", "--cached", "--stat", cwd=wt_dir, max_bytes=max_bytes // 4,
         )
         return (
             f"[Patch truncated to its first {max_bytes:,} bytes; "
@@ -1572,13 +1551,10 @@ class GitWorktreeOps:
         if result.returncode == 0:
             return True
         after = _git("status", "--porcelain", cwd=repo)
-        if (
-            before.returncode != 0
-            or after.returncode != 0
-            or after.stdout != before.stdout
-        ):
-            # Either the tree changed, or we cannot prove it did not
-            # (a status command failed) — never risk a double-apply.
+        if before.returncode != 0 or after.returncode != 0 or after.stdout != before.stdout:
+            # The tree changed, or a status failed so nothing proves it
+            # did not (two identical failure reports are not proof):
+            # never risk a double-apply.
             return False
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
@@ -1668,18 +1644,14 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
         """
-        if GitWorktreeOps.has_staged_changes(repo):
-            msg = GitWorktreeOps._merge_commit_message(
-                repo, branch, user_prompt=user_prompt, task_result=task_result,
-            )
-            commit_result = _git("commit", "-F", "-", cwd=repo, input=msg)
-            if commit_result.returncode != 0:
-                logger.warning(
-                    "squash merge commit failed: %s",
-                    commit_result.stderr.strip(),
-                )
-                _git("reset", "--hard", "HEAD", cwd=repo)
-                return MergeResult.MERGE_FAILED
+        if not GitWorktreeOps.has_staged_changes(repo):
+            return MergeResult.SUCCESS
+        msg = GitWorktreeOps._merge_commit_message(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
+        if not GitWorktreeOps.commit_staged(repo, msg):
+            _git("reset", "--hard", "HEAD", cwd=repo)
+            return MergeResult.MERGE_FAILED
         return MergeResult.SUCCESS
 
     @staticmethod
@@ -1761,8 +1733,10 @@ class GitWorktreeOps:
     def delete_branch(repo: Path, branch: str) -> bool:
         """Delete a branch, its git config section and its preserve marker (best-effort).
 
-        Tries ``-d`` first (safe delete), falls back to ``-D`` (force).
-        Also removes the ``branch.<name>.*`` config section and the
+        Uses ``-D`` (force): every caller deletes an agent-owned branch
+        whose commits were merged, discarded or reclaimed, so a
+        preceding safe ``-d`` could only ever add a git process.  Also
+        removes the ``branch.<name>.*`` config section and the
         preserve-for-review marker file.
 
         Args:
@@ -1771,13 +1745,11 @@ class GitWorktreeOps:
 
         Returns:
             True if the branch was deleted (or never existed), False
-            if git refused both ``-d`` and ``-D`` — typically because
-            the branch is the current HEAD of a worktree and cannot
-            be deleted without first switching away.
+            if git refused ``-D`` — typically because the branch is the
+            current HEAD of a worktree and cannot be deleted without
+            first switching away.
         """
-        result = _git("branch", "-d", branch, cwd=repo)
-        if result.returncode != 0:
-            result = _git("branch", "-D", branch, cwd=repo)
+        result = _git("branch", "-D", branch, cwd=repo)
         if result.returncode == 0:
             GitWorktreeOps._remove_branch_config_section(repo, branch)
             marker = GitWorktreeOps._preserve_marker_path(repo, branch)
@@ -2669,8 +2641,7 @@ class GitWorktreeOps:
             repo: The rescue destination repository root.
             landed: The just-landed ``.kiss-rescued-`` sibling path.
         """
-        check = _git("check-ignore", "-q", "--", str(landed), cwd=repo)
-        if check.returncode == 0:
+        if GitWorktreeOps.is_ignored(repo, landed):
             return
         logger.warning(
             "Rescued sibling %s is NOT git-ignored (the rescue "
@@ -2873,10 +2844,7 @@ class GitWorktreeOps:
                 os.symlink(os.readlink(src), dst)
                 copied = True
             elif src.is_file():
-                if dst.is_symlink():
-                    dst.unlink()
-                elif dst.is_dir():
-                    shutil.rmtree(str(dst))
+                GitWorktreeOps._remove_path(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
@@ -2898,15 +2866,10 @@ class GitWorktreeOps:
                     ignore=shutil.ignore_patterns(".git"),
                 )
                 copied = True
-            elif dst.is_symlink():
-                dst.unlink()
-                copied = True
-            elif dst.is_dir():
-                if not src.exists():
-                    shutil.rmtree(str(dst))
-                    copied = True
-            elif dst.exists():
-                dst.unlink()
+            elif dst.is_symlink() or (dst.exists() and not (dst.is_dir() and src.exists())):
+                # Deleted in the main worktree, or an untracked directory
+                # entry landing on a non-directory: drop the stale copy.
+                GitWorktreeOps._remove_path(dst)
                 copied = True
 
         return copied
@@ -2926,35 +2889,25 @@ class GitWorktreeOps:
         return sha if result.returncode == 0 and sha else None
 
     @staticmethod
-    def _head_matches_baseline_parent(repo: Path, baseline: str) -> bool:
-        """Return True when ``HEAD == baseline^`` in *repo*.
-
-        Used by :meth:`squash_merge_from_baseline` to decide whether
-        ``-X theirs`` is safe — see that method's docstring for the
-        full analysis.  Returns ``False`` on any git error: a
-        conservative default that disables ``-X theirs`` rather than
-        risk silently losing user commits.
-        """
-        head = _git("rev-parse", "HEAD", cwd=repo)
-        parent = _git("rev-parse", f"{baseline}^", cwd=repo)
-        if head.returncode != 0 or parent.returncode != 0:
-            return False
-        head_sha = head.stdout.strip()
-        parent_sha = parent.stdout.strip()
-        return bool(head_sha) and head_sha == parent_sha
-
-    @staticmethod
     def _theirs_option(repo: Path, baseline: str) -> list[str]:
         """Return ``["-X", "theirs"]`` when it is safe for a merge from *baseline*.
 
         Safe exactly when ``HEAD == baseline^`` (see
-        :meth:`squash_merge_from_baseline` for why); empty otherwise.
+        :meth:`squash_merge_from_baseline` for why); empty otherwise,
+        including on any git error — a conservative default that
+        disables ``-X theirs`` rather than risk silently losing user
+        commits.
 
         Args:
             repo: Git repo root path.
             baseline: The worktree's baseline commit SHA.
         """
-        if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
+        head = _git("rev-parse", "HEAD", cwd=repo)
+        parent = _git("rev-parse", f"{baseline}^", cwd=repo)
+        if head.returncode != 0 or parent.returncode != 0:
+            return []
+        head_sha = head.stdout.strip()
+        if head_sha and head_sha == parent.stdout.strip():
             return ["-X", "theirs"]
         return []
 

@@ -100,19 +100,16 @@ class TestRecordingIsolation(unittest.TestCase):
         def wt_task() -> None:
             printer._thread_local.task_id = "B"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "thinking_start", "tabId": "B"})
+            printer.broadcast({"type": "thinking_start"})
             barrier.wait()
             barrier2.wait()
-            with printer._lock:
-                printer._record_event({"type": "thinking_delta", "text": "hi", "tabId": "B"})
+            printer.broadcast({"type": "thinking_delta", "text": "hi"})
             results["B_events"] = printer.stop_recording()
 
         def non_wt_task() -> None:
             printer._thread_local.task_id = "A"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "tool_call", "name": "Read", "tabId": "A"})
+            printer.broadcast({"type": "tool_call", "name": "Read"})
             barrier.wait()
             results["A_events"] = printer.stop_recording()
             barrier2.wait()
@@ -140,19 +137,16 @@ class TestRecordingIsolation(unittest.TestCase):
         def task_a() -> None:
             printer._thread_local.task_id = "A"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "tool_call", "name": "Bash", "tabId": "A"})
+            printer.broadcast({"type": "tool_call", "name": "Bash"})
             barrier.wait()
-            with printer._lock:
-                printer._record_event({"type": "tool_result", "content": "ok", "tabId": "A"})
+            printer.broadcast({"type": "tool_result", "content": "ok"})
             results["A_events"] = printer.stop_recording()
 
         def task_b() -> None:
             printer._thread_local.task_id = "B"
             barrier.wait()
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "text_delta", "text": "hi", "tabId": "B"})
+            printer.broadcast({"type": "text_delta", "text": "hi"})
             results["B_events"] = printer.stop_recording()
 
         t_a = threading.Thread(target=task_a, daemon=True)
@@ -172,13 +166,11 @@ class TestRecordingIsolation(unittest.TestCase):
         printer = JsonPrinter()
         printer._thread_local.task_id = "A"
         printer.start_recording()
-        with printer._lock:
-            printer._record_event({"type": "tool_call", "name": "Read", "tabId": "A"})
+        printer.broadcast({"type": "tool_call", "name": "Read"})
         events = printer.peek_recording()
         assert len(events) == 1
         assert events[0]["type"] == "tool_call"
-        with printer._lock:
-            printer._record_event({"type": "tool_result", "content": "ok", "tabId": "A"})
+        printer.broadcast({"type": "tool_result", "content": "ok"})
         events = printer.stop_recording()
         assert len(events) == 2
 
@@ -302,25 +294,18 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
         def non_wt_task() -> None:
             printer._thread_local.task_id = "nwt"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "thinking_start", "tabId": "nwt"})
+            printer.broadcast({"type": "thinking_start"})
             barrier.wait()
             barrier2.wait()
-            with printer._lock:
-                printer._record_event(
-                    {"type": "thinking_delta", "text": "analyzing...", "tabId": "nwt"}
-                )
-                printer._record_event({"type": "thinking_end", "tabId": "nwt"})
+            printer.broadcast({"type": "thinking_delta", "text": "analyzing..."})
+            printer.broadcast({"type": "thinking_end"})
             results["nwt_events"] = printer.stop_recording()
 
         def wt_task() -> None:
             printer._thread_local.task_id = "wt"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "tool_call", "name": "Edit", "tabId": "wt"})
-                printer._record_event(
-                    {"type": "tool_result", "content": "ok", "tabId": "wt"}
-                )
+            printer.broadcast({"type": "tool_call", "name": "Edit"})
+            printer.broadcast({"type": "tool_result", "content": "ok"})
             barrier.wait()
             results["wt_events"] = printer.stop_recording()
             barrier2.wait()
@@ -350,21 +335,16 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
         def non_wt_task() -> None:
             printer._thread_local.task_id = "nwt"
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "tool_call", "name": "Read", "tabId": "nwt"})
+            printer.broadcast({"type": "tool_call", "name": "Read"})
             barrier.wait()
-            with printer._lock:
-                printer._record_event(
-                    {"type": "tool_result", "content": "data", "tabId": "nwt"}
-                )
+            printer.broadcast({"type": "tool_result", "content": "data"})
             results["nwt_events"] = printer.stop_recording()
 
         def wt_task() -> None:
             printer._thread_local.task_id = "wt"
             barrier.wait()
             printer.start_recording()
-            with printer._lock:
-                printer._record_event({"type": "text_delta", "text": "hello", "tabId": "wt"})
+            printer.broadcast({"type": "text_delta", "text": "hello"})
             results["wt_events"] = printer.stop_recording()
 
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)

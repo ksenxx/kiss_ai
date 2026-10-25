@@ -73,9 +73,45 @@ async function testAppendToRunningTaskClearsComposer() {
   console.log('  ok - appending to a running task clears the composer');
 }
 
+function key(inp, win, name) {
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: name,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+// The composer's x button is a third copy of the same sequence: it must
+// reset the prompt-history cursor like a send does, or ArrowDown after
+// clearing refills the composer with the next history entry.
+async function testClearButtonResetsLikeASend() {
+  const {win} = makePage();
+  const inp = win.document.getElementById('task-input');
+  inp.value = 'first';
+  clickSend(win);
+  inp.value = 'second';
+  clickSend(win);
+  key(inp, win, 'ArrowUp');
+  key(inp, win, 'ArrowUp');
+  assert.strictEqual(inp.value, 'first', 'ArrowUp walks the history');
+  win.document
+    .getElementById('input-clear-btn')
+    .dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    );
+  assertComposerCleared(win, 'clear button');
+  key(inp, win, 'ArrowDown');
+  assert.strictEqual(inp.value, '', 'ArrowDown after clearing is inert');
+  win.close();
+  console.log('  ok - the clear button resets the composer like a send');
+}
+
 async function main() {
   await testFreshSubmitClearsComposer();
   await testAppendToRunningTaskClearsComposer();
+  await testClearButtonResetsLikeASend();
   console.log('audit0903_composer_reset.test.js: all passed.');
 }
 

@@ -107,3 +107,8 @@ def tool_names(request: dict[str, Any]) -> set[str]:
 def tool_results(request: dict[str, Any]) -> list[str]:
     """Return the tool-result message texts of one chat-completions *request*, in order."""
     return [str(m["content"]) for m in request["messages"] if m["role"] == "tool"]
+
+
+def tool_result_text(result: str) -> str:
+    """Return a tool *result* without the ``\\n\\nSteps: ...`` status footer the agent appends."""
+    return result.split("\n\nSteps:")[0]

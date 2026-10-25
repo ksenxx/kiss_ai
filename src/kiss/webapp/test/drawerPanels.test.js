@@ -109,8 +109,8 @@ function fireTimeouts(win, timeouts, from) {
   }
 }
 
-function click(win, id, el) {
-  const target = el || win.document.getElementById(id);
+function click(win, id) {
+  const target = win.document.getElementById(id);
   assert.ok(target, `element #${id} must exist`);
   target.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
@@ -303,24 +303,6 @@ function testPersistenceAcrossReopen() {
   wv3.win.close();
 }
 
-function testRemoteWebApp() {
-  persistedState = undefined;
-  const {win, posted} = makePage();
-  showTaskPanel(win, posted);
-
-  click(win, 'input-drawer-btn');
-  assertInputDrawer(win, true, 'remote: the composer collapses on click');
-  assert.strictEqual(
-    cs(win, 'output').flexGrow,
-    '1',
-    'remote: #output must keep flex:1 to absorb the freed space',
-  );
-
-  click(win, 'input-drawer-btn');
-  assertInputDrawer(win, false, 'remote: the composer comes back');
-  win.close();
-}
-
 function testDrawerStateSurvivesTaskChurn() {
   persistedState = undefined;
   const {win, posted} = makePage();
@@ -360,26 +342,24 @@ function testDrawerButtonsBigEnough() {
 function testDrawerButtonsLoseFocusAfterClick() {
   persistedState = undefined;
   const {win} = makePage();
-  for (const id of ['input-drawer-btn']) {
-    const el = win.document.getElementById(id);
-    el.focus();
-    assert.strictEqual(
-      win.document.activeElement,
-      el,
-      `#${id} must be focusable (test setup)`,
-    );
-    // A pointer click (detail 1); a keyboard-originated click (detail
-    // 0) keeps focus by design, see ui_antipattern_keyboard.test.js.
-    el.dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
-    );
-    assert.notStrictEqual(
-      win.document.activeElement,
-      el,
-      `#${id} must not keep focus after being clicked (same ` +
-        'blur-after-click contract as every other chat control)',
-    );
-  }
+  const el = win.document.getElementById('input-drawer-btn');
+  el.focus();
+  assert.strictEqual(
+    win.document.activeElement,
+    el,
+    '#input-drawer-btn must be focusable (test setup)',
+  );
+  // A pointer click (detail 1); a keyboard-originated click (detail
+  // 0) keeps focus by design, see ui_antipattern_keyboard.test.js.
+  el.dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
+  );
+  assert.notStrictEqual(
+    win.document.activeElement,
+    el,
+    '#input-drawer-btn must not keep focus after being clicked (same ' +
+      'blur-after-click contract as every other chat control)',
+  );
   win.close();
 }
 
@@ -771,7 +751,6 @@ async function runTests() {
     testDefaults,
     testInputDrawerToggle,
     testPersistenceAcrossReopen,
-    testRemoteWebApp,
     testDrawerStateSurvivesTaskChurn,
     testDrawerButtonsBigEnough,
     testDrawerButtonsLoseFocusAfterClick,

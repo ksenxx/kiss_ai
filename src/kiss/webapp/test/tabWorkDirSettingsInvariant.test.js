@@ -19,13 +19,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg} = require('./settings_helpers');
-
-function initialTabId(posted) {
-  const ready = posted.find(m => m && m.type === 'ready');
-  return ready ? ready.tabId : '';
-}
+const {
+  makePage,
+  send,
+  lastMsg,
+  readyTabId: initialTabId,
+} = require('./simplify2_harness');
 
 function sendConfig(win, workDir) {
   send(win, {type: 'configData', config: {work_dir: workDir}, apiKeys: {}});

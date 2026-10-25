@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<!--
+  Author: Koushik Sen (ksen@berkeley.edu)
+  Contributors:
+  Koushik Sen (ksen@berkeley.edu)
+  add your name here
+
+  The page kiss-app opens in the Chromium "app" window when the daemon
+  is not answering yet (kiss.server.standalone_app.start_page_url): a
+  file:// page, so it needs no server.  After a reboot macOS relaunches
+  the app a minute before the kiss-web LaunchAgent is spawned; the
+  window used to stay closed (a bouncing Dock icon) until the daemon
+  answered, and a window opened on the daemon's URL earlier would have
+  shown Chromium's error page.  This page shows the app's name at
+  once, asks the daemon every half second (?probe=, a no-cors fetch
+  that only needs an answer, any status) and replaces itself with the
+  app (?next=) at the first answer.  ?title= names the window.  A
+  probe the daemon accepts but does not answer (its socket is bound,
+  its request loop not serving yet) is given up after two seconds so
+  the polling keeps going; without that bound the dots froze until
+  Chromium's own network timeout, minutes later.
+
+  On macOS (?popup=1) the window must be a popup, not this app
+  window, from the start (see appWindow.html): a click on the Dock
+  icon while the page waits sends the browser a reopen, and
+  Chromium's reopen handler, finding no window it counts (app windows
+  are skipped), opens an empty browser window.  So the page first
+  opens itself as the popup named kiss-app-window and closes this
+  window, and the popup waits for the daemon; ?next= (the popup
+  opener, which shows the app in place when it finds itself in the
+  popup) then replaces it.  A page that merely navigated the app
+  window could not close it afterwards (Chromium lets a script close
+  only a window it opened, or one still on its first page).
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title></title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #111317;
+      color: #e8e8ea;
+    }
+    @media (prefers-color-scheme: light) {
+      html, body { background: #f6f6f7; color: #1d1d1f; }
+      .note { color: #6e6e73; }
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+    }
+    h1 { font-size: 22px; font-weight: 600; margin: 0; }
+    .note { font-size: 14px; color: #9a9aa0; min-height: 1.4em; }
+    .dots { display: inline-block; width: 1.5em; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1 id="name"></h1>
+  <div class="note">Starting<span class="dots" id="dots"></span> <span id="waited"></span></div>
+  <div class="note" id="hint"></div>
+  <script>
+    (function () {
+      'use strict';
+      var params = new URLSearchParams(location.search);
+      var next = params.get('next');
+      var probe = params.get('probe');
+      var popup = params.get('popup') === '1';
+      var title = params.get('title') || '';
+      document.title = title;
+      document.getElementById('name').textContent = title;
+      if (!next || !probe) return;
+      if (popup && window.name !== 'kiss-app-window') {
+        var features = 'popup,left=' + screenX + ',top=' + screenY +
+          ',width=' + outerWidth + ',height=' + outerHeight;
+        if (window.open(location.href, 'kiss-app-window', features)) {
+          window.close();
+          return;
+        }
+      }
+      var started = Date.now();
+      var dots = document.getElementById('dots');
+      var waited = document.getElementById('waited');
+      var hint = document.getElementById('hint');
+      function tick() {
+        fetch(probe, {mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(2000)})
+          .then(function () { location.replace(next); })
+          .catch(function () {
+            var secs = Math.round((Date.now() - started) / 1000);
+            dots.textContent = '...'.slice(0, 1 + (secs % 3));
+            waited.textContent = secs >= 10 ? '(' + secs + ' s)' : '';
+            if (secs >= 120) {
+              hint.textContent = 'The daemon has not answered yet; it is started at login ' +
+                'and after an install.';
+            }
+            setTimeout(tick, 500);
+          });
+      }
+      tick();
+    })();
+  </script>
+</body>
+</html>

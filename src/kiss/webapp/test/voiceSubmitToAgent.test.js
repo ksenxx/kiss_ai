@@ -6,13 +6,9 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function stubVoiceConfig(win) {
   stubRaf(win);
@@ -20,9 +16,10 @@ function stubVoiceConfig(win) {
 }
 
 function makePage() {
-  const page = makeChatPage({beforeScripts: stubVoiceConfig});
-  page.win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
-  return page;
+  return makeChatPage({
+    beforeScripts: stubVoiceConfig,
+    extraScripts: ['voice.js'],
+  });
 }
 
 function input(win) {
@@ -62,43 +59,9 @@ test('spoken task steers a running agent as a user message', () => {
   assert.strictEqual(input(win).value, '');
 });
 
-test('spoken task with a language submits the language-aware prompt', () => {
-  const {win, posted} = makePage();
-  posted.length = 0;
-  send(win, {
-    type: 'voiceSpeech',
-    text: 'Fix the parser bug',
-    speaker: 1,
-    language: 'fr',
-  });
-  const submits = posted.filter(m => m.type === 'submit');
-  assert.strictEqual(submits.length, 1, JSON.stringify(posted));
-  assert.strictEqual(
-    submits[0].prompt,
-    'Speaker #1 says in the language fr that: Fix the parser bug',
-  );
-  assert.strictEqual(input(win).value, '');
-});
-
-test('spoken task with a language steers a running agent', () => {
-  const {win, posted} = makePage();
-  send(win, {type: 'status', running: true});
-  posted.length = 0;
-  send(win, {
-    type: 'voiceSpeech',
-    text: 'Also update the docs',
-    speaker: 2,
-    language: 'es',
-  });
-  const steers = posted.filter(m => m.type === 'appendUserMessage');
-  assert.strictEqual(steers.length, 1, JSON.stringify(posted));
-  assert.strictEqual(
-    steers[0].prompt,
-    'Speaker #2 says in the language es that: Also update the docs',
-  );
-  assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
-  assert.strictEqual(input(win).value, '');
-});
+// The language-aware prefix ("says in the language xx that:") is
+// voiceSpeakerLanguagePrefix's; submit-vs-steer routing does not depend
+// on the language.
 
 test('legacy speech without a speaker still submits unprefixed', () => {
   const {win, posted} = makePage();

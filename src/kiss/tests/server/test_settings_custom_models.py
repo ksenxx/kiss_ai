@@ -175,6 +175,19 @@ class TestCustomModelCrud(_MyModelsFileCase):
             entry["output_price_per_1M"], info.output_price_per_1M
         )
 
+    def test_new_entry_with_harbor_prefix_seeds_the_bundled_prices(self) -> None:
+        # ``openai/gpt-6.1-sol`` is priced as ``gpt-6.1-sol`` everywhere
+        # else (``_lookup_model_info`` strips the prefix); the seed must
+        # agree, or the $0 entry shadows the real prices after a restart.
+        bundled = mi._lookup_model_info("gpt-6.1-sol")
+        assert bundled is not None
+        self.assertIsNone(mi.save_custom_model("openai/gpt-6.1-sol", endpoint="http://a/v1"))
+        entry = self.read_raw()["openai/gpt-6.1-sol"]
+        self.assertEqual(entry["context_length"], bundled.context_length)
+        self.assertEqual(entry["input_price_per_1M"], bundled.input_price_per_1M)
+        self.assertEqual(entry["output_price_per_1M"], bundled.output_price_per_1M)
+        self.assertGreater(entry["input_price_per_1M"], 0.0)
+
     def test_delete_refuses_reserved_keys(self) -> None:
         mi.list_custom_models()  # seed the file
         error = mi.delete_custom_model("_documentation")

@@ -6,17 +6,11 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
-const {makePage: makeChatPage, MEDIA} = require('./simplify2_harness');
+const {installTokenisedCss} = require('./designTokens');
+const {makePage: makeChatPage, showTips} = require('./simplify2_harness');
 
 function installTokenCss(win) {
-  const style = win.document.createElement('style');
-  style.textContent = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  win.document.head.appendChild(style);
+  installTokenisedCss(win, 'main.css');
   win.__TIPS__ = {tips: [], show: false};
 }
 
@@ -146,9 +140,13 @@ function testCloseButtonsAreBigger() {
   assertAtLeast(searchClear.height, 18, '.search-clear-btn height');
   assertAtLeast(searchClear.fontSize, 16, '.search-clear-btn font-size');
 
-  win.__kissShowTipsPanel(['# Tip 1\nHello']);
+  showTips(win, ['# Tip 1\nHello']);
   const panel = doc.querySelector('kiss-tips-panel');
   assert.ok(panel && panel.shadowRoot, 'tips panel must mount a shadow root');
+  // jsdom neither cascades a shadow root's <style> into getComputedStyle
+  // (the close button reads `font-size: medium`) nor exposes it as a
+  // CSSStyleSheet (`style.sheet` is null), so the declaration is read
+  // from the stylesheet text the component embeds.
   const shadowCss = panel.shadowRoot.querySelector('style').textContent;
   const m = shadowCss.match(/\.tips-close\s*\{[^}]*font-size:\s*([0-9.]+)px/);
   assert.ok(m, 'tips.js must give .tips-close an explicit px font-size');
@@ -218,7 +216,7 @@ function testTipsCloseLosesFocusAndClosesPanel() {
   const {win} = makePage();
   const doc = win.document;
 
-  win.__kissShowTipsPanel(['# Tip 1\nHello']);
+  showTips(win, ['# Tip 1\nHello']);
   const panel = doc.querySelector('kiss-tips-panel');
   assert.ok(panel && panel.shadowRoot, 'tips panel must mount');
   const close = panel.shadowRoot.querySelector('.tips-close');

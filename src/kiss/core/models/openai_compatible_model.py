@@ -609,12 +609,14 @@ class OpenAICompatibleBase(Model):
         handshake while the previous pool waited on the garbage
         collector.  The client is rebuilt only when the inputs it was
         constructed from (``base_url``, ``api_key``, ``extra_headers``)
-        have actually changed.
+        have actually changed, and the replaced client is closed so its
+        pool is released at once.
         """
         extra_headers = self.model_config.get("extra_headers") or {}
         inputs = (self.base_url, self.api_key, tuple(sorted(extra_headers.items())))
         if self.client is not None and inputs == self._client_inputs:
             return
+        replaced = self.client
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
@@ -623,6 +625,8 @@ class OpenAICompatibleBase(Model):
             default_headers=extra_headers,
         )
         self._client_inputs = inputs
+        if replaced is not None:
+            replaced.close()
 
     def _stream_request(
         self,
@@ -637,7 +641,11 @@ class OpenAICompatibleBase(Model):
         ``stream_abort.CONNECT_TIMEOUT`` to connect) and, once the headers
         arrive, the abort watchdog the transport's *consume* runs the
         events under.  Both raise the same retryable stall error (or the
-        Stop error when the user stopped meanwhile).
+        Stop error when the user stopped meanwhile).  A Stop that landed
+        after *consume* left its loop early (a ``break`` on the terminal
+        event skips the post-loop check inside ``stop_aware_events``) is
+        honoured here, once the usage *consume* recorded is in
+        ``_rejected_response`` for the stopped run's bill.
 
         Args:
             create: The SDK call that opens the stream
@@ -653,9 +661,12 @@ class OpenAICompatibleBase(Model):
         kwargs["stream"] = True
         kwargs["timeout"] = httpx.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
         try:
-            return consume(create(**kwargs))
+            result = consume(create(**kwargs))
         except (httpx.TimeoutException, APITimeoutError) as err:
             raise stop_or_stall_error(self._stream_stall_timeout) from err
+        if stop_signal.stop_requested():
+            raise stop_error()
+        return result
 
     def _config_request_params(self) -> dict[str, Any]:
         """Return the ``model_config`` entries that may be request parameters.
@@ -807,7 +818,7 @@ class OpenAICompatibleBase(Model):
         content, response = self._request_with_tools_prompt(tools_prompt)
         _, content_clean = _extract_deepseek_reasoning(content)
         function_calls = _parse_text_based_tool_calls(content_clean)
-        self._append_text_based_tool_turn(content, content_clean, function_calls)
+        self._append_text_based_tool_turn(content_clean, function_calls)
         return function_calls, content, response
 
     @abstractmethod
@@ -820,9 +831,14 @@ class OpenAICompatibleBase(Model):
 
     @abstractmethod
     def _append_text_based_tool_turn(
-        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+        self, content: str, function_calls: list[dict[str, Any]]
     ) -> None:
-        """Record a text-based tool turn in this transport's conversation shape."""
+        """Record a text-based tool turn in this transport's conversation shape.
+
+        Args:
+            content: The response without the DeepSeek reasoning block.
+            function_calls: The parsed tool calls (may be empty).
+        """
 
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
@@ -1036,6 +1052,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         self._ensure_client()
         self.conversation = []
+        self._delegate_raw_items.clear()
         system_instruction = self.system_instruction_text()
         if system_instruction:
             self.conversation.append({"role": "system", "content": system_instruction})
@@ -1387,7 +1404,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             return ""
         return str(_get_attr_or_key(err, "message") or err)
 
-    def _raise_for_finish_reason(self, finish_reason: str | None, response: Any) -> None:
+    def _raise_for_finish_reason(self, finish_reason: str | None) -> None:
         """Reject a truncated completion instead of using its partial output.
 
         ``finish_reason="length"`` means the model hit its output-token
@@ -1398,18 +1415,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         a reason unrelated to the real cause.  The Responses transport
         already refuses the equivalent ``status="incomplete"`` response.
 
-        The truncated completion was still billed, so *response* is kept
-        for :meth:`take_partial_usage_response`.
+        The truncated completion was still billed: the transport already
+        holds it in ``_rejected_response`` for
+        :meth:`take_partial_usage_response`.
 
         Args:
             finish_reason: The choice's ``finish_reason``, if any.
-            response: The completion (or final stream chunk) carrying usage.
 
         Raises:
             KISSError: When the completion was truncated.
         """
         if finish_reason == "length":
-            self._rejected_response = response
             raise KISSError(
                 "Chat Completions response was truncated "
                 "(finish_reason='length'): the model hit its output-token "
@@ -1422,7 +1438,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         The counterpart of
         :meth:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2._raise_for_failed_response`
-        for the Chat Completions transport.
+        for the Chat Completions transport.  *response* is billed either
+        way, so it is recorded in ``_rejected_response`` first (the
+        streamed path records its usage chunk the same way); the public
+        generation methods clear the slot on success.
 
         Args:
             response: The response returned by ``chat.completions.create``.
@@ -1431,15 +1450,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             KISSError: When ``choices`` is empty (surfacing the gateway's
                 own error message) or the single choice was truncated.
         """
+        # Any usage the gateway reported alongside an error was billed.
+        self._rejected_response = response
         choices = getattr(response, "choices", None) or []
         if not choices:
             message = self._response_error_message(response)
-            # Any usage the gateway reported alongside the error was billed.
-            self._rejected_response = response
             raise KISSError(
                 "Chat Completions returned no choices" + (f": {message}" if message else "")
             )
-        self._raise_for_finish_reason(getattr(choices[0], "finish_reason", None), response)
+        self._raise_for_finish_reason(getattr(choices[0], "finish_reason", None))
 
     def _stream_chat_completion(
         self, kwargs: dict[str, Any], adaptive: bool
@@ -1477,16 +1496,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         content, tool_calls_accum, response, last_chunk, finish_reason = self._stream_request(
             create, kwargs, partial(self._consume_chat_stream, watchdog_name=watchdog_name)
         )
-        # Leaving the loop early skips the post-loop stop check inside
-        # ``stop_aware_events`` (closing the generator runs only its
-        # cleanup), so a Stop pressed during the stream is honoured here;
-        # the usage already recorded above is billed to the stopped run via
-        # ``take_partial_usage_response``.  A no-op after a normal EOF,
-        # where that check already ran.
-        if stop_signal.stop_requested():
-            raise stop_error()
-        self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
+        # Billed: kept for ``take_partial_usage_response`` until the public
+        # generation method hands the response to its caller.
+        self._rejected_response = response
         return content, tool_calls_accum, response, finish_reason
 
     def _consume_chat_stream(
@@ -1605,7 +1618,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         content, _accum, response, finish_reason = self._stream_chat_completion(
             kwargs, adaptive=False
         )
-        self._raise_for_finish_reason(finish_reason, response)
+        self._raise_for_finish_reason(finish_reason)
         return content, response
 
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1675,6 +1688,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             _, content = _extract_deepseek_reasoning(content)
 
         self.conversation.append({"role": "assistant", "content": content})
+        self._rejected_response = None
         return content, response
 
     def generate_and_process_with_tools(
@@ -1715,7 +1729,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 response,
                 finish_reason,
             ) = self._stream_chat_completion(kwargs, adaptive=True)
-            self._raise_for_finish_reason(finish_reason, response)
+            self._raise_for_finish_reason(finish_reason)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
             response = self._create_chat_completion_adaptive(**kwargs)
@@ -1725,6 +1739,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
 
         self._append_assistant_turn(content, function_calls, raw_tool_calls)
+        self._rejected_response = None
         return function_calls, content, response
 
     def _append_assistant_turn(
@@ -2064,6 +2079,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         delegate.base_url = self.base_url
         delegate.api_key = self.api_key
         delegate.model_config = delegate_config
+        delegate._stream_stall_timeout = self._stream_stall_timeout
         self._ensure_client()
         delegate.client = self.client
         delegate._client_inputs = self._client_inputs
@@ -2162,22 +2178,26 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         return self._stream_text(self._build_chat_kwargs(messages))
 
     def _append_text_based_tool_turn(
-        self, content: str, content_clean: str, function_calls: list[dict[str, Any]]
+        self, content: str, function_calls: list[dict[str, Any]]
     ) -> None:
         """Append the assistant message, with ``tool_calls`` when calls were parsed.
 
         Args:
-            content: The raw text response (reasoning included).
-            content_clean: The response without the DeepSeek reasoning block.
+            content: The response without the DeepSeek reasoning block.
             function_calls: The parsed tool calls (may be empty).
         """
         self.conversation.append({"role": "assistant", "content": content})
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
+        self._rejected_response = None
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int, int]:
+    ) -> (
+        tuple[int, int, int, int]
+        | tuple[int, int, int, int, int]
+        | tuple[int, int, int, int, int, int, int]
+    ):
         """Extract token counts from an API response.
 
         Returns:

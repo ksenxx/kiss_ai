@@ -3,52 +3,64 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// A thinking_start with no thought tokens yet shows the Thoughts panel
+// at once, with a live .panel-time footer (the panel's last child) that
+// advances once a second.  The page runs on a frozen clock and its 1 s
+// intervals are recorded instead of scheduled, so the elapsed labels
+// are exact and the test does not wait on wall-clock time.
+
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send, parsePanelTimeMs} = require('./simplify2_harness');
+
+const clock = {now: 1_700_000_000_000};
+const ticks = [];
+
+function seedClock(win) {
+  win.Date.now = () => clock.now;
+  const realSetInterval = win.setInterval;
+  win.setInterval = function (fn, ms, ...args) {
+    if (ms !== 1000) return realSetInterval(fn, ms, ...args);
+    ticks.push(fn);
+    return ticks.length;
+  };
+}
+
+function advance(ms) {
+  clock.now += ms;
+  for (const tick of ticks) tick();
+}
+
+function footers(panel) {
+  return panel.querySelectorAll(':scope > .panel-time');
+}
 
 function panelTimeMs(panel) {
   const footer = panel.querySelector(':scope > .panel-time');
   return footer ? parsePanelTimeMs(footer.textContent) : NaN;
 }
 
-function parsePanelTimeMs(text) {
-  const t = String(text || '').trim();
-  let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
-  if (m) return (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000;
-  m = t.match(/^(\d+(?:\.\d+)?)s$/);
-  if (m) return parseFloat(m[1]) * 1000;
-  m = t.match(/^(\d+)ms$/);
-  if (m) return parseInt(m[1], 10);
-  return NaN;
-}
-
-async function runTests() {
-  const wv = makePage();
-  const win = wv.win;
-  const ready = wv.posted.find(m => m.type === 'ready');
+function runTests() {
+  const {win, posted} = makePage({beforeScripts: seedClock});
+  const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
   const TAB = ready.tabId;
 
   send(win, {type: 'clear', chat_id: 'chat-active-tick', tabId: TAB});
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: TAB,
-    startTs: Date.now(),
-  });
-
+  send(win, {type: 'status', running: true, tabId: TAB, startTs: clock.now});
   send(win, {type: 'thinking_start', tabId: TAB});
 
   const output = win.document.getElementById('output');
-  const immediatePanel = output.querySelector('.llm-panel');
-  assert.ok(
-    immediatePanel,
+  const panels = output.querySelectorAll('.llm-panel');
+  assert.strictEqual(
+    panels.length,
+    1,
     'BUG: thinking_start with no thought tokens must immediately show ' +
       'the Thoughts panel so the user can see that the model is thinking.',
   );
-  const thinkingContent = immediatePanel.querySelector('.think');
+  const panel = panels[0];
+  const thinkingContent = panel.querySelector('.think');
   assert.ok(
     thinkingContent,
     'expected the tokenless Thoughts panel to contain an empty ' +
@@ -60,79 +72,41 @@ async function runTests() {
     'test setup must reproduce the tokenless-thinking state before ' +
       'checking the live time footer',
   );
-  let immediateFooters = immediatePanel.querySelectorAll(':scope > .panel-time');
   assert.strictEqual(
-    immediateFooters.length,
+    footers(panel).length,
     1,
     'BUG: a tokenless active .llm-panel must show a .panel-time ' +
       'footer immediately when thinking_start arrives.',
   );
 
-  // The footer ticks once a second; wait for the first tick rather than
-  // a fixed interval so a loaded host cannot make this flake.
-  await waitFor(
-    () => panelTimeMs(immediatePanel) >= 1000,
-    'BUG: the live footer of a tokenless active panel never reached ' +
-      '1000ms within 5s.  The page is not ticking the active footer.',
-    5000,
-  );
-
-  const llmPanels = output.querySelectorAll('.llm-panel');
+  advance(1000);
   assert.strictEqual(
-    llmPanels.length,
-    1,
-    'expected exactly one open .llm-panel, got ' + llmPanels.length,
+    panelTimeMs(panel),
+    1000,
+    'BUG: the live footer of a tokenless active panel must read 1s ' +
+      'after one tick; the page is not ticking the active footer.',
   );
-  const panel = llmPanels[0];
-  let footers = panel.querySelectorAll(':scope > .panel-time');
+  advance(1000);
   assert.strictEqual(
-    footers.length,
-    1,
-    'BUG: a tokenless active .llm-panel must have a .panel-time ' +
-      'footer that updates live (got ' + footers.length +
-      ' footers).  The page is only rendering the footer when ' +
-      'the panel closes.',
+    panelTimeMs(panel),
+    2000,
+    'BUG: the live .panel-time footer must keep advancing each second',
   );
-
-  const firstMs = parsePanelTimeMs(footers[0].textContent);
-  assert.ok(
-    !Number.isNaN(firstMs),
-    'panel-time text must parse as a duration, got: ' +
-      JSON.stringify(footers[0].textContent),
-  );
-  await waitFor(
-    () => panelTimeMs(panel) - firstMs >= 800,
-    'BUG: the live .panel-time footer must keep advancing each second; ' +
-      'it did not grow by >= 800ms from ' + firstMs + 'ms within 5s.',
-    5000,
-  );
-  footers = panel.querySelectorAll(':scope > .panel-time');
   assert.strictEqual(
-    footers.length,
+    footers(panel).length,
     1,
     'expected the live .panel-time footer to remain a single ' +
-      'direct child after the second tick (got ' + footers.length + ')',
-  );
-  const secondMs = parsePanelTimeMs(footers[0].textContent);
-  assert.ok(
-    !Number.isNaN(secondMs),
-    'panel-time text must still parse as a duration after the ' +
-      'second tick, got: ' + JSON.stringify(footers[0].textContent),
-  );
-  assert.ok(
-    secondMs - firstMs >= 800,
-    'BUG: the live .panel-time footer must keep advancing each ' +
-      'second; after ~1.2s more it must grow by >= 800ms (grew from ' +
-      firstMs + 'ms to ' + secondMs + 'ms).',
+      'direct child after the second tick',
   );
 
   const last = panel.lastElementChild;
   assert.ok(
     last && last.classList.contains('panel-time'),
     'BUG: live .panel-time must be the LAST child of its panel; last ' +
-      'child is <' + (last ? last.tagName.toLowerCase() : 'null') + '>',
+      'child is <' +
+      (last ? last.tagName.toLowerCase() : 'null') +
+      '>',
   );
-
   assert.strictEqual(
     thinkingContent.textContent,
     '',
@@ -143,13 +117,11 @@ async function runTests() {
   win.close();
 }
 
-runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.message ? err.message : err);
-    process.exit(1);
-  },
-);
+try {
+  runTests();
+  console.log('\nAll tests passed');
+  process.exit(0);
+} catch (err) {
+  console.error('FAIL:', err && err.message ? err.message : err);
+  process.exit(1);
+}

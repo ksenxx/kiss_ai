@@ -93,9 +93,12 @@ def api() -> Iterator[RecordingServer]:
 
 
 @pytest.fixture
-def legacy_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate config under a temp ``KISS_HOME`` and force legacy auth."""
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+def legacy_env(isolated_kiss_home: Path) -> Path:
+    """Isolate config under a temp ``KISS_HOME``.
+
+    Legacy auth (``KISS_MUSE_AUTH=0``) is pinned for every test process by
+    ``tests/conftest.py``.
+    """
     return isolated_kiss_home
 
 

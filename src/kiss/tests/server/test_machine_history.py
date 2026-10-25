@@ -194,8 +194,26 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         reply = await self._history()
         self.assertEqual(reply["machineLabels"], {"box": "box", "127.0.0.1": host})
 
+    async def test_a_machine_that_stops_answering_keeps_its_rows(self) -> None:
+        """The rows a machine last answered with stay listed while it is down."""
+        before = await self._history()
+        self.remote.stop()
+        reply = await self._history()
+        self.assertEqual(
+            [s["title"] for s in reply["sessions"]],
+            [s["title"] for s in before["sessions"]],
+        )
+        self.assertEqual(
+            [s["title"] for s in reply["sessions"] if s.get("machine") == "box"],
+            ["remote alpha"],
+        )
+        self.assertEqual(reply["dateRange"], before["dateRange"])
+        # A search is not remembered: it reaches the machine or shows nothing of it.
+        reply = await self._history(query="alpha")
+        self.assertEqual(reply["sessions"], [])
+
     async def test_a_dead_machine_hides_nothing_local(self) -> None:
-        """Once the remote is down its rows vanish; the local ones stay."""
+        """A machine down before it ever answered lists nothing; the local rows stay."""
         self.remote.stop()
         mach._hosts.clear()
         reply = await self._history()

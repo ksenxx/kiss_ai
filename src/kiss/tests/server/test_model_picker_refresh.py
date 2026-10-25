@@ -35,8 +35,9 @@ def _make_server() -> Any:
     return AgentServer()
 
 
-def _clear_all_keys() -> dict[str, str]:
-    """Clear every API key from env + DEFAULT_CONFIG; return saved values."""
+def _clear_all_keys() -> tuple[dict[str, str], config_module.Config]:
+    """Clear every API key from env + DEFAULT_CONFIG; return the saved values
+    and the original ``DEFAULT_CONFIG`` singleton for :func:`_restore_keys`."""
     names = (
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -49,17 +50,20 @@ def _clear_all_keys() -> dict[str, str]:
     saved = {n: os.environ.get(n, "") for n in names}
     for n in names:
         os.environ.pop(n, None)
+    original = config_module.DEFAULT_CONFIG
     config_module.DEFAULT_CONFIG = config_module.Config()
-    return saved
+    return saved, original
 
 
-def _restore_keys(saved: dict[str, str]) -> None:
-    for n, v in saved.items():
+def _restore_keys(saved: tuple[dict[str, str], config_module.Config]) -> None:
+    """Undo :func:`_clear_all_keys`: put the env keys and the original singleton back."""
+    env, original = saved
+    for n, v in env.items():
         if v:
             os.environ[n] = v
         else:
             os.environ.pop(n, None)
-    config_module.DEFAULT_CONFIG = config_module.Config()
+    config_module.DEFAULT_CONFIG = original
 
 
 class TestModelPickerRefresh(TestCase):

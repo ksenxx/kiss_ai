@@ -22,8 +22,7 @@ import tempfile
 from pathlib import Path
 
 from kiss.agents.sorcar.commit_message import (
-    _append_task_result,
-    _append_user_prompt,
+    fallback_commit_message,
     generate_commit_message_from_diff,
 )
 from kiss.agents.sorcar.git_worktree import (
@@ -80,8 +79,8 @@ class TestGitCleanupWhitespace:
 
 class TestAppendTaskResult:
     def test_html_result_is_appended_as_markdown(self) -> None:
-        assert _append_task_result("subject", HTML_RESULT) == (
-            f"subject\n\nResult:\n{MARKDOWN_RESULT}"
+        assert fallback_commit_message(None, HTML_RESULT) == (
+            f"kiss: auto-commit agent work\n\nResult:\n{MARKDOWN_RESULT}"
         )
 
     def test_fallback_message_without_diff_uses_markdown(self) -> None:
@@ -113,9 +112,7 @@ class TestEnsureTaskMetadata:
 
     def test_prompt_with_leading_indent_is_not_stamped_twice(self) -> None:
         prompt = "  indented prompt\nsecond line"
-        stored = git_cleanup_whitespace(_append_task_result(
-            _append_user_prompt("subject", prompt), HTML_RESULT,
-        ))
+        stored = git_cleanup_whitespace(_ensure_task_metadata("subject", prompt, HTML_RESULT))
         assert _ensure_task_metadata(stored, prompt, HTML_RESULT) == stored
 
     def test_legacy_html_result_block_is_replaced_by_markdown(self) -> None:
@@ -169,8 +166,8 @@ class TestSquashMergeStampsMarkdownResultOnce:
             _agent_manual_commit(wt_dir, "first.txt")
             (wt_dir / "second.txt").write_text("more\n")
             _git("add", "second.txt", cwd=wt_dir)
-            auto_msg = _append_task_result(
-                f"feat: second\n\nUser prompt:\n{PROMPT_WITH_TRAILING_SPACE}", HTML_RESULT,
+            auto_msg = _ensure_task_metadata(
+                f"feat: second\n\nUser prompt:\n{PROMPT_WITH_TRAILING_SPACE}", None, HTML_RESULT,
             )
             assert GitWorktreeOps.commit_staged(wt_dir, auto_msg)
             assert "<h3>" not in _head_message(wt_dir)

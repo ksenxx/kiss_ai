@@ -6,7 +6,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, readyTabId} = require('./simplify2_harness');
 
 function typeInto(win, text) {
   const inp = win.document.getElementById('task-input');
@@ -25,8 +25,7 @@ async function runTests() {
   const wv = makePage();
   const {win, posted} = wv;
 
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
+  readyTabId(posted);
 
   posted.length = 0;
   const inp = typeInto(win, '@');

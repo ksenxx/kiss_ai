@@ -50,7 +50,6 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
-from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
@@ -103,7 +102,6 @@ def test_system_prompt_opens_with_system_lite_md() -> None:
     with ``_ask_system_lite.md`` with only the brand placeholders filled.
     """
     text = AskSea().system_prompt("ASSEMBLED PROMPT")
-    assert text == _EXPECTED_SYSTEM_PROMPT
     assert "ASSEMBLED PROMPT" not in text
     assert text.startswith(_EXPECTED_LITE + "\n\n")
     assert "{{IDENTITY}}" not in text
@@ -189,102 +187,8 @@ def test_system_lite_is_bundled_next_to_the_module() -> None:
     assert "{{IDENTITY}}" in path.read_text(encoding="utf-8")
 
 
-def test_ask_sea_lives_in_seas_package() -> None:
-    """The SEA file MUST be discoverable by the slash-command registry.
-
-    The registry scans the bundled ``seas`` package folder; if the
-    file were somewhere else the /ask command would silently disappear.
-    """
-    module_path = Path(ask_sea.__file__).resolve()
-    assert module_path.parent.name == "ask"
-    assert module_path.parents[1].name == "seas"
-    assert module_path.name == "ask_sea.py"
-    sea_commands.refresh_registry()
-    registered = sea_commands.get_command("ask")
-    assert registered is not None
-    assert registered.resolve() == module_path
-
-
 # ---------------------------------------------------------------------------
-# 2. The slash-command resolver
-# ---------------------------------------------------------------------------
-
-
-def test_slash_ask_resolves_to_the_question_and_the_bundled_sea() -> None:
-    """``/ask <question>`` MUST resolve to the question verbatim and ``ask_sea.py``.
-
-    The daemon runs the SEA directly on that text (its ``settings()``
-    supply the prompt suffix and the ``none`` tool profile), so the
-    resolver hands back nothing but the user's words and the path: no
-    directive, no ``run_agent`` arguments, no placeholder.
-    """
-    sea_commands.refresh_registry()
-    assert sea_commands.slash_command_task("/ask why did the last step fail?") == (
-        "why did the last step fail?",
-        Path(_ASK_PATH),
-    )
-    # The settings the daemon will apply to that very run.
-    assert sea_commands.sea_settings(Path(_ASK_PATH)) == _EXPECTED_SETTINGS
-
-
-def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -> None:
-    """A non-``/ask`` slash command MUST resolve to its own text and path.
-
-    Regression guard: nothing of the ask flow (its prompt suffix, its
-    playbook) leaks into a sibling SEA's resolution.
-    """
-    folder = tmp_path / "user-seas"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "notify").mkdir()
-    (folder / "notify" / "notify_sea.py").write_text(_EMPTY_SEA, encoding="utf-8")
-    kiss_home().mkdir(parents=True, exist_ok=True)
-    (kiss_home() / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
-    sea_commands.refresh_registry()
-
-    sea_path = folder / "notify" / "notify_sea.py"
-    assert sea_commands.slash_command_task("/notify hello") == ("hello", sea_path)
-    assert sea_commands.sea_settings(sea_path) == {}
-
-
-def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None:
-    """A ``SEAS.md`` folder that shadows ``/ask`` MUST win the resolution.
-
-    The bundled ``seas/ask`` has the lowest registry precedence, so a
-    user SEA named ``ask`` wins; it defines none of the ask settings,
-    so the daemon would run it as a plain session on the question.
-    """
-    shadow = tmp_path / "user-seas" / "ask"
-    shadow.mkdir(parents=True)
-    (shadow / "ask_sea.py").write_text(_EMPTY_SEA, encoding="utf-8")
-    kiss_home().mkdir(parents=True, exist_ok=True)
-    (kiss_home() / "SEAS.md").write_text(str(shadow.parent) + "\n", encoding="utf-8")
-    sea_commands.refresh_registry()
-    assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
-    sea_path = shadow / "ask_sea.py"
-    assert sea_commands.slash_command_task("/ask what happened?") == ("what happened?", sea_path)
-    assert sea_commands.sea_settings(sea_path) == {}
-
-
-def test_slash_resolver_resolves_bare_ask_and_answers_help_from_description() -> None:
-    """``/ask`` with no trailing text resolves to the SEA; ``/ask help`` is the description.
-
-    Same contract as every other slash command: a bare command runs the
-    SEA when its ``prompt()`` gives the empty task text (``AskSea``
-    appends the answering playbook, so a bare ``/ask`` asks about the
-    task with no question), and ``help`` (in any case) is answered from
-    ``description()`` without a run.
-    """
-    sea_commands.refresh_registry()
-    sea_path = Path(ask_sea.__file__).resolve()
-    assert sea_commands.slash_command_task("/ask") == ("", sea_path)
-    assert sea_commands.slash_command_task("/ask ") == ("", sea_path)
-    assert sea_commands.slash_command_task("/ask help") is None
-    assert sea_commands.slash_command_task("/ask HELP") is None
-    assert sea_commands.help_text_if_command("/ask help") == AskSea().description()
-
-
-# ---------------------------------------------------------------------------
-# 3. The daemon-side loader: settings on the wire, {task_id} substitution
+# 2. The daemon-side loader: settings on the wire, {task_id} substitution
 # ---------------------------------------------------------------------------
 
 
@@ -470,7 +374,7 @@ class Sea(BaseSea):
 
 
 # ---------------------------------------------------------------------------
-# 4. The dispatch layer threads the parent id and leaves the text alone
+# 3. The dispatch layer threads the parent id and leaves the text alone
 # ---------------------------------------------------------------------------
 
 

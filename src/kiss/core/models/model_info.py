@@ -383,31 +383,24 @@ _MY_MODELS_CORRUPT_ERROR = (
 def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     """Return the loader-required keys for a brand-new *name* entry.
 
-    A name that shadows a bundled catalog model copies THAT model's
-    context length and prices — seeding the generic
+    A name that resolves to a catalog model (exactly, through a harbor
+    prefix such as ``openai/gpt-6.1-sol``, or as a ``bedrock/<id>``
+    profile of a ``claude-*`` entry; the one rule of
+    :func:`_lookup_model_info`) copies THAT model's context length and
+    prices, cache prices included and scaled by a Bedrock profile's
+    premium (see :func:`bedrock_price_factor`) — seeding the generic
     :data:`_CUSTOM_MODEL_DEFAULTS` over e.g. ``gpt-5.6-sol`` would
     replace its real 500K context and per-token prices with 128K and
     $0, silently breaking budget accounting for the bundled model.
-    A ``bedrock/<id>`` name (how a Bedrock Claude model is added to the
-    picker: name only, no endpoint) copies its ``claude-*`` entry,
-    cache prices included and scaled by the profile's premium (see
-    :func:`bedrock_price_factor`), so the entry reloaded at the next
-    start bills exactly what that Bedrock profile charges.
     """
-    info = MODEL_INFO.get(name)
+    info = _lookup_model_info(name)
     if info is None:
-        catalog = MODEL_INFO.get(bedrock_catalog_name(name) or "")
-        if catalog is None:
-            return dict(_CUSTOM_MODEL_DEFAULTS)
-        info = _scaled_prices(catalog, bedrock_price_factor(name))
-    entry = {
-        "context_length": info.context_length,
-        "input_price_per_1M": info.input_price_per_1M,
-        "output_price_per_1M": info.output_price_per_1M,
-        "cache_read_price_per_1M": info.cache_read_price_per_1M,
-        "cache_write_price_per_1M": info.cache_write_price_per_1M,
-        "cache_write_1h_price_per_1M": info.cache_write_1h_price_per_1M,
-    }
+        return dict(_CUSTOM_MODEL_DEFAULTS)
+    # Every per-million price, audio and image output included: the
+    # loader replaces the catalog entry with this one, so a dropped
+    # field would bill audio/image tokens at the text rates.
+    entry: dict[str, Any] = {"context_length": info.context_length}
+    entry.update({field: getattr(info, field) for field in _PER_1M_PRICE_FIELDS})
     return {key: value for key, value in entry.items() if value is not None}
 
 
@@ -755,7 +748,7 @@ def _load_model_info() -> dict[str, ModelInfo]:
     )
     try:
         return _load_catalog_file(catalog_path)
-    except (KISSError, KeyError, TypeError, ValueError, AttributeError):
+    except (KISSError, KeyError, TypeError, ValueError):
         if catalog_path == PACKAGE_MODEL_INFO_PATH:
             raise
         logger.warning(
@@ -787,7 +780,7 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
 
     Raises:
         KISSError: When the catalog is unreadable or not a JSON object.
-        KeyError, TypeError, ValueError, AttributeError: When a *catalog*
+        KeyError, TypeError, ValueError: When a *catalog*
             entry does not conform to the catalog schema (e.g. a required
             field is missing or has the wrong type).
     """
@@ -797,7 +790,7 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
     for name in list(user_entries):
         try:
             built[name] = _build_model_info_entry(user_entries[name])
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (KeyError, TypeError, ValueError):
             logger.warning("Ignoring malformed MY_MODELS.json entry %r", name, exc_info=True)
             del user_entries[name]
     raw.update(user_entries)
@@ -1140,8 +1133,8 @@ def _match_openai_compatible_provider(
         name is handled by a non-OpenAI-compatible factory branch.
     """
     for provider in OPENAI_COMPATIBLE_PROVIDERS:
-        if model_name.startswith(provider.prefixes) and not (
-            provider.excludes and model_name.startswith(provider.excludes)
+        if model_name.startswith(provider.prefixes) and not model_name.startswith(
+            provider.excludes
         ):
             return provider
     return None
@@ -1595,10 +1588,12 @@ def _bedrock_sibling_key(undated: str) -> str | None:
         The sibling's catalog key, or None when there is none.
     """
     for key in MODEL_INFO:
-        if not key.startswith(BEDROCK_PREFIX) or bedrock_price_factor(key) != 1.0:
-            continue
         split = _split_bedrock_name(key)
-        if split is not None and _CLAUDE_DATE_SUFFIX_RE.sub("", split[1]) + split[2] == undated:
+        if (
+            split is not None
+            and _CLAUDE_DATE_SUFFIX_RE.sub("", split[1]) + split[2] == undated
+            and bedrock_price_factor(key) == 1.0
+        ):
             return key
     return None
 
@@ -1712,9 +1707,11 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
     """Return the published ``(read, write_5m, write_1h)`` cache prices for *name*.
 
     Encodes each provider's prompt-caching rule as multiples of the base
-    input price *inp*; ``write_1h`` is ``None`` for providers without a
-    one-hour cache tier.  Returns ``None`` for providers without a
-    documented cache discount.
+    input price *inp*.  ``write_5m`` is the default-lifetime write rate
+    and ``write_1h`` the long-lifetime one (Anthropic's 1-hour writes at
+    2x, OpenAI's 12-hour ``prompt_cache_options.ttl`` writes at 2.5x);
+    ``write_1h`` is ``None`` for providers without a long-lifetime tier.
+    Returns ``None`` for providers without a documented cache discount.
 
     Args:
         name: The MODEL_INFO key.
@@ -1729,9 +1726,12 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         return _derived_price(inp, read_mult), _derived_price(inp, 1.25), _derived_price(inp, 2.0)
     bare = _openai_bare_name(name)
     if bare is not None:
-        write_mult = 1.25 if _openai_charges_cache_writes(bare) else 0.0
-        read_mult = _openai_cache_read_multiplier(bare)
-        return _derived_price(inp, read_mult), _derived_price(inp, write_mult), None
+        read = _derived_price(inp, _openai_cache_read_multiplier(bare))
+        if not _openai_charges_cache_writes(bare):
+            return read, 0.0, None
+        # 30-minute writes (the default) cost 1.25x input, 12-hour writes
+        # 2.5x: https://developers.openai.com/api/docs/guides/prompt-caching
+        return read, _derived_price(inp, 1.25), _derived_price(inp, 2.5)
     if name.startswith("gemini-") or (
         name.startswith(_GOOGLE_OPENROUTER_PREFIXES)
         and name.rsplit("/", 1)[-1].startswith("gemini-")
@@ -2410,13 +2410,9 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     if bare.startswith(_ANTHROPIC_LONG_CONTEXT_FAMILIES):
         return 100_000, 5.0, 5.0
     if bare.startswith(
-        ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
         + _OPENAI_ROLLING_LATEST
-    ):
-        return 272_000, 2.0, 1.5
-    if bare.startswith("gpt-5.5"):
-        return 272_000, 2.0, 1.5
-    if bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare:
+    ) or (bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare):
         return 272_000, 2.0, 1.5
     if bare.startswith(("gemini-3.1-pro", "gemini-2.5-pro")):
         return 200_000, 2.0, 1.5
@@ -2447,7 +2443,8 @@ def calculate_cost(
             tokens already split out).
         num_cache_read_tokens: Number of tokens read from cache.
         num_cache_write_tokens: Number of standard/5-minute cache-write tokens.
-        num_cache_write_1h_tokens: Number of one-hour Anthropic cache-write tokens.
+        num_cache_write_1h_tokens: Number of long-lifetime cache-write
+            tokens (Anthropic one-hour, OpenAI twelve-hour writes).
         num_audio_input_tokens: Number of AUDIO input tokens (the
             ``prompt_tokens_details.audio_tokens`` subset of an OpenAI
             audio-chat response), billed at the model's audio input

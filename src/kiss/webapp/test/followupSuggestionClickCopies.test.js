@@ -18,9 +18,7 @@
 //
 // The reported bug: after a chat page reload, bars of earlier tasks
 // (the adjacent-transcript surface) were rendered without a click
-// handler, so clicking them silently did nothing.  The welcome screen's
-// "Suggested prompt" chips share the same copy-to-input behavior and
-// are covered here too.
+// handler, so clicking them silently did nothing.
 
 const assert = require('assert');
 const {makePage, send, click} = require('./simplify2_harness');

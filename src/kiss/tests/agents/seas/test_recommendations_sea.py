@@ -47,8 +47,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-_SEA_PATH = Path(sea.__file__).resolve()
-
 TEN = [
     "Fix the failing parser test in parser.py",
     "Add a changelog entry for the new /recommendations command",
@@ -138,17 +136,6 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert sea_commands.base_settings([agent])["auto_classify"] is False
     assert "RECOMMENDATIONS" in agent.description() and "ten" in agent.description()
     assert_no_removed_getters(sea)
-
-
-def test_slash_recommendations_resolves_to_the_bundled_sea() -> None:
-    """``/recommendations now`` resolves to this SEA, which the chat and cron run directly."""
-    assert sea_commands.get_command("recommendations") == _SEA_PATH
-    assert sea_commands.slash_command_task("/recommendations now") == ("now", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings(
-        [RecommendationsSea()])
-    assert sea_commands.help_text_if_command("/recommendations help") == (
-        RecommendationsSea().description()
-    )
 
 
 def test_recent_tasks_lists_the_last_day_and_twenty_completed_tasks(

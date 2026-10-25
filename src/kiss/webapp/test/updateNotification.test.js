@@ -5,14 +5,13 @@
 
 'use strict';
 
+// The sticky update notification's markup (sticky flag, SVG icon, aria
+// label) and its lifecycle across `available: false` / re-broadcast.  The
+// badge icon and the Update click posting `runUpdate` are pinned by
+// simplify2_update_badge.test.js.
+
 const assert = require('assert');
 const {makePage, send, waitFor} = require('./simplify2_harness');
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {bubbles: true}),
-  );
-}
 
 async function runTests() {
   const wv = makePage();
@@ -58,12 +57,6 @@ async function runTests() {
     assert.ok(
       ariaLabel.includes('update'),
       'action button must advertise itself as an update action',
-    );
-
-    click(actionButton);
-    await waitFor(
-      () => wv.posted.some(m => m.type === 'runUpdate'),
-      'clicking the update notification button must post {type: "runUpdate"}',
     );
 
     send(wv.win, {

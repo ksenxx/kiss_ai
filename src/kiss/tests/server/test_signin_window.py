@@ -26,6 +26,7 @@ import sys
 import unittest
 from pathlib import Path
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.server import signin
 from kiss.server.signin import SIGNIN_HOOK
 from kiss.tests.local_ws import LocalReader, LocalWriter
@@ -71,6 +72,15 @@ NOT_LOGGED_IN = {
 }
 
 
+def forget_status() -> None:
+    """Drop the cached ``status`` answer the way a ``signinDone`` does.
+
+    Under the status lock, so a ``status`` run a previous test's daemon
+    still has in flight is what gets dropped rather than what gets kept.
+    """
+    locked_call(signin._status_lock, signin._drop_status)
+
+
 @unittest.skipIf(sys.platform == "win32", "the stub hook is a bash script")
 class SigninHookCase(_UpdateCheckTestBase):
     """A real daemon whose ``$KISS_HOME`` holds the stub sign-in hook.
@@ -88,13 +98,13 @@ class SigninHookCase(_UpdateCheckTestBase):
         os.environ["KISS_HOME"] = str(self.home)
         self._saved_ttl = signin.STATUS_CACHE_TTL
         signin.STATUS_CACHE_TTL = 0.0
-        signin.forget_status()
+        forget_status()
         self._writers: list[LocalWriter] = []
         self._readers_writers: dict[LocalReader, LocalWriter] = {}
 
     async def asyncTearDown(self) -> None:
         signin.STATUS_CACHE_TTL = self._saved_ttl
-        signin.forget_status()
+        forget_status()
         for writer in self._writers:
             writer.close()
             try:

@@ -156,13 +156,15 @@ def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
         proc.kill()
 
 
-def _run_playback(argv: list[str]) -> bool:
-    """Run one playback child to completion; ``True`` on exit code 0.
+def _run_playback(argv: list[str]) -> None:
+    """Run one playback child to completion.
 
-    Output is suppressed so a chatty player never pollutes the
-    daemon's terminal or logs.  A hung child is killed after
-    :func:`_playback_timeout` seconds — together with its whole
-    process group on POSIX (see :func:`_kill_playback`).
+    A player that cannot start or exits non-zero is skipped silently
+    (the browser clients still play their copy), and its output is
+    suppressed so a chatty player never pollutes the daemon's terminal
+    or logs.  A hung child is killed after :func:`_playback_timeout`
+    seconds — together with its whole process group on POSIX (see
+    :func:`_kill_playback`).
     """
     try:
         proc: subprocess.Popen[bytes] = popen_process_group(
@@ -172,9 +174,9 @@ def _run_playback(argv: list[str]) -> bool:
             stderr=subprocess.DEVNULL,
         )
     except OSError:
-        return False
+        return
     try:
-        return proc.wait(timeout=_playback_timeout()) == 0
+        proc.wait(timeout=_playback_timeout())
     except subprocess.TimeoutExpired:
         _kill_playback(proc)
         # Bounded: a SIGKILLed player stuck in the kernel (an audio
@@ -184,7 +186,6 @@ def _run_playback(argv: list[str]) -> bool:
         # from its unreaped-children list once it finally dies.
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=5)
-        return False
 
 
 class TalkPlayer:

@@ -386,13 +386,18 @@ def test_submit_on_a_dead_socket_reconnects_at_once(_browser):
         page.wait_for_timeout(50)
         assert page.evaluate(
             "window.localStorage.getItem('sorcar-remote-pwd')"
-        ) == _PASSWORD
+        ) is None, "a password the server has not accepted is not stored"
         assert page.evaluate("window.__sockets.length") == 2, (
             "submitting on a dead socket must reconnect immediately"
         )
         page.evaluate("window.__fireOpen()")
         sent = [json.loads(d) for d in page.evaluate("window.__last().sent")]
         assert sent == [{"type": "auth", "password": _PASSWORD}]
+        page.evaluate("window.__fireMessage({type: 'auth_ok'})")
+        page.wait_for_timeout(50)
+        assert page.evaluate(
+            "window.localStorage.getItem('sorcar-remote-pwd')"
+        ) == _PASSWORD, "auth_ok stores the accepted password"
     finally:
         context.close()
 

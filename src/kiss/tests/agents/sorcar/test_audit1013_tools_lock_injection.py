@@ -77,7 +77,7 @@ class _ReapFinishedStraggler:
         self.conn.task.result(5.0)
 
     def __call__(self) -> None:
-        self.manager._reap_straggler(self.conn)
+        self.manager._reap_straggler(self.conn, self.conn.task)
 
 
 _DRIVERS: dict[str, type[_ModelLookup | _MissRefresh | _ReapFinishedStraggler]] = {

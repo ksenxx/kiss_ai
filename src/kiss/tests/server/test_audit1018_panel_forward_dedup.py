@@ -109,6 +109,35 @@ class TestPanelForwardDedup(RemoteMachineCase):
         self.assertIn("box one", names)
         self.assertIn("box two", names)
 
+    async def test_task_update_polls_dedup_per_tab_and_refreshes_pass(self) -> None:
+        # Two timer polls of tab A, one of tab B and A's refresh, all
+        # while the first waits on the hole: the repeat of A's timer
+        # poll is the one dropped.  B (another tab running there, the
+        # user switched to it) is polled at once, and the refresh (the
+        # panel's button) is never dropped.
+        for tab, token, refresh in (("A", "a1", False), ("A", "a2", False),
+                                    ("B", "b1", False), ("A", "a3", True)):
+            await self._send({
+                "type": "getTaskUpdate", "tabId": tab, "token": token,
+                "refresh": refresh, "machine": "hole",
+            })
+        replies: list[dict[str, object]] = []
+        deadline = time.monotonic() + mach.REQUEST_TIMEOUT + 6
+        while time.monotonic() < deadline:
+            try:
+                replies.append(await asyncio.wait_for(
+                    self._next("taskUpdate"), deadline - time.monotonic(),
+                ))
+            except TimeoutError:
+                break
+        self.assertEqual(sorted(str(r["token"]) for r in replies), ["a1", "a3", "b1"])
+        # The first dial gives the machine up as unreachable; the two
+        # that waited behind it on the link are refused as busy.
+        for reply in replies:
+            self.assertEqual(reply["tabId"], "A" if reply["token"] != "b1" else "B")
+            self.assertFalse(reply["exists"])
+            self.assertRegex(str(reply["error"]), "unreachable|busy")
+
     async def test_stop_does_not_wait_for_a_forward_in_flight(self) -> None:
         await self._send({"type": "getSpendReport", "machine": "hole"})
         await asyncio.sleep(0.5)

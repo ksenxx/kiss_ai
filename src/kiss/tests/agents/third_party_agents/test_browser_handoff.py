@@ -32,6 +32,8 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -249,8 +251,6 @@ def test_malformed_browser_env_or_url_never_raises(
 
 def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
     """Two threads asking for the same page at once launch the browser once."""
-    import threading
-
     (fake_browser / "linger").touch()
     url = _unique_url("concurrent")
     results: list[bool] = []
@@ -318,8 +318,6 @@ def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:
 def test_default_command_without_browser_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without ``$BROWSER`` the platform opener is used (xdg-open here)."""
     monkeypatch.delenv("BROWSER", raising=False)
-    import sys
-
     expected = "open" if sys.platform == "darwin" else "xdg-open"
     assert _launch_commands("https://x.test/") == [[expected, "https://x.test/"]]
 
@@ -387,10 +385,13 @@ def test_open_for_user_without_daemon_or_browser(
     assert open_for_user(_unique_url("nothing")) == NOT_OPENED
 
 
-def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_tab: Any) -> None:
-    """A caller that finds the same page mid-launch waits for the real outcome."""
-    import threading
+@pytest.mark.usefixtures("browser_tab")
+def test_concurrent_callers_share_the_final_outcome(fake_browser: Path) -> None:
+    """A caller that finds the same page mid-launch waits for the real outcome.
 
+    The ``browser_tab`` fixture is requested only so its teardown resets the
+    opener installed by ``set_browser_tab_opener(slow)`` below.
+    """
     gate = threading.Event()
 
     class _SlowTab(_BrowserTab):
@@ -681,7 +682,7 @@ def test_token_agents_open_their_developer_portals(
 
 
 def test_device_flow_prerequisite_portals_open(
-    isolated_kiss_home: Path, fake_browser: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_kiss_home: Path, fake_browser: Path
 ) -> None:
     """Without an OAuth app ID, the registration portal opens for the user."""
     from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent

@@ -207,21 +207,6 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == ALLOW
 
 
-def test_slash_command_resolves_to_the_bundled_sea() -> None:
-    """``/git_extract_knowledge <repo>`` resolves to the repo text and this SEA."""
-    assert sea_commands.get_command("git_extract_knowledge") == _SEA_PATH
-    assert sea_commands.slash_command_task("/git_extract_knowledge /tmp/repo") == (
-        "/tmp/repo",
-        _SEA_PATH,
-    )
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings(
-        [GitExtractKnowledgeSea()]
-    )
-    assert sea_commands.help_text_if_command("/git_extract_knowledge help") == (
-        GitExtractKnowledgeSea().description()
-    )
-
-
 def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> None:
     """The first run indexes files, chunks, symbols, commits, changes, refs, authors, dirs."""
     report = sea.index_repo(str(repo / "src"))  # any directory inside the work tree

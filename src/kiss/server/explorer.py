@@ -421,12 +421,12 @@ def git_log(
         return {"error": f"Not a git repository: {work_dir}"}
     limit = max(1, min(int(limit), GIT_LOG_MAX_LIMIT))
     head = _git("rev-parse", "--verify", "--quiet", "HEAD", cwd=repo)
-    worktrees = git_worktrees(repo)
     if head.returncode != 0 and (head.returncode != 1 or head.stderr.strip()):
         # --verify --quiet exits 1 silently when HEAD names nothing (an
         # unborn branch, handled below).  Any other failure is real.
         return {"error": head.stderr.strip() or "git rev-parse HEAD failed"}
     head_sha = _chomp(head.stdout) if head.returncode == 0 else ""
+    worktrees = git_worktrees(repo)
     # Every worktree head is a start of the walk -- the current one
     # first.  An unborn worktree (head "") contributes nothing; when
     # all of them are unborn the graph is empty.
@@ -690,12 +690,10 @@ def git_file_at(work_dir: str, sha: str, path: str) -> dict[str, Any]:
         return {"error": f"Not a commit id: {sha}"}
     if not path or path.startswith("/"):
         return {"error": f"Not a repository path: {path}"}
-    result = _git("show", f"{sha}:{path}", cwd=repo)
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "git show failed"}
-    if "\0" in result.stdout[:8192]:
-        return {"error": f"Cannot display binary file: {path}"}
-    text, truncated = _truncate(result.stdout)
+    content, err = _blob_text(repo, f"{sha}:{path}")
+    if content is None:
+        return {"error": err or f"No {path} in commit {sha[:8]}"}
+    text, truncated = _truncate(content)
     return {
         "repo": repo,
         "sha": sha,

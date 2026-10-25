@@ -57,8 +57,6 @@ iMessage, WhatsApp, Gmail) start a browser or device sign-in with no
 arguments.
 """
 
-_MACOS_ONLY = {"BlueBubblesAgent", "IMessageAgent"}
-
 
 def _agent(class_name: str) -> Any:
     """Instantiate a fresh channel agent by class name."""
@@ -69,7 +67,7 @@ def _agent(class_name: str) -> Any:
 @pytest.mark.parametrize("class_name", list(_CREDENTIAL_AGENTS))
 def test_authenticate_rejects_blank_required_params(class_name: str, blank: str) -> None:
     """authenticate_*() returns an error for every empty or whitespace-only required param."""
-    if class_name in _MACOS_ONLY and sys.platform != "darwin":
+    if class_name == "BlueBubblesAgent" and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
     tool_name, required_params = _CREDENTIAL_AGENTS[class_name]
     auth_fn = auth_tools(_agent(class_name))[tool_name]

@@ -183,7 +183,10 @@ class TestCLIOneShotMode:
         assert "Not authenticated" in out
 
     def test_channel_with_invalid_token(
-        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_auth_server: RecordingServer,
     ) -> None:
         """One-shot mode with invalid token prints checking message and raises.
 
@@ -195,13 +198,13 @@ class TestCLIOneShotMode:
         deterministic offline.
         """
         _save_token("xoxb-invalid-for-oneshot-test")
-        with recording_server(InvalidAuthHandler) as server:
-            monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url)
-            monkeypatch.setattr(
-                sys, "argv", ["kiss-slack", "--channel", "some-channel", "-m", "test-model"]
-            )
-            with pytest.raises(RuntimeError, match="Failed to connect"):
-                main()
-            assert [r["path"] for r in server.requests] == ["/api/auth.test"]
+        invalid_auth_server.requests.clear()
+        monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
+        monkeypatch.setattr(
+            sys, "argv", ["kiss-slack", "--channel", "some-channel", "-m", "test-model"]
+        )
+        with pytest.raises(RuntimeError, match="Failed to connect"):
+            main()
+        assert [r["path"] for r in invalid_auth_server.requests] == ["/api/auth.test"]
         out = capsys.readouterr().out
         assert "Checking Slack channel for pending messages..." in out

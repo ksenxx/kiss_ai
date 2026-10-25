@@ -79,12 +79,24 @@ function active(win) {
   return win.document.activeElement;
 }
 
+/** Right-click *target* at (10, 10), which is how the page opens the menu. */
+function open(win, target) {
+  target.dispatchEvent(
+    new win.MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    }),
+  );
+}
+
 
 test('items expose tabIndex / aria-disabled and the first enabled item is focused on open', () => {
   const win = makeDom();
-  const ctl = win.ContentContextMenu.installContentContextMenu(win.document);
+  win.ContentContextMenu.installContentContextMenu(win.document);
   // No selection: Copy is disabled; on a link, Copy Link Address is enabled.
-  ctl.open(10, 10, win.document.getElementById('link'));
+  open(win, win.document.getElementById('link'));
   const rows = items(win);
   const byAction = Object.fromEntries(rows.map(r => [r.dataset.action, r]));
   assert.ok(byAction.copy.classList.contains('disabled'));
@@ -98,13 +110,12 @@ test('items expose tabIndex / aria-disabled and the first enabled item is focuse
     byAction['copy-link'],
     'first ENABLED item has focus',
   );
-  ctl.dispose();
 });
 
 test('ArrowDown / ArrowUp wrap over enabled items; Home / End jump', () => {
   const win = makeDom();
-  const ctl = win.ContentContextMenu.installContentContextMenu(win.document);
-  ctl.open(10, 10, win.document.getElementById('link'));
+  win.ContentContextMenu.installContentContextMenu(win.document);
+  open(win, win.document.getElementById('link'));
   const enabled = items(win).filter(r => !r.classList.contains('disabled'));
   assert.strictEqual(enabled.length, 2, 'Copy Link Address, Select All');
   key(win, 'ArrowDown');
@@ -117,14 +128,13 @@ test('ArrowDown / ArrowUp wrap over enabled items; Home / End jump', () => {
   assert.strictEqual(active(win), enabled[0]);
   key(win, 'End');
   assert.strictEqual(active(win), enabled[1]);
-  ctl.dispose();
 });
 
 test('Enter activates the focused item and Escape closes', () => {
   const win = makeDom();
-  const ctl = win.ContentContextMenu.installContentContextMenu(win.document);
+  win.ContentContextMenu.installContentContextMenu(win.document);
   const ta = win.document.getElementById('ta');
-  ctl.open(10, 10, ta);
+  open(win, ta);
   const enabled = items(win).filter(r => !r.classList.contains('disabled'));
   const selectAll = enabled.find(r => r.dataset.action === 'select-all');
   key(win, 'End');
@@ -137,20 +147,19 @@ test('Enter activates the focused item and Escape closes', () => {
     'hello world'.length,
     'Select All ran on the field',
   );
-  ctl.open(10, 10, ta);
+  open(win, ta);
   assert.ok(items(win).length > 0);
   key(win, 'Escape');
   assert.strictEqual(items(win).length, 0, 'Escape closes');
-  ctl.dispose();
 });
 
 test('Space activates too, and focus returns to the opener on close', () => {
   const win = makeDom();
-  const ctl = win.ContentContextMenu.installContentContextMenu(win.document);
+  win.ContentContextMenu.installContentContextMenu(win.document);
   const ta = win.document.getElementById('ta');
   ta.focus();
   assert.strictEqual(active(win), ta);
-  ctl.open(10, 10, win.document.getElementById('para'));
+  open(win, win.document.getElementById('para'));
   assert.notStrictEqual(active(win), ta, 'focus moved into the menu');
   key(win, 'Escape');
   assert.strictEqual(
@@ -158,25 +167,23 @@ test('Space activates too, and focus returns to the opener on close', () => {
     ta,
     'Escape hands focus back to the textarea',
   );
-  ctl.open(10, 10, ta);
+  open(win, ta);
   key(win, 'End');
   key(win, ' ');
   assert.strictEqual(items(win).length, 0, 'Space activates');
   assert.strictEqual(ta.selectionEnd, 'hello world'.length);
   assert.strictEqual(active(win), ta, 'the field keeps focus after Select All');
-  ctl.dispose();
 });
 
 test('keys do nothing while the menu is closed', () => {
   const win = makeDom();
-  const ctl = win.ContentContextMenu.installContentContextMenu(win.document);
+  win.ContentContextMenu.installContentContextMenu(win.document);
   const ta = win.document.getElementById('ta');
   ta.focus();
   key(win, 'ArrowDown');
   key(win, 'Enter');
   assert.strictEqual(active(win), ta);
   assert.strictEqual(items(win).length, 0);
-  ctl.dispose();
 });
 
 // The browser focuses a clicked control on mousedown, before the click
@@ -206,16 +213,9 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
   );
   const opener = doc.getElementById('opener');
   const destination = doc.getElementById('destination');
-  const ctl = win.ContentContextMenu.installContentContextMenu(doc);
+  win.ContentContextMenu.installContentContextMenu(doc);
   opener.focus();
-  opener.dispatchEvent(
-    new win.MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: 10,
-      clientY: 10,
-    }),
-  );
+  open(win, opener);
   assert.ok(items(win).length > 0, 'right-click opened the menu');
   assert.ok(
     items(win).includes(active(win)),
@@ -240,16 +240,16 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
   // Keyboard dismissal and clicks on the menu itself still hand focus
   // back to the opener.
   opener.focus();
-  ctl.open(10, 10, opener);
+  open(win, opener);
   key(win, 'Escape');
   assert.strictEqual(active(win), opener, 'Escape restores the opener');
-  ctl.open(10, 10, opener);
+  open(win, opener);
   const selectAll = items(win).find(r => r.dataset.action === 'select-all');
   pointerClick(win, selectAll);
   assert.strictEqual(items(win).length, 0, 'clicking an item closes the menu');
   assert.strictEqual(active(win), opener, 'the opener has focus afterwards');
   // A click on inert text leaves focus nowhere (body): restore it.
-  ctl.open(10, 10, opener);
+  open(win, opener);
   doc.activeElement.blur();
   pointerClick(win, doc.getElementById('para'));
   assert.strictEqual(items(win).length, 0);
@@ -258,7 +258,6 @@ test('R3-1: dismissing the menu by clicking another field keeps focus (and typin
     opener,
     'a click on non-focusable text still returns focus to the opener',
   );
-  ctl.dispose();
 });
 
 report('ui_antipattern_content_menu_keyboard');

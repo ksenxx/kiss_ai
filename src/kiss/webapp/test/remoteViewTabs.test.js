@@ -19,12 +19,22 @@
 //   * an unbound chat behaves as before: no machine field anywhere.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send, click, stubRaf, ofType} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  click,
+  stubRaf,
+  ofType,
+} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
-const MEDIA = path.join(__dirname, '..', 'media');
+/** A chat page with browserTab.js / terminalTab.js over stubbed xterm. */
+function makePage() {
+  return makeChatPage({
+    beforeScripts: withTabViews,
+    extraScripts: ['browserTab.js', 'terminalTab.js'],
+  });
+}
 
 function withTabViews(win) {
   stubRaf(win);
@@ -55,8 +65,6 @@ function withTabViews(win) {
     observe() {}
     disconnect() {}
   };
-  win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
 }
 
 /** Structural equality across the jsdom realm (its arrays are not ours), key order aside. */
@@ -109,7 +117,7 @@ const {test, report} = makeRunner();
 
 async function main() {
   await test('the terminal of a chat bound to a machine opens there', async () => {
-    const {win, posted} = makePage({beforeScripts: withTabViews});
+    const {win, posted} = makePage();
     openChat(win);
     bindToBox(win);
     click(win, win.document.getElementById('terminal-btn'));
@@ -126,7 +134,7 @@ async function main() {
   });
 
   await test('the Browser button opens a page on the bound machine', () => {
-    const {win, posted} = makePage({beforeScripts: withTabViews});
+    const {win, posted} = makePage();
     openChat(win);
     bindToBox(win);
     click(win, win.document.getElementById('browser-btn'));
@@ -137,7 +145,7 @@ async function main() {
   });
 
   await test('a remote page is a browser tab labelled with its machine', () => {
-    const {win, posted} = makePage({beforeScripts: withTabViews});
+    const {win, posted} = makePage();
     openChat(win);
     bindToBox(win);
     send(win, {
@@ -217,7 +225,7 @@ async function main() {
   });
 
   await test('an unbound chat keeps the terminal and the browser on this machine', async () => {
-    const {win, posted} = makePage({beforeScripts: withTabViews});
+    const {win, posted} = makePage();
     openChat(win);
     click(win, win.document.getElementById('terminal-btn'));
     await settle();

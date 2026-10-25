@@ -219,9 +219,14 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         await self._send(writer_a, {"type": "getInputHistory"})
         await self._send(writer_a, {"type": "getConfig"})
 
-        for reply_type in ("models", "history", "inputHistory", "configData"):
-            msg = await self._drain_until(reader_a, _has_type(reply_type))
+        # In any order: the history page is answered in the background
+        # (``ServerApi.get_history``), so it may land after the replies
+        # to the commands sent behind it.
+        wanted = {"models", "history", "inputHistory", "configData"}
+        while wanted:
+            msg = await self._drain_until(reader_a, lambda m: m.get("type") in wanted)
             self.assertNotIn("connId", msg)
+            wanted.discard(str(msg.get("type")))
 
         await self._assert_no_reply_leak(reader_b, writer_b)
 

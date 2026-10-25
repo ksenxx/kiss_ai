@@ -163,7 +163,6 @@ class TestStopBeforeThreadStart(TestCase):
             state_key,
             chat_id=uuid.uuid4().hex,
             tab_id=tab_id,
-            conn_id="",
             server_owned=True,
             stop_event=threading.Event(),
         )

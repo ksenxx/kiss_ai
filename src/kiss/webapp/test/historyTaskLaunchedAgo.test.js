@@ -28,6 +28,7 @@ const {
   loadMainCss,
   MEDIA,
 } = require('./simplify2_harness');
+const {loadHistory, makeSession, historyRows} = require('./history_helpers');
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -55,43 +56,6 @@ function makePage(captureTimeouts) {
   });
   return {win, posted, timeouts};
 }
-
-function makeSession(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-1',
-      task_id: 'task-1',
-      title: 'refactor the parser',
-      preview: 'refactor the parser',
-      has_events: true,
-      tokens: 1234,
-      cost: 0.5678,
-      steps: 7,
-      timestamp: 1700000000,
-      work_dir: '/home/user/proj',
-      model: 'test-model',
-      is_parallel: false,
-      is_favorite: false,
-    },
-    overrides || {},
-  );
-}
-
-function loadHistory(win, sessions) {
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {type: 'history', offset: 0, generation: 0, sessions: sessions},
-    }),
-  );
-}
-
-function historyRows(win) {
-  return Array.prototype.slice.call(
-    win.document.querySelectorAll('#history-list .sidebar-item'),
-  );
-}
-
-const label = 'webapp';
 
 // ---------------------------------------------------------------------------
 // 1. Every unit of the ladder renders, next to the show-details button.
@@ -131,18 +95,18 @@ function testUnitLadder() {
   assert.strictEqual(
     rows.length,
     cases.length,
-    `${label}: one history row per session`,
+    'one history row per session',
   );
   cases.forEach((testCase, i) => {
     const row = win.document.querySelector(
       '[data-chat-id="chat-' + i + '"] .sidebar-item',
     );
     const ago = row.querySelector('.sidebar-item-launched');
-    assert.ok(ago, `${label}: row ${i} renders the launched-ago label`);
+    assert.ok(ago, `row ${i} renders the launched-ago label`);
     assert.strictEqual(
       ago.textContent,
       testCase.text,
-      `${label}: row ${i} (${testCase.ago} ms old)`,
+      `row ${i} (${testCase.ago} ms old)`,
     );
     // "Next to the show details button": the label lives in the same
     // action strip, immediately after the collapse toggle.
@@ -150,22 +114,22 @@ function testUnitLadder() {
     assert.strictEqual(
       ago.parentElement,
       actions,
-      `${label}: row ${i} label sits in the action strip`,
+      `row ${i} label sits in the action strip`,
     );
     const toggle = row.querySelector('.sidebar-item-collapse');
     assert.strictEqual(
       toggle.nextElementSibling,
       ago,
-      `${label}: row ${i} label is adjacent to the show-details button`,
+      `row ${i} label is adjacent to the show-details button`,
     );
     // The tooltip carries the absolute launch time.
     assert.ok(
       ago.title.indexOf('Launched ') === 0,
-      `${label}: row ${i} tooltip shows the absolute launch time`,
+      `row ${i} tooltip shows the absolute launch time`,
     );
   });
   win.close();
-  console.log(`  ok - ${label}: full unit ladder renders next to the toggle`);
+  console.log('  ok - full unit ladder renders next to the toggle');
 }
 
 // ---------------------------------------------------------------------------
@@ -310,23 +274,23 @@ function testActionsStillWork() {
   loadHistory(win, [makeSession({startTs: Date.now() - 5 * MINUTE_MS})]);
   const row = historyRows(win)[0];
   const toggle = row.querySelector('.sidebar-item-collapse');
-  assert.ok(row.classList.contains('collapsed'), `${label}: collapsed first`);
+  assert.ok(row.classList.contains('collapsed'), 'collapsed first');
   toggle.click();
   assert.ok(
     !row.classList.contains('collapsed'),
-    `${label}: the show-details toggle still expands the panel`,
+    'the show-details toggle still expands the panel',
   );
   assert.ok(
     !posted.some(m => m.type === 'resumeSession'),
-    `${label}: the toggle click must not bubble into the row click`,
+    'the toggle click must not bubble into the row click',
   );
   row.click();
   assert.ok(
     posted.some(m => m.type === 'resumeSession'),
-    `${label}: clicking the row body still opens the chat`,
+    'clicking the row body still opens the chat',
   );
   win.close();
-  console.log(`  ok - ${label}: action strip behaviour is unchanged`);
+  console.log('  ok - action strip behaviour is unchanged');
 }
 
 // ---------------------------------------------------------------------------

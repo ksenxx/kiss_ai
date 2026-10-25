@@ -201,14 +201,14 @@ class TestReplayEventsOutsideChat:
         assert agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
-            result_raw=_CANNED_RESULT,
+            parsed=yaml.safe_load(_CANNED_RESULT),
             result_summary="all done",
             usage=agent.usage_snapshot(),
         )
         assert not agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
-            result_raw=_CANNED_RESULT,
+            parsed=yaml.safe_load(_CANNED_RESULT),
             result_summary="all done",
             usage=agent.usage_snapshot(),
         )
@@ -262,7 +262,7 @@ class TestReplayEventsOutsideChat:
             agent._persist_replay_events_if_missing(
                 task_id=task_id,
                 prompt="a worktree task",
-                result_raw=_CANNED_RESULT_WITH_SUGGESTION,
+                parsed=yaml.safe_load(_CANNED_RESULT_WITH_SUGGESTION),
                 result_summary="all done",
                 usage=agent.usage_snapshot(),
             )

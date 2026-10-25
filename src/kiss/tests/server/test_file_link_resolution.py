@@ -26,6 +26,7 @@ token-authenticated local WSS endpoint.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,58 @@ class TestFileLinkResolution(_ServerHarness):
         self.assertEqual(reply["error"], "File not found: no/such/file.txt")
         self.assertNotIn("content", reply)
         self.assertNotIn("line", reply, "a non-positive line is not echoed")
+        self.assertNotIn("token", reply, "no token sent, none echoed")
+
+    async def test_open_file_echoes_the_token_on_every_reply(self) -> None:
+        """A tokened ``openFile`` gets its token back: picture, text, error.
+
+        ``main.js`` fetches the pictures of a result or preview
+        (``<img src="tmp/plot.png">``) with a tokened ``openFile`` and
+        routes the reply by the echoed token to the ``<img>`` instead of
+        a content tab, whatever the reply turned out to be.
+        """
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA"
+            "60e6kgAAAABJRU5ErkJggg=="
+        )
+        (self.work_dir / "tmp").mkdir()
+        (self.work_dir / "tmp" / "plot.png").write_bytes(png)
+        # Bytes: the daemon serves the file verbatim, text mode would write CRLF on Windows.
+        (self.work_dir / "tmp" / "d.svg").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'/>\n")
+        reader, writer = await self._connect()
+
+        async def tokened(path: str, token: str) -> dict[str, Any]:
+            return await self._reply(
+                reader,
+                writer,
+                {
+                    "type": "openFile",
+                    "path": path,
+                    "workDir": str(self.work_dir),
+                    "tabId": "tab-img",
+                    "token": token,
+                },
+                "fileContent",
+            )
+
+        picture = await tokened("tmp/plot.png", "img-1")
+        self.assertEqual(picture["token"], "img-1")
+        self.assertTrue(picture["binary"])
+        self.assertEqual(picture["mime"], "image/png")
+        self.assertEqual(base64.b64decode(picture["base64"]), png)
+
+        svg = await tokened("tmp/d.svg", "img-2")
+        self.assertEqual(svg["token"], "img-2")
+        self.assertEqual(svg["content"], "<svg xmlns='http://www.w3.org/2000/svg'/>\n")
+        self.assertNotIn("binary", svg)
+
+        missing = await tokened("tmp/none.png", "img-3")
+        self.assertEqual(missing["token"], "img-3")
+        self.assertEqual(missing["error"], "File not found: tmp/none.png")
+
+        listing = await tokened("tmp", "img-4")
+        self.assertEqual(listing["token"], "img-4")
+        self.assertIn("plot.png", listing["content"])
 
     async def test_open_file_of_a_directory_lists_it(self) -> None:
         """A directory link resolves to its listing."""

@@ -32,69 +32,28 @@ function clickFirstLink(win, p) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function testAbsoluteFilePathInPromptIsLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'See /tmp/foo.py for details.'});
-  const links = findLinks(win, '/tmp/foo.py');
-  assert.strictEqual(
-    links.length,
-    1,
-    'absolute path /tmp/foo.py in prompt must be linkified',
-  );
-  win.close();
-  console.log('  ok - absolute path in prompt is linkified');
-}
+// Every path shape (absolute, dot-relative, workspace-relative,
+// home-relative, parent-relative) in a prompt becomes exactly one link.
+const PROMPT_PATHS = [
+  ['absolute', 'See /tmp/foo.py for details.', '/tmp/foo.py'],
+  ['dot-relative', 'open ./src/main.js', './src/main.js'],
+  ['workspace-relative', 'open src/kiss/INJECTIONS.md', 'src/kiss/INJECTIONS.md'],
+  ['home-relative', 'open ~/work/foo/bar.txt now', '~/work/foo/bar.txt'],
+  ['parent-relative', 'see ../README.md please', '../README.md'],
+];
 
-function testRelativeFilePathLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'open ./src/main.js'});
-  const links = findLinks(win, './src/main.js');
-  assert.strictEqual(
-    links.length,
-    1,
-    'relative path ./src/main.js must be linkified',
-  );
-  win.close();
-  console.log('  ok - dot-relative path is linkified');
-}
-
-function testWorkspaceRelativeFilePathLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'open src/kiss/INJECTIONS.md'});
-  const links = findLinks(win, 'src/kiss/INJECTIONS.md');
-  assert.strictEqual(
-    links.length,
-    1,
-    'workspace-relative path src/kiss/INJECTIONS.md must be linkified',
-  );
-  win.close();
-  console.log('  ok - workspace-relative path is linkified');
-}
-
-function testHomeRelativeFilePathLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'open ~/work/foo/bar.txt now'});
-  const links = findLinks(win, '~/work/foo/bar.txt');
-  assert.strictEqual(
-    links.length,
-    1,
-    'home-relative path ~/work/foo/bar.txt must be linkified',
-  );
-  win.close();
-  console.log('  ok - home-relative path is linkified');
-}
-
-function testParentRelativeFilePathLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'see ../README.md please'});
-  const links = findLinks(win, '../README.md');
-  assert.strictEqual(
-    links.length,
-    1,
-    'parent-relative path ../README.md must be linkified',
-  );
-  win.close();
-  console.log('  ok - parent-relative path is linkified');
+function testFilePathShapesInPromptAreLinkified() {
+  for (const [shape, text, p] of PROMPT_PATHS) {
+    const {win} = makePage();
+    send(win, {type: 'prompt', text});
+    assert.strictEqual(
+      findLinks(win, p).length,
+      1,
+      `${shape} path ${p} in prompt must be linkified`,
+    );
+    win.close();
+    console.log(`  ok - ${shape} path in prompt is linkified`);
+  }
 }
 
 function testFilePathWithLineSuffixLinkified() {
@@ -314,47 +273,14 @@ function testFilePathInsideExistingAnchorNotDoubleLinkified() {
   console.log('  ok - anchor contents are not double-linkified');
 }
 
-function testToolCallPathArgStillUsesExistingHook() {
-  const {win, posted} = makePage();
-  send(win, {type: 'tool_call', name: 'Read', path: '/tmp/old/style.py'});
-  const links = findLinks(win, '/tmp/old/style.py');
-  assert.ok(
-    links.length >= 1,
-    'tool_call path arg keeps its existing data-path hook',
-  );
-  links[0].dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const opens = posted.filter(m => m.type === 'openFile');
-  assert.ok(
-    opens.some(m => m.path === '/tmp/old/style.py'),
-    'click on tool_call path arg still posts openFile',
-  );
-  win.close();
-  console.log('  ok - tool_call path arg keeps existing data-path hook');
-}
+// A tool_call `path` arg being clickable is pinned against the real
+// filesystem by clickFilePathExistsOnly.testToolCallExistingPathArgIsClickable.
 
-function testLinkifierIsIdempotent() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'open /tmp/once.py twice /tmp/once.py'});
-  const links = Array.from(
-    win.document.querySelectorAll('#output [data-path]'),
-  );
-  for (const a of links) {
-    assert.strictEqual(
-      a.querySelectorAll('[data-path]').length,
-      0,
-      'no data-path element nested inside another',
-    );
-  }
-  win.close();
-  console.log('  ok - linkifier is idempotent (no nested data-path)');
-}
+// The linkifier being idempotent (no nested [data-path]) is pinned against
+// the real filesystem by clickFilePathExistsOnly.testLinkifierIdempotentOnCandidatesAndMissing.
 
 function runTests() {
-  testAbsoluteFilePathInPromptIsLinkified();
-  testRelativeFilePathLinkified();
-  testWorkspaceRelativeFilePathLinkified();
-  testHomeRelativeFilePathLinkified();
-  testParentRelativeFilePathLinkified();
+  testFilePathShapesInPromptAreLinkified();
   testFilePathWithLineSuffixLinkified();
   testFilePathInResultSummaryLinkified();
   testFilePathInResultTextLinkified();
@@ -369,13 +295,11 @@ function runTests() {
   testClickPostsOpenFileWithCorrectPath();
   testClickPostsOpenFileWithLine();
   testFilePathInsideExistingAnchorNotDoubleLinkified();
-  testToolCallPathArgStillUsesExistingHook();
-  testLinkifierIsIdempotent();
 }
 
 try {
   runTests();
-  console.log('\n21 passed, 0 failed');
+  console.log('\nclickFilePathOpens.test.js: all tests passed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

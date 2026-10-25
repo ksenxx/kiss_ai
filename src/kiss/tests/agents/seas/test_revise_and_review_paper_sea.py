@@ -100,28 +100,6 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "strong accept" in agent.description()
 
 
-def test_slash_command_resolves_to_the_bundled_sea() -> None:
-    """``/revise_and_review_paper <text>`` resolves to the text and this file.
-
-    The daemon runs the SEA directly on the text; a ``run_agent``
-    dispatch of the same file waits ``settings()["timeout"]`` (a day)
-    when the caller names no timeout.
-    """
-    assert sea_commands.get_command("revise_and_review_paper") == _SEA_PATH
-    assert sea_commands.slash_command_task(
-        "/revise_and_review_paper Writing: a paper. Review: for ICLR."
-    ) == ("Writing: a paper. Review: for ICLR.", _SEA_PATH)
-    settings = sea_commands.sea_settings(_SEA_PATH)
-    assert settings == ReviseAndReviewPaperSea().settings({})
-    assert resolve_timeout(None, settings) == 86400.0
-    loaded = sea_commands.load_sea(_SEA_PATH)
-    assert type(loaded).__name__ == "ReviseAndReviewPaperSea" and loaded.path == _SEA_PATH
-    assert sea_commands.sea_description(loaded) == ReviseAndReviewPaperSea().description()
-    assert sea_commands.help_text_if_command("/revise_and_review_paper help") == (
-        ReviseAndReviewPaperSea().description()
-    )
-
-
 def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path: Path) -> None:
     """``resolve_timeout`` takes ``settings()["timeout"]`` when positive, else the default.
 
@@ -132,7 +110,8 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     broken script must not run with guessed parameters); a positive
     float is kept as is.
     """
-    for command, seconds in [("write_paper", 21600.0), ("review_paper", 7200.0)]:
+    for command, seconds in [("revise_and_review_paper", 86400.0), ("write_paper", 21600.0),
+                             ("review_paper", 7200.0)]:
         path = sea_commands.get_command(command)
         assert path is not None
         assert resolve_timeout(None, sea_commands.sea_settings(path)) == seconds, command
@@ -224,7 +203,11 @@ def test_reviewer_task_is_fresh_and_keeps_the_write_tool() -> None:
     assert "Do not open any other file of the repository, any earlier review" in text
     assert "under /w/tmp/revise_review/round-2/notes/" in text
     assert "do not ask the user questions" in text
-    assert text.endswith('"strong accept" only for a paper you would argue for at the meeting.')
+    assert '"strong accept" only for a paper you would argue for at the meeting.' in text
+    assert text.endswith(
+        "Report back in at most 150 words: the output path, the word count, the score lines "
+        "and the Recommendation line. The review text itself stays in the file; do not repeat it."
+    )
     assert "Recommendation: <" + " | ".join(sea.VERDICTS) + ">" in text
     default = sea.reviewer_task("Review for ICLR.", "/w/r/1/p.pdf", "/w/reports/r1.txt", 1)
     assert f"(word_limit={sea.DEFAULT_WORD_LIMIT})" in default

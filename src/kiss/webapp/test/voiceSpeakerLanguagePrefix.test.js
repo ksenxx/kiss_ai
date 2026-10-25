@@ -6,41 +6,20 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {send: sendHostMessage} = require('./simplify2_harness');
+const {makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-
-
 function makeWindow() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
-  );
-  const win = dom.window;
-  win.__VOICE__ = {};
-
   const counters = {input: 0, submit: 0};
-  win.document
-    .getElementById('task-input')
-    .addEventListener('input', () => counters.input++);
-  win.addEventListener('kiss-voice-submit', () => counters.submit++);
-
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
-
+  const win = makeBareVoiceWindow({}, w => {
+    w.document
+      .getElementById('task-input')
+      .addEventListener('input', () => counters.input++);
+    w.addEventListener('kiss-voice-submit', () => counters.submit++);
+  });
   return {win, counters};
-}
-
-function sendHostMessage(win, data) {
-  win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 test('speaker + language payload inserts the language-aware prefix', () => {

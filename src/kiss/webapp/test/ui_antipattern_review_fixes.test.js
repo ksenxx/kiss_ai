@@ -28,6 +28,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {typeInto} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -35,11 +36,6 @@ const FILE_ENTRIES = [
   {name: 'foo.py', path: h.WD + '/foo.py', isDir: false},
   {name: 'src', path: h.WD + '/src', isDir: true},
 ];
-
-function typeInto(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
 
 function switchWorkDir(win, dir) {
   h.send(win, {type: 'configData', config: {work_dir: dir}});

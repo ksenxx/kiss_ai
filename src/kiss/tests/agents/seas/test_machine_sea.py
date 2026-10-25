@@ -36,8 +36,6 @@ from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_b
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 
-_SEA_PATH = Path(sea.__file__).resolve()
-
 
 @pytest.fixture(autouse=True)
 def _empty_registry() -> Iterator[None]:
@@ -92,16 +90,6 @@ def test_sea_methods_follow_the_contract() -> None:
     assert "/machine add user@host" in agent.description()
     assert "/machine add <name> <https://host:port> <password>" in agent.description()
     assert_no_removed_getters(sea)
-
-
-def test_slash_machine_resolves_to_the_bundled_sea() -> None:
-    """``/machine list`` resolves to the request text and this SEA."""
-    assert sea_commands.get_command("machine") == _SEA_PATH
-    assert sea_commands.slash_command_task("/machine add box https://10.0.0.5:8787 s3cret") == (
-        "add box https://10.0.0.5:8787 s3cret", _SEA_PATH)
-    assert sea_commands.slash_command_task("/machine add ksen@10.0.0.5") == (
-        "add ksen@10.0.0.5", _SEA_PATH)
-    assert sea_commands.help_text_if_command("/machine help") == MachineSea().description()
 
 
 def test_tools_add_list_and_remove_against_a_real_daemon(remote: RemoteDaemon) -> None:

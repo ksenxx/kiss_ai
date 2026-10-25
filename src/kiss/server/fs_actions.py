@@ -365,13 +365,14 @@ def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> 
             chunks.append(chunk)
             size += len(chunk)
             if size > limit:
-                out.truncated = True
+                # Decided under the guard, before the kill: a timer
+                # firing meanwhile must not relabel the capped result
+                # as timed out, and a timer that already did wins.
+                with out.guard:
+                    if not out.timed_out:
+                        out.truncated = out.finished = True
                 break
         if out.truncated:
-            # Decided before the kill: a timer firing in between must
-            # not relabel the capped result as timed out.
-            with out.guard:
-                out.finished = True
             _kill_tree(proc)
         proc.stdout.close()
         # Stdout EOF is not exit: the deadline stays armed until the

@@ -93,10 +93,7 @@ def _all_sent_params(requests: list[dict[str, Any]]) -> set[str]:
         names.update(req["query"])
         body = req["body"]
         if body and not body.startswith(("{", "OK")):
-            try:
-                names.update(urllib.parse.parse_qs(body).keys())
-            except ValueError:
-                continue
+            names.update(urllib.parse.parse_qs(body).keys())
     return names
 
 

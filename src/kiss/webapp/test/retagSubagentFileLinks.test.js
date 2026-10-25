@@ -16,7 +16,7 @@
 /* global require, console, process */
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, nextFrames} = require('./simplify2_harness');
 const {clickClose} = require('./subagent_tab_helpers');
 
 const REL = 'reports/out.html';
@@ -179,17 +179,6 @@ function testCloseForgetsTheSpans() {
   );
   win.close();
   console.log('  ok - closing the retagged tab releases its bookkeeping');
-}
-
-function nextFrames(win, n) {
-  return new Promise(resolve => {
-    let left = n;
-    function step() {
-      if (--left <= 0) return resolve();
-      win.requestAnimationFrame(step);
-    }
-    win.requestAnimationFrame(step);
-  });
 }
 
 async function testPendingSweepFollowsActiveTabRetag() {

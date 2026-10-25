@@ -556,7 +556,9 @@ class TestRestTools:
         """The stand-in refuses every other verb, so the method assertions above bite."""
         body = {"message_id": "m3", "chat_jid": _ALICE}
         for verb in ("put", "patch", "delete", "get"):
-            response = getattr(requests, verb)(f"{self.server.base_url}/api/download", json=body)
+            response = getattr(requests, verb)(
+                f"{self.server.base_url}/api/download", json=body, timeout=10
+            )
             assert response.status_code == 405, verb
         assert self.server.requests == []
 

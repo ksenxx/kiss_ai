@@ -22,7 +22,9 @@ Shared by ``run_parallel`` / ``run_agent`` and the daemon:
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 
 _REVIEW_WORDS = re.compile(
     r"\b(review\w*|audit\w*|critiqu\w*|inspect\w*|regression\w*"
@@ -47,6 +49,64 @@ def is_review_task(task: str) -> bool:
         defects" (case-insensitive).
     """
     return _REVIEW_WORDS.search(task) is not None
+
+
+REVIEW_BUDGET_BASE_USD = 5.0
+"""Budget (USD) of a read-only review of an empty diff.  The 2,535
+reviewer sub-agents of the three weeks before 2026-10-25 cost $1.57 at
+the median and $3.27 at the 75th percentile while holding 28x their
+spend; the base alone covers three reviews in four."""
+REVIEW_BUDGET_PER_KLINE_USD = 5.0
+"""Budget (USD) added per 1,000 changed lines the review has to read."""
+
+
+def changed_lines(work_dir: str) -> int:
+    """Return the lines added and deleted in *work_dir* against ``HEAD``, untracked files included.
+
+    ``0`` when *work_dir* is not a git repository or git is missing;
+    binary files count as none.
+
+    Args:
+        work_dir: The directory whose diff a review is to read.
+    """
+    try:
+        numstat = subprocess.run(
+            ["git", "diff", "--numstat", "HEAD"], cwd=work_dir, capture_output=True,
+            text=True, timeout=30, check=False,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"], cwd=work_dir,
+            capture_output=True, text=True, timeout=30, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    lines = 0
+    for row in numstat.splitlines():
+        # ``<added>\t<deleted>\t<path>``; binary files show ``-`` counts.
+        columns = row.split("\t", 2)
+        for count in columns[:2]:
+            lines += int(count) if count.isdigit() else 0
+    for name in untracked.splitlines():
+        try:
+            with open(os.path.join(work_dir, name), "rb") as handle:
+                lines += sum(1 for _ in handle)
+        except OSError:
+            continue
+    return lines
+
+
+def review_budget(work_dir: str) -> float:
+    """Return the default budget (USD) of a read-only review dispatched from *work_dir*.
+
+    :data:`REVIEW_BUDGET_BASE_USD` plus :data:`REVIEW_BUDGET_PER_KLINE_USD`
+    per thousand changed lines (:func:`changed_lines`): a review's
+    cost follows the size of the diff it reads, not the caller's
+    remaining budget.
+
+    Args:
+        work_dir: The directory the review runs in.
+    """
+    return REVIEW_BUDGET_BASE_USD + REVIEW_BUDGET_PER_KLINE_USD * changed_lines(work_dir) / 1000
 
 
 _IMPLEMENTATION_WORDS = re.compile(
@@ -126,7 +186,7 @@ def parse_tasks_json(tasks: str, name: str = "tasks") -> list[str]:
     stripped = tasks.strip()
     try:
         parsed = _decode_json_leniently(stripped)
-    except (ValueError, TypeError):
+    except ValueError:
         hint = (
             " Inside a JSON string every backslash must be doubled (write "
             '\\\\| for grep\'s \\|) and a newline written as \\n.'

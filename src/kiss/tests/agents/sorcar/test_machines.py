@@ -13,6 +13,7 @@ test session's ``KISS_HOME``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import socket
@@ -56,6 +57,7 @@ def _clear_registry_and_pins() -> None:
     the assertions here that a rejected enrollment leaves no pin.
     """
     mach.save_machines([])
+    mach._last_pages.clear()
     certs_dir = mach.kiss_home() / mach.MACHINE_CERTS_DIR
     if certs_dir.is_dir():
         for pin in certs_dir.iterdir():
@@ -344,7 +346,7 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     with pytest.raises(mach.MachineError, match="did not answer"):
         link.request({"type": "ping"}, "never-sent", timeout=0.5)
     assert link._retry_at > time.monotonic()
-    link._retry_at = 0.0
+    link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
     # An already expired deadline fails even when the reply is buffered.
     assert link._ws is not None
@@ -355,7 +357,7 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     with pytest.raises(mach.MachineError, match="no pong within 0s"):
         link.request({"type": "ping"}, "pong", timeout=0.0)
     assert link._retry_at > time.monotonic()
-    link._retry_at = 0.0
+    link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
 
     dead = mach.Machine("dead", f"https://127.0.0.1:{_closed_port()}")
@@ -368,12 +370,12 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     # answer instantly anyway, so the backoff deadline is what proves it).
     dead_link = mach.link_for(dead)
     assert dead_link._retry_at > time.monotonic()
-    dead_link._retry_at = time.monotonic() + 3600
+    dead_link._health.retry_at = time.monotonic() + 3600
     started = time.monotonic()
     with pytest.raises(mach.MachineError, match="unreachable"):
         mach.fetch_history(dead, "", "", 50)
     assert time.monotonic() - started < 0.5
-    dead_link._retry_at = 0.0  # expired: the next attempt connects again
+    dead_link._health.retry_at = 0.0  # expired: the next attempt connects again
     with pytest.raises(mach.MachineError, match="unreachable"):
         dead_link.request({"type": "ping"}, "pong")
     # A pin that does not match the daemon is a refused TLS handshake.
@@ -492,6 +494,59 @@ def test_merged_history_dedups_orders_and_paginates(
     assert _titles(mach.merged_history(empty, [dead, leaf], "", "", 0, 50)) == ["leaf task"]
     os.unlink(dead.cert_file())
     assert mach.merged_history(empty, [], "", "", 0, 50) == mach.HistoryPage()
+
+
+def test_merged_history_keeps_a_machines_last_page_while_it_does_not_answer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A machine that stops answering keeps its chats in the CHATS panel.
+
+    Its last unfiltered page is served again (trimmed to the limit)
+    until it answers afresh; a filtered view contributes nothing then.
+    """
+    seed = [
+        {"chat_id": "c", "task": f"flaky {i}", "timestamp": 1_700_000_000.0 + i}
+        for i in range(3)
+    ]
+    empty = mach.HistoryPage()
+    flaky = start_remote_daemon(tmp_path / "flaky-home", seed=seed)
+    try:
+        machine = mach.add_machine("flaky", flaky.url)
+        # A filtered fetch is not remembered: nothing to fall back on yet.
+        assert _titles(mach.merged_history(empty, [machine], "flaky 2", "", 0, 50)) == ["flaky 2"]
+    finally:
+        flaky.stop()
+    assert mach.merged_history(empty, [machine], "", "", 0, 50).rows == []
+    # The machine is back (at a new address): its unfiltered page is remembered.
+    flaky = start_remote_daemon(tmp_path / "flaky-home-2", seed=seed)
+    try:
+        machine = mach.add_machine("flaky", flaky.url)
+        whole = mach.merged_history(empty, [machine], "", "", 0, 50)
+        assert _titles(whole) == ["flaky 2", "flaky 1", "flaky 0"]
+    finally:
+        flaky.stop()
+    # The daemon is gone: the remembered page stands in, with its date
+    # range, trimmed to what the caller asked for, and the failure is
+    # still logged; a filtered view has nothing to show.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.machines"):
+        again = mach.merged_history(empty, [machine], "", "", 0, 50)
+        assert _titles(again) == ["flaky 2", "flaky 1", "flaky 0"]
+        assert (again.date_min, again.date_max) == (whole.date_min, whole.date_max)
+        two = mach.merged_history(empty, [machine], "", "", 0, 2)
+        assert _titles(two) == ["flaky 2", "flaky 1"]
+        assert mach.merged_history(empty, [machine], "flaky", "", 0, 50).rows == []
+    assert sum("CHATS: flaky" in rec.getMessage() for rec in caplog.records) == 3
+    # Local rows still merge in around the remembered ones.
+    local = mach.HistoryPage([_local_row("b" * 32, "local newest", 1_800_000_000.0, False)])
+    assert _titles(mach.merged_history(local, [machine], "", "", 0, 50))[:2] == [
+        "local newest", "flaky 2",
+    ]
+    # The name registered again for another daemon (another address)
+    # is not shown the remembered page: those are not its chats.
+    other = mach.Machine("flaky", f"https://127.0.0.1:{_closed_port()}")
+    other.cert_file().write_text(machine.cert_file().read_text(), encoding="utf-8")
+    assert mach.merged_history(empty, [other], "", "", 0, 50).rows == []
 
 
 def test_merged_pages_are_consistent_with_tied_timestamps(
@@ -978,7 +1033,7 @@ def test_ssh_machine_survives_a_daemon_restart_on_the_same_port(
         daemon = start_remote_daemon(
             home, password="pw", seed=[{"chat_id": "c", "task": "two"}], port=port,
         )
-        link._retry_at = 0.0  # the backoff has expired
+        link._health.retry_at = 0.0  # the backoff has expired
         assert _titles(mach.fetch_history(machine, "", "", 50)) == ["two", "one"]
         assert mach.fetch_history(machine, "", "", 50).rows[0]["machine_url"] == machine.url
 
@@ -986,7 +1041,7 @@ def test_ssh_machine_survives_a_daemon_restart_on_the_same_port(
         daemon = start_remote_daemon(home, password="pw", seed=[{"chat_id": "c", "task": "three"}])
         if daemon.port == port:
             pytest.skip("the OS handed the restarted daemon the same port")
-        link._retry_at = 0.0
+        link._health.retry_at = 0.0
         with pytest.raises(mach.MachineError, match="unreachable"):
             mach.fetch_history(machine, "", "", 50)
         again = mach.add_machine("box", server.login)

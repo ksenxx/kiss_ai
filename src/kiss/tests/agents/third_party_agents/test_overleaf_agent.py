@@ -499,15 +499,13 @@ def test_git_remote_url_forms() -> None:
 
 
 def test_unconfigured_agent_and_instructions() -> None:
-    """A fresh agent exposes only the auth trio and explains the cookie flow."""
+    """A fresh agent explains the cookie flow and its backend refuses to connect.
+
+    The unauthenticated state and the auth-tool trio of a fresh agent are
+    pinned for every channel by ``test_base_channel_agent.py``.
+    """
     agent = OverleafAgent()
     assert agent.name == "Overleaf Agent"
-    assert agent._is_authenticated() is False
-    assert [t.__name__ for t in agent._get_tools()] == [
-        "check_overleaf_auth",
-        "authenticate_overleaf",
-        "clear_overleaf_auth",
-    ]
     msg = auth_tools(agent)["check_overleaf_auth"]()
     assert "DevTools" in msg and "overleaf_session2" in msg and "no OAuth" in msg
     assert "authenticate_overleaf" in msg
@@ -585,8 +583,6 @@ def test_authenticate_save_failure(overleaf_server) -> None:
     base_url, _ = overleaf_server
     agent = OverleafAgent()
     config_dir = _config.path.parent
-    if config_dir.is_dir():
-        shutil.rmtree(config_dir)
     config_dir.parent.mkdir(parents=True, exist_ok=True)
     config_dir.write_text("blocks the directory")
     try:
@@ -785,7 +781,9 @@ def test_realtime_emulator_survives_client_dropping_connection(
         assert greeting.startswith(b"HTTP/1.1 101")
         # Drain the join exchange so the emulator is idle in its frame reader.
         while b"joinProjectResponse" not in greeting:
-            greeting += sock.recv(4096)
+            chunk = sock.recv(4096)
+            assert chunk, "emulator closed the connection before joinProjectResponse"
+            greeting += chunk
     # The connection is gone; the handler thread must finish on its own.
     assert wait_until(lambda: threading.active_count() <= threads_before, timeout=10.0)
     assert capfd.readouterr().err == ""

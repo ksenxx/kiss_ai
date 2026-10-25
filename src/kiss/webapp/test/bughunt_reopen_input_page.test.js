@@ -6,15 +6,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {makePage: makeChatPage, send, readyTabId} = require('./simplify2_harness');
 
 // The state the previous page persisted, carried into the next page as
 // a reload of the same surface would.
 let persistedState;
 
 function makePage() {
-  const {win, posted, getState} = makeChatPage({initialState: persistedState});
-  return {win, posted, getState};
+  return makeChatPage({initialState: persistedState});
 }
 
 function typeAndSend(win, text) {
@@ -27,9 +26,7 @@ function typeAndSend(win, text) {
 
 async function runTests() {
   const wv1 = makePage();
-  const ready1 = wv1.posted.find(m => m.type === 'ready');
-  assert.ok(ready1 && ready1.tabId, 'page must post ready with a tabId');
-  const TAB = ready1.tabId;
+  const TAB = readyTabId(wv1.posted);
 
   typeAndSend(wv1.win, 'do a long task');
   const submit = wv1.posted.find(m => m.type === 'submit');

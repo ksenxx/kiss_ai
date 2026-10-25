@@ -58,25 +58,29 @@ from kiss.agents.sorcar.sea_apply import (
 )
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
+    base_prompt,
     base_settings,
     get_command,
     help_text_if_command,
+    load_sea,
     model_sea,
     run_picked_hook,
     sea_layers,
-    slash_command_task,
+    slash_command,
 )
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
+    custom_model_config,
     get_available_models,
     get_default_model,
     is_known_model,
 )
 from kiss.core.printer import parse_result_yaml
 from kiss.core.tool_verdict import Verdict
+from kiss.core.user_config import build_model_config, load_config
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
@@ -141,8 +145,8 @@ def inject_if_owned(
 
 def wait_for_thread_start(
     thread: threading.Thread,
-    still_owns: Callable[[], bool] | None = None,
-    deadline: float | None = None,
+    still_owns: Callable[[], bool] | None,
+    deadline: float,
 ) -> bool:
     """Wait until *thread* has actually started, or ownership is lost.
 
@@ -166,8 +170,8 @@ def wait_for_thread_start(
             :data:`agent_state.STATE_LOCK` while waiting; ``False``
             ends the wait (the run was pre-cancelled, finished or
             replaced).
-        deadline: Optional ``time.monotonic()`` deadline after which
-            the wait gives up.  With the handshake in place the
+        deadline: ``time.monotonic()`` deadline after which the wait
+            gives up.  With the handshake in place the
             give-up is harmless: an accepted stop is still honored by
             ``_cmd_run`` itself, which never starts the thread.
 
@@ -180,9 +184,7 @@ def wait_for_thread_start(
             with agent_state.STATE_LOCK:
                 if not still_owns():
                     return False
-        if (
-            deadline is not None and time.monotonic() > deadline
-        ):  # pragma: no cover — reachable only by stalling start() past the deadline
+        if time.monotonic() > deadline:  # pragma: no cover — only by stalling start()
             return False
         time.sleep(0.01)
     return True
@@ -302,21 +304,73 @@ def _drain_queued_followups(
     return queued, files[: len(queued)]
 
 
-def _end_agent_loop(state: AgentState) -> None:
-    """Under ``STATE_LOCK``: close the follow-up queue and acknowledge any stop.
+def _pending_message_reruns(state: AgentState) -> list[tuple[str, list[Attachment]]]:
+    """Under ``STATE_LOCK``: *state*'s undrained steering messages as ``(prompt, files)`` re-runs.
 
-    The subtask loop is over on every path, so no drain of
-    ``queued_followup_tasks`` can happen any more: from here on a
-    ``<task>`` message must take the plain steering path rather than
-    be queued, echoed and silently dropped.  And a Stop from here on
-    has nothing left to interrupt: acknowledging it up front (as
-    ``_cancel_outcome`` does for a stop caught in the loop) keeps the
-    watchdog from injecting ``KeyboardInterrupt`` into the
-    persistence, auto-commit and presentation that follow; the
+    Consecutive plain messages make one prompt, joined by blank lines
+    in the order they were typed, with their files combined; a
+    ``<task>`` message is a re-run of its own with its own files —
+    never joined with a plain one, which ``parse_task_tags`` would then
+    drop, and never given another message's files.
+    """
+    files_per_message = list(state.pending_user_attachments)
+    # Index-aligned by construction (``_route_prompt_to_owner``); a
+    # message queued by an older path without files gets none.
+    missing = len(state.pending_user_messages) - len(files_per_message)
+    files_per_message.extend([] for _ in range(missing))
+    reruns: list[tuple[str, list[Attachment]]] = []
+    joinable = False  # the last re-run is a plain prompt the next plain message joins
+    for text, files in zip(state.pending_user_messages, files_per_message, strict=False):
+        tagged = contains_task_tags(text)
+        if joinable and not tagged:
+            prompt, pooled = reruns[-1]
+            reruns[-1] = (f"{prompt}\n\n{text}", pooled + list(files))
+        else:
+            reruns.append((text, list(files)))
+        joinable = not tagged
+    return reruns
+
+
+def _end_run_before_loop(state: AgentState) -> None:
+    """Under ``STATE_LOCK``: end a run that returns before its subtask loop.
+
+    No agent step will run any more, so the follow-up queue is closed:
+    from here on a ``<task>`` message must take the plain steering
+    path rather than be queued, echoed and silently dropped.  And a
+    Stop from here on has nothing left to interrupt: acknowledging it
+    up front (as ``_cancel_outcome`` does for a stop caught in the
+    loop) keeps the watchdog from injecting ``KeyboardInterrupt`` into
+    the persistence, auto-commit and presentation that follow; the
     thread's stop binding still aborts their LLM calls cooperatively.
+
+    A ``/xxx help`` answer, a run refused for want of a model or during
+    a merge, and a setup failure all return without the loop, so the
+    loop's ``finally`` (:func:`_end_agent_loop`) never runs for them.
+    ``<task>`` follow-ups typed since ``_cmd_run`` registered the run
+    (the SEA's ``description()`` may block for as long as it likes)
+    were accepted "for after the current task"; with no loop to drain
+    them they stay queued, each with its own files, for the re-dispatch
+    of ``_release_run_state``, which runs them after the tab's leftover
+    plain prompt — exactly as if the user had typed them one second
+    later — instead of clearing them silently.
     """
     state.followup_queue_closed = True
     state.stop_acknowledged = True
+
+
+def _end_agent_loop(state: AgentState) -> None:
+    """Under ``STATE_LOCK``: end the subtask loop on every path.
+
+    Closes the follow-up queue and acknowledges any stop
+    (:func:`_end_run_before_loop`).  A loop that ended normally drained
+    its queue; one that a failure or a Stop cut short aborts the
+    follow-ups still queued (``_run_task_inner``), so they are dropped
+    here rather than handed to the re-dispatch of
+    ``_release_run_state``.
+    """
+    _end_run_before_loop(state)
+    state.queued_followup_tasks.clear()
+    state.queued_followup_files.clear()
 
 
 def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
@@ -409,6 +463,35 @@ def build_task_extra_payload(
         "startTs": start_ms,
         "endTs": end_ms,
     }
+
+
+def _reload_layers(cmd: dict[str, Any], base: Path | None, loaded: list[BaseSea]) -> list[BaseSea]:
+    """:func:`load_layers` for the bare-command fallback, reusing the SEAs already *loaded*.
+
+    The fallback drops the slash SEA and keeps what lay under it (the
+    picker's SEA, loaded once already) plus the tab's prior SEA, if
+    any; only a file not among *loaded* is executed.  Loading the
+    picker's file again would run its import a second time.
+
+    Args:
+        cmd: The ``run`` command after the fallback rewrote its
+            ``seaPath`` (absent, or the tab's prior SEA).
+        base: The tab's model-picker SEA, or ``None``.
+        loaded: The layers :func:`load_layers` built for the slash SEA.
+    """
+    raw_path = cmd.get("seaPath")
+    if raw_path is None or raw_path == "":
+        if base is None:
+            return [BaseSea()]
+        paths = [base]
+    elif isinstance(raw_path, str):
+        paths = [Path(raw_path)]
+        if base is not None and base != paths[0]:
+            paths.insert(0, base)
+    else:
+        raise SeaError(f"SEA field must be a path string, got {type(raw_path).__name__}")
+    by_path = {sea.path: sea for sea in loaded}
+    return [by_path.get(path) or load_sea(path) for path in paths]
 
 
 def _picker_model(seas: list[BaseSea], picker: Path) -> str:
@@ -589,14 +672,22 @@ def decode_attachments(raw: object) -> list[Attachment] | None:
     Returns:
         The decoded attachments, or ``None`` when there are none to send.
     """
-    if not isinstance(raw, list):
-        logger.warning(
-            "Ignoring malformed attachments field of type %s",
-            type(raw).__name__,
-        )
+    entries = _attachment_entries(raw)
+    if entries is None:
         return None
-    out = [a for a in map(decode_attachment, raw) if a is not None]
+    out = [a for a in map(decode_attachment, entries) if a is not None]
     return out or None
+
+
+def _attachment_entries(raw: object) -> list[Any] | None:
+    """Return *raw* when it is a list, else log and return ``None``."""
+    if isinstance(raw, list):
+        return raw
+    logger.warning(
+        "Ignoring malformed attachments field of type %s",
+        type(raw).__name__,
+    )
+    return None
 
 
 def decode_attachment(att: object) -> Attachment | None:
@@ -659,17 +750,14 @@ def pending_attachments(raw: object) -> list[Attachment] | None:
     Returns:
         The pending attachments, or ``None`` when there are none to send.
     """
-    if not isinstance(raw, list):
-        logger.warning(
-            "Ignoring malformed attachments field of type %s",
-            type(raw).__name__,
-        )
+    entries = _attachment_entries(raw)
+    if entries is None:
         return None
     out: list[Attachment] = [
-        PendingAttachment(att) for att in raw if _well_formed_attachment(att)
+        PendingAttachment(att) for att in entries if _well_formed_attachment(att)
     ]
-    if len(out) < len(raw):
-        logger.warning("Skipping %d malformed attachment(s)", len(raw) - len(out))
+    if len(out) < len(entries):
+        logger.warning("Skipping %d malformed attachment(s)", len(entries) - len(out))
     return out or None
 
 
@@ -904,7 +992,6 @@ class _TaskRunnerMixin:
             *,
             discard_if_empty: bool = True,
         ) -> bool: ...
-        def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
 
@@ -970,8 +1057,10 @@ class _TaskRunnerMixin:
             SeaError: When a script is broken, or ``seaCommand`` names
                 no command registered here.
         """
-        overridden: set[str] = set()
-        _slash = slash_command_task(cmd.get("prompt", ""))
+        # The slash SEA is executed once, as a layer below; whether a
+        # bare ``/xxx`` has a default task is read off the loaded layers.
+        prior_sea_path = cmd.get("seaPath")
+        _slash = slash_command(cmd.get("prompt", ""))
         if _slash is not None:
             cmd["displayPrompt"] = cmd["prompt"]
             cmd["prompt"], cmd["seaPath"] = _slash[0], str(_slash[1])
@@ -982,7 +1071,9 @@ class _TaskRunnerMixin:
             command_path = get_command(sea_command)
             if command_path is None:
                 raise SeaError(f"'{sea_command}' is not a registered command on this machine")
-            cmd["seaPath"] = str(command_path)
+            # A registered command wins over the tab's prior SEA, on the
+            # bare-command fallback below too.
+            prior_sea_path = cmd["seaPath"] = str(command_path)
         # The model the tab remembers from its picker is a persisted
         # value of the tab, like the settings the tab sends as wire
         # fields: it fills a missing ``model`` here, before the layers
@@ -1001,6 +1092,19 @@ class _TaskRunnerMixin:
                 cmd["model"] = remembered
         picked = self._picker_sea(cmd)
         layers = load_layers(cmd, base=None if picked is None else picked[1])
+        if (
+            _slash is not None
+            and not _slash[0]
+            and not base_prompt([sea for sea in layers if sea.path == _slash[1]], "")
+        ):
+            # A bare ``/xxx`` whose SEA passes the empty task through
+            # (no default task, unlike ``/sync``) has nothing to run as
+            # the SEA: it stays an ordinary prompt, without the SEA.
+            cmd["prompt"] = cmd.pop("displayPrompt")
+            cmd.pop("seaPath", None)
+            if prior_sea_path is not None:
+                cmd["seaPath"] = prior_sea_path
+            layers = _reload_layers(cmd, None if picked is None else picked[1], layers)
         if picked is not None:
             cmd["model"] = _picker_model(layers, picked[1])
         # A ``channel: True`` run holds its workspace (the account its
@@ -1024,7 +1128,7 @@ class _TaskRunnerMixin:
         # Writes every daemon-side field (tool callables, hooks), so
         # whatever a client sent in them is overwritten rather than read
         # as input.
-        overridden |= apply_sea(cmd, layers)
+        overridden = apply_sea(cmd, layers)
         # A layer's ``model`` setting may name a picker entry — the
         # tab's own ("" or its name: keep the picker's model) or another
         # one, which is executed once here and resolved the same way.
@@ -1101,9 +1205,12 @@ class _TaskRunnerMixin:
             # ``/xxx`` prompt turns into may replace the text (the
             # scheduled ``/recommendations now`` does).  An in-chat
             # cron job and a cron run's sub-tasks say so on the wire.
-            cmd["cronJob"] = bool(cmd.get("cronJob")) or is_unattended_text(
+            # ``_unattended`` is stamped on the agent for
+            # ``cron_agent.is_unattended`` (``ask_user_question`` refuses).
+            cmd["_unattended"] = is_unattended_text(
                 str(cmd.get("prompt", "")) + str(cmd.get("appendToPrompt") or "")
             )
+            cmd["cronJob"] = bool(cmd.get("cronJob")) or cmd["_unattended"]
             try:
                 overridden_fields = self._apply_sea(cmd)
             except SeaError as exc:
@@ -1196,6 +1303,10 @@ class _TaskRunnerMixin:
                 # idempotent for a registered run.
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
+            if state is not None:
+                # Idempotent after a loop that ended on its own; for a
+                # setup failure it is the only end-of-loop call.
+                locked_call(self._state_lock, _end_run_before_loop, state)
             if state is not None and (
                 isinstance(exc, KeyboardInterrupt) or _stop_interrupt_wrapped(exc, state)
             ):
@@ -1302,7 +1413,7 @@ class _TaskRunnerMixin:
             # merge, while ``task_thread`` was still installed): no
             # agent drains them any more, so they are re-submitted
             # below as the tab's next run instead of being dropped.
-            leftover, leftover_files, redispatch, task_id_for_end = locked_call(
+            reruns, redispatch, task_id_for_end = locked_call(
                 self._state_lock,
                 self._release_run_state,
                 state,
@@ -1325,61 +1436,59 @@ class _TaskRunnerMixin:
                 tab_id,
                 client_task_id=client_task_id,
             )
-            # The binding is per THREAD — that is how a model stream
-            # learns about a stop — so it has to end with the run, or
-            # anything this thread does next would inherit it.  It ends
-            # BEFORE the deferred disposal: retiring a closed tab's
-            # worktree auto-commits with an LLM-generated message, and
-            # the model layer turns any request failure into the stop
-            # interrupt while the thread's stop signal is set.  That
-            # interrupt used to escape ``_teardown_tab_resources`` with
-            # the disposal claim (``is_merging``) still set, and every
-            # later main-tree run on the repo was refused with "A
-            # worktree merge is in progress".
+            # End this thread's stop binding HERE too, not only in
+            # ``_run_task_inner``'s cleanup: that cleanup belongs to
+            # the inner try, which begins only after the binding is
+            # made, the task classified and a pending worktree
+            # retired — a Stop landing in that prologue (the
+            # classifier's model call, or ``KeyboardInterrupt("Stopped
+            # during worktree retire")``) unwinds past it with the
+            # cancelled run's set stop signal still bound.  The
+            # deferred disposal below (which may make an LLM call for
+            # the auto-commit message) must not inherit it.
             self.printer._thread_local.stop_event = None
             self._dispose_if_closed(tab_id)
             if redispatch:
-                self._redispatch_leftover_prompts(submitted_cmd, leftover, leftover_files)
+                self._redispatch_leftover_prompts(submitted_cmd, reruns)
 
     def _redispatch_leftover_prompts(
         self,
         cmd: dict[str, Any],
-        leftover: list[str],
-        files: list[Attachment],
+        reruns: list[tuple[str, list[Attachment]]],
     ) -> None:
-        """Re-submit prompts left in ``pending_user_messages`` as the tab's next run.
+        """Re-submit the prompts a finished run left undrained, in order.
 
         Called at the very end of :meth:`_run_task`'s cleanup, once the
         tab's thread slot is free, so :meth:`_cmd_run` takes its
-        fresh-run branch — exactly what would have happened had the
-        user typed the prompt one second later.  The follow-up inherits
-        the finished run's settings as the user submitted them (work
-        dir, model, worktree and auto-commit choices) — not what its
-        SEA pipeline made of them (a ``/xxx`` command's ``seaPath``,
-        a script's pinned fields) — and not its client stamp: the run
-        token (``taskId``) belongs to the submission that has just
-        ended, and the routing key (``_state_key``) to the state that
-        has just been torn down.  Multiple leftovers become one
-        prompt, joined by blank lines, in the order they were typed;
-        the files attached to them are the follow-up's attachments
-        (not the finished run's).
+        fresh-run branch for the first prompt — exactly what would have
+        happened had the user typed it one second later — and queues
+        every further one on that run as a ``<task>`` follow-up, each
+        with its own files.  The follow-ups inherit the finished run's
+        settings as the user submitted them (work dir, model, worktree
+        and auto-commit choices) — not what its SEA pipeline made of
+        them (a ``/xxx`` command's ``seaPath``, a script's pinned
+        fields) — and not its client stamp: the run token (``taskId``)
+        belongs to the submission that has just ended, and the routing
+        key (``_state_key``) to the state that has just been torn down.
 
         Args:
             cmd: The finished run's ``run`` command as submitted
                 (``_run_task``'s pre-SEA snapshot).
-            leftover: The undrained prompts, oldest first.
-            files: The attachments of those prompts.
+            reruns: ``(prompt, attachments)`` pairs from
+                :meth:`_release_run_state`, oldest first.
         """
-        followup = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")}
-        followup["prompt"] = "\n\n".join(leftover)
-        followup["attachments"] = [
-            {"mimeType": att.mime_type, "data": base64.b64encode(att.data).decode("ascii")}
-            for att in files
-        ]
-        try:
-            self._cmd_run(followup)
-        except BaseException:
-            logger.debug("Leftover prompt re-dispatch error", exc_info=True)
+        base = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")}
+        for prompt, files in reruns:
+            followup = dict(base)
+            followup["prompt"] = prompt
+            followup["attachments"] = [
+                {"mimeType": att.mime_type, "data": base64.b64encode(att.data).decode("ascii")}
+                for att in files
+            ]
+            try:
+                self._cmd_run(followup)
+            except BaseException:
+                logger.debug("Leftover prompt re-dispatch error", exc_info=True)
 
     def _release_run_state(
         self,
@@ -1387,7 +1496,7 @@ class _TaskRunnerMixin:
         cmd: dict[str, Any],
         tab_id: str,
         client_task_id: str,
-    ) -> tuple[list[str], list[Attachment], bool, str | None]:
+    ) -> tuple[list[tuple[str, list[Attachment]]], bool, str | None]:
         """Under ``_state_lock``: free *state*'s run slot and end the tab's status.
 
         Clears the thread, stop and answer handles and every per-run
@@ -1406,21 +1515,30 @@ class _TaskRunnerMixin:
                 status event when known.
 
         Returns:
-            ``(leftover, files, redispatch, task_id)``: the prompts typed into
-            the tab after the agent's last step (no agent drains them
-            any more) and their attachments, whether they should be re-submitted as the
-            tab's next run (mirrors ``commands._reruns_after_teardown``
-            plus the stop verdict only known here), and the state's
-            task id for the viewers' status fan-out.
+            ``(reruns, redispatch, task_id)``: the ``(prompt,
+            attachments)`` pairs to re-submit, whether they should be
+            re-submitted as the tab's next run (mirrors
+            ``commands._reruns_after_teardown`` plus the stop verdict
+            only known here), and the state's task id for the viewers'
+            status fan-out.  The messages typed into the tab after the
+            agent's last step (no agent drains them any more) come
+            first (:func:`_pending_message_reruns`); after them the
+            ``<task>`` follow-ups a run that ended before its subtask
+            loop (:func:`_end_run_before_loop`) left queued, re-tagged
+            one by one, each with its own files — never joined with a
+            plain prompt, which ``parse_task_tags`` would then drop.
         """
-        leftover: list[str] = []
-        leftover_files: list[Attachment] = []
+        reruns: list[tuple[str, list[Attachment]]] = []
         redispatch = False
         task_id_for_end: str | None = None
         if state is not None:
-            leftover = list(state.pending_user_messages)
-            leftover_files = list(state.pending_user_attachments)
-            redispatch = bool(leftover) and not (
+            reruns.extend(_pending_message_reruns(state))
+            queued, files = _drain_queued_followups(state, close_if_empty=False)
+            reruns.extend(
+                (f"<task>{task}</task>", attachments)
+                for task, attachments in zip(queued, files, strict=True)
+            )
+            redispatch = bool(reruns) and not (
                 _stop_requested(state)
                 or state.frontend_closed
                 or state.is_subagent
@@ -1432,12 +1550,6 @@ class _TaskRunnerMixin:
             state.pending_user_messages.clear()
             state.pending_user_attachments.clear()
             state.unattributed_prompt_echoes.clear()
-            # Queued ``<task>`` follow-ups that were never drained (the
-            # run failed, was stopped, or the message landed after the
-            # last drain point) must not leak into a later run on the
-            # same tab.
-            state.queued_followup_tasks.clear()
-            state.queued_followup_files.clear()
             # Not redundant with ``_run_task_inner``'s mandatory
             # finally: ``_activate_run`` raises the flag before that
             # try block starts, and a failure in between (early prompt
@@ -1462,10 +1574,10 @@ class _TaskRunnerMixin:
             status_end["taskId"] = client_task_id
         self.printer.broadcast(status_end)
         self._restore_user_model_pick(tab_id)
-        return leftover, leftover_files, redispatch, task_id_for_end
+        return reruns, redispatch, task_id_for_end
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
-        """Put the user's own model back in *tab_id*'s picker.
+        """Under ``_state_lock``: put the user's own model back in *tab_id*'s picker.
 
         A finished agent's ``set_model`` override is display-only, so
         the moment the task stops the picker must show the user's own
@@ -1480,8 +1592,7 @@ class _TaskRunnerMixin:
         Args:
             tab_id: The tab whose picker should be restored.
         """
-        model = locked_call(self._state_lock, self._user_model_for_tab, tab_id)
-        self.printer.restore_model_pick(model, tab_id)
+        self.printer.restore_model_pick(self._user_model_for_tab(tab_id), tab_id)
 
     def _user_model_for_tab(self, tab_id: str) -> str:
         """Under ``_state_lock``: *tab_id*'s own pick, else the last saved or default model."""
@@ -1704,6 +1815,7 @@ class _TaskRunnerMixin:
             error is broadcast to *tab_id*) is ``(False, None)``.
         """
         if state.merge_in_progress():
+            _end_run_before_loop(state)
             self.printer.broadcast(
                 {
                     "type": "error",
@@ -1750,7 +1862,6 @@ class _TaskRunnerMixin:
             key or uuid.uuid4().hex,
             chat_id=str(cmd.get("chatId", "") or ""),
             tab_id=tab_id,
-            conn_id=str(cmd.get("connId", "") or ""),
             server_owned=True,
             stop_event=threading.Event(),
             task_thread=threading.current_thread(),
@@ -1875,6 +1986,10 @@ class _TaskRunnerMixin:
         # ``_run_task``.  Set unconditionally: a reused agent must not
         # keep a previous run's marking.
         agent.is_cron_job = bool(cmd.get("cronJob"))
+        # The verdict ``cron_agent.is_unattended`` reads (``_unattended``
+        # was decided on the submitted text in ``_run_task``, before a
+        # SEA's ``prompt()`` could drop the preamble).
+        agent.is_unattended = bool(cmd.get("_unattended"))
         _open_bare_path = not _sea_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
@@ -1932,6 +2047,10 @@ class _TaskRunnerMixin:
             if help_text is not None:
                 if locked_call(self._state_lock, _stop_requested, state):
                     raise KeyboardInterrupt("Stopped during /xxx help")
+                # The answer is complete: a Stop from here on has nothing
+                # to interrupt, and the follow-ups queued meanwhile run
+                # next (see ``_end_run_before_loop``).
+                locked_call(self._state_lock, _end_run_before_loop, state)
                 self._finish_sea_help_task(
                     state,
                     prompt=display_prompt,
@@ -1943,9 +2062,6 @@ class _TaskRunnerMixin:
                     start_ms=start_ms or int(time.time() * 1000),
                 )
                 return
-
-        from kiss.core.models.model_info import custom_model_config
-        from kiss.core.user_config import build_model_config, load_config
 
         # The run's model configuration, resolved ONCE for the
         # classifier and the run: the client-sent ``modelConfig``,
@@ -1972,6 +2088,7 @@ class _TaskRunnerMixin:
         )
         available = get_available_models()
         if not _endpoint_run and (not available or (model and model not in available)):
+            locked_call(self._state_lock, _end_run_before_loop, state)
             self.printer.broadcast(
                 {
                     **_result_event(
@@ -2047,7 +2164,7 @@ class _TaskRunnerMixin:
                 agent._retire_after_task_saved()
             finally:
                 locked_call(self._state_lock, _set_merge_claim, state, *prior_claim)
-            if stop_event is not None and stop_event.is_set():
+            if locked_call(self._state_lock, _stop_requested, state):
                 raise KeyboardInterrupt("Stopped during worktree retire")
         inherit_worktrees = getattr(agent, "inherit_worktrees", None)
         if callable(inherit_worktrees):
@@ -2102,7 +2219,7 @@ class _TaskRunnerMixin:
             # literal fallback here would be unreachable code that can
             # only drift away from the one authoritative default.
             _cfg_budget = float(_vcfg["max_budget"])
-            _cfg_web = _vcfg.get("use_web_browser", True)
+            _cfg_web = _vcfg["use_web_browser"]
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("useWebTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
@@ -2328,7 +2445,7 @@ class _TaskRunnerMixin:
                 except Exception as e:
                     subtask_failed = True
                     subtask_exc = e
-                    if stop_event is not None and stop_event.is_set():
+                    if locked_call(self._state_lock, _stop_requested, state):
                         # The agent raised while a Stop was pending
                         # (a tool aborted by the stop, typically): the
                         # run is a stop, and acknowledging it here
@@ -2642,9 +2759,19 @@ class _TaskRunnerMixin:
                 tl = getattr(self.printer, "_thread_local", None)
                 if tl is not None:
                     tl.task_id = ""
-                # The run is over, so this thread's stop binding ends
-                # (``_run_task`` clears it again before the deferred
-                # tab disposal).
+                # The binding is per THREAD — that is how a model
+                # stream learns about a stop — so it has to end with
+                # the run, or anything this thread does next would
+                # inherit it.  It ends BEFORE ``_run_task``'s deferred
+                # disposal: retiring a closed tab's worktree
+                # auto-commits with an LLM-generated message, and the
+                # model layer turns any request failure into the stop
+                # interrupt while the thread's stop signal is set.
+                # That interrupt used to escape
+                # ``_teardown_tab_resources`` with the disposal claim
+                # (``is_merging``) still set, and every later
+                # main-tree run on the repo was refused with "A
+                # worktree merge is in progress".
                 self.printer._thread_local.stop_event = None
 
     def _broadcast_setup_result(
@@ -3402,24 +3529,20 @@ class _TaskRunnerMixin:
             state.pending_ask_question = question
         self.printer.broadcast({"type": "askUser", "question": question})
 
-    def _await_user_response(
-        self,
-        q: queue.Queue[str] | None = None,
-    ) -> str:
+    def _await_user_response(self, q: queue.Queue[str] | None) -> str:
         """Block until the user sends a response, checking stop_event periodically.
 
         Args:
-            q: The answer queue to wait on.  When ``None`` it is the
-                calling task's own queue (:meth:`_resolve_task_state`).
-                W2-F9: :meth:`_ask_user_question` passes the queue it
-                already resolved (and drained / registered in the
-                pending-answer registry) so both steps operate on the
-                SAME queue object — re-resolving here opened a TOCTOU
-                window in which the owner tab could be disposed and
-                re-created (closeTab + reopen), making the agent drain
-                and register queue #1 but block on a DIFFERENT queue
-                #2 that no ``userAnswer`` routed to the registry entry
-                would ever fill.
+            q: The answer queue to wait on: the one
+                :meth:`_ask_user_question` already resolved (and drained
+                / registered in the pending-answer registry), so both
+                steps operate on the SAME queue object.  Re-resolving it
+                here opened a TOCTOU window in which the owner tab could
+                be disposed and re-created (closeTab + reopen), making
+                the agent drain and register queue #1 but block on a
+                DIFFERENT queue #2 that no ``userAnswer`` routed to the
+                registry entry would ever fill.  ``None`` (the task is
+                not registered, or its tab is gone) aborts the wait.
 
         Returns:
             The user's answer string.
@@ -3435,9 +3558,6 @@ class _TaskRunnerMixin:
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
-        if q is None:
-            state = self._resolve_task_state()
-            q = state.user_answer_queue if state is not None else None
         if q is None:
             raise KeyboardInterrupt(
                 "User answer queue is missing (tab closed?); aborting wait",

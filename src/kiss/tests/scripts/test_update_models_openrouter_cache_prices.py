@@ -192,6 +192,137 @@ def test_fetch_compute_apply_writes_cache_prices(
     assert [u for u in updates_again if u["name"].startswith("openrouter/")] == []
 
 
+IMAGE_LISTING = {
+    "data": [
+        _or_model(
+            "google/gemini-nano-banana-9",
+            "0.0000015",
+            "0.0000075",
+            context_length=65536,
+            pricing={
+                "prompt": "0.0000015",
+                "completion": "0.0000075",
+                "image_output": "0.00003",
+                "input_cache_read": "0.00000015",
+                "web_search": "0.014",
+            },
+        ),
+    ]
+}
+
+
+def test_image_output_price_flows_to_openrouter_and_direct_gemini_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new image model is born with OpenRouter's ``image_output`` rate, twice.
+
+    The refresh of 2026-10-24 added ``gemini-nano-banana-2.1`` from its
+    OpenRouter twin with only the text prices, so a 1120-token image was
+    billed $0.0084 instead of Google's $0.0336.  Both the ``openrouter/``
+    entry and the direct Gemini entry priced from it must carry
+    ``image_output_price_per_1M``; the direct entry must not copy the
+    twin's cache rate (``model_info`` derives Google's own).
+    """
+    catalog = tmp_path / "MODEL_INFO.json"
+    catalog.write_text("{}")
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    with _listing_server(IMAGE_LISTING) as url:
+        _point_fetch_at(monkeypatch, url)
+        fetched = mod.fetch_openrouter()
+    assert fetched["openrouter/google/gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
+
+    gemini = {"gemini-nano-banana-9": {"context_length": 65536, "source": "gemini"}}
+    updates, new_models = mod.compute_changes({}, fetched, {}, gemini, {}, {})
+    assert updates == []
+    new_by_name = {nm["name"]: nm for nm in new_models}
+    routed = new_by_name["openrouter/google/gemini-nano-banana-9"]
+    assert routed["image_output_price_per_1M"] == 30.0
+    direct = new_by_name["gemini-nano-banana-9"]
+    assert direct["input_price_per_1M"] == 1.5
+    assert direct["output_price_per_1M"] == 7.5
+    assert direct["image_output_price_per_1M"] == 30.0
+    assert direct["needs_pricing"] is False
+    assert "cache_read_price_per_1M" not in direct
+
+    mod.apply_updates_to_file(updates, new_models, [], {}, dry_run=False)
+    written = json.loads(catalog.read_text())
+    assert written["gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
+    assert "cache_read_price_per_1M" not in written["gemini-nano-banana-9"]
+    assert written["openrouter/google/gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
+    assert written["openrouter/google/gemini-nano-banana-9"]["cache_read_price_per_1M"] == 0.15
+
+    monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loaded = model_info._load_model_info()
+    monkeypatch.setattr(model_info, "MODEL_INFO", loaded)
+    # A 1K image (1120 tokens) costs Google's advertised $0.0336, not $0.0084.
+    assert model_info.calculate_cost(
+        "gemini-nano-banana-9", 0, 0, num_image_output_tokens=1120
+    ) == pytest.approx(0.0336)
+    assert model_info.calculate_cost(
+        "openrouter/google/gemini-nano-banana-9", 0, 0, num_image_output_tokens=1120
+    ) == pytest.approx(0.0336)
+
+    # Idempotent: the written catalog reports the field back and nothing changes.
+    current_again = mod.get_current_model_info()
+    assert current_again["gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
+    updates_again, new_again = mod.compute_changes(current_again, fetched, {}, gemini, {}, {})
+    assert [u for u in updates_again if "nano-banana" in u["name"]] == []
+    assert [nm for nm in new_again if "nano-banana" in nm["name"]] == []
+
+
+def test_backfill_of_unpriced_gemini_image_model_copies_image_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct image entry born ``NEW: needs pricing`` gains the image rate on backfill.
+
+    When the model is discovered before its OpenRouter twin lists it, the
+    catalog holds $0/$0; the next refresh prices it from the twin through
+    the ``openrouter-xref`` path, which must carry the image rate too or the
+    entry stays image-blind for good (once priced it is skipped).
+    """
+    catalog = tmp_path / "MODEL_INFO.json"
+    current = {
+        "gemini-nano-banana-9": {
+            "context_length": 65536,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "fc": True,
+            "emb": False,
+            "gen": True,
+            "comment": "NEW: needs pricing",
+        },
+    }
+    catalog.write_text(json.dumps(current))
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    with _listing_server(IMAGE_LISTING) as url:
+        _point_fetch_at(monkeypatch, url)
+        fetched = mod.fetch_openrouter()
+
+    gemini = {"gemini-nano-banana-9": {"context_length": 65536, "source": "gemini"}}
+    updates, new_models = mod.compute_changes(current, fetched, {}, gemini, {}, {})
+    by_name = {u["name"]: u for u in updates}
+    assert by_name["gemini-nano-banana-9"]["source"] == "openrouter-xref"
+    assert by_name["gemini-nano-banana-9"]["changes"] == {
+        "input_price_per_1M": 1.5,
+        "output_price_per_1M": 7.5,
+        "image_output_price_per_1M": 30.0,
+    }
+
+    mod.apply_updates_to_file(updates, new_models, [], current, dry_run=False)
+    written = json.loads(catalog.read_text())["gemini-nano-banana-9"]
+    assert written["image_output_price_per_1M"] == 30.0
+    assert written["comment"] == "NEW"
+    assert "cache_read_price_per_1M" not in written
+
+    monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(model_info, "MODEL_INFO", model_info._load_model_info())
+    assert model_info.calculate_cost(
+        "gemini-nano-banana-9", 0, 0, num_image_output_tokens=1120
+    ) == pytest.approx(0.0336)
+
+
 def test_get_current_model_info_reports_only_stored_cache_prices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -480,7 +480,7 @@ def test_gemini_tool_result_routes_attachment_via_user_message(temp_dir):
     assert attachments[0].mime_type == "image/png"
     assert attachments[0].data == _PNG_1x1
 
-    contents = model._convert_conversation_to_gemini_contents()
+    contents = model._convert_conversation_to_gemini_contents(model._chat_messages())
     last = contents[-1]
     assert last.role == "user"
     has_inline = False

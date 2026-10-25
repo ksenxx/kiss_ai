@@ -10,17 +10,12 @@
 // reply that reloads the list.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, typeInto: input} = require('./simplify2_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children).map(
     el => el.textContent,
   );
-}
-
-function input(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
 function run() {

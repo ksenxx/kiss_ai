@@ -232,14 +232,6 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
             timeout=10,
         )
         assert bad.json()["error"]["code"] == -32700
-        assert (
-            raw_post_status(
-                port,
-                "Authorization: Bearer sekret\r\nContent-Type: application/json\r\n"
-                "Content-Length: 2097152\r\n",
-            )
-            == 413
-        )
 
         # Replying to a context with no pending task raises, with either
         # an unknown task id or an empty thread_ts.

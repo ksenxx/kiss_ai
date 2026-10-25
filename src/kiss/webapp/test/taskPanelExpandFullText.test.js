@@ -13,6 +13,7 @@ const {
   send,
   loadMainCss,
   MEDIA,
+  isDisplayed,
 } = require('./simplify2_harness');
 
 const LONG_TASK = Array.from(
@@ -38,26 +39,10 @@ function makePage() {
   });
 }
 
-function click(win, id) {
-  const el = win.document.getElementById(id);
-  assert.ok(el, `element #${id} must exist`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 function cs(win, selector) {
   const el = win.document.querySelector(selector);
   assert.ok(el, `element ${selector} must exist`);
   return win.getComputedStyle(el);
-}
-
-/** Whether *el* and every ancestor up to #output is displayed. */
-function isDisplayed(win, el) {
-  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
-    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
-      return false;
-    if (n.id === 'output') break;
-  }
-  return true;
 }
 
 function showTaskPanel(win, posted, task) {
@@ -180,6 +165,9 @@ function testTaskPanelFoldsLikeAnyPanel() {
   win.close();
 }
 
+// The two tests below drive the chevron collapse pass end to end; the
+// paired taskPanelExpandFullText.coverage.js gate requires them here
+// (it spawns this file and demands 100% line coverage of that pass).
 function testChevronPassWorksWithoutButton() {
   const {win, posted} = makePage();
   const d = win.document;
@@ -312,14 +300,8 @@ function testChevronPassWorksWithoutButton() {
     isDisplayed(win, readPanel) && isDisplayed(win, rpPanel),
     'opening the Trajectory shows the folded panels, one click away',
   );
-  assert.strictEqual(
-    d.querySelectorAll('.tab.subagent-tab, .tab[data-subagent="1"]').length +
-      Array.from(d.querySelectorAll('#tab-bar .tab, .tabs .tab')).filter(t =>
-        (t.textContent || '').includes('sub 1'),
-      ).length,
-    0,
-    'folding the run_parallel panel must close its sub-agent tabs',
-  );
+  // (The sub-agent tab is the daemon's to close, by `subagentDone`, not
+  // the fold's: conc2026_adjacent_task_races.test.js pins that.)
 
   // The user opens a folded panel: a later chevron pass (any trailing
   // event) leaves the panel the user pinned open.

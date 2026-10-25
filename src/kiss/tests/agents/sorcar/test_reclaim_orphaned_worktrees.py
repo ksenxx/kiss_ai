@@ -591,6 +591,52 @@ class TestReclaimCleanWorktree:
         assert not wt_dir.exists()
 
 
+class TestReclaimLegacySpare:
+    """A pool spare of an older release (``branch.<name>.kiss-spare=1``,
+    no ``kiss-original``) is discarded, never merged; one that was
+    written to externally is preserved."""
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = _make_repo(Path(self.tmpdir) / "repo")
+
+    def teardown_method(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _plant_spare(self, branch: str) -> Path:
+        wt_dir = self.repo / ".kiss-worktrees" / branch.replace("/", "_")
+        assert GitWorktreeOps.create(self.repo, branch, wt_dir)
+        assert _git("config", f"branch.{branch}.kiss-spare", "1", cwd=self.repo).returncode == 0
+        assert GitWorktreeOps.load_spare_marker(self.repo, branch)
+        return wt_dir
+
+    def test_empty_spare_is_removed_without_merging(self) -> None:
+        branch = "kiss/wt-1000-spare"
+        wt_dir = self._plant_spare(branch)
+        head_before = GitWorktreeOps.head_sha(self.repo)
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+
+        assert not wt_dir.exists()
+        assert not GitWorktreeOps.branch_exists(self.repo, branch)
+        assert GitWorktreeOps.head_sha(self.repo) == head_before
+        assert GitWorktreeOps.load_spare_marker(self.repo, branch) is False
+
+    def test_spare_with_external_content_is_preserved(self) -> None:
+        branch = "kiss/wt-1000-spare-written"
+        wt_dir = self._plant_spare(branch)
+        (wt_dir / "external.txt").write_text("someone wrote this\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        head_before = GitWorktreeOps.head_sha(self.repo)
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+
+        assert (wt_dir / "external.txt").exists()
+        assert GitWorktreeOps.branch_exists(self.repo, branch)
+        assert GitWorktreeOps.head_sha(self.repo) == head_before
+        assert not (self.repo / "external.txt").exists()
+
+
 class TestRegisteredWorktreesHelper:
     """Behaviour of the low-level parser."""
 

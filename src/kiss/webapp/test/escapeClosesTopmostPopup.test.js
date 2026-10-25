@@ -37,6 +37,7 @@ function testMenuClosesBeforeTheDrawer() {
 
   escape(win);
   assert.ok(!moreMenu.classList.contains('open'), 'the menu closed');
+  assert.strictEqual(moreBtn.getAttribute('aria-expanded'), 'false');
   assert.strictEqual(doc.activeElement, moreBtn, 'focus went to the button');
   assert.ok(sidebar.classList.contains('open'), 'the drawer stayed open');
 

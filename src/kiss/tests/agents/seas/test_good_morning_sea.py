@@ -37,8 +37,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-_SEA_PATH = Path(sea.__file__).resolve()
-
 FIVE = [
     "Fix the failing parser test in parser.py",
     "Add a changelog entry for /recommendations",
@@ -69,15 +67,6 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     )
     assert "never generated on the fly" in agent.description()
     assert_no_removed_getters(sea)
-
-
-def test_slash_good_morning_resolves_to_the_bundled_sea() -> None:
-    """``/good_morning now`` (the morning cron job's prompt) resolves to this SEA."""
-    assert sea_commands.get_command("good_morning") == _SEA_PATH
-    assert sea_commands.slash_command_task("/good_morning now") == ("now", _SEA_PATH)
-    assert sea_commands.help_text_if_command("/good_morning help") == (
-        GoodMorningSea().description()
-    )
 
 
 def test_stored_recommendations_reads_the_file_only(recommendations_path: Path) -> None:

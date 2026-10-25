@@ -107,8 +107,9 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'claude-fable-5-1' model for all tasks, including software development.",
-        "Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only "
-        "review and debugging of the other model's work.",
+        "Use gpt-6-astra (not codex) through `run_agent(model=\"gpt-6-astra\", "
+        "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
+        "debugging of the other model's work,",
         "Use at most 75% of the task budget in gpt-6-astra",
         "ask the model not to invent new problems",
         "Use the model names literally without hallucinating new model names.",

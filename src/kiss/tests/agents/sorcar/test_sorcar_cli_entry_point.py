@@ -53,6 +53,7 @@ Branch-coverage notes for ``main()``:
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -375,3 +376,51 @@ class TestRealAgentRuns:
             "the terminal answer never reached the agent — "
             "ask_user_question_callback is not wired"
         )
+
+    def test_run_records_its_outcome_in_history(self, tmp_path: Path) -> None:
+        # ``ChatSorcarAgent.run`` allocates the task's history row before
+        # the run (with the "Agent Failed Abruptly" sentinel the daemon's
+        # orphan sweep later rewrites as "process killed"), so a CLI run
+        # that skips the final save leaves that sentinel behind for every
+        # run.  The row must instead carry the run's real outcome: its
+        # summary, verdict, usage and a replayable event stream.
+        work = tmp_path / "work"
+        work.mkdir()
+        proc = _run_cli(
+            [
+                "-m",
+                "gpt-4o-mini",
+                "-b",
+                "1.0",
+                "--work-dir",
+                str(work),
+                "-t",
+                "Immediately call the finish tool with success=true,"
+                " is_continue=false, and summary_in_html '<p>recorded</p>'."
+                " Do nothing else.",
+            ],
+            env=_base_env(tmp_path),
+            cwd=str(tmp_path),
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        db = sqlite3.connect(str(tmp_path / ".kiss" / "history.db"))
+        try:
+            rows = db.execute(
+                "SELECT id, result, success, cost, end_ts FROM task_history"
+            ).fetchall()
+            assert len(rows) == 1, rows
+            task_id, result, success, cost, end_ts = rows[0]
+            assert "recorded" in result, rows
+            assert success == 1, rows
+            assert cost > 0.0 and end_ts > 0, rows
+            kinds = {
+                kind
+                for (kind,) in db.execute(
+                    "SELECT json_extract(event_json, '$.type') FROM events"
+                    " WHERE task_id = ?",
+                    (task_id,),
+                )
+            }
+        finally:
+            db.close()
+        assert {"prompt", "result"} <= kinds, kinds

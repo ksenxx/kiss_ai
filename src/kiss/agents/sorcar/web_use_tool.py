@@ -47,7 +47,7 @@ from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import resolve_tool_path
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.processes import SIGKILL, kill_process_tree, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
 
@@ -77,6 +77,11 @@ _PAGE_READ_NAVIGATIONS = 3
 # How long to wait for a tab the daemon opened in the Browser tab's
 # browser to show up in this tool's own CDP client.
 _LIVE_PAGE_TIMEOUT = 15.0
+
+# How long a dead-driver cleanup waits for the daemon to register a popup
+# this tool followed just before (it maps the popup's target id to a tab
+# id only once its own client has attached to the page).
+_LIVE_TAB_LOOKUP_SECS = 3.0
 
 # Deadline, on this side of the driver, for the round trips to a
 # Browser-tab page that have no usable one of their own: the liveness
@@ -304,6 +309,34 @@ def _watchdog_kill(
     _terminate_pid_escalating(pid, identity)
 
 
+def _driver_is_dead(playwright: Any) -> bool:
+    """Return True iff the driver process behind a sync *playwright* has gone.
+
+    The Node driver can crash under the tool (an internal assertion in
+    its CDP session on a crashed renderer has been seen).  The sync API
+    fails the first call after that (its request dies with the closed
+    pipe) and, unguarded, hangs every later one for good -- the
+    watchdog's kill of Chromium unwedges nothing since no driver observes
+    it.  :mod:`web_stealth` turns those hangs into errors; this check is
+    what lets the tool *recover*: the page's and context's local state
+    (``is_closed()``, ``pages``) never learns of the exit, so without it
+    every later call would fail the same way instead of relaunching.
+    The transport records the failure in ``on_error_future`` (also set
+    when the driver's stdout closes), and its subprocess has a return
+    code once reaped; both are updated only by a call that runs the
+    loop, so a death while idle is noticed by the first call after it.
+    """
+    try:
+        transport = playwright._impl_obj._connection._transport
+    except AttributeError:
+        return False
+    future = getattr(transport, "on_error_future", None)
+    if future is not None and future.done():
+        return True
+    proc = getattr(transport, "_proc", None)
+    return proc is not None and proc.returncode is not None
+
+
 class _TimerGuard:
     """Context manager that starts a ``threading.Timer`` on enter and cancels it on exit."""
 
@@ -437,10 +470,7 @@ def _install_chromium(
     except BaseException:
         # The launcher is alive or an unreaped zombie here, so its pid
         # (the group id) cannot have been recycled.
-        try:
-            kill_process_group(installer.pid, SIGKILL)
-        except OSError:  # pragma: no cover — group already gone, or Windows taskkill failed
-            installer.kill()
+        kill_process_tree(installer)
         installer.wait()
         raise
     if installer.returncode:
@@ -601,6 +631,13 @@ class WebUseTool:
         # _live_tab is the id of the tab this tool opened there.
         self._live = False
         self._live_tab: str | None = None
+        # The Chromium target id of the page driven in the Browser tab,
+        # read when the page is adopted: the daemon's service maps it to
+        # the tab id without this tool's driver (see _live_tab_id).
+        self._live_target: str | None = None
+        # The profile directory the last launch actually used (the
+        # configured one or an ``<dir>_N`` escalation); a test seam.
+        self.effective_user_data_dir: str | None = None
         # The DevTools endpoint _browser is connected to in the Browser
         # tab; a relaunched browser listens on a new one (see _attach_live).
         self._live_cdp_url: str | None = None
@@ -674,6 +711,9 @@ class WebUseTool:
         """Return True iff the current page/context survived (not crashed/closed)."""
         if self._playwright is None or self._context is None or self._page is None:
             return False
+        if _driver_is_dead(self._playwright):
+            # ``is_closed()`` is local state the dead driver never updated.
+            return False
         if self._live:
             # In the Browser tab the user closes tabs and navigates too, and
             # this client only hears of that while it talks to the browser:
@@ -695,9 +735,17 @@ class WebUseTool:
             except Exception:  # noqa: BLE001 - closed, exited, crashed, or not answering
                 logger.debug("Exception caught", exc_info=True)
             # The round trip delivers a crash or an exit to the handlers
-            # that drop the page.
-            if self._page is None:
+            # that drop the page -- or is the first to learn that the
+            # driver itself died while the tool was idle.
+            if self._page is None or _driver_is_dead(self._playwright):
                 return False
+            if self._live_tab is None:
+                # The tab of a followed popup or a switched-to page is
+                # learned while the driver can still be asked (the daemon
+                # registers a popup a moment after the tool adopts it):
+                # once the driver has died, an unidentified tab could not
+                # be closed (:meth:`_discard_dead_driver`).
+                self._live_tab_id()
         try:
             return not self._page.is_closed()
         except Exception:  # pragma: no cover — Playwright internals rarely throw here
@@ -713,9 +761,15 @@ class WebUseTool:
         still reports live, wedging every later call.  The per-page
         state is reset with it — the element ids of the old page, the
         pointer position, and the Browser-tab id (resolved again from
-        the new page when needed, see :meth:`_live_tab_id`), so the
-        hang watchdog interrupts the page it is driving, not the one
-        it left.  Adopting the current page again changes nothing.
+        the new page by the next call's :meth:`_is_alive`, or when
+        needed, see :meth:`_live_tab_id`), so the hang watchdog
+        interrupts the page it is driving, not the one it left.  In the
+        Browser tab the new page's target id is read now, while the
+        driver can be asked: a popup the daemon has not registered yet
+        has no tab id at this point, and a driver that dies before the
+        next call could not be asked for anything, yet the tab must
+        still be identifiable to be closed (:meth:`_discard_dead_driver`).
+        Adopting the current page again changes nothing.
         """
         if page is self._page:
             return
@@ -723,7 +777,13 @@ class WebUseTool:
         self._elements = []
         self._mouse_xy = None
         self._live_tab = None
+        self._live_target = None
         page.on("crash", self._on_page_crash)
+        if self._live:
+            try:
+                self._live_target = self._target_id(page)
+            except Exception:  # noqa: BLE001 - the page closed under us
+                logger.debug("Exception caught", exc_info=True)
 
     def _on_page_crash(self, _page: Any = None) -> None:
         """Handle a renderer (page) crash without dropping the browser reference.
@@ -867,7 +927,8 @@ class WebUseTool:
         """
         if self._live_tab is None and self._page is not None:
             try:
-                self._live_tab = self._live_browser.tab_for_target(self._target_id(self._page))
+                target = self._live_target or self._target_id(self._page)
+                self._live_tab = self._live_browser.tab_for_target(target)
             except Exception:  # noqa: BLE001 - the page is gone
                 logger.debug("Exception caught", exc_info=True)
         return self._live_tab
@@ -884,7 +945,13 @@ class WebUseTool:
                 self._page.close()
             except Exception:  # noqa: BLE001 - closed by the user meanwhile
                 logger.debug("Could not close the Browser tab's page", exc_info=True)
+        if self._playwright is not None and _driver_is_dead(self._playwright):
+            # The liveness probe (or the close) was the first to learn that
+            # the driver died; disconnecting through it would never return.
+            self._discard_dead_driver(close_live_tab=close_tab)
+            return
         self._live_tab = None
+        self._live_target = None
         self._cdp_sessions = {}
         self._disconnect_live()
         self._on_browser_lost()
@@ -918,7 +985,13 @@ class WebUseTool:
         timer covers the remaining failure mode: a graceful close that
         HANGS (never returns) — after ``_CLOSE_WATCHDOG_SECS`` it kills
         the browser process directly, which also unwedges the hung call.
+        The one hang that kill cannot unwedge, a close sent to a driver
+        that has itself exited, is never attempted: a dead driver is
+        discarded whole (:meth:`_discard_dead_driver`).
         """
+        if self._playwright is not None and _driver_is_dead(self._playwright):
+            self._discard_dead_driver(close_live_tab=not keep_live_tab)
+            return
         if self._live:
             self._detach_live(close_tab=not keep_live_tab)
             return
@@ -937,6 +1010,12 @@ class WebUseTool:
             for obj in (self._context, self._browser):
                 if obj is None:
                     continue
+                if _driver_is_dead(self._playwright):
+                    # A driver that died while the tool was idle is first
+                    # noticed by the close before this one, which fails;
+                    # the next call into it would never return.
+                    self._discard_dead_driver(close_live_tab=False)
+                    return
                 try:
                     obj.close()
                 except Exception:
@@ -950,6 +1029,56 @@ class WebUseTool:
                 watchdog.cancel()
         self._kill_browser_process()
         self._on_browser_lost()
+
+    def _discard_dead_driver(self, close_live_tab: bool) -> None:
+        """Drop a Playwright whose driver process died under the tool.
+
+        No graceful close goes to a dead driver (it would never return,
+        see :func:`_driver_is_dead`): Chromium is killed directly when
+        this tool launched it (in the Browser tab the browser is the
+        daemon's and no pid is recorded), every reference is dropped and
+        the driver stopped, so the next call starts a fresh driver and
+        browser instead of wedging the task thread forever.  ``stop()``
+        on a dead driver returns at once (its transport already finished).
+
+        Args:
+            close_live_tab: In the Browser tab, also close this tool's tab
+                on every surface -- through the daemon's service, the only
+                way left without a driver.  False leaves it in front of
+                the user (end of a task).
+        """
+        logger.warning(
+            "Playwright driver exited under the browser tool; discarding it"
+            " and relaunching on the next call"
+        )
+        playwright, self._playwright = self._playwright, None
+        live_tab, self._live_tab = self._live_tab, None
+        target, self._live_target = self._live_target, None
+        self._cdp_sessions = {}
+        if self._live and close_live_tab:
+            try:
+                if live_tab is None and target is not None:
+                    # A popup followed just before the driver died: the
+                    # daemon knows the tab by the target id read at adoption
+                    # -- from the moment its own client has attached to the
+                    # popup, which may still be under way.
+                    deadline = time.monotonic() + _LIVE_TAB_LOOKUP_SECS
+                    while (
+                        live_tab := self._live_browser.tab_for_target(target)
+                    ) is None and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                if live_tab is None:
+                    logger.warning("The Browser tab of the dead driver's page is unknown; it stays")
+                else:
+                    self._live_browser.close(live_tab)
+            except Exception:  # noqa: BLE001 - closed by the user meanwhile
+                logger.debug("Could not close the Browser tab's page", exc_info=True)
+        self._kill_browser_process()
+        self._on_browser_lost()
+        try:
+            playwright.stop()
+        except Exception:
+            logger.debug("Stopping the dead Playwright driver failed", exc_info=True)
 
     def _kill_browser_process(self) -> None:
         """Ensure the recorded Chromium OS process is dead, escalating to signals.
@@ -1011,6 +1140,14 @@ class WebUseTool:
         """
         if self._is_alive():
             return
+        if self._playwright is not None and _driver_is_dead(self._playwright):
+            # Before anything consults the dead driver's local state
+            # (``context.pages``, a Browser-tab connection that still
+            # reads as connected): drop it, a fresh one starts below.  The
+            # Browser tab it drove is closed, ``_attach_live`` opens a new
+            # one rather than leaving the old one adrift in front of the
+            # user.
+            self._discard_dead_driver(close_live_tab=True)
         if self._live:
             # The user closed the tab (or the browser exited): open a new one.
             self._attach_live()
@@ -1094,7 +1231,7 @@ class WebUseTool:
         finally:
             _activate_app(prev_app)
 
-    def _clean_singleton_locks(self, profile_dir: str | None = None) -> None:
+    def _clean_singleton_locks(self, profile_dir: str) -> None:
         """Remove stale Singleton* files from a previously crashed Chromium.
 
         Chromium writes Singleton{Lock,Cookie,Socket} when a persistent profile
@@ -1103,14 +1240,10 @@ class WebUseTool:
         recreates the files during startup.
 
         Args:
-            profile_dir: Directory to clean.  Falls back to ``self.user_data_dir``
-                when *None*.
+            profile_dir: The profile directory to clean.
         """
-        target = profile_dir or self.user_data_dir
-        if not target:
-            return
         for name in _SINGLETON_FILES:
-            path = Path(target) / name
+            path = Path(profile_dir) / name
             try:
                 if path.is_symlink() or path.exists():
                     path.unlink()

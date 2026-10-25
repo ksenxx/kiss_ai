@@ -142,6 +142,35 @@ class TestAnthropicInitializeClosesTheReplacedClient:
         assert not client.is_closed()
 
 
+class TestOpenAIInitializeClosesTheReplacedClient:
+    """Same contract for the OpenAI adapter: a rebuilt client closes the old one."""
+
+    def test_changed_api_key_closes_the_old_client(self) -> None:
+        """A new API key rebuilds the client and closes the old pool."""
+        model = OpenAICompatibleModel("gpt-under-test", base_url="http://127.0.0.1:9", api_key="k1")
+        model.initialize("first run")
+        old = model.client
+        assert old is not None and not old.is_closed()
+
+        model.api_key = "k2"
+        model.initialize("second run")
+
+        assert model.client is not old
+        assert old.is_closed()
+        assert not model.client.is_closed()
+
+    def test_unchanged_inputs_keep_the_open_client(self) -> None:
+        """Same inputs: the client is reused and stays open."""
+        model = OpenAICompatibleModel("gpt-under-test", base_url="http://127.0.0.1:9", api_key="k1")
+        model.initialize("first run")
+        client = model.client
+
+        model.initialize("second run")
+
+        assert model.client is client
+        assert not client.is_closed()
+
+
 def _read_file(path: str, count: int = 3, tags: list[str] | None = None, extra=None) -> str:  # type: ignore[no-untyped-def]
     """Read a file.
 

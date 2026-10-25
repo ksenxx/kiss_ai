@@ -24,7 +24,6 @@
 // The real media/chat.html + panelCopy.js + api.js + mobileSwipe.js +
 // main.js are booted in jsdom; nothing under test is mocked.
 
-/* global require, __dirname, console */
 'use strict';
 
 const assert = require('assert');
@@ -305,29 +304,9 @@ function testParentTaskDoneAfterSubagentReportSwitches() {
   console.log('  ok - the parent task_done focuses its report as before');
 }
 
-function testClickingAFilePathStillSwitches() {
-  // handleFileContent is also the "user clicked a file path" path; that
-  // is a genuine user action and must keep focusing even mid-task.
-  const {win} = bootParallelRun(1, makePage());
-
-  send(win, {
-    type: 'fileContent',
-    path: '/tmp/opened.txt',
-    name: 'opened.txt',
-    content: 'hello from the editor',
-  });
-
-  const fileTab = contentTabFor(win, 'opened.txt');
-  assert.ok(fileTab, 'clicking a file path must open a content tab');
-  assert.strictEqual(
-    activeTabId(win),
-    fileTab.id,
-    'REGRESSION - a user-requested file must still switch to its tab',
-  );
-
-  win.close();
-  console.log('  ok - a user-opened file still switches to its tab');
-}
+// The "a user-opened file still switches to its tab" guard lives in
+// subagentDoneAdjacencyNoReport.test.js
+// (testUserFileOpenStillFocusesAfterSubagentDone).
 
 function main() {
   console.log('subagentReportNoTabSwitch.test.js');
@@ -338,7 +317,6 @@ function main() {
   testTaskDoneStillSwitchesToTheReport();
   testTerminalErrorEventsStillSwitchToTheReport();
   testParentTaskDoneAfterSubagentReportSwitches();
-  testClickingAFilePathStillSwitches();
   console.log('subagentReportNoTabSwitch.test.js: all tests passed');
 }
 

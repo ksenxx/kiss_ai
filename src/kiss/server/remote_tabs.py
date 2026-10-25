@@ -41,8 +41,12 @@ What else the stream carries:
 * **The binding.**  ``tabMachine {tabId, machine}`` tells every surface
   which machine a tab is bound to (on bind, on unbind, and on
   ``ready``), so the chat header's drop-down agrees across surfaces.
-  The binding is also told to :class:`~kiss.server.remote_views.RemoteViews`,
-  which keeps a view stream to the machine open while a tab is bound
+  A sub-agent tab that joins a stream (its ``resumeSession``, or an
+  ``openSubagentTab`` a replay announced) is told the same way: the
+  drop-down shows the machine for the sub-agent tab as for its
+  parent, not this machine.  The binding is also told to
+  :class:`~kiss.server.remote_views.RemoteViews`, which keeps a view
+  stream to the machine open while a tab is bound
   there: the Browser tab an agent of the machine opens for the user
   (``show_browser``, a sign-in hand-off) reaches this daemon's
   surfaces over it.
@@ -366,7 +370,13 @@ class RemoteTabs:
         self._lock = threading.Lock()
 
     def machine_of(self, tab_id: str) -> str:
-        """Return the name of the machine *tab_id* is bound to ("" when it runs here)."""
+        """Return the name of the machine *tab_id* is bound to ("" when it runs here).
+
+        Test probe only: the surfaces learn a tab's machine from the
+        ``tabMachine`` announcement, and the server routes through
+        :meth:`route`; the tests under ``src/kiss/tests/server`` read the
+        binding here.
+        """
         with self._lock:
             tab = self._tabs.get(tab_id)
         return tab.machine.name if tab is not None else ""
@@ -639,10 +649,15 @@ class RemoteTabs:
             self._end_stream(ended, orphans)
 
     def adopt(self, tab: RemoteTab, sub_tab_id: str) -> None:
-        """Map the sub-agent tab *sub_tab_id* a replay announced to *tab*'s stream."""
+        """Map the sub-agent tab *sub_tab_id* a replay announced to *tab*'s stream.
+
+        The tab's binding is announced as a bound tab's is: the
+        surfaces show the machine for the sub-agent tab too.
+        """
         with self._lock:
             if self._tabs.get(tab.tab_id) is tab:
                 self._tabs[sub_tab_id] = tab
+        self._announce(sub_tab_id, tab)
 
     def _resume(self, tab_id: str, task_id: str, conn_id: str, cmd: dict[str, Any]) -> bool:
         """Route a ``resumeSession``: a machine's chat binds the tab, a sub-agent task's joins it.
@@ -707,6 +722,12 @@ class RemoteTabs:
             self._end_stream(ended, orphans)
         if tab is None:
             return False
+        # The tab is the stream's machine's from here on (a sub-agent
+        # tab joining its parent's stream, or a root tab moved to
+        # another): told before its transcript, as a bound tab's
+        # binding precedes its frames, so the chat header's drop-down
+        # shows the machine for the sub-agent tab as for its parent.
+        self._announce(tab_id, tab)
         self._forward(tab, tab_id, cmd)
         return True
 
@@ -718,9 +739,22 @@ class RemoteTabs:
         arrive.  A stream carrying a sub-agent run of a local task has no tab of its own
         to replay: the client gets the run's ``new_tab`` again (if it
         is still running) and opens and resumes the nested tab itself.
+        The sub-agent tabs on a stream (:attr:`RemoteTab.tab_ids`) are
+        bound to its machine too.  Every binding (a bound tab's, then
+        its sub-agent tabs': the order they were mapped in) is told
+        before any transcript is asked for: a replayed transcript
+        (and the ``openSubagentTab`` it carries for a sub-agent tab the
+        stream already knows, which announces nothing) never reaches
+        the client ahead of the binding its file links are checked on.
         """
         with self._lock:
-            tabs = {t.tab_id: t for t in self._tabs.values()}
+            mapped = list(self._tabs.items())
+        tabs = {t.tab_id: t for _, t in mapped}
+        for tab_id, tab in mapped:
+            # A stream carrying a local task's sub-agent run has no
+            # tab of its own, only the sub-agent tabs that joined it.
+            if tab_id != tab.tab_id or not tab.subagent:
+                self._replay_binding(conn_id, tab_id, tab)
         for tab_id, tab in tabs.items():
             if tab.subagent:
                 # Under the lock retirement takes (as a relayed frame
@@ -729,7 +763,6 @@ class RemoteTabs:
                     if tab.spawn and not tab.retired:
                         self.deliver_to(conn_id, tab.spawn)
                 continue
-            self._replay_binding(conn_id, tab_id, tab)
             resume: dict[str, Any] = {"type": "resumeSession", "tabId": tab_id}
             with tab.lock:
                 if not tab.chat_id:

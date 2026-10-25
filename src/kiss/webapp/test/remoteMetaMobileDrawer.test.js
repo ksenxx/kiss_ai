@@ -30,6 +30,13 @@ const {
 const POLL_MS = 5000;
 
 const {makeRunner} = require('./ui_antipattern_harness');
+const {
+  click,
+  drawerOpen,
+  overlayOpen,
+  pollCount,
+  lastPoll,
+} = require('./remote_drawer_helpers');
 
 const {test, report} = makeRunner();
 
@@ -40,47 +47,13 @@ function makePage(opts) {
   const {win, posted} = makeHarnessPage({
     bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
-    sourceUrl: 'metadrawer-main.js',
     beforeScripts(win) {
       stubRaf(win);
       setDesktop = fakeMatchMedia(win, desktopMatches);
       timers = fakeIntervals(win);
     },
   });
-  return {
-    win,
-    posted,
-    setDesktop,
-    tick: timers.tick,
-    intervals: timers.intervals,
-  };
-}
-
-function click(win, id) {
-  win.document
-    .getElementById(id)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-function drawerOpen(win) {
-  return win.document.getElementById('meta-panel').classList.contains('open');
-}
-
-function overlayOpen(win) {
-  return win.document.getElementById('meta-overlay').classList.contains('open');
-}
-
-function polls(wv) {
-  return wv.posted.filter(m => m.type === 'getTaskUpdate');
-}
-
-function pollCount(wv) {
-  return polls(wv).length;
-}
-
-function lastPoll(wv) {
-  const all = polls(wv);
-  return all[all.length - 1];
+  return {win, posted, setDesktop, tick: timers.tick};
 }
 
 async function main() {

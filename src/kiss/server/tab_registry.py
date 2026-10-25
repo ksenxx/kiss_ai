@@ -93,9 +93,26 @@ def _clean_str(value: Any, max_len: int = 0) -> str:
     if not isinstance(value, str):
         return ""
     out = value.strip()
-    if max_len and len(out) > max_len:
-        out = out[:max_len]
-    return out
+    return out[:max_len] if max_len else out
+
+
+def _entry(
+    tab_id: str,
+    chat_id: str = "",
+    title: str = "",
+    work_dir: str = "",
+    scope_work_dir: str = "",
+    task_id: str = "",
+) -> dict[str, str]:
+    """Return a registry entry (every field already cleaned; a blank title reads ``new chat``)."""
+    return {
+        "tabId": tab_id,
+        "chatId": chat_id,
+        "title": title or "new chat",
+        "workDir": work_dir,
+        "scopeWorkDir": scope_work_dir,
+        "taskId": task_id,
+    }
 
 
 def _clean_work_dir(value: Any) -> str:
@@ -151,19 +168,14 @@ def _sanitize_entries(
                 continue
             seen_chats.add(chat_id)
         seen.add(tab_id)
-        out.append({
-            "tabId": tab_id,
-            "chatId": chat_id,
-            "title": (
-                _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
-                or "new chat"
-            ),
-            "workDir": _clean_work_dir(entry.get("workDir")),
-            "scopeWorkDir": _clean_work_dir(entry.get("scopeWorkDir")),
-            "taskId": (
-                _clean_str(entry.get("taskId")) if keep_task_id else ""
-            ),
-        })
+        out.append(_entry(
+            tab_id,
+            chat_id,
+            _clean_str(entry.get("title"), _MAX_TITLE_CHARS),
+            _clean_work_dir(entry.get("workDir")),
+            _clean_work_dir(entry.get("scopeWorkDir")),
+            _clean_str(entry.get("taskId")) if keep_task_id else "",
+        ))
     return out
 
 
@@ -501,14 +513,11 @@ class TabRegistry:
                 _MAX_TABS, tab_id,
             )
             return OpenTabOutcome.FULL
-        self._tabs.append({
-            "tabId": tab_id,
-            "chatId": "",
-            "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
-            "workDir": _clean_work_dir(work_dir),
-            "scopeWorkDir": "",
-            "taskId": "",
-        })
+        self._tabs.append(_entry(
+            tab_id,
+            title=_clean_str(title, _MAX_TITLE_CHARS),
+            work_dir=_clean_work_dir(work_dir),
+        ))
         self._bump_generation_locked(tab_id)
         self._save_locked()
         return OpenTabOutcome.OPENED
@@ -788,12 +797,7 @@ class TabRegistry:
         if entry is None:
             if not create or len(self._tabs) >= _MAX_TABS:
                 return False, [], 0
-            entry = {
-                "tabId": tab_id, "chatId": "",
-                "title": "new chat", "workDir": "",
-                "scopeWorkDir": "",
-                "taskId": "",
-            }
+            entry = _entry(tab_id)
             self._tabs.append(entry)
             changed = True
         # Every publication — even one that changes no field —

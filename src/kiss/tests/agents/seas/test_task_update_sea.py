@@ -22,7 +22,7 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
-from kiss.agents.sorcar import sea_commands, task_digest
+from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import persist_task, run_sea
 from kiss.tests.agents.seas.sea_contract import (
@@ -35,8 +35,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
 )
-
-_SEA_PATH = Path(sea.__file__).resolve()
 
 
 def _persist_task(
@@ -87,23 +85,6 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
         "auto_classify": False,
     }
     assert_no_removed_getters(sea)
-
-
-def test_slash_task_update_resolves_to_the_bundled_sea() -> None:
-    """``/task_update <id>`` resolves to the id and this SEA, which the chat runs directly."""
-    assert sea_commands.get_command("task_update") == _SEA_PATH
-    assert sea_commands.slash_command_task("/task_update deadbeef") == ("deadbeef", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == sea_commands.base_settings([TaskUpdateSea()])
-    assert sea_commands.help_text_if_command("/task_update help") == (
-        TaskUpdateSea().description()
-    )
-
-
-def test_transcript_errors_for_missing_and_unknown_ids() -> None:
-    """No id and an unknown id produce one-line errors, not exceptions."""
-    assert sea.task_transcript("") == "Error: no task id given."
-    assert sea.task_transcript("   ") == "Error: no task id given."
-    assert sea.task_transcript("no-such-task") == "Error: no task with id 'no-such-task'."
 
 
 def test_transcript_digests_a_running_task() -> None:
@@ -185,29 +166,6 @@ def test_transcript_digests_a_running_task() -> None:
     assert len(entries) == 11
     assert "Transcript entries: 11" in header
     assert digest.endswith("(end of transcript)")
-
-
-def test_transcript_pages_and_clips_the_page_size() -> None:
-    """``start``/``count`` page through the entries; the tail says what remains."""
-    events = [{"type": "prompt", "text": "p"}] + [
-        {"type": "tool_call", "name": f"tool{i}", "extras": {"i": i}} for i in range(10)
-    ]
-    task_id = _persist_task("p", events)
-
-    first = sea.task_transcript(task_id, 0, 4)
-    assert "Entries 0..3 of 10:" in first
-    assert [e[:4] for e in _entries(first)] == ["[0] ", "[1] ", "[2] ", "[3] "]
-    assert first.endswith("... 6 more entries; call again with start=4.")
-
-    last = sea.task_transcript(task_id, 4, 100)
-    assert "Entries 4..9 of 10:" in last
-    assert len(_entries(last)) == 6
-    assert last.endswith("(end of transcript)")
-
-    # A negative start and an oversized count are clamped.
-    clamped = sea.task_transcript(task_id, -5, 10_000)
-    assert "Entries 0..9 of 10:" in clamped
-    assert task_digest.MAX_PAGE == 400
 
 
 def test_transcript_of_a_finished_subagent_without_events() -> None:

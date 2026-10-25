@@ -31,7 +31,7 @@ function makeClockedPage() {
   return {win, posted, clock, advance};
 }
 
-async function testForeignTabStatusMustNotClobberActiveTimer() {
+function testForeignTabStatusMustNotClobberActiveTimer() {
   const {win, posted, clock, advance} = makeClockedPage();
 
   const ready = posted.find(m => m.type === 'ready');
@@ -73,7 +73,7 @@ async function testForeignTabStatusMustNotClobberActiveTimer() {
   );
 }
 
-async function testBackgroundLocalTabStatusKeepsOwnT0() {
+function testBackgroundLocalTabStatusKeepsOwnT0() {
   const {win, posted, clock, advance} = makeClockedPage();
   const ready = posted.find(m => m.type === 'ready');
   const activeId = ready.tabId;
@@ -114,18 +114,12 @@ async function testBackgroundLocalTabStatusKeepsOwnT0() {
   );
 }
 
-async function runTests() {
-  await testForeignTabStatusMustNotClobberActiveTimer();
-  await testBackgroundLocalTabStatusKeepsOwnT0();
+try {
+  testForeignTabStatusMustNotClobberActiveTimer();
+  testBackgroundLocalTabStatusKeepsOwnT0();
+  console.log('\n2 passed, 0 failed');
+  process.exit(0);
+} catch (err) {
+  console.error('FAIL:', err && err.message ? err.message : err);
+  process.exit(1);
 }
-
-runTests().then(
-  () => {
-    console.log('\n2 passed, 0 failed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.message ? err.message : err);
-    process.exit(1);
-  },
-);

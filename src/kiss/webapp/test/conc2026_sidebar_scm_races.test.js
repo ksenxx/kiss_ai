@@ -23,19 +23,18 @@
 'use strict';
 
 const assert = require('assert');
+const {send, click, ofType} = require('./simplify2_harness');
 const {
-  makePage: makeChatPage,
-  send,
-  click,
-  stubRaf,
-  fakeMatchMedia,
-  ofType,
-} = require('./simplify2_harness');
-const {
+  WD,
+  makePage: makeHarnessPage,
   makeRunner,
   byId,
   showSection,
   rightClick,
+  all,
+  menuItem,
+  openExplorer,
+  explorerRow,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
@@ -43,70 +42,15 @@ const {test, report} = makeRunner();
 const pages = [];
 
 function makePage() {
-  return makeChatPage({
-    bodyClass: 'remote-chat',
-    extraScripts: [
-      'marked.min.js',
-      'contentContextMenu.js',
-      'treeContextMenu.js',
-    ],
-    sourceUrl: 'conc2026-races-main.js',
-    beforeScripts(win) {
-      pages.push(win);
-      stubRaf(win);
-      fakeMatchMedia(win, true);
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {writeText: () => Promise.resolve()},
-        configurable: true,
-      });
-      // Native dialogs are gone from main.js; any call is a regression.
-      win.prompt = () => {
-        throw new Error('window.prompt must not be called');
-      };
-      win.confirm = () => {
-        throw new Error('window.confirm must not be called');
-      };
-    },
-  });
+  const page = makeHarnessPage();
+  pages.push(page.win);
+  return page;
 }
 
-const WD = '/ws/repo';
 const WD2 = '/ws/other';
 
 function pinWorkspace(win, wd) {
   send(win, {type: 'configData', config: {work_dir: wd || WD}});
-}
-
-function rows(win, sel) {
-  return Array.from(win.document.querySelectorAll(sel));
-}
-
-function menuItem(win, label) {
-  return rows(win, '#sidebar-context-menu .tree-ctx-item').find(
-    el => el.querySelector('.tree-ctx-label').textContent === label,
-  );
-}
-
-/** Open the Explorer on WD and answer its root listing with *entries*. */
-function openExplorer(win, posted, entries) {
-  pinWorkspace(win);
-  showSection(win, 'meta-explorer');
-  const list = ofType(posted, 'listDir');
-  const req = list[list.length - 1];
-  send(win, {
-    type: 'dirListing',
-    token: req.token,
-    path: req.path,
-    root: req.path,
-    entries,
-  });
-  return req;
-}
-
-function explorerRow(win, p) {
-  return win.document.querySelector(
-    '.explorer-row[data-explorer-path="' + p + '"]',
-  );
 }
 
 const SHA_A = 'a'.repeat(40);
@@ -168,7 +112,7 @@ function answerScm(win, posted, wd, commits) {
 }
 
 function commitRow(win, sha) {
-  return rows(win, '#scm-graph .scm-commit').find(
+  return all(win, '#scm-graph .scm-commit').find(
     el => el.dataset.scmSha === sha,
   );
 }

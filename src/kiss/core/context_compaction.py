@@ -51,6 +51,14 @@ COMPACTION_STEP_TOKENS = 100_000
 (the default of ``Config.compaction_step_tokens``).
 Production sessions grew 2-5k tokens a step, so 100k is 20-50 steps of
 warm cache between two forced cache misses."""
+COMPACTION_MIN_STEP_GAP = 30
+"""Steps that must pass after a compaction before the next one is
+considered, whatever the context did meanwhile.  Every compaction is a
+full cache miss, so two of them a few steps apart pay twice for one
+batch of stale outputs; waiting lets more results age out of the kept
+window, so the next compaction is larger and rarer (the 7-day audit of
+2026-10-24 priced the 8 compactions of six coding tasks at $0.40 to
+$1.33 each)."""
 KEEP_RECENT_TOOL_RESULTS = 6
 """The newest tool results are never compacted (nor is anything appended
 after the last assistant turn, which the model has not seen yet).  The
@@ -159,8 +167,6 @@ def make_stub(text: str, preview_chars: int = STUB_PREVIEW_CHARS) -> str:
 def plan_compaction(
     conversation: list[Any],
     keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
-    min_chars: int = MIN_COMPACT_CHARS,
-    protected_tools: frozenset[str] = PROTECTED_TOOLS,
 ) -> list[tuple[dict[str, Any], str, str]]:
     """Select the old, large tool outputs a compaction would stub, without editing.
 
@@ -168,8 +174,8 @@ def plan_compaction(
         conversation: The model conversation (any of the three shapes in
             the module docstring; unknown messages are ignored).
         keep_recent: Number of newest tool results left untouched.
-        min_chars: Results shorter than this are left untouched.
-        protected_tools: Tool names whose results are never compacted.
+            Results of at most :data:`MIN_COMPACT_CHARS` characters and
+            those of the :data:`PROTECTED_TOOLS` are never compacted.
 
     Returns:
         ``(holder, key, stub)`` triples such that ``holder[key]`` is a
@@ -184,9 +190,9 @@ def plan_compaction(
     plan: list[tuple[dict[str, Any], str, str]] = []
     for holder, key, call_id in candidates:
         text = holder[key]
-        if len(text) <= min_chars or text.startswith(STUB_PREFIX):
+        if len(text) <= MIN_COMPACT_CHARS or text.startswith(STUB_PREFIX):
             continue
-        if names.get(call_id, "") in protected_tools:
+        if names.get(call_id, "") in PROTECTED_TOOLS:
             continue
         plan.append((holder, key, make_stub(text)))
     return plan

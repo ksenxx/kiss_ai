@@ -607,6 +607,7 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
     daemon = _Daemon(home)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", daemon.endpoint_file)
     release = threading.Event()
+    slow_started = threading.Event()
     parent_steps: list[str] = []
     children_seen: list[str] = []
 
@@ -624,6 +625,7 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
             # and the kill is CONFIRMED by its terminal status.
             if "slow" not in children_seen:
                 children_seen.append("slow")
+                slow_started.set()
             if release.is_set():
                 return finish_response("slow child done")
             return tool_call_response("Bash", {"command": "sleep 0.3"})
@@ -645,6 +647,10 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
         if step == 4:
             return tool_call_response("agent_job", {"job_id": ids[1], "action": "tail"})
         if step == 5:
+            # Kill the slow child while it RUNS (what the test is about):
+            # on a loaded machine it may not have reached its first model
+            # call yet when the parent gets here.
+            slow_started.wait(60)
             return tool_call_response("agent_job", {"job_id": ids[1], "action": "kill"})
         if step == 6:
             return tool_call_response("agent_job", {"job_id": "agent-00000000", "action": "tail"})

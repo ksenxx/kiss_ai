@@ -20,9 +20,10 @@ import time
 from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
-    begin_tool_call,
     drain_pending_interrupt,
     interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
     unregister_tool_call,
 )
 
@@ -53,7 +54,8 @@ def test_drain_without_a_pending_injection_idles_rather_than_spins() -> None:
 
 def _drain_on_a_tool_thread(ready: threading.Event, out: dict[str, float]) -> None:
     """Register a tool call and drain on it; record when the drain raised."""
-    token = begin_tool_call("swallower")
+    token = new_tool_call("swallower")
+    register_tool_call(token)
     try:
         ready.set()
         try:

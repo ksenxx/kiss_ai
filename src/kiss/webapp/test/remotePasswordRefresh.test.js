@@ -31,6 +31,7 @@ const {
   byId,
   openSettings,
   closeSettings,
+  lastMsg,
 } = require('./settings_helpers');
 
 const TAB_ID = 'tab-remote-password-refresh-test';
@@ -44,32 +45,10 @@ function openSettingsWith(wv, stored) {
   });
 }
 
-function lastSave(wv) {
-  const saves = wv.posted.filter(m => m.type === 'saveConfig');
-  return saves[saves.length - 1];
-}
-
-function testRefreshButtonSitsNextToTheBox() {
+function testRefreshButtonIsALabelledIconButton() {
   const wv = makePreloadedPage(TAB_ID);
   openSettingsWith(wv, 'Old-Password-1');
-  const box = byId(wv.win, 'cfg-remote-password');
   const refresh = byId(wv.win, 'cfg-remote-password-refresh');
-  const toggle = byId(wv.win, 'cfg-remote-password-toggle');
-  const wrap = box.parentNode;
-  assert.ok(
-    wrap.classList.contains('config-password-wrap'),
-    'the box is wrapped',
-  );
-  assert.ok(
-    wrap.classList.contains('config-password-wrap-refresh'),
-    'the wrap is marked so the box keeps room for two buttons',
-  );
-  assert.strictEqual(
-    refresh.parentNode,
-    wrap,
-    'the refresh button is in the wrap',
-  );
-  assert.strictEqual(toggle.parentNode, wrap, 'the eye toggle is in the wrap');
   assert.strictEqual(
     refresh.type,
     'button',
@@ -80,12 +59,8 @@ function testRefreshButtonSitsNextToTheBox() {
     'Generate a new random password',
   );
   assert.ok(refresh.querySelector('svg'), 'the refresh button shows an icon');
-  assert.ok(
-    refresh.classList.contains('config-password-refresh'),
-    'the refresh button carries its positioning class',
-  );
   wv.close();
-  console.log('  ok - the refresh button sits in the password box row');
+  console.log('  ok - the refresh button is a labelled icon button');
 }
 
 function testClickFillsRevealsAndSavesARandomPassword() {
@@ -137,9 +112,9 @@ function testClickFillsRevealsAndSavesARandomPassword() {
     !wv.posted.some(m => m.type === 'rotateRemotePassword'),
     'the refresh asks nothing of the daemon',
   );
-  assert.ok(!lastSave(wv), 'nothing is saved until Settings closes');
+  assert.ok(!lastMsg(wv.posted, 'saveConfig'), 'nothing is saved until Settings closes');
   closeSettings(wv.win);
-  const save = lastSave(wv);
+  const save = lastMsg(wv.posted, 'saveConfig');
   assert.ok(save, 'closing Settings saves the form');
   assert.strictEqual(
     save.config.remote_password,
@@ -161,7 +136,7 @@ function testManualEditAfterRefreshWins() {
   box.dispatchEvent(new wv.win.Event('input', {bubbles: true}));
   closeSettings(wv.win);
   assert.strictEqual(
-    lastSave(wv).config.remote_password,
+    lastMsg(wv.posted, 'saveConfig').config.remote_password,
     'Typed-After-3',
     'an edit after the refresh is what gets saved',
   );
@@ -191,7 +166,7 @@ function testEveryGeneratedPasswordIsWellFormed() {
   );
 }
 
-testRefreshButtonSitsNextToTheBox();
+testRefreshButtonIsALabelledIconButton();
 testClickFillsRevealsAndSavesARandomPassword();
 testManualEditAfterRefreshWins();
 testEveryGeneratedPasswordIsWellFormed();

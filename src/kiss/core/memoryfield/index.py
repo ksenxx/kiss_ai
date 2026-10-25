@@ -42,7 +42,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.locked import locked_call
-from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, split_frontmatter
+from kiss.core.memoryfield.pages import (
+    MAX_PAGE_BYTES,
+    MemoryDir,
+    page_summary,
+    page_title,
+    split_frontmatter,
+)
 from kiss.core.utils import read_bytes_waiting_for_writer, unlink_waiting_for_holders
 
 if TYPE_CHECKING:
@@ -351,14 +357,12 @@ class SearchHit:
     @property
     def title(self) -> str:
         """Title from frontmatter, or the page name."""
-        title = self.frontmatter.get("title")
-        return str(title) if title else self.name
+        return page_title(self.frontmatter, self.name)
 
     @property
     def summary(self) -> str:
         """Summary from frontmatter, or an empty string."""
-        summary = self.frontmatter.get("summary")
-        return str(summary) if summary else ""
+        return page_summary(self.frontmatter)
 
 
 @dataclass(frozen=True)

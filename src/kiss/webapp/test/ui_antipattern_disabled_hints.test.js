@@ -13,13 +13,9 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {typeInto} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
-
-function typeInto(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
-}
 
 async function main() {
   await test('the disabled promptlet Add button explains itself', () => {

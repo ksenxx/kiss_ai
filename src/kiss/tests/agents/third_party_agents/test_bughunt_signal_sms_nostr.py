@@ -159,9 +159,6 @@ class TestSignalBackend(unittest.TestCase):
 class TestSMSBackend(unittest.TestCase):
     """Tests for SMSChannelBackend config contract and bot detection."""
 
-    def setUp(self) -> None:
-        """Back up any existing SMS config; it is restored at cleanup."""
-
     def test_config_without_from_number_is_invalid(self) -> None:
         """A legacy config lacking from_number must be rejected by connect()."""
         from kiss.agents.third_party_agents.sms.sms_sea import SMSChannelBackend, _config

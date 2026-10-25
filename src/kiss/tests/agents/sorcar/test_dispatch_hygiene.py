@@ -64,14 +64,14 @@ class TestRewrite:
         repo, wt = worktree
         err = _bash_parent_repo_guard(f"sed -n 1,5p {repo}/README.md", wt)
         assert err is not None
-        assert err.endswith(f"Suggested command: sed -n 1,5p {wt}/README.md")
+        assert err.endswith(f"Copy this rewritten command as is: sed -n 1,5p {wt}/README.md")
         assert _bash_parent_repo_guard(f"sed -n 1,5p {wt}/README.md", wt) is None
 
     def test_bash_tool_refusal_includes_suggestion(self, worktree) -> None:
         repo, wt = worktree
         tools = UsefulTools(work_dir=wt)
         out = tools.Bash(f"echo hi > {repo}/note.txt", "write in parent repo")
-        assert "Suggested command:" in out and f"{wt}/note.txt" in out
+        assert "Copy this rewritten command as is:" in out and f"{wt}/note.txt" in out
         assert not (Path(repo) / "note.txt").exists()
 
 
