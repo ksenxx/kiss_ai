@@ -72,6 +72,71 @@ are per-round working notes (36 of 260 pages in the 2026-09-19 audit)."""
 # Cap on characters returned by memory_pull so a broad query cannot flood the context.
 PULL_CHAR_LIMIT = 24_000
 
+_SWALLOWED_PARAMETER_RE = re.compile(r"""<parameter\s+name=["']?(\w+)["']?\s*>""", re.IGNORECASE)
+_CLOSING_TAG_RE = re.compile(r"</\s*(title|summary|parameter)\s*>", re.IGNORECASE)
+"""A model sometimes closes the ``title`` parameter of a ``memory_write`` call
+with ``</title>`` instead of ``</parameter>``; the call parser stops only at
+``</parameter>``, so the title value runs on through the next parameter's
+opening tag and text.  14 pages had a title of the form
+``'Real title</title>\\n<parameter name="summary">Real summary'`` and no
+summary key in the 2026-10-26 audit."""
+
+
+def _strip_tags(text: str) -> str:
+    return " ".join(_CLOSING_TAG_RE.sub(" ", text).split())
+
+
+def repair_swallowed_title(title: str, summary: str) -> tuple[str, str, str]:
+    """Undo a ``memory_write`` title that ran on into the ``summary`` parameter.
+
+    A title holding ``<parameter name="summary">`` is split there: the head
+    becomes the title, the tail the summary (unless *summary* was given).
+    Stray tool-call closing tags (``</title>``, ``</summary>``, ``</parameter>``)
+    are removed from both; other markup (``<code>x</code>``) is content and
+    stays as it is.
+
+    Args:
+        title: The title argument as the tool received it.
+        summary: The summary argument as the tool received it.
+
+    Returns:
+        ``(title, summary, note)``; *note* is empty when nothing was changed
+        and otherwise tells the caller what was repaired.
+
+    Raises:
+        ValueError: If the title swallowed a parameter other than ``summary``
+            or still holds a ``<parameter name=`` tag after the split, since
+            the other arguments of such a call cannot be trusted.
+    """
+    if "<parameter name=" not in title.lower() and not _CLOSING_TAG_RE.search(title):
+        return title, summary, ""
+    # [title] or [title, swallowed parameter name, its text, ...]
+    parts = _SWALLOWED_PARAMETER_RE.split(title)
+    swallowed_summary = len(parts) == 3 and parts[1].lower() == "summary"
+    if len(parts) > 3 or (len(parts) == 3 and not swallowed_summary):
+        raise ValueError(_malformed_title_error(title))
+    head = _strip_tags(parts[0])
+    tail = _strip_tags(parts[2]) if swallowed_summary else ""
+    if not head or "<parameter name=" in (head + tail).lower():
+        raise ValueError(_malformed_title_error(title))
+    summary = summary or tail
+    note = (
+        f" Note: the title parameter was closed with the wrong tag and ran on; it was "
+        f"repaired to title {head!r} and summary {summary!r}. Close every parameter "
+        f"with </parameter>."
+    )
+    return head, summary, note
+
+
+def _malformed_title_error(title: str) -> str:
+    return (
+        f"title {title[:120]!r} contains a literal closing tag or '<parameter name=' and "
+        "cannot be repaired: the title parameter was closed with the wrong tag and "
+        "swallowed the parameters after it. Nothing was written; re-issue memory_write "
+        "with every parameter closed by </parameter>."
+    )
+
+
 # Pages listed in the block :meth:`MemoryTools.recall` appends to a task.
 RECALL_PAGES = 5
 # Characters of the task text embedded as the recall query; a longer
@@ -399,14 +464,14 @@ class MemoryTools:
         """
         try:
             memory, memory_dir, page_name = self._locate(name)
+            title, summary, note = repair_swallowed_title(title, summary)
             page = memory_dir.write(page_name, content, title=title, summary=summary)
         except (ValueError, TimeoutError) as e:
             return f"Error: {e}"
         size = len(page.raw.encode("utf-8"))
         embedded = len(embedding_text(page.raw).encode("utf-8"))
-        note = ""
         if _EPHEMERAL_NAME_RE.search(page.name):
-            note = (
+            note += (
                 " Warning: the name looks like a per-round/per-session note; such "
                 "notes belong in ./tmp/PROGRESS.md, not in durable memory. Consider "
                 "memory_delete once the task is over."

@@ -112,6 +112,55 @@ def test_write_warns_when_page_exceeds_embedding_limit(tmp_path: Path) -> None:
     assert "Warning" not in result
 
 
+def test_write_repairs_a_title_that_swallowed_the_summary_parameter(tmp_path: Path) -> None:
+    """The 2026-10-26 corruption: title closed with </title>, so it ran on into summary."""
+    tools = make_tools(tmp_path)
+    swallowed = (
+        'Warden deploy pipeline</title>\n\n<parameter name="summary">Merge to ops-eks runs it'
+    )
+    result = tools.memory_write("warden-deploy", "Body text.", title=swallowed)
+    assert result.startswith("Wrote warden-deploy.md")
+    assert "repaired to title 'Warden deploy pipeline' and summary 'Merge to ops-eks runs it'" in (
+        result
+    )
+    page = tools.memory_read("warden-deploy")
+    assert "title: Warden deploy pipeline\n" in page
+    assert "summary: Merge to ops-eks runs it\n" in page
+    assert "</title>" not in page and "<parameter" not in page
+    # The same swallow with an explicit summary keeps the explicit one.
+    result = tools.memory_write("warden-deploy", "Body text.", title=swallowed, summary="Given.")
+    assert "summary 'Given.'" in result
+    assert "summary: Given.\n" in tools.memory_read("warden-deploy")
+    # A stray closing tag alone (no swallowed parameter) is just removed, whatever its case.
+    result = tools.memory_write("tagged", "Body.", title="Only a tag</ Title>", summary="Fine.")
+    assert "repaired to title 'Only a tag' and summary 'Fine.'" in result
+    assert "title: Only a tag\n" in tools.memory_read("tagged")
+    # Markup that is not a tool-call tag is content: written untouched, no note.
+    title = "Why <code>foo()</code> leaks a <b> handle"
+    result = tools.memory_write("clean", "Body.", title=title, summary="S.")
+    assert "Note:" not in result and f"title: {title}\n" in tools.memory_read("clean")
+
+
+def test_write_rejects_a_title_that_swallowed_other_parameters(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    cases = [
+        # The swallowed parameter is not summary: the other arguments cannot be trusted.
+        'T</title>\n<parameter name="content">body here',
+        # Two parameters swallowed.
+        'T</title>\n<parameter name="summary">s</parameter>\n<parameter name="content">b',
+        # Nothing left of the title once the tags are gone.
+        '</title><parameter name="summary">only a summary',
+        # A parameter tag the splitter does not recognise.
+        "T</title><parameter name=summary with spaces>s",
+        "T <Parameter Name=",
+    ]
+    for title in cases:
+        result = tools.memory_write("bad", "Body.", title=title)
+        assert result.startswith("Error: title "), (title, result)
+        assert "Nothing was written" in result
+    assert tools.memory_read("bad").startswith("Error: no memory page")
+
+
 def test_pull_caps_total_output(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     body = "alpha beta gamma delta " * 500  # ~11.5 KB per page
