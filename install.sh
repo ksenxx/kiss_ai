@@ -16,7 +16,8 @@
 #                                 ``run_agent``/``sea`` load them by path
 #     src/kiss/**/*_sea.py        channel and cron SEAs, same reason
 #     (and the few other modules COMPILE_KEEP_SOURCE names: the /cron
-#     agent, _version.py, the two files sync_db ships to a remote)
+#     agent, _version.py, the files sync_db and the memory sync ship
+#     to a remote)
 #     src/kiss/webapp/media/  the webapp frontend kiss-web serves
 #     .venv/                      the Python environment (``uv sync``)
 #   ~/.local/bin/sorcar           the CLI (``uv run --directory ~/.kiss/kiss sorcar``)
@@ -1616,6 +1617,10 @@ COMPILE_KEEP_SOURCE=(
     "src/kiss/scripts/sync_db.py"
     "src/kiss/agents/sorcar/chat_summary.py"
     "src/kiss/agents/sorcar/history_columns.py"
+    # The /sync_history_and_memory SEA ships this module's source with its
+    # memory_delta.py to the remote (peer_sync.MERGE_PAGES_PATH), and
+    # scripts/sync-memory.sh runs it as a script.
+    "src/kiss/scripts/merge_memory_pages.py"
 )
 
 keep_source() {

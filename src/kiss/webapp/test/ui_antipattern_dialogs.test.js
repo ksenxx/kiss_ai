@@ -232,7 +232,8 @@ async function main() {
     win.close();
   });
 
-  await test('Create Tag: an annotation message is passed; Cancel creates no tag', () => {
+  // Cancelling step 2 creating no tag: ui_antipattern_review_fixes R1-4.
+  await test('Create Tag: an annotation message is passed', () => {
     const {win, posted} = h.makePage();
     const row = h.openScm(win, posted);
     h.runMenuItem(win, row, 'Create Tag...');
@@ -245,17 +246,6 @@ async function main() {
     const acts = h.ofType(posted, 'gitAction');
     assert.strictEqual(acts.length, 1);
     assert.strictEqual(acts[0].message, 'release ten');
-
-    h.runMenuItem(win, row, 'Create Tag...');
-    const again = h.toastInput(h.toast(win, 'git-create-tag'));
-    again.value = 'v11';
-    h.key(win, again, 'Enter');
-    h.click(
-      win,
-      h.toastButton(h.toast(win, 'git-create-tag-message'), 'Cancel'),
-    );
-    assert.strictEqual(h.toast(win, 'git-create-tag-message'), null);
-    assert.strictEqual(h.ofType(posted, 'gitAction').length, 1, 'no tag');
     win.close();
   });
 

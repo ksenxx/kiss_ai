@@ -16,7 +16,7 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks, existsOnRealFs} = require('./file_link_helpers');
+const {findLinks, checkPathsOnRealFs} = require('./file_link_helpers');
 
 // A real temp workspace with one real file and no "missing" file.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-filelink-'));
@@ -24,20 +24,7 @@ const realFile = path.join(tmpDir, 'real.txt');
 fs.writeFileSync(realFile, 'hello\n');
 const missingFile = path.join(tmpDir, 'missing.txt');
 fs.mkdirSync(path.join(tmpDir, 'somedir'));
-
-function checkPathsOnRealFs(msg) {
-  const results = {};
-  for (const p of msg.paths) {
-    let abs = p;
-    if (p.startsWith('~/')) {
-      abs = path.join(os.homedir(), p.slice(2));
-    } else if (!path.isAbsolute(p)) {
-      abs = path.resolve(msg.workDir || tmpDir, p);
-    }
-    results[p] = existsOnRealFs(abs);
-  }
-  return results;
-}
+const answerOnRealFs = checkPathsOnRealFs(tmpDir);
 
 // makePage loads the real chat page (chat.html + api.js + main.js)
 // in jsdom.  When autoReply is true, every posted `checkPaths` command is
@@ -47,7 +34,7 @@ function makePage(opts) {
   const autoReply = !opts || opts.autoReply !== false;
   return harness.makePage({
     beforeScripts: win => {
-      if (autoReply) answerCheckPaths(win, checkPathsOnRealFs);
+      if (autoReply) answerCheckPaths(win, answerOnRealFs);
     },
   });
 }
@@ -65,6 +52,11 @@ function testExistingPathIsClickable() {
   const opens = posted.filter(m => m.type === 'openFile');
   assert.strictEqual(opens.length, 1, 'click must post one openFile');
   assert.strictEqual(opens[0].path, realFile);
+  assert.strictEqual(
+    opens[0].line,
+    undefined,
+    'no line is sent when the path has no :line suffix',
+  );
   win.close();
   console.log('  ok - existing path is clickable and opens');
 }
@@ -290,7 +282,7 @@ function testLateReplyPromotesCandidates() {
   // Deliver the reply later, as the real host does asynchronously.
   send(win, {
     type: 'pathsExist',
-    results: checkPathsOnRealFs(checks[0]),
+    results: answerOnRealFs(checks[0]),
     workDir: checks[0].workDir,
     tabId: checks[0].tabId,
   });
@@ -340,7 +332,7 @@ function testPartialReplyLeavesOtherPathsPending() {
   const checks = posted.filter(m => m.type === 'checkPaths');
   send(win, {
     type: 'pathsExist',
-    results: checkPathsOnRealFs(checks[0]),
+    results: answerOnRealFs(checks[0]),
     workDir: checks[0].workDir,
   });
   assert.strictEqual(findLinks(win, realFile).length, 1);

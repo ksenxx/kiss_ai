@@ -17,6 +17,9 @@ const {test, report} = makeRunner();
 
 const AUTO_SUBMIT_KEY = 'kissVoiceAutoSubmit';
 
+// Every page built; closed after the run so node exits on its own.
+const windows = [];
+
 function makePage(options) {
   const opts = options || {};
   // The "working on it" ack is an audio clip the page plays itself.
@@ -35,6 +38,7 @@ function makePage(options) {
     beforeScripts,
     extraScripts: ['voice.js'],
   });
+  windows.push(win);
   return {win, posted, played};
 }
 
@@ -183,9 +187,9 @@ test('caret insertion pads only where whitespace is missing', () => {
     {value: 'ab', pos: 0, text: 'hi', want: 'hi ab', caret: 2},
     {value: ' ab', pos: 0, text: 'hi', want: 'hi ab', caret: 2},
   ];
+  const {win} = makePage({stored: 'off'});
+  const inp = input(win);
   cases.forEach(c => {
-    const {win} = makePage({stored: 'off'});
-    const inp = input(win);
     inp.value = c.value;
     caret(win, c.pos);
     send(win, {type: 'voiceSpeech', text: c.text});
@@ -227,20 +231,21 @@ test('with auto submit off a running agent is not steered', () => {
   assert.strictEqual(input(win).value, 'Also update the docs');
 });
 
-test('an empty transcript never edits the draft in either mode', () => {
-  ['on', 'off'].forEach(mode => {
-    const {win, posted} = makePage({stored: mode});
-    input(win).value = 'precious draft';
-    caret(win, 0);
-    posted.length = 0;
-    send(win, {type: 'voiceSpeech', text: '   ', speaker: 1});
-    assert.strictEqual(
-      posted.filter(m => m.type === 'submit').length,
-      0,
-      `mode ${mode}: ${JSON.stringify(posted)}`,
-    );
-    assert.strictEqual(input(win).value, 'precious draft', `mode ${mode}`);
-  });
+// With auto submit on, an empty transcript leaving the draft alone is
+// voiceSubmitToAgent's 'empty translation submits nothing and keeps a
+// draft intact'.
+test('with auto submit off an empty transcript never edits the draft', () => {
+  const {win, posted} = makePage({stored: 'off'});
+  input(win).value = 'precious draft';
+  caret(win, 0);
+  posted.length = 0;
+  send(win, {type: 'voiceSpeech', text: '   ', speaker: 1});
+  assert.strictEqual(
+    posted.filter(m => m.type === 'submit').length,
+    0,
+    JSON.stringify(posted),
+  );
+  assert.strictEqual(input(win).value, 'precious draft');
 });
 
 test(
@@ -301,5 +306,5 @@ test('an unrelated storage key never disturbs the setting', () => {
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
 });
 
+windows.forEach(win => win.close());
 report('voiceAutoSubmitToggle');
-process.exit(0);

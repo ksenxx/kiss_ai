@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -55,6 +56,7 @@ from typing import Any
 
 from kiss.core.config import kiss_home
 from kiss.core.locked import locked_call
+from kiss.core.processes import kill_process_group, popen_process_group, terminate_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -135,19 +137,14 @@ def send_signin(reply: StatusReply) -> None:
     locked_call(_status_lock, _send_cached_status, hook, reply)
 
 
-def _drop_status() -> None:
-    """Clear the cache (lock held)."""
-    global _status_cache
-    _status_cache = None
-
-
 def _signed_in(reply: Reply, email: str) -> None:
     """Drop the cached answer and tell every window ``signinDone`` (lock held).
 
     One step with :func:`_send_cached_status`'s delivery, so no window
     gets a ``signin`` after the ``signinDone`` that closed its window.
     """
-    _drop_status()
+    global _status_cache
+    _status_cache = None
     reply({"type": "signinDone", "email": email}, True)
 
 
@@ -237,7 +234,10 @@ class SigninLogin:
         with self._lock:
             self._end_locked()
             try:
-                proc = subprocess.Popen(
+                # In a group of its own: a helper the hook starts (and
+                # that inherits its stdout) is ended with it, or the
+                # relay would stay blocked on the pipe the helper holds.
+                proc = popen_process_group(
                     [str(hook), "login", provider],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -248,6 +248,8 @@ class SigninLogin:
             except OSError as exc:
                 reply({"type": "signinError", "provider": provider, "error": str(exc)}, False)
                 return
+            assert proc.stdin is not None
+            os.set_blocking(proc.stdin.fileno(), False)  # see paste()
             self._proc = proc
         threading.Thread(
             target=self._relay,
@@ -260,24 +262,31 @@ class SigninLogin:
         """Write the pasted redirect URL or code to the running hook's stdin.
 
         The text is cut to :data:`PASTE_LIMIT` characters (a redirect URL
-        or a code is far shorter), and written outside the lock, so a
-        paste the hook is not reading can never hold up :meth:`cancel`
-        or the next :meth:`start`.
+        or a code is far shorter) and written to the non-blocking pipe
+        in one ``os.write``: a paste that does not fit because the hook
+        is not reading is refused, never parked on the pipe.  A parked
+        writer would hold up :meth:`cancel`, the next :meth:`start` and
+        the close of the pipe after the hook's exit (hence its
+        ``signinDone``) for as long as any process holding the pipe's
+        read end lives, which a descendant of the hook may well do
+        after the hook itself is gone.  As nothing can block, the write
+        happens under the lock, so the stream is closed only once no
+        paste can reach it any more.
 
         Returns:
             ``False`` when no login is running (or the hook closed its
-            stdin), so the window can say so.
+            stdin, or is not reading it), so the window can say so.
         """
         with self._lock:
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None:
                 return False
-        try:
-            proc.stdin.write(text.strip()[:PASTE_LIMIT] + "\n")
-            proc.stdin.flush()
-        except (OSError, ValueError):
-            return False
-        return True
+            data = (text.strip()[:PASTE_LIMIT] + "\n").encode()
+            try:
+                written = os.write(proc.stdin.fileno(), data)
+            except (OSError, ValueError):  # the pipe is full, closed or gone
+                return False
+        return written == len(data)
 
     def cancel(self) -> None:
         """End the running login, if any; its relay thread then stays silent.
@@ -307,35 +316,27 @@ class SigninLogin:
     def _end_locked(self) -> None:
         """End the running hook and forget it (the lock is held).
 
-        It is sent SIGTERM at once; a thread (:meth:`_end`) then sends
-        SIGKILL after :data:`HOOK_END_TIMEOUT` seconds when it ignores
-        that, and closes its stdin.  A thread, and only once the hook is
-        dead, because a paste the hook never read can fill the pipe and
-        leave its writer (:meth:`paste`) blocked on the stream's buffer
-        lock, which closing the stream needs too: only the hook's death
-        frees it.  (The relay thread cannot do this: it is blocked reading
-        the hook's stdout.)
+        Its stdin is closed and its process group is sent SIGTERM at
+        once; a thread (:meth:`_end`) then kills whatever of the group
+        ignores that after :data:`HOOK_END_TIMEOUT` seconds.  (The relay
+        thread cannot do this: it is blocked reading the hook's stdout.)
         """
         proc, self._proc = self._proc, None
         if proc is None:
             return
-        proc.terminate()
+        assert proc.stdin is not None
+        proc.stdin.close()
+        try:
+            kill_process_group(proc.pid, signal.SIGTERM)
+        except OSError:
+            proc.terminate()
         thread = threading.Thread(target=self._end, args=(proc,), name="signin-end", daemon=True)
         self._ending.append(thread)
         thread.start()
 
     def _end(self, proc: subprocess.Popen[str]) -> None:
-        """Thread body of :meth:`_end_locked`: see the ended *proc* out and close its stdin."""
-        try:
-            proc.wait(HOOK_END_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        assert proc.stdin is not None
-        try:
-            proc.stdin.close()
-        except OSError:  # an unread paste, and the hook is gone
-            pass
+        """Thread body of :meth:`_end_locked`: see the ended *proc* and its group out."""
+        terminate_process_group(proc, HOOK_END_TIMEOUT)
         with self._lock:
             self._ending.remove(threading.current_thread())
 
@@ -359,10 +360,18 @@ class SigninLogin:
             if line.strip():
                 last = _parse(line)
         proc.wait()
+        proc.stdout.close()
         with self._lock:
             if self._proc is not proc:  # ended by cancel() or a newer start()
-                return
+                return  # _end_locked() closed its stdin
             self._proc = None
+        # Closed here, not left to the Popen's finaliser (a ResourceWarning
+        # and a pipe held open until the collector gets to it).  No paste()
+        # reaches the stream any more (it is not the current hook's), and
+        # the stream buffers nothing (paste() writes the descriptor), so
+        # the close cannot block or fail.
+        assert proc.stdin is not None
+        proc.stdin.close()
         if proc.returncode == 0 and last.get("logged_in"):
             locked_call(_status_lock, _signed_in, reply, str(last.get("email") or ""))
             return

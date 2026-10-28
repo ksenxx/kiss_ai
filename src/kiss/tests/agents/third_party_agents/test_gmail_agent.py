@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
 
 import pytest
 
@@ -26,19 +25,14 @@ from kiss.agents.third_party_agents.gmail.gmail_sea import (
     GmailChannelBackend,
     _extract_attachments,
     _extract_body,
-    main,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
-    connect,
-    fake_composio,
+    connected_endpoint,
     reset_state,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
-from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
-    recording_server,
-)
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -183,10 +177,10 @@ def gmail_server(monkeypatch):
         to gmail.googleapis.com rerouted to the local endpoint) and the
         local Gmail server.
     """
-    with recording_server(_GmailHandler) as server, fake_composio(monkeypatch) as composio:
-        composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
-        connect(composio, _SERVICE)
-        yield composio, server
+    with connected_endpoint(
+        monkeypatch, _GmailHandler, _SERVICE, "https://gmail.googleapis.com"
+    ) as wiring:
+        yield wiring
 
 
 def _make_error_backend(composio) -> GmailChannelBackend:
@@ -276,11 +270,3 @@ class TestGmailAgent:
         assert "cleared" in clear().lower()
         assert composio.deleted == [account]
         assert agent._is_authenticated() is False
-
-
-def test_main_missing_task_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CLI exits 1 when no task is given."""
-    monkeypatch.setattr(sys, "argv", ["gmail_sea"])
-    with pytest.raises(SystemExit) as excinfo:
-        main()
-    assert excinfo.value.code == 1

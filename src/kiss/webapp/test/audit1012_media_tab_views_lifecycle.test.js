@@ -28,7 +28,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep} = require('./simplify2_harness');
+const {sleep, queueRaf} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -63,7 +63,7 @@ function makeTerminalPage() {
     observe() {}
     disconnect() {}
   };
-  win.requestAnimationFrame = () => 0;
+  queueRaf(win); // no frame ever runs
   win.AbortController = class {
     constructor() {
       this.signal = {};

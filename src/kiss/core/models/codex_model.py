@@ -49,7 +49,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import IO, Any
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.codex_mcp_bridge import ServedCall, ToolBridge
@@ -366,11 +366,22 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
         except OSError as e:
             return {"error": f"`codex login --device-auth` failed to start: {e}"}
         prompt = {}
+        # Stderr is drained on its own thread: the CLI's log lines go
+        # there, and a child that fills the pipe (64 KiB) before it
+        # prints the code would otherwise block and never print it.
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_lines: list[str] = []
+        drain = threading.Thread(
+            target=_read_lines,
+            args=(proc.stderr, stderr_lines),
+            name="codex-device-login-stderr",
+            daemon=True,
+        )
+        drain.start()
         expired = threading.Event()
         timer = threading.Timer(timeout, _kill_expired, args=(proc, expired))
         timer.start()
         try:
-            assert proc.stdout is not None
             for raw in proc.stdout:
                 line = _ANSI_ESCAPES.sub("", raw).strip()
                 url = _DEVICE_URL.search(line)
@@ -388,17 +399,33 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
             timer.join()
         if expired.is_set() or "url" not in prompt or "code" not in prompt:
             kill_process_tree(proc)
-            _, stderr = proc.communicate()
+            proc.stdout.close()
+            proc.wait()
+            drain.join(timeout=_STDERR_DRAIN_GRACE_SECONDS)
             within = f" within {timeout:g}s" if expired.is_set() else ""
             return {
                 "error": f"`codex login --device-auth` printed no login code{within}: "
-                + (stderr.strip()[:300] or "(no output)")
+                + ("".join(stderr_lines).strip()[:300] or "(no output)")
             }
         _device_login = (prompt, proc)
         threading.Thread(
-            target=_finish_device_login, args=(proc,), name="codex-device-login", daemon=True
+            target=_finish_device_login,
+            args=(proc, drain, stderr_lines),
+            name="codex-device-login",
+            daemon=True,
         ).start()
         return dict(prompt)
+
+
+#: How long the device-login threads wait for the stderr drain after the
+#: CLI exited: a grandchild that escaped the kill may still hold the pipe.
+_STDERR_DRAIN_GRACE_SECONDS = 5.0
+
+
+def _read_lines(stream: IO[str], lines: list[str]) -> None:
+    """Append every line of *stream* to *lines* until EOF."""
+    for line in stream:
+        lines.append(line)
 
 
 def _start_codex(path: str, *args: str) -> "subprocess.Popen[str]":
@@ -426,12 +453,27 @@ def _kill_expired(proc: "subprocess.Popen[str]", expired: threading.Event) -> No
     kill_process_tree(proc)
 
 
-def _finish_device_login(proc: "subprocess.Popen[str]") -> None:
-    """Wait for the device-login CLI to exit, log a failure and forget its prompt."""
+def _finish_device_login(
+    proc: "subprocess.Popen[str]", drain: threading.Thread, stderr_lines: list[str]
+) -> None:
+    """Wait for the device-login CLI to exit, log a failure and forget its prompt.
+
+    Its stdout is read to the end meanwhile, so the CLI cannot block on
+    a full pipe while it polls for the login; *drain* collects its
+    stderr into *stderr_lines*.
+    """
     global _device_login
-    _, stderr = proc.communicate()
+    assert proc.stdout is not None
+    for _ in proc.stdout:
+        pass
+    proc.wait()
+    drain.join(timeout=_STDERR_DRAIN_GRACE_SECONDS)
     if proc.returncode != 0:
-        logger.warning("codex login --device-auth exited %s: %s", proc.returncode, stderr.strip())
+        logger.warning(
+            "codex login --device-auth exited %s: %s",
+            proc.returncode,
+            "".join(stderr_lines).strip(),
+        )
     with _device_login_lock:
         if _device_login is not None and _device_login[1] is proc:
             _device_login = None

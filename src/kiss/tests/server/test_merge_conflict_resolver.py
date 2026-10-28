@@ -158,7 +158,7 @@ class TestResolveMergeConflictThroughMerge:
         msg = self.agent.merge()
         assert "Merge conflict detected" in msg
         assert self._branch_exists()
-        assert self.agent._last_merge_resolved_by_agent is False
+        assert "The merge agent resolved the conflicts." not in msg
 
     def test_resolving_runner_completes_the_merge(self) -> None:
         msg = self.agent.merge(conflict_resolver=self._resolver(_resolving_runner))
@@ -192,7 +192,7 @@ class TestResolveMergeConflictThroughMerge:
         assert _git("rev-parse", "HEAD", cwd=self.repo).stdout.strip() == head
         assert GitWorktreeOps.status_porcelain(self.repo) == ""
         assert (self.repo / "f.txt").read_text() == "a\nB-user\nc\n"
-        assert self.agent._last_merge_resolved_by_agent is False
+        assert "The merge agent resolved the conflicts." not in msg
 
     def test_raising_runner_is_a_plain_conflict(self) -> None:
         msg = self.agent.merge(conflict_resolver=self._resolver(_raising_runner))

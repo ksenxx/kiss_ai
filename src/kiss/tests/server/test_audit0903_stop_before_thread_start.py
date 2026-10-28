@@ -43,10 +43,6 @@ Branch-coverage notes:
   starts while ownership is still held is unreachable without
   stalling ``thread.start()`` itself for 30 s; it stays uncovered by
   design (the ownership-dropped exit is covered below).
-* The start-wait loop's ``still_owns is None`` arm is likewise
-  uncovered: production always passes the ownership guard, and a
-  guard-less direct call with an unstarted thread could only be
-  produced by a caller that does not exist.
 """
 
 from __future__ import annotations

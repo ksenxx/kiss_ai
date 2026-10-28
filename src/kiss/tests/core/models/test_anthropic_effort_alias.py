@@ -12,8 +12,11 @@ base model ids — ``claude-opus-5-5-medium`` answers 404
 * send the alias's base id (``alias_of``) as ``model``;
 * turn the alias's catalog ``thinking`` level, or an explicit
   ``model_config["reasoning_effort"]``, into ``output_config.effort``;
-* send NO effort for a bare base name so it costs what the raw API call
-  costs (the vendor default is ``medium`` on Opus 5.5, ``high`` elsewhere);
+* send the base entry's own ``thinking`` level (``high``) for a bare base
+  name, so the request matches the catalog instead of the vendor default
+  (``medium`` on Opus 5.5 and Haiku 5.5, ``high`` on Fable 5.1 and Sonnet 5.5);
+* send nothing for a base entry without a ``thinking`` level (the models
+  that reject the parameter);
 * keep a caller-supplied native ``output_config.effort`` untouched.
 
 Request kwargs are inspected through ``_build_create_kwargs``; no network
@@ -96,14 +99,42 @@ def test_every_level_alias_maps_to_output_config(level: str) -> None:
     assert kw["output_config"]["effort"] == level
 
 
-def test_bare_base_sends_no_effort() -> None:
+def test_bare_base_sends_its_catalog_level() -> None:
+    """The bare ``claude-opus-5-5`` runs at the catalog's ``thinking``
+    level (``high``), not at Anthropic's omitted-effort default
+    (``medium`` on Opus 5.5)."""
     kw = _kwargs("claude-opus-5-5")
     assert kw["model"] == "claude-opus-5-5"
-    assert "output_config" not in kw
-    # The base entry's own ``thinking`` ("high", the split-writer's cap
-    # marker) must not leak into the request as a default.
     assert MODEL_INFO["claude-opus-5-5"].thinking == "high"
-    assert _effort_level_for("claude-opus-5-5", {}) is None
+    assert kw["output_config"] == {"effort": "high"}
+    assert "reasoning_effort" not in kw
+    assert _effort_level_for("claude-opus-5-5", {}) == "high"
+
+
+def test_every_base_with_a_level_sends_it() -> None:
+    """Every direct ``claude-*`` base entry sends exactly its catalog level,
+    and one without a level (the parameter is rejected) sends none."""
+    checked = 0
+    for name, info in MODEL_INFO.items():
+        if not name.startswith("claude-") or info.alias_of:
+            continue
+        kw = _kwargs(name)
+        if info.thinking in ANTHROPIC_EFFORT_LEVELS:
+            assert kw["output_config"] == {"effort": info.thinking}, name
+            checked += 1
+        else:
+            assert "output_config" not in kw, name
+    assert checked > 0
+    assert "output_config" not in _kwargs("claude-haiku-4-5")
+    assert MODEL_INFO["claude-haiku-4-5"].thinking is None
+
+
+def test_bedrock_bare_base_sends_the_claude_catalog_level() -> None:
+    """A bare Bedrock id resolves to the Claude base entry behind it for effort."""
+    m = AnthropicModel("bedrock/us.anthropic.claude-opus-5-5", api_key="bearer", bedrock=True)
+    m.initialize(_PROMPT)
+    kw = m._build_create_kwargs()
+    assert kw["output_config"] == {"effort": "high"}
 
 
 def test_explicit_reasoning_effort_on_base() -> None:

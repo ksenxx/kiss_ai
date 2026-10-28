@@ -224,17 +224,19 @@ def _find_consecutive_tool_calls_end(content: str) -> int:
 class _ObjectSpans:
     """Balanced ``{...}`` spans of streamed text, fed one delta at a time.
 
-    Follows the candidate rule of
-    :func:`~kiss.core.models.model._iter_balanced_json_objects`: every
-    ``{`` outside a JSON string opens a candidate object and the ``}``
-    matching it closes one, at any depth.  That scanner retries from the
-    next ``{`` when an earlier candidate never closes, so a stray ``{``
-    in prose must not hide the tool-call object after it; here the
-    stray stays open on the stack while the inner object still closes.
-    A candidate whose first non-blank character is neither ``"`` nor
-    ``}`` cannot be a JSON object and is dropped at once, so prose
-    quotes after a prose brace do not poison the string state.  Quotes
-    outside every candidate are ignored, as in that scanner.
+    An incremental :func:`~kiss.core.models.model._brace_matches`: every
+    unescaped ``"`` toggles the string parity, each parity matches the
+    braces it sees outside its strings on its own stack, and the span a
+    ``}`` closes is reported for the parity that sees it.  A candidate
+    ``{`` that a whole-text scan sees inside a prose string (``printf("{")``
+    before the tool-call block) is therefore matched on the other stack
+    and never hides the object after it, exactly as the whole-text
+    scanner of :func:`~kiss.core.models.model._iter_balanced_json_objects`
+    pairs it.  A candidate whose first non-blank character is neither
+    ``"`` nor ``}`` cannot be a JSON object and is dropped from its stack
+    at once (the braces of a valid object all pass that rule, so its own
+    pairing is unchanged), which spares a decode per ``{...}`` of a
+    brace-heavy file streamed inside a ``Write`` argument.
 
     The streaming parser checks only the spans :meth:`feed` reports and
     rescans the whole text only when one of them is a ``tool_calls``
@@ -245,8 +247,8 @@ class _ObjectSpans:
 
     def __init__(self) -> None:
         self.pos = 0
-        self.starts: list[int] = []
-        self.fresh = False
+        self.stacks: tuple[list[int], list[int]] = ([], [])
+        self.fresh: list[int] | None = None
         self.in_string = False
         self.escaped = False
 
@@ -262,28 +264,23 @@ class _ObjectSpans:
         """
         closed: list[tuple[int, int]] = []
         for ch in text:
-            if self.fresh and not ch.isspace():
-                self.fresh = False
+            if self.fresh is not None and not ch.isspace():
                 if ch not in '"}':
-                    self.starts.pop()
-            if not self.starts:
-                if ch == "{":
-                    self.starts.append(self.pos)
-                    self.fresh = True
-            elif self.in_string:
-                if self.escaped:
-                    self.escaped = False
-                elif ch == "\\":
-                    self.escaped = True
-                elif ch == '"':
-                    self.in_string = False
-            elif ch == '"':
-                self.in_string = True
-            elif ch == "{":
-                self.starts.append(self.pos)
-                self.fresh = True
-            elif ch == "}":
-                closed.append((self.starts.pop(), self.pos + 1))
+                    self.fresh.pop()
+                self.fresh = None
+            if ch == "\\" and not self.escaped:
+                self.escaped = True
+            else:
+                stack = self.stacks[self.in_string]
+                if ch == '"':
+                    if not self.escaped:
+                        self.in_string = not self.in_string
+                elif ch == "{":
+                    stack.append(self.pos)
+                    self.fresh = stack
+                elif ch == "}" and stack:
+                    closed.append((stack.pop(), self.pos + 1))
+                self.escaped = False
             self.pos += 1
         return closed
 
@@ -648,7 +645,12 @@ class ClaudeCodeModel(CLITextModel):
                             object_spans.feed(text)
                             self._invoke_token_callback(text)
                 if stop_on_tool_calls and content:
-                    tc_end = _find_consecutive_tool_calls_end(content)
+                    # The deltas already located the blocks when they streamed.
+                    tc_end = (
+                        last_tc_end
+                        if found_tool_calls
+                        else _find_consecutive_tool_calls_end(content)
+                    )
                     if tc_end > 0:
                         content = content[:tc_end]
                         self._stopped_for_tool_calls = True

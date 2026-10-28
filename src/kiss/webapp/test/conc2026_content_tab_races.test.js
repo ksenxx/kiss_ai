@@ -35,11 +35,11 @@ const assert = require('assert');
 const {
   makePage: makeSharedPage,
   send,
-  sleep,
   waitFor,
   click,
   stubMonaco,
 } = require('./simplify2_harness');
+const {toastButton, contentTabStrips} = require('./ui_antipattern_harness');
 
 // The page harness of workspaceScopedTabs.test.js plus a fake Monaco
 // rich enough for the EDITABLE content-tab path: renderCodeContent needs
@@ -72,17 +72,6 @@ function conflictToast(win) {
   );
 }
 
-function toastActionButton(win, toast, label) {
-  const buttons = Array.from(
-    toast.querySelectorAll('.kiss-notification-action'),
-  );
-  return buttons.find(b => b.textContent.trim() === label) || null;
-}
-
-function contentTabStrips(win) {
-  return win.document.querySelectorAll('.chat-tab.content-tab');
-}
-
 /**
  * Answer the in-page "unsaved changes" question (it replaced
  * window.confirm) with "Don't save".
@@ -92,7 +81,7 @@ function discardEditsAndClose(win) {
     '[data-notification-id^="close-dirty-"]',
   );
   assert.ok(toast, 'closing a dirty tab must ask in-page first');
-  click(win, toastActionButton(win, toast, "Don't save"));
+  click(win, toastButton(toast, "Don't save"));
 }
 
 const FILE_PATH = '/shared/notes.txt';
@@ -158,7 +147,7 @@ async function testForeignScopeErrorMustNotSwallowReload() {
 
   // The user chooses to reload from disk, dropping the edits: this arms
   // contentReloadRequested and sends openFile for the tab's own scope.
-  const reloadBtn = toastActionButton(win, toast, 'Reload from disk');
+  const reloadBtn = toastButton(toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
   click(win, reloadBtn);
   assert.strictEqual(
@@ -213,7 +202,7 @@ async function testSameScopeErrorStillClearsReloadFlag() {
   const {win, created} = ctx;
   const toast = await openDirtyConflictedTab(ctx);
 
-  const reloadBtn = toastActionButton(win, toast, 'Reload from disk');
+  const reloadBtn = toastButton(toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
   click(win, reloadBtn);
 
@@ -237,10 +226,25 @@ async function testSameScopeErrorStillClearsReloadFlag() {
     content: 'v3 on disk',
     version: 'ver-3',
   });
-  await sleep(80); // let any (wrong) async re-render surface
+  // A (wrong) re-render of notes.txt would create its editor on the
+  // same microtask chain as this sentinel open of another file, and
+  // ahead of it: once the sentinel's editor exists, one editor between
+  // the two proves nothing was re-rendered.
+  send(win, {
+    type: 'fileContent',
+    tabId: 'a1',
+    path: '/shared/sentinel.txt',
+    name: 'sentinel.txt',
+    content: 'sentinel',
+    version: 'ver-s',
+  });
+  await waitFor(
+    () => created.some(c => c.value === 'sentinel'),
+    'the sentinel open must create its editor',
+  );
   assert.strictEqual(
     created.length,
-    1,
+    2,
     'after its own reload failed, a plain re-open must not replace ' +
       "the tab's unsaved edits",
   );

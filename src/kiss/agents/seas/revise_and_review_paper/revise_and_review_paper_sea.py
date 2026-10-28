@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.discover.discover_sea import DISCOVERY_INSTRUCTIONS
 
 WRITE_PAPER_SEA = str(Path(__file__).resolve().parents[1] / "write_paper" / "write_paper_sea.py")
 """Absolute path of the bundled ``/write_paper`` SEA, the writer of every round."""
@@ -152,7 +153,7 @@ Reviews go to `<work dir>/reports/<stem>-round<N>-review.txt`.
    venue's scale, decide the verdict yourself, log it, and call `loop_status` again
    with `overrides="<round>=<verdict>"`.
 4. On CONTINUE, triage each weakness: a writing fix; an allowed experiment, ablation or
-   benchmark (the writer runs it, via the AI-discovery process of its system prompt when
+   benchmark (the writer runs it, via the AI discovery loop its task carries when
    a stronger method or result is wanted); or a ruled-out point, stated in the paper as a
    limitation. Put ruled-out points, allowed benchmarks and the remaining budget into
    `coordinator_notes` of `writer_task(instructions, N + 1, review_path, coordinator_notes)`.
@@ -203,7 +204,7 @@ Rules for this round:
 - Experiments: when the instructions or the review ask for evidence the paper lacks (a
   baseline, an ablation, a benchmark, a stronger result), run it on the benchmarks the
   instructions name; when they name none, use the area's standard public benchmarks and
-  say which in the paper. Use the AI-discovery process of your system prompt when asked
+  say which in the paper. Follow the AI discovery loop below when asked
   for a stronger method or result. Commit the scripts and the raw results next to the
   paper; every new number enters the paper through its macros.
 - Never remove a negative result, inflate a claim, or mention a review, a round or an
@@ -252,10 +253,10 @@ class ReviseAndReviewPaperSea(BaseSea):
         may take up to a day.
         """
         return settings | {
-            "use_web_tools": False,
             "auto_classify": False,
             "tool_profile": "full",
             "timeout": DISPATCH_TIMEOUT_SECONDS,
+            "model": "bestrouter",
         }
 
 
@@ -295,7 +296,7 @@ def writer_task(
     parts = [head, "", "Writing instructions from the user:", instructions.strip(), ""]
     if coordinator_notes.strip():
         parts += ["Notes from the loop coordinator:", coordinator_notes.strip(), ""]
-    parts.append(_WRITER_RULES.rstrip())
+    parts += [_WRITER_RULES.rstrip(), "", DISCOVERY_INSTRUCTIONS]
     return "\n".join(parts)
 
 

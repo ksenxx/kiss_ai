@@ -34,6 +34,7 @@ from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
     _redirect_db,
     _restore_db,
 )
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.worktree_helpers import merge_conflict
 
 
@@ -117,13 +118,13 @@ class TestBug24SilentDiscardOnGitFailure:
                 "task-t24", agent=agent, tab_id="t24", server_owned=True,
             )
             agent_state.register(state)
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=wt.repo_root,
                 branch=wt.branch,
                 original_branch=wt.original_branch,
                 wt_dir=wt.wt_dir,
                 baseline_commit="0000000000000000000000000000000000000000",
-            )
+            ))
 
             try:
                 changed_after = server._get_worktree_changed_files("t24")

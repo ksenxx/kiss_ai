@@ -184,6 +184,20 @@ def _start_ts_from_extra(extra: object) -> int:
     return max(start_ts, 0)
 
 
+def _subagent_done_event(tab_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``subagentDone`` event closing sub-agent tab *tab_id*.
+
+    Args:
+        tab_id: The sub-agent tab to close.
+        scope: ``{"connId": ...}`` (and ``replayId``) to address one
+            connection, else empty.
+
+    Returns:
+        The event dict to broadcast.
+    """
+    return {"type": "subagentDone", "tab_id": tab_id, "tabId": "", **scope}
+
+
 def _coerce_id(value: object) -> str | None:
     """Coerce a DB row id that may be a str or a legacy int to a string.
 
@@ -548,6 +562,9 @@ class AgentServer(
         self._model_pick: tuple[int, str] = (0, "")
         self._model_picks_pending = 0
         self._state_lock = agent_state.STATE_LOCK
+        # ``_cmd_run`` waits here while ``_history_deletes`` is non-zero
+        # (see ``_CommandsMixin``).
+        self._history_delete_done = threading.Condition(self._state_lock)
         # Raised (under ``_state_lock``) by the graceful-shutdown
         # sweep (``RemoteAccessServer._stop_active_agent_tasks``):
         # from then on ``_cmd_run``'s pre-start handshake cancels new
@@ -1328,12 +1345,9 @@ class AgentServer(
                 for key in ("tags", "sea"):
                     raw = extra_obj.get(key, "")
                     session[key] = raw if isinstance(raw, str) else ""
-                try:
-                    start_ts_raw = extra_obj.get("startTs", 0)
-                    if start_ts_raw:
-                        session["startTs"] = int(start_ts_raw)
-                except (TypeError, ValueError, OverflowError):
-                    pass
+                start_ts = _start_ts_from_extra(extra_obj)
+                if start_ts:
+                    session["startTs"] = start_ts
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
@@ -1415,13 +1429,7 @@ class AgentServer(
         Args:
             conn_id: Requesting connection id (``""`` for direct callers).
         """
-        seen: set[str] = set()
-        tasks: list[str] = []
-        for raw in _load_input_history():
-            task = raw.strip()
-            if task and task not in seen:
-                seen.add(task)
-                tasks.append(task)
+        tasks = list(dict.fromkeys(t for raw in _load_input_history() if (t := raw.strip())))
         event: dict[str, Any] = {"type": "inputHistory", "tasks": tasks}
         self._broadcast_to_conn(event, conn_id)
 
@@ -1625,12 +1633,12 @@ class AgentServer(
         down when :meth:`TabRegistry.republished_since` reports a
         newer publication.  A token-0 duplicate close (the registry
         did not list the tab) passes the clock OBSERVATION drawn by
-        :meth:`TabRegistry.close_tab_or_observe` instead, so a reopen
-        republishing the tab after the close observed it absent makes
-        this drop stand down exactly like a real removal's tail; a
-        tab that was never published (sub-agent tabs) has generation
-        0 — never greater than any token — and is dropped
-        unconditionally, as before.  ``None`` (direct callers with no
+        :meth:`TabRegistry.clock` right after :meth:`TabRegistry.close_tab`
+        instead, so a reopen republishing the tab after the close
+        observed it absent makes this drop stand down exactly like a
+        real removal's tail; a tab that was never published (sub-agent
+        tabs) has generation 0 — never greater than any token — and is
+        dropped unconditionally, as before.  ``None`` (direct callers with no
         registry ordering) keeps the unconditional behaviour.
 
         Removes the tab from
@@ -2024,6 +2032,20 @@ class AgentServer(
         self._tab_opened_task_ids.pop(tab_id, None)
         self._tab_models.pop(tab_id, None)
 
+    def _pin_opened_task(self, tab_id: str, task_id: str | None) -> None:
+        """Record which task *tab_id* was opened on, under ``_state_lock``.
+
+        Args:
+            tab_id: The frontend tab id.
+            task_id: The task the tab is pinned to; ``""``/``None``
+                unpins it (the tab tracks the chat's latest task).
+        """
+        with self._state_lock:
+            if task_id:
+                self._tab_opened_task_ids[tab_id] = str(task_id)
+            else:
+                self._tab_opened_task_ids.pop(tab_id, None)
+
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
 
@@ -2078,6 +2100,14 @@ class AgentServer(
         twenty full transcripts (hundreds of megabytes over a tunnel)
         and froze the daemon while it loaded and serialized them.
 
+        The running state is always re-sent, whatever flag the client
+        kept from before its outage: ``running:true`` for a tab whose
+        task is still going (the attached source's optimistic status,
+        or the tab's own run through :meth:`_broadcast_replay_status`
+        when the attach resolved nothing), ``running:false`` for an
+        idle tab, so a background tab's spinner matches the daemon
+        even though the client missed the run's start or end.
+
         Args:
             chat_id: The chat the registry binds *tab_id* to.
             tab_id: The frontend tab id.
@@ -2087,45 +2117,42 @@ class AgentServer(
         """
         if not tab_id:
             return
-        with self._state_lock:
-            if task_id:
-                self._tab_opened_task_ids[tab_id] = str(task_id)
-            else:
-                self._tab_opened_task_ids.pop(tab_id, None)
+        self._pin_opened_task(tab_id, task_id)
         source, _source_task_id, _recording = self._attach_viewer_to_running_chat(
             chat_id,
             tab_id,
             task_id=task_id or None,
         )
-        if source is not None:
+        with self._state_lock:
+            # Decided and sent under the lock, like every viewer status
+            # broadcast: a run the user starts on this tab meanwhile
+            # publishes its ``running:true`` under the same lock, and a
+            # stale ``running:false`` after it would kill its spinner.
+            owner_decides = source is None or self._viewer_owns_other_busy_run(
+                tab_id, source,
+            )
+            if owner_decides:
+                # Nothing live attached, or the tab's own busy run
+                # outranks the pinned source it views (the optimistic
+                # status below would be withheld): the owner decides,
+                # and only the (re)connecting client needs the answer.
+                self._broadcast_replay_status(tab_id, {"connId": conn_id})
+        if not owner_decides:
+            assert source is not None
             self._broadcast_viewer_running(
                 tab_id,
                 source,
                 int(getattr(source.agent, "_task_start_ms", 0) or 0),
             )
-        with self._state_lock:
-            # Checked and sent under the lock, like every viewer status
-            # broadcast: a run the user starts on this tab meanwhile
-            # publishes its ``running:true`` under the same lock, and a
-            # stale ``running:false`` after it would kill its spinner.
-            owner = agent_state.find_by_tab(tab_id)
-            idle = (source is None or not source.running()) and not (
-                owner is not None and owner.busy()
-            )
-            if idle:
-                status = {"type": "status", "running": False, "tabId": tab_id}
-                if source is None:
-                    # Nothing optimistic went out: only the
-                    # (re)connecting client needs the answer.
-                    status["connId"] = conn_id
-                # Else the source ended inside the attach window: its
-                # end-of-run fan-out already told EVERY client
-                # ``running:false`` BEFORE the optimistic
-                # ``running:true`` above (which, like the tab, reaches
-                # every surface), so the correction must reach every
-                # client too — scoped to one connection it stranded the
-                # other surfaces' spinners (audit 2026-10-12).
-                self.printer.broadcast(status)
+            # The source may have ended inside the attach window: its
+            # end-of-run fan-out already told EVERY client
+            # ``running:false`` BEFORE the optimistic ``running:true``
+            # above (which, like the tab, reaches every surface), so
+            # the correction must reach every client too — scoped to
+            # one connection it stranded the other surfaces' spinners
+            # (audit 2026-10-12).  No transcript was replayed, so the
+            # terminal result is not re-sent here.
+            self._finalize_viewer_attach(tab_id, source, [], {}, resend_result=False)
         self.printer.broadcast(
             {
                 "type": "replay_deferred",
@@ -2188,8 +2215,11 @@ class AgentServer(
                 shows.  ``""`` (a user's history click) reaches every
                 client, since the other windows mirror the same tab and
                 have no other way to learn its new transcript.  The tab
-                binding (``tabs_state``) and status events are always
-                broadcast.
+                binding (``tabs_state``) and a live task's
+                ``running:true`` are always broadcast; the status
+                that precedes a transcript with nothing live attached
+                (:meth:`_broadcast_replay_status`) is scoped like the
+                transcript.
             replay_id: When non-empty, echoed as ``replayId`` on every
                 frame of the answer (the transcript, the status or
                 ``subagentDone`` standing in for it, the sub-agent
@@ -2204,11 +2234,7 @@ class AgentServer(
         replay_scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
         if replay_id:
             replay_scope["replayId"] = replay_id
-        with self._state_lock:
-            if task_id:
-                self._tab_opened_task_ids[tab_id] = str(task_id)
-            else:
-                self._tab_opened_task_ids.pop(tab_id, None)
+        self._pin_opened_task(tab_id, task_id)
         row = None
         if task_id is not None:
             row = _load_chat_events_by_task_id(task_id)
@@ -2316,21 +2342,15 @@ class AgentServer(
                 # opened the tab on ``new_tab`` before the run ended
                 # (or restored it from its saved state); tell it to
                 # close the tab instead of re-opening it finished.
-                self.printer.broadcast(
-                    {
-                        "type": "subagentDone",
-                        "tab_id": tab_id,
-                        "tabId": "",
-                        **replay_scope,
-                    }
-                )
+                self.printer.broadcast(_subagent_done_event(tab_id, replay_scope))
                 return
-            parent_tid = _coerce_id(subagent_info.get("parent_task_id"))
-            parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
-                parent_task_id=parent_tid,
-                chat_id=chat_id,
-                sub_tab_id=tab_id,
-                sub_task_id=rebound_task_id or "",
+            announcement = self._subagent_announcement(
+                result,
+                None,
+                _coerce_id(subagent_info.get("parent_task_id")) or "",
+                tab_id,
+                is_done,
+                replay_scope,
             )
             # A client asked for this sub-agent's tab by name: a tab the
             # user had closed while it ran is open again.  Committed and
@@ -2356,19 +2376,7 @@ class AgentServer(
                 self._tab_chat_views.pop(tab_id, None)
                 if rebound_state is not None and rebound_state.running():
                     self.printer.subscribe_tab(rebound_state.task_id, tab_id)
-                self.printer.broadcast(
-                    {
-                        "type": "openSubagentTab",
-                        "tab_id": tab_id,
-                        "parent_tab_id": parent_tab_id_for_sub,
-                        "description": str(result.get("task", "") or ""),
-                        "task_id": result.get("task_id"),
-                        "isSubagentTab": True,
-                        "isDone": is_done,
-                        "startTs": _start_ts_from_extra(extra_raw),
-                        **replay_scope,
-                    }
-                )
+                self.printer.broadcast(announcement)
 
         if rebound_state is not None:
             # The live agent's stamp (``_cmd_run``'s start, stamped by
@@ -2385,6 +2393,8 @@ class AgentServer(
                 rebound_state,
                 start_ts_for_resume,
             )
+        elif subagent_info is None:
+            self._broadcast_replay_status(tab_id, replay_scope)
         replay_payload: dict[str, Any] = {
             "type": "task_events",
             "task": result["task"],
@@ -2595,7 +2605,7 @@ class AgentServer(
     def _subagent_announcement(
         self,
         row: dict[str, Any],
-        idx: int,
+        idx: int | None,
         parent_task_id: str,
         sub_tab_id: str,
         is_done: bool,
@@ -2605,9 +2615,11 @@ class AgentServer(
 
         Args:
             row: The sub-agent's row from
-                :func:`_load_subagent_rows_by_parent_task_id`.
+                :func:`_load_subagent_rows_by_parent_task_id` (or the
+                one :meth:`_replay_session` loaded by task id).
             idx: The row's position among its parent's children
-                (numbers the tab title).
+                (numbers the tab title), or ``None`` when the client
+                asked for this one tab by name and keeps its title.
             parent_task_id: ``task_history.id`` of the parent task.
             sub_tab_id: The deterministic sub-agent tab id.
             is_done: Whether the sub-agent has finished.
@@ -2628,7 +2640,7 @@ class AgentServer(
             ),
             "description": str(row.get("task", "") or ""),
             "task_id": row["task_id"],
-            "taskIndex": idx,
+            **({} if idx is None else {"taskIndex": idx}),
             "isSubagentTab": True,
             "isDone": is_done,
             # The frontend attributes the row to the fan-out call that
@@ -2760,14 +2772,7 @@ class AgentServer(
                     # transcript and which has no fan-out panel to
                     # keep its tab closed).  A client that missed the
                     # close or completion still closes its copy.
-                    self.printer.broadcast(
-                        {
-                            "type": "subagentDone",
-                            "tab_id": sub_tab_id,
-                            "tabId": "",
-                            **scope,
-                        }
-                    )
+                    self.printer.broadcast(_subagent_done_event(sub_tab_id, scope))
                     continue
                 # A finished direct child: history the client's fan-out
                 # panel keeps closed or reopens.
@@ -2825,14 +2830,7 @@ class AgentServer(
                 continue
             is_done = _subagent_is_done(sub_task_id)
             if is_done:
-                self.printer.broadcast(
-                    {
-                        "type": "subagentDone",
-                        "tab_id": sub_tab_id,
-                        "tabId": "",
-                        **scope,
-                    }
-                )
+                self.printer.broadcast(_subagent_done_event(sub_tab_id, scope))
             # Preserve the original ID chain even when a completed ancestor
             # no longer has a visible tab. Completion can race with replay.
             self._open_persisted_subagent_tabs(
@@ -2952,12 +2950,28 @@ class AgentServer(
                 if candidate is not None and candidate.running():
                     source = candidate
             if source is None and chat_id and not is_subagent:
-                for t in agent_state.agent_states.values():
-                    if t.chat_id != chat_id or t.is_subagent:
-                        continue
-                    if t.running():
-                        source = t
-                        break
+                # The tab's own run first: two tasks of one chat can
+                # run at once (the chat opened in two tabs, a run
+                # started in each), and a tab attached to its
+                # sibling's run instead of its own was reported
+                # neither running nor idle on a reconnect, since the
+                # optimistic status of a source the tab does not own
+                # is suppressed (``_viewer_owns_other_busy_run``).
+                own = agent_state.find_by_tab(new_tab_id)
+                if (
+                    own is not None
+                    and own.chat_id == chat_id
+                    and not own.is_subagent
+                    and own.running()
+                ):
+                    source = own
+                else:
+                    for t in agent_state.agent_states.values():
+                        if t.chat_id != chat_id or t.is_subagent:
+                            continue
+                        if t.running():
+                            source = t
+                            break
             source_task_id = source.task_id if source is not None else ""
             if replace_subscriptions:
                 self._printer_cleanup_tab(new_tab_id, source_task_id)
@@ -3045,12 +3059,70 @@ class AgentServer(
                 }
             )
 
+    def _broadcast_replay_status(
+        self,
+        tab_id: str,
+        replay_scope: dict[str, Any],
+    ) -> None:
+        """Settle *tab_id*'s running flag when its replay attached to nothing live.
+
+        The page settles a tab's running flag only from ``status``
+        events (a replay skips ``task_done``), so a replay that
+        carries none leaves whatever flag the tab had — wrong for
+        every client that was disconnected while the flag changed.
+        A replay of a finished task (a history row, nothing live
+        attached) used to carry no status: a tab that saw its task's
+        ``running:true``, lost its connection and missed the task's
+        end got the finished transcript while still marked running,
+        kept a Stop button, and landed at the end of the transcript
+        instead of on its task panel (``main.js``
+        ``landOpenedTranscript``).  And a deferred replay
+        (:meth:`_defer_replay`) of a tab whose own run the attach did
+        not resolve (bound to a chat other than the run's) sent
+        neither state, so a background tab's spinner stayed stale.
+
+        The tab's OWNER decides, under ``_state_lock`` so the check is
+        serialized against ``_cmd_run`` installing a run on the tab:
+        a tab that owns a live run is told ``running:true`` again
+        (``attached``, like :meth:`_broadcast_viewer_running`, so the
+        page does not treat the re-send as a run starting; the run's
+        own start stamp so the timer keeps counting from the same
+        instant), any other tab ``running:false``.  A worktree merge
+        in progress on the tab is not a run: the page shows no spinner
+        for it and ``_cmd_run`` refuses runs during it, so only
+        ``running()`` — not ``busy()`` — withholds the idle status.
+
+        Sent BEFORE a transcript so the page lands the replay with the
+        flag settled, and stamped with the replay's scope (a
+        connection-scoped ready replay stays scoped, a forwarded
+        resume keeps its ``replayId``).
+
+        Args:
+            tab_id: The tab whose replay attached to nothing live.
+            replay_scope: The ``connId`` / ``replayId`` stamps of the
+                replay's frames.
+        """
+        with self._state_lock:
+            owner = agent_state.find_by_tab(tab_id)
+            status: dict[str, Any] = {
+                "type": "status",
+                "running": False,
+                "tabId": tab_id,
+                **replay_scope,
+            }
+            if owner is not None and owner.running():
+                status["running"] = True
+                status["startTs"] = int(getattr(owner.agent, "_task_start_ms", 0) or 0)
+                status["attached"] = True
+            self.printer.broadcast(status)
+
     def _finalize_viewer_attach(
         self,
         tab_id: str,
         source: AgentState,
         replayed_events: list[dict[str, Any]],
         events_payload: dict[str, Any],
+        resend_result: bool = True,
     ) -> None:
         """Correct *tab_id*'s status when *source* died during the attach.
 
@@ -3091,13 +3163,17 @@ class AgentServer(
                 terminal snapshot so both broadcasts describe the same
                 task/chat/tab and reach the same connections (a
                 ``connId``-scoped replay stays scoped).
+            resend_result: ``False`` for a deferred replay
+                (:meth:`_defer_replay`), which sent no transcript and so
+                has no terminal result to re-send — only the status is
+                corrected.
         """
         with self._state_lock:
             if source.running():
                 return
             if self._viewer_owns_other_busy_run(tab_id, source):
                 return
-            if not any(ev.get("type") == "result" for ev in replayed_events):
+            if resend_result and not any(ev.get("type") == "result" for ev in replayed_events):
                 events = self.printer.peek_recording_for_task(
                     source.task_id,
                 )

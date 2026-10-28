@@ -13,12 +13,13 @@ a registered SSH machine.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools, sleep_guard
+from kiss.agents.sorcar.useful_tools import UsefulTools, _log_matches, sleep_guard
 
 
 def _job_id(started: str) -> str:
@@ -39,6 +40,34 @@ def test_wait_until_returns_when_the_log_matches(tmp_path: Path) -> None:
         "Error: until is not a valid regular expression"
     )
     tools.bash_job(job, action="kill")
+
+
+def test_wait_until_finds_a_match_that_straddles_two_scans(tmp_path: Path) -> None:
+    """The log is scanned incrementally (once a second); a match split across scans is found."""
+    tools = UsefulTools(work_dir=str(tmp_path))
+    job = _job_id(
+        tools.Bash("printf READY-; sleep 1.5; echo GO; sleep 20", "job", background=True)
+    )
+    before = time.monotonic()
+    report = tools.bash_job(job, action="wait", until="READY-GO", timeout_seconds=15)
+    assert time.monotonic() - before < 10
+    assert "running (pid" in report and "READY-GO" in report
+    tools.bash_job(job, action="kill")
+
+
+def test_log_matches_searches_the_whole_log(tmp_path: Path) -> None:
+    """Anchored and multi-line patterns keep their meaning across appends."""
+    log = tmp_path / "job.log"
+    log.write_bytes(b"START\n" + b"x" * 10_000)
+    assert _log_matches(log, re.compile(r"START[\s\S]*END")) is False
+    assert _log_matches(log, re.compile(r"^END", re.MULTILINE)) is False
+    with log.open("ab") as appended:
+        appended.write(b"\nEND\n")
+    assert _log_matches(log, re.compile(r"START[\s\S]*END")) is True
+    assert _log_matches(log, re.compile(r"^END", re.MULTILINE)) is True
+    # Anchored to the start of the whole log, not of the appended tail.
+    assert _log_matches(log, re.compile(r"\AEND")) is False
+    assert _log_matches(tmp_path / "missing.log", re.compile("END")) is False
 
 
 def test_wait_until_still_ends_at_exit_or_deadline(tmp_path: Path) -> None:

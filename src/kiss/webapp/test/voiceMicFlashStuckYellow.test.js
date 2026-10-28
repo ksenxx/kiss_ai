@@ -11,158 +11,52 @@
 // is lost the timer must clear the stale flash AND reset the round
 // counter, otherwise every later utterance leaves the button blinking.
 //
-// jsdom has no speech engine, audio graph or microphone, so the harness
-// supplies the minimal window.Vosk / AudioContext / mediaDevices the page
-// expects and feeds real audio blocks through the real capture logic.
+// jsdom has no speech engine, audio graph or microphone, so
+// voice_page_helpers supplies the window.Vosk / AudioContext /
+// mediaDevices the page expects and the tests feed real audio blocks
+// through the real capture logic of a bare voice.js window.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {send} = require('./simplify2_harness');
 const {
-  micBtn,
-  audioBlock,
+  VOICE_CFG,
+  voicePageState,
+  stubVoiceSurface,
   makeBareVoiceWindow,
+  micBtn,
+  startPipeline,
+  wake,
+  speak,
+  fireTimer,
 } = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-const CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: 'https://models.example.com/model.tar.gz',
-};
+// Every window built; closed after the run so the armed safety timers
+// do not keep node alive and a failed assertion cannot hang the suite.
+const windows = [];
 
-class FakeRecognizer {
-  constructor() {
-    this.handlers = {};
-  }
-  setWords() {}
-  on(event, cb) {
-    this.handlers[event] = cb;
-  }
-  acceptWaveform() {}
-  retrieveFinalResult() {}
-  remove() {}
-}
-
+/** A bare voice.js window over the stubbed voice surface. */
 function makeWindow() {
-  const page = {
-    timers: [],
-    clock: {now: 1000000},
-    state: {recognizers: [], processors: []},
-    posted: [],
-  };
-  page.win = makeBareVoiceWindow(CFG, win => stubVoiceSurface(win, page));
-  return page;
-}
-
-/**
- * Give `win` the microphone, Vosk model and audio graph the pipeline
- * expects, recording recognizers, processor nodes and posts in `page`.
- * The page's timers are recorded too, so a test can fire the flash
- * safety timeout instead of waiting a minute.
- */
-function stubVoiceSurface(win, page) {
-  const {timers, clock, state, posted} = page;
-  win.setTimeout = (fn, ms) => {
-    timers.push({fn, ms, cleared: false});
-    return timers.length;
-  };
-  win.clearTimeout = id => {
-    if (typeof id === 'number' && timers[id - 1]) {
-      timers[id - 1].cleared = true;
-    }
-  };
-
-  win.Date.now = () => clock.now;
-
-  Object.defineProperty(win.navigator, 'mediaDevices', {
-    configurable: true,
-    value: {
-      getUserMedia: () =>
-        Promise.resolve({
-          getTracks: () => [{stop: () => {}}],
-          getAudioTracks: () => [],
-        }),
-      enumerateDevices: () => Promise.resolve([]),
-    },
+  const page = voicePageState();
+  page.posted = [];
+  page.win = makeBareVoiceWindow(VOICE_CFG, win => {
+    stubVoiceSurface(win, page);
+    win.addEventListener('kiss-voice-post', e => page.posted.push(e.detail));
   });
-  win.Vosk = {
-    createModel: () =>
-      Promise.resolve({
-        KaldiRecognizer: class extends FakeRecognizer {
-          constructor() {
-            super();
-            state.recognizers.push(this);
-          }
-        },
-      }),
-  };
-  win.AudioContext = class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      const node = {
-        connect: () => {},
-        disconnect: () => {},
-        onaudioprocess: null,
-      };
-      state.processors.push(node);
-      return node;
-    }
-  };
-
-  win.addEventListener('kiss-voice-post', e => posted.push(e.detail));
-}
-
-function tick() {
-  return new Promise(resolve => setTimeout(resolve, 20));
-}
-
-/** Turn the mic on and let the (instantly granted) pipeline come up. */
-async function startMic(page) {
-  micBtn(page.win).click();
-  await tick();
-  assert.ok(
-    micBtn(page.win).classList.contains('voice-listening'),
-    `pipeline must be live: ${micBtn(page.win).className}`,
-  );
+  windows.push(page.win);
+  return page;
 }
 
 // Say the wake word, speak for half a second and fall silent for two:
 // the round's audio is posted and the yellow transcribing flash is on.
 function speakRound(page) {
-  page.clock.now += 10000; // clear the 2 s wake cooldown
-  const rec = page.state.recognizers[page.state.recognizers.length - 1];
-  rec.handlers.result({result: {text: 'abracadabra'}});
-  const proc = page.state.processors[page.state.processors.length - 1];
-  for (let i = 0; i < 2; i++) proc.onaudioprocess(audioBlock(true));
-  for (let i = 0; i < 8; i++) proc.onaudioprocess(audioBlock(false));
+  wake(page);
+  speak(page);
   assert.ok(
     micBtn(page.win).classList.contains('voice-transcribing'),
     `the round must show the yellow transcribing flash: ${micBtn(page.win).className}`,
   );
-}
-
-function firePendingTimer(timers) {
-  for (let i = timers.length - 1; i >= 0; i--) {
-    if (!timers[i].cleared) {
-      timers[i].cleared = true;
-      timers[i].fn();
-      return timers[i].ms;
-    }
-  }
-  throw new Error('no pending timer to fire');
 }
 
 async function main() {
@@ -171,19 +65,18 @@ async function main() {
       'flash blinking (safety timeout self-heals the round counter)',
     async () => {
       const page = makeWindow();
-      const {win, timers, posted} = page;
+      const {win, posted} = page;
       const btn = micBtn(win);
       const inp = win.document.getElementById('task-input');
 
-      await startMic(page);
+      await startPipeline(page);
       speakRound(page); // round A: audio posted, reply never comes
       assert.strictEqual(
         posted.filter(m => m.type === 'voiceTranscribe').length,
         1,
       );
 
-      const ms = firePendingTimer(timers);
-      assert.strictEqual(ms, 60000, 'yellow safety timer must be 60s');
+      fireTimer(page, 60000); // the yellow safety timer
       assert.ok(
         !btn.classList.contains('voice-transcribing'),
         'the safety timeout must clear the stale yellow flash',
@@ -203,12 +96,12 @@ async function main() {
 
   await test('every later utterance also clears the flash after the self-heal', async () => {
     const page = makeWindow();
-    const {win, timers} = page;
+    const {win} = page;
     const btn = micBtn(win);
 
-    await startMic(page);
+    await startPipeline(page);
     speakRound(page);
-    firePendingTimer(timers);
+    fireTimer(page, 60000);
 
     for (let round = 1; round <= 3; round++) {
       speakRound(page);
@@ -225,7 +118,7 @@ async function main() {
     const {win} = page;
     const btn = micBtn(win);
 
-    await startMic(page);
+    await startPipeline(page);
     speakRound(page);
     speakRound(page);
 
@@ -239,6 +132,7 @@ async function main() {
     assert.ok(!btn.classList.contains('voice-transcribing'));
   });
 
+  windows.forEach(win => win.close());
   report('voiceMicFlashStuckYellow');
 }
 

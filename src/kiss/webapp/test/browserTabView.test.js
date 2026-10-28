@@ -19,6 +19,8 @@ const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
 
+const {captureTimers} = require('./simplify2_harness');
+
 const MEDIA = path.join(__dirname, '..', 'media');
 
 function makeView() {
@@ -26,6 +28,7 @@ function makeView() {
     runScripts: 'outside-only',
   });
   const win = dom.window;
+  const timers = captureTimers(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
   const sent = [];
   const view = win.BrowserTabView.create('tab-1', {
@@ -35,10 +38,16 @@ function makeView() {
   const screen = view.el.querySelector('.browser-screen');
   Object.defineProperty(screen, 'clientWidth', {value: 640});
   Object.defineProperty(screen, 'clientHeight', {value: 480});
-  return {win, view, sent, screen};
+  /** Run now every armed (not cleared) timer: the deferred layout tick. */
+  function tick() {
+    for (const t of timers.splice(0)) {
+      if (t.cleared) continue;
+      win.clearTimeout(t.id);
+      t.cb();
+    }
+  }
+  return {win, view, sent, screen, tick};
 }
-
-const {sleep} = require('./simplify2_harness');
 
 function keydown(win, el, key) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key, bubbles: true}));
@@ -114,9 +123,9 @@ async function testAddressBarAndState() {
 }
 
 async function testViewportAndDispose() {
-  const {view, sent} = makeView();
+  const {view, sent, tick} = makeView();
   view.setVisible(true);
-  await sleep(10);
+  tick();
   assert.deepStrictEqual(sent, [
     {
       type: 'browserViewport',
@@ -127,7 +136,7 @@ async function testViewportAndDispose() {
     },
   ]);
   view.setVisible(true);
-  await sleep(10);
+  tick();
   assert.strictEqual(sent.length, 1, 'an unchanged viewport is not resent');
   view.resubscribe();
   assert.strictEqual(sent.length, 2, 'resubscribe reports again');
@@ -139,7 +148,7 @@ async function testViewportAndDispose() {
   assert.strictEqual(sent.length, 3, 'hidden: nothing to report');
 
   view.setVisible(true);
-  await sleep(10);
+  tick();
   assert.strictEqual(sent.length, 4);
   view.dispose();
   view.dispose();
@@ -151,19 +160,19 @@ async function testViewportAndDispose() {
 }
 
 async function testShowHideBeforeTick() {
-  const {view, sent} = makeView();
+  const {view, sent, tick} = makeView();
   view.setVisible(true);
   view.setVisible(false);
-  await sleep(10);
+  tick();
   assert.deepStrictEqual(sent, [], 'a tab hidden before layout reports nothing');
   view.dispose();
   assert.deepStrictEqual(sent, [], 'and dispose has nothing to retract');
 }
 
 async function testHideThenDispose() {
-  const {view, sent} = makeView();
+  const {view, sent, tick} = makeView();
   view.setVisible(true);
-  await sleep(10);
+  tick();
   assert.strictEqual(sent.length, 1);
   assert.strictEqual(sent[0].visible, true);
   view.setVisible(false);
@@ -172,7 +181,7 @@ async function testHideThenDispose() {
   view.dispose();
   assert.strictEqual(sent.length, 2, 'hide already retracted the viewport');
   view.setVisible(true);
-  await sleep(10);
+  tick();
   assert.strictEqual(sent.length, 2, 'a disposed view never reports');
 }
 

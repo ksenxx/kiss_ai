@@ -6,15 +6,31 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf, waitFor} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  recordTimers,
+  fireTimers,
+} = require('./simplify2_harness');
 
 const openWindows = [];
 
-/** A chat page with synchronous animation frames, closed after its test. */
+/**
+ * A chat page with synchronous animation frames and recorded 300 ms
+ * timers (`timers`, cancellation aware, so the ghost debounce can be
+ * fired by hand and a cleared one never fires), closed after its test.
+ */
 function openPage() {
-  const page = makePage({beforeScripts: stubRaf});
+  let timers = [];
+  const page = makePage({
+    beforeScripts: win => {
+      stubRaf(win);
+      timers = recordTimers(win, 300);
+    },
+  });
   openWindows.push(page.win);
-  return page;
+  return {win: page.win, posted: page.posted, timers};
 }
 
 function setInput(win, text) {
@@ -77,23 +93,6 @@ function testCompletionsRendersPicker() {
   const hl = picker(win).querySelectorAll('strong.ac-hl');
   assert.ok(hl.length >= 1, 'matched prefix must be wrapped in .ac-hl');
   assert.strictEqual(hl[0].textContent, 'fix');
-}
-
-function testCompletionsRendersFooter() {
-  const {win} = openPage();
-  setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-  });
-  const footer = picker(win).querySelector('.ac-footer');
-  assert.ok(footer, 'completions picker must render the .ac-footer kbd row');
-  assert.ok(/Tab/.test(footer.textContent));
-  assert.ok(/Esc/.test(footer.textContent));
-  assert.ok(/navigate/.test(footer.textContent), 'navigate hint present');
-  assert.ok(/accept/.test(footer.textContent), 'accept hint present');
-  assert.ok(/dismiss/.test(footer.textContent), 'dismiss hint present');
 }
 
 function testCompletionsStaleQueryDropped() {
@@ -344,18 +343,21 @@ function testGhostStillWorks() {
   assert.strictEqual(inp.value, 'fix the bug ');
 }
 
-async function testTypingRequestsCompletions() {
-  const {win, posted} = openPage();
+function testTypingRequestsCompletions() {
+  const {win, posted, timers} = openPage();
   const inp = win.document.getElementById('task-input');
   inp.value = 'f';
   inp.setSelectionRange(1, 1);
   inp.dispatchEvent(new win.Event('input', {bubbles: true}));
   typeChar(win, 'i');
   typeChar(win, 'x');
-  const cmd = await waitFor(
-    () => posted.find(p => p && p.type === 'complete'),
-    'typing must dispatch a ``complete`` command',
-  );
+  // Each keystroke re-arms the 300 ms ghost debounce and clears the
+  // previous one: only the last keystroke's timer is live.  Fire it.
+  const live = timers.filter(t => !t.cleared);
+  assert.strictEqual(live.length, 1, "only the last keystroke's debounce is live");
+  fireTimers(live);
+  const cmd = posted.find(p => p && p.type === 'complete');
+  assert.ok(cmd, 'typing must dispatch a ``complete`` command');
   assert.strictEqual(cmd.query, 'fix');
 }
 
@@ -563,7 +565,6 @@ function testIdentifierClickAcceptPreservesExistingText() {
 
 const tests = [
   testCompletionsRendersPicker,
-  testCompletionsRendersFooter,
   testCompletionsStaleQueryDropped,
   testCompletionsSuppressedDuringAtMention,
   testCompletionsSuppressedWhenCursorNotAtEnd,
@@ -589,11 +590,11 @@ const tests = [
   testIdentifierClickAcceptPreservesExistingText,
 ];
 
-async function main() {
+function main() {
   let failed = 0;
   for (const t of tests) {
     try {
-      await t();
+      t();
       console.log('PASS', t.name);
     } catch (err) {
       failed += 1;

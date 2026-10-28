@@ -31,12 +31,8 @@ from typing import Any, cast
 import pytest
 
 from kiss.agents.third_party_agents.gmail.gmail_sea import _SERVICE, GmailChannelBackend
-from kiss.tests.agents.third_party_agents.composio_test_utils import connect, fake_composio
-from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
-    RecordingServer,
-    recording_server,
-)
+from kiss.tests.agents.third_party_agents.composio_test_utils import connected_endpoint
+from kiss.tests.agents.third_party_agents.recording_http import RecordingHandler, RecordingServer
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -154,9 +150,9 @@ def backend(monkeypatch):
     Yields:
         ``(backend, server)``.
     """
-    with recording_server(_GmailHandler) as server, fake_composio(monkeypatch) as composio:
-        composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
-        connect(composio, _SERVICE)
+    with connected_endpoint(
+        monkeypatch, _GmailHandler, _SERVICE, "https://gmail.googleapis.com"
+    ) as (_, server):
         gmail = GmailChannelBackend()
         assert gmail.connect() is True
         yield gmail, server

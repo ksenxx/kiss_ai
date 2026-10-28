@@ -352,11 +352,7 @@ function runPanel() {
     ],
     userCount: 2,
   });
-  posted.splice(
-    posted.findIndex(m => m.type === 'editTrick' && m.newText === '変換中'),
-    1,
-  );
-  assert.strictEqual(editsPosted(posted).length, 3);
+  assert.strictEqual(editsPosted(posted).length, 4);
 
   // --- opening a second editor closes the first (one at a time)
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
@@ -372,7 +368,7 @@ function runPanel() {
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
   input(win, editor(doc, rows(doc)[1]), 'Line one\nLine two');
   click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
-  assert.deepStrictEqual(editsPosted(posted)[3], {
+  assert.deepStrictEqual(editsPosted(posted).at(-1), {
     type: 'editTrick',
     text: 'Mine two, edited',
     newText: 'Line one\nLine two',
@@ -446,7 +442,7 @@ function runPanel() {
     rows(doc)[0].querySelectorAll('.sidebar-item-edit').length,
     1,
   );
-  assert.strictEqual(editsPosted(posted).length, 4, 'closing posts no edit');
+  assert.strictEqual(editsPosted(posted).length, 5, 'closing posts no edit');
 
   // --- a filtered list edits the right promptlet (index into the full list)
   send(win, {
@@ -461,7 +457,7 @@ function runPanel() {
   assert.strictEqual(ta.value, 'Mine B');
   input(win, ta, 'Mine B2');
   key(win, ta, 'Enter');
-  assert.deepStrictEqual(editsPosted(posted)[4], {
+  assert.deepStrictEqual(editsPosted(posted).at(-1), {
     type: 'editTrick',
     text: 'Mine B',
     newText: 'Mine B2',
@@ -475,16 +471,11 @@ function runPanel() {
   assert.strictEqual(composer.value, 'Bundled alpha');
   assert.ok(!panel.classList.contains('open'));
 
-  // --- a page loaded without the count global shows no pencils
-  const bare = makePage();
-  bare.win.__TRICKS__ = ['a', 'b'];
-  bare.win.document.getElementById('tricks-btn').click();
-  const bareList = bare.win.document.getElementById('tricks-list');
-  assert.strictEqual(bareList.querySelectorAll('.sidebar-item-edit').length, 0);
+  // A page loaded without the count global shows no pencils:
+  // tricksPanelCopyDelete.test.js (its bare page).
 
-  // Close the pages so no timer main.js armed keeps node alive.
+  // Close the page so no timer main.js armed keeps node alive.
   win.close();
-  bare.win.close();
   console.log('tricksPanelEdit.test.js passed');
 }
 

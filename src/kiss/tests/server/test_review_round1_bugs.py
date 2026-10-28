@@ -8,8 +8,6 @@ should pass; before the fix, each test failed deterministically.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     """The ``parent_tid`` extraction in ``_replay_session`` must accept str.
@@ -22,12 +20,6 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     """
     from kiss.server.server import _coerce_id
 
-    src = Path(
-        "src/kiss/server/server.py"
-    ).read_text()
-    assert (
-        'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
-    )
     assert _coerce_id("deadbeef" * 4) == "deadbeef" * 4
     assert _coerce_id(5) == "5"
     assert _coerce_id("") is None

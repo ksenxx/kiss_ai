@@ -69,11 +69,7 @@ function testWorktreeBarHasDoNothing() {
 
   sendWorktreeDone(win, tabId);
   assert.ok(bar(win), 'worktree_done must show the action bar');
-  assert.deepStrictEqual(
-    barButtons(win).map(b => b.textContent),
-    ['Auto-commit and merge', 'Do nothing', 'Discard'],
-    'the worktree bar must offer all three choices',
-  );
+  // The three buttons and their order: ui_antipattern_destructive_confirm.
 
   const btn = clickBarButton(win, 'Do nothing');
   assert.deepStrictEqual(

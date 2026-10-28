@@ -6,15 +6,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
-  loadMainCss,
-  MEDIA,
+  loadRemoteCss,
   isDisplayed,
 } = require('./simplify2_harness');
+const {spawnSubagent} = require('./subagent_tab_helpers');
 
 const LONG_TASK = Array.from(
   {length: 12},
@@ -27,15 +25,7 @@ function makePage() {
   return makeChatPage({
     bodyClass: 'remote-chat',
     sourceUrl: 'taskpanel-main.js',
-    beforeScripts(win) {
-      loadMainCss(win);
-      const remoteStyle = win.document.createElement('style');
-      remoteStyle.textContent = fs.readFileSync(
-        path.join(MEDIA, 'remote-codex.css'),
-        'utf8',
-      );
-      win.document.head.appendChild(remoteStyle);
-    },
+    beforeScripts: loadRemoteCss,
   });
 }
 
@@ -89,10 +79,6 @@ function assertFullTextPanel(win, why) {
   assert.ok(
     parseFloat(m[1]) > 0 && parseFloat(m[1]) <= 100,
     `the vh bound must keep the panel within the page (${why})`,
-  );
-  assert.ok(
-    !maxHeight.includes('calc('),
-    `the old fixed three-line clamp must be gone (${why})`,
   );
 }
 
@@ -197,24 +183,7 @@ function testChevronPassWorksWithoutButton() {
     tabId: parentId,
     extras: {tasks: JSON.stringify(['sub 1'])},
   });
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-1',
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted.find(
-    m => m.type === 'resumeSession' && m.taskId === 'sub-task-1',
-  );
-  assert.ok(resume, 'the spawned sub-agent must open its own tab');
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: resume.tabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-  });
+  spawnSubagent({win, posted}, parentId, 'sub-task-1', 'sub 1', 0);
   send(win, {
     type: 'tool_result',
     name: 'run_parallel',

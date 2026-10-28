@@ -18,22 +18,7 @@ import unittest
 
 from kiss.agents.third_party_agents.signal.signal_sea import SignalChannelBackend
 from kiss.tests.agents.third_party_agents.conftest import install_cli_on_path
-
-# A Python program (not a shell script) so the same stand-in runs on
-# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
-_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
-import sys
-args = sys.argv[1:]
-if args[:1] == ["-u"]:
-    args = args[2:]
-if args[:1] == ["send"]:
-    if args[-1] == "+FAIL":
-        print("Failed to send message: ERROR unregistered recipient", file=sys.stderr)
-        sys.exit(1)
-    if args[-1] == "+WARN":
-        print("WARNING: error while updating profile", file=sys.stderr)
-sys.exit(0)
-"""
+from kiss.tests.agents.third_party_agents.signal_cli import FAKE_SIGNAL_CLI
 
 
 class TestSendSignalMessage(unittest.TestCase):
@@ -41,7 +26,7 @@ class TestSendSignalMessage(unittest.TestCase):
 
     def setUp(self) -> None:
         """Install a real executable signal-cli stub on PATH."""
-        install_cli_on_path(self, "signal-cli", _FAKE_SIGNAL_CLI)
+        install_cli_on_path(self, "signal-cli", FAKE_SIGNAL_CLI)
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
 

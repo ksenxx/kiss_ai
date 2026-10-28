@@ -39,7 +39,7 @@ import pytest
 
 from kiss.core.processes import find_bash
 from kiss.server.terminal_tab import TerminalService
-from kiss.tests.server.test_terminal_tab_service import ConnPrinter
+from kiss.tests.server.test_terminal_tab_service import ConnPrinter, session_count
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
@@ -144,7 +144,7 @@ def test_input_on_another_tab_is_not_blocked_by_a_slow_spawn(
     assert bash_shell.is_file()
     opened = printer.of_type("terminalOpened", "conn-2")
     assert len(opened) == 1 and opened[0]["tab_id"] == "tab-b" and opened[0]["attached"] is False
-    assert svc.session_count() == 2
+    assert session_count(svc) == 2
     svc.input("tab-b", "conn-2", "echo from-b\n")
     printer.wait_for(lambda: "from-b" in printer.output("tab-b"), timeout=5.0)
 
@@ -171,7 +171,7 @@ def test_concurrent_opens_of_one_tab_keep_a_single_shell(
     second.join(10.0)
     assert not first.is_alive() and not second.is_alive()
 
-    assert svc.session_count() == 1
+    assert session_count(svc) == 1
     opened = printer.of_type("terminalOpened")
     assert sorted(e["attached"] for e in opened) == [False, True]
     assert {e["tab_id"] for e in opened} == {"tab-r"}
@@ -186,5 +186,5 @@ def test_concurrent_opens_of_one_tab_keep_a_single_shell(
     printer.wait_for(lambda: "survivor" in printer.output("tab-r"), timeout=5.0)
     svc.close("tab-r")
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=5.0)
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     assert _shells_in(work) == []

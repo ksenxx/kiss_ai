@@ -408,7 +408,9 @@ class TestPreserveMarkerDoesNotWaitForRepoLocks(unittest.TestCase):
     fresh process sees it), and this task's run can finish.
     """
 
-    HOLD_SECONDS = 1.0
+    # The marker write runs one ``git rev-parse``, which a loaded Windows
+    # box has taken most of a second to answer.
+    HOLD_SECONDS = 3.0
 
     def setUp(self) -> None:
         self.home = IsolatedKissHome(prefix="kiss-preserve-marker-lock-")

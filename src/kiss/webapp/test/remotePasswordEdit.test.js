@@ -20,36 +20,33 @@
 // src/kiss/tests/server/test_save_config_remote_password.py.
 
 const assert = require('assert');
-const {makePreloadedPage, send} = require('./simplify2_harness');
 const {
+  makePreloadedPage,
+  send,
   click,
   byId,
+  lastMsg,
+} = require('./simplify2_harness');
+const {
   openSettings,
   closeSettings,
   typeInto,
-  lastMsg,
+  openSettingsWith,
 } = require('./settings_helpers');
 
 const TAB_ID = 'tab-remote-password-edit-test';
-
-function openSettingsWith(wv, stored) {
-  openSettings(wv.win);
-  assert.ok(
-    wv.posted.some(m => m.type === 'getConfig'),
-    'opening Settings must request the config',
-  );
-  send(wv.win, {
-    type: 'configData',
-    config: {remote_password: stored, max_budget: 5},
-  });
-}
+const STORED = {remote_password: 'Old-Password-1', max_budget: 5};
 
 // That the box is an editable, masked input whose untouched value is
 // saved back is pinned by settingsPanelStaleConfig.test.js; here: the eye
 // toggle and the absence of a daemon-side Rotate button.
 function testEyeToggleRevealsAndHides() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
+  openSettingsWith(wv, STORED);
+  assert.ok(
+    wv.posted.some(m => m.type === 'getConfig'),
+    'opening Settings must request the config',
+  );
   const box = byId(wv.win, 'cfg-remote-password');
   assert.strictEqual(
     box.value,
@@ -74,7 +71,7 @@ function testEyeToggleRevealsAndHides() {
 
 function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
+  openSettingsWith(wv, STORED);
   typeInto(wv.win, 'cfg-remote-password', '  New-Password-2  ');
   // The daemon re-pushes configData (another window saved something):
   // the edit in progress must stand.
@@ -116,7 +113,7 @@ function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
 
 function testClearingTheBoxSavesAnEmptyPassword() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
+  openSettingsWith(wv, STORED);
   typeInto(wv.win, 'cfg-remote-password', '');
   closeSettings(wv.win);
   const save = lastMsg(wv.posted, 'saveConfig');

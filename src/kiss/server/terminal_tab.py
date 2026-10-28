@@ -354,11 +354,6 @@ class TerminalService:
                     return
             time.sleep(0.05)
 
-    def session_count(self) -> int:
-        """Return how many shells are running (tests and diagnostics)."""
-        with self._lock:
-            return len(self._sessions)
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -489,7 +484,7 @@ class TerminalService:
         with self._lock:
             if (
                 session.grace_timer is threading.current_thread()
-                and session.tab_id in self._sessions
+                and self._sessions.get(session.tab_id) is session
             ):
                 self._hang_up(session)
 
@@ -551,6 +546,9 @@ class TerminalService:
         selector.close()
         with self._lock:
             self._sessions.pop(session.tab_id, None)
+            # A detached shell that exited on its own: its grace timer
+            # has nothing left to hang up.
+            self._cancel_grace(session)
             # Announced under the lock, like every other session-scoped
             # event: a re-open of the tab registers and announces its new
             # shell under it, so this exit can never reach the client

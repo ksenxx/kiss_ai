@@ -6,12 +6,12 @@
 // JSDOM end-to-end test for the streaming collapse pass
 // (collapseOlderPanels in media/main.js).
 //
-// While a task streams, the transcript folds its older panels so the
-// screen is not a wall of finished tool calls, keeping the NEWEST TWO
-// open.  A tool-call panel, though, starts folded the moment it
-// renders (its header carries the call) and only a click of the user
-// unfolds it; a Thoughts panel (the agent's own words) is never folded
-// by the pass.
+// While a task streams, the transcript's collapse pass runs after every
+// event.  A tool-call panel starts folded the moment it renders (its
+// header carries the call) and only a click of the user unfolds it,
+// however new it is; a Thoughts panel (the agent's own words) is never
+// folded by the pass.  (The file name predates the pass folding every
+// tool call: the "newest two" allowance no longer exists.)
 //
 // Covered here, on the visible tab and on a tab that ran while hidden:
 //   * after every event, every tool-call panel is folded unless the
@@ -36,9 +36,10 @@ function makePage() {
   return {win};
 }
 
-/** Top-level collapsible panels of the visible transcript, in order. */
-/** The task's event panels: on the transcript while the task runs,
- * inside its Trajectory panel once it has ended. */
+/**
+ * The task's top-level collapsible panels, in order: on the transcript
+ * while the task runs, inside its Trajectory panel once it has ended.
+ */
 function panels(win) {
   const out = win.document.getElementById('output');
   const traj = out.querySelector(':scope > .trajectory > .trajectory-sub');
@@ -52,14 +53,14 @@ function isCollapsed(p) {
 }
 
 /**
- * Assert the streaming invariant: a Thoughts panel is open anywhere, a
- * tool-call panel is folded (it starts so) unless the user pinned it,
- * and any other panel but the newest two is folded.
+ * Assert the streaming invariant: a Thoughts panel is open anywhere and
+ * a tool-call panel is folded (it starts so) unless the user pinned it.
+ * The run() fixture renders no other panel kind; one would need its
+ * own rule here.
  */
 function assertStreamFolding(win, label) {
   const ps = panels(win);
   ps.forEach((p, i) => {
-    const isNewestTwo = i >= ps.length - 2;
     if (p.classList.contains('llm-panel')) {
       assert.ok(
         !isCollapsed(p),
@@ -70,20 +71,14 @@ function assertStreamFolding(win, label) {
         !isCollapsed(p),
         `${label}: pinned panel #${i + 1} of ${ps.length} stays open`,
       );
-    } else if (p.classList.contains('tc')) {
+    } else {
+      assert.ok(
+        p.classList.contains('tc'),
+        `${label}: panel #${i + 1} of ${ps.length} has no rule: ${p.className}`,
+      );
       assert.ok(
         isCollapsed(p),
         `${label}: tool panel #${i + 1} of ${ps.length} is folded`,
-      );
-    } else if (isNewestTwo) {
-      assert.ok(
-        !isCollapsed(p),
-        `${label}: panel #${i + 1} of ${ps.length} (one of the newest two) must be open`,
-      );
-    } else {
-      assert.ok(
-        isCollapsed(p),
-        `${label}: panel #${i + 1} of ${ps.length} must be folded`,
       );
     }
   });

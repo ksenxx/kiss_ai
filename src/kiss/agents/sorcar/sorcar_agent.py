@@ -33,7 +33,9 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_parallel_tool,
 )
 from kiss.agents.sorcar.commit_message import fallback_commit_message
+from kiss.agents.sorcar.container_jobs import ContainerJobs
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
+from kiss.agents.sorcar.evidence_gate import EvidenceGate
 from kiss.agents.sorcar.fanout_guard import (
     is_implementation_task,
 )
@@ -104,7 +106,9 @@ logger = logging.getLogger(__name__)
 
 BROWSER_TOOL_NAMES: frozenset[str] = frozenset({
     "go_to_url", "click", "type_text", "press_key", "scroll", "screenshot",
-    "get_page_content", "show_browser", "close_browser",
+    "get_page_content", "evaluate_script", "list_console_messages",
+    "list_network_requests", "wait_for", "attach_to_chrome", "use_my_chrome",
+    "show_browser", "close_browser",
 })
 """Names of the tools :meth:`WebUseTool.get_tools` returns."""
 
@@ -351,10 +355,7 @@ your own knowledge, and say so when a fact could be outdated.
 
 
 def summary(description: str) -> str:
-    """Record a progress summary at a natural checkpoint (a plan made, a milestone reached).
-
-    The framework writes a recap of the tool calls every 10 steps on its
-    own; call this only when you have something the recap cannot say.
+    """Every 10 steps: summarize your steps since the last `summary` call.
 
     Args:
         description: Natural language summary in 5-10 sentences of
@@ -374,15 +375,20 @@ def _memory_root_for_run(
     docker_image: str | None,
     caller_system_instruction: bool = False,
     use_memory_override: bool | None = None,
+    profile_has_memory: bool = True,
 ) -> Path | None:
     """The memory directory this run should use, or None for no memory.
 
-    Memory rides with the built-in toolset, so three gates precede the
+    Memory rides with the built-in toolset, so four gates precede the
     user's ``use_memory`` setting (see :func:`_memory_settings`):
 
     * ``append_basic_tools=False`` strips the run down to ``finish`` plus
       the caller's tools — promising ``memory_*`` tools in the prompt
       would be a lie.
+    * A tool profile without any memory tool (``shell``, ``assistant``,
+      ...) would drop them from the toolset anyway; building them,
+      running the recall search and appending ``MEMORY_PROTOCOL`` (which
+      names them) would cost every step for tools the model cannot call.
     * Docker runs replace Bash/Read/Edit/Write with container-backed
       tools; the memory tools execute in the host process on host paths,
       so registering them would hand a containerized task read/write
@@ -406,12 +412,19 @@ def _memory_root_for_run(
         use_memory_override: Per-run memory toggle — ``True`` enables
             (subject to the gates above), ``False`` disables, ``None``
             falls back to the environment/config default.
+        profile_has_memory: Whether the run's tool profile keeps at
+            least one memory tool (the full toolset does).
 
     Returns:
         The memory root when every gate and the effective toggle allow
         it, else None.
     """
-    if not append_basic_tools or docker_image or caller_system_instruction:
+    if (
+        not append_basic_tools
+        or not profile_has_memory
+        or docker_image
+        or caller_system_instruction
+    ):
         return None
     enabled, root = _memory_settings()
     if use_memory_override is not None:
@@ -599,7 +612,8 @@ def auto_commit_changes(
             chat page never sees a misleading "Generating commit
             message" toast without a follow-up.  When
             ``commit_staged`` returns ``False`` after *message_fn*
-            (e.g. a pre-commit hook rejected the commit),
+            (e.g. a pre-commit hook rejected the commit), or when a
+            Stop (``KeyboardInterrupt``) lands during *message_fn*,
             ``notify_fn("failed", "")`` is invoked instead so the
             sticky "generating" toast always gets a terminal update.
 
@@ -620,6 +634,11 @@ def auto_commit_changes(
             "LLM commit message generation failed; using fallback", exc_info=True,
         )
         msg = fallback_commit_message(user_prompt, task_result)
+    except BaseException:
+        # A Stop during the model call: no commit follows, so close the
+        # sticky "generating" toast before the interrupt propagates.
+        _safe_notify(notify_fn, "failed", "")
+        raise
     GitWorktreeOps.stage_all(commit_dir)
     committed = GitWorktreeOps.commit_staged(commit_dir, msg)
     if committed:
@@ -729,6 +748,24 @@ def _broadcast_subagent_done(
             pass
 
 
+def _viewer_tab_ids(printer: Any, task_id: str | None) -> list[str]:
+    """Return the tab ids subscribed to *task_id* through *printer*'s fan-out registry.
+
+    ``[]`` when the printer has no registry (headless, a bare
+    ``Printer``) or when *task_id* is empty.
+
+    Args:
+        printer: The run's printer (a ``JsonPrinter`` has
+            ``_fanout_targets``).
+        task_id: The persisted task id looked up, or ``""``/``None``.
+    """
+    fanout = getattr(printer, "_fanout_targets", None)
+    if not callable(fanout) or not task_id:
+        return []
+    targets = cast(list[Any], fanout(task_id))
+    return [str(v) for v in targets if v]
+
+
 def _notify_subagent_done(
     printer: Any,
     sub_task_id: str | None,
@@ -764,12 +801,7 @@ def _notify_subagent_done(
             named (its ``_subagent_info["parent_tab_id"]``); empty for
             a parentless sub-agent, whose tab is ``task__sub_…``.
     """
-    viewer_ids: list[str] = []
-    fanout = getattr(printer, "_fanout_targets", None)
-    if callable(fanout) and sub_task_id:
-        found = fanout(sub_task_id)
-        if isinstance(found, list):
-            viewer_ids = [v for v in found if v]
+    viewer_ids = _viewer_tab_ids(printer, sub_task_id)
     extra = [sub_tab_id]
     if sub_task_id:
         extra.insert(0, f"{parent_tab_id or 'task'}__sub_{sub_task_id}")
@@ -1104,10 +1136,12 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         # The run's file/shell tools; kept so ``create_worktree``, which
-        # moves the work directory mid-run, can re-point them.
+        # moves the work directory mid-run, can re-point them.  Bound by
+        # ``_get_tools`` (a Docker run has none) and dropped by
+        # ``_release_run_hooks`` so no run sees the previous run's.
         self._useful_tools: UsefulTools | None = None
-        # Files written in every session of the current run (the tools
-        # instance is rebuilt per session), for the continuation message.
+        # Files written by the current run's tools instances (a test
+        # may swap them), for the continuation message.
         self._written_files: set[Path] = set()
         self._wts: dict[Path, GitWorktree] = {}
         # The warning pending for the user (a worktree kept for review,
@@ -1118,10 +1152,6 @@ class SorcarAgent(RelentlessAgent):
         # Start of the current task block, stamped by the daemon's task
         # runner (``cmd["_start_ms"]``) and read back when a tab rebinds.
         self._task_start_ms: int = 0
-        self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
-        # Set by ``_do_merge``: the last merge conflicted and the merge
-        # SEA resolved it (``merge`` reports this in its message).
-        self._last_merge_resolved_by_agent: bool = False
         # Repositories whose worktree setup failed (detached HEAD, no
         # commits, a git failure): the task edits them in place.
         self._unisolated_repos: set[Path] = set()
@@ -1131,6 +1161,9 @@ class SorcarAgent(RelentlessAgent):
         # One-shot ``finish`` gate: the first ``finish`` with a worktree
         # still pending is refused once with "call commit_and_merge".
         self._worktree_finish_gate_used: bool = False
+        # One-shot ``finish`` gate: a success whose own summary says the
+        # result is unverified is refused once.
+        self._evidence_gate = EvidenceGate()
         # Per-run settings taken from :meth:`run`'s arguments; the
         # defaults are what a run that never reached ``run`` reports.
         self._launch_model_name: str = ""
@@ -1186,9 +1219,17 @@ class SorcarAgent(RelentlessAgent):
         # the agent (not the per-run UsefulTools) so a follow-up prompt
         # in the same chat can still wait on, tail or kill them.
         self._background_jobs: dict[str, BackgroundJob] = {}
+        # The same registry for a container run (``_docker_bash`` reads the
+        # attached manager at call time, so one instance serves every run).
+        self._container_jobs = ContainerJobs(self._docker_bash)
         # Explicit tool profile named by the fan-out (a TOOL_PROFILES key)
         # or "" to let _tool_profile() decide from the reviewer marker.
         self._tool_profile_name: str = ""
+        # The profile ``run()`` decided for the current run, judged once
+        # on the raw prompt template: the restricted-profile note, the
+        # system prompt choice and the toolset (``_get_tools``) all
+        # follow it.  "" before the first run.
+        self._run_profile: str = ""
         # Pre-run task classification state (see
         # :meth:`_classify_task_once`).  ``_classification_attempted``
         # makes the classifier run at most once per task even when a
@@ -1305,10 +1346,9 @@ class SorcarAgent(RelentlessAgent):
         else:
             parent_tab_id = str(info.get("parent_tab_id") or "") or "task"
             own = f"{parent_tab_id}__sub_{own_task_id}"
-        fanout = getattr(self.printer, "_fanout_targets", None)
         viewer_ids = sorted(
-            str(v) for v in (fanout(own_task_id) if fanout else [])
-            if v and (v != tab_id or info is None)
+            v for v in _viewer_tab_ids(self.printer, own_task_id)
+            if v != tab_id or info is None
         )
         if not viewer_ids or own in viewer_ids:
             return own
@@ -1353,8 +1393,9 @@ class SorcarAgent(RelentlessAgent):
     def _tool_profile(self, task: str = "") -> str:
         """Return the tool profile this agent runs with.
 
-        A profile named explicitly by the fan-out (``_tool_profile_name``)
-        wins.  Otherwise a reviewer sub-agent gets the reduced ``review``
+        A profile named explicitly by the fan-out (``_tool_profile_name``,
+        stored canonical by :meth:`run`) wins.  Otherwise a reviewer
+        sub-agent gets the reduced ``review``
         profile when ``DEFAULT_CONFIG.tool_profiles`` is on and its task
         does not ask for changes (:func:`is_implementation_task`), and
         everything else gets ``full``.
@@ -1368,7 +1409,7 @@ class SorcarAgent(RelentlessAgent):
             keys (see :func:`resolve_tool_profile`).
         """
         if self._tool_profile_name:
-            return canonical_tool_profile(self._tool_profile_name)
+            return self._tool_profile_name
         task = task or self.task_description
         if (
             DEFAULT_CONFIG.tool_profiles
@@ -1384,9 +1425,10 @@ class SorcarAgent(RelentlessAgent):
         Must be called after docker_manager is set up (i.e., from perform_task,
         not from run() before super().run()).
 
-        The list is cut down to the agent's tool profile
-        (:meth:`_tool_profile`, resolved by :func:`resolve_tool_profile`
-        so composites such as ``shell+edit+browser`` work): the browser,
+        The list is cut down to the profile ``run()`` decided
+        (``_run_profile``; a direct call before any run decides now with
+        :meth:`_tool_profile`), resolved by :func:`resolve_tool_profile`
+        so composites such as ``shell+edit+browser`` work: the browser,
         skill, MCP, channel-dispatch and fan-out tools are built only
         where the profile names them, so a ``review`` or ``shell``
         sub-agent's every step carries only the schemas it can use.
@@ -1397,7 +1439,7 @@ class SorcarAgent(RelentlessAgent):
                 synthesized MCP tool name among them, or among the
                 built-ins actually built, gets a numeric suffix.
         """
-        allowed = resolve_tool_profile(self._tool_profile())
+        allowed = resolve_tool_profile(self._run_profile or self._tool_profile())
 
         def _stream(text: str) -> None:
             if self.printer:
@@ -1503,6 +1545,7 @@ class SorcarAgent(RelentlessAgent):
 
             docker_tools = DockerTools(self._docker_bash)
             self.docker_manager.stop_event = self._stop_event
+            jobs = self._container_jobs
 
             def Bash(  # noqa: N802
                 command: str,
@@ -1510,39 +1553,44 @@ class SorcarAgent(RelentlessAgent):
                 timeout_seconds: int = 30,
                 max_output_chars: int = DEFAULT_CONFIG.tool_output_default_chars,
                 background: bool = False,
+                on_timeout: str = "kill",
             ) -> str:
-                """Runs a bash command in the task's Docker container and returns its output.
+                """Runs a bash command in the task's container and returns its output.
 
                 The command starts in the container's working directory;
                 in a container kiss started that is the task's work dir,
                 bind-mounted at its host path.
-                Background jobs (``background=True``) are not available in
-                Docker mode: start long commands yourself with
-                ``nohup cmd > /tmp/out.log 2>&1 < /dev/null &`` and poll
-                the log file with ``tail``.
 
                 Args:
                     command: The bash command to run.
                     description: A brief description of the command.
                     timeout_seconds: Timeout in seconds for the command.
                     max_output_chars: Maximum characters in output before truncation.
-                    background: Must stay false in Docker mode (see above).
+                    background: Start the command as a detached background
+                        job and return its job id immediately; follow it
+                        with ``bash_job`` (wait until it exits or its log
+                        matches a regex, tail, kill).
+                    on_timeout: ``"kill"`` (default) kills the command at
+                        the deadline and returns what it printed;
+                        ``"background"`` starts the command as a background
+                        job up front and waits ``timeout_seconds`` for it,
+                        so a command that outlives the deadline keeps
+                        running and is followed with ``bash_job``.
 
                 Returns:
-                    The output of the command.
+                    The output of the command, or the background job's report.
                 """
-                if background:
-                    return (
-                        "Error: background=True is not available in Docker mode. "
-                        "Run the command as `nohup cmd > /tmp/out.log 2>&1 "
-                        "< /dev/null &` and poll the log with `tail`."
-                    )
+                if background or on_timeout == "background":
+                    job_id, started = jobs.start(command)
+                    if background or job_id is None:
+                        return started
+                    return jobs.bash_job(job_id, "wait", timeout_seconds, 50, max_output_chars)
                 return self._docker_bash(
                     command, description, timeout_seconds, max_output_chars,
                 )
 
             tools: list = [
-                Bash, self.docker_manager.run_commands_parallel,
+                Bash, jobs.bash_job, self.docker_manager.run_commands_parallel,
                 docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
@@ -1764,9 +1812,10 @@ class SorcarAgent(RelentlessAgent):
         # activity.  Chat-page runs react to the persisted
         # ``tool_call`` event by nesting and collapsing the preceding
         # event panels (see ``media/main.js``); outside a chat page the
-        # call is a harmless no-op.  The every-N-steps cadence is
-        # requested by the SYSTEM.md instructions and this tool's
-        # docstring only — there is no mechanical enforcement.
+        # call is a harmless no-op.  The every-10-steps cadence is
+        # enforced by the SEA root layer (``BaseSea.tool_call_hook``,
+        # ``SUMMARY_DUE_REFUSAL``); a run without a SEA relies on the
+        # SYSTEM.md rule alone.
         tools.append(summary)
         if self._is_parallel and (allowed is None or "run_parallel" in allowed):
             tools.append(make_run_parallel_tool(self.work_dir or "", self))
@@ -2019,7 +2068,6 @@ class SorcarAgent(RelentlessAgent):
         model_name: str,
         task: str,
         model_config: dict[str, Any] | None,
-        arguments: dict[str, str] | None = None,
         enabled_override: bool | None = None,
     ) -> TaskClassification | None:
         """Classify *task* at most once per run and return the verdict.
@@ -2038,12 +2086,10 @@ class SorcarAgent(RelentlessAgent):
         Args:
             model_name: The run's resolved model name (see
                 :meth:`_resolve_model_name`).
-            task: The task prompt template about to run.
+            task: The task prompt about to run, with its
+                ``{placeholder}`` arguments already substituted so the
+                classifier sees the prompt the run will actually execute.
             model_config: The caller-supplied model configuration.
-            arguments: The caller-supplied prompt-template arguments;
-                substituted into *task* before classification so the
-                classifier sees the prompt the run will actually
-                execute, not the raw ``{placeholder}`` template.
             enabled_override: Per-run override of the persisted
                 ``classify_tasks`` config key (see
                 :meth:`classify_task_for_run`); ``None`` follows the
@@ -2060,7 +2106,7 @@ class SorcarAgent(RelentlessAgent):
         if not classification_enabled(enabled_override):
             return None
         outcome = classify_task(
-            task=substitute_prompt_args(task, arguments),
+            task=task,
             model_name=model_name,
             model_config=model_config,
         )
@@ -2268,8 +2314,8 @@ class SorcarAgent(RelentlessAgent):
                 environment variable / the stored ``use_memory``
                 setting (see :func:`_memory_settings`).  A boolean
                 never bypasses the hard gates of
-                :func:`_memory_root_for_run` (stripped basic tools,
-                Docker runs, a caller
+                :func:`_memory_root_for_run` (stripped basic tools, a
+                tool profile without memory tools, Docker runs, a caller
                 ``model_config["system_instruction"]``).  Forwarded to
                 every ``run_parallel`` sub-agent, so one override
                 governs the whole task tree.
@@ -2345,9 +2391,15 @@ class SorcarAgent(RelentlessAgent):
         # toolset) all see the directory the run executes in.
         work_dir = resolve_work_dir(work_dir or ".")
         completed = False
+        # The task as the model sees it (arguments substituted): the
+        # tool-profile verdict, the classifier and the memory recall
+        # all read this one string.
+        task_text = substitute_prompt_args(prompt_template, arguments)
         try:
             try:
-                profile = self._tool_profile(prompt_template)
+                # Decided once per run: the restricted-profile note and
+                # the toolset both follow this verdict.
+                profile = self._run_profile = self._tool_profile(task_text)
                 allowed = resolve_tool_profile(profile)
                 # A run that cannot edit files runs on SYSTEM_LITE.md
                 # without classifying the task (see
@@ -2363,8 +2415,7 @@ class SorcarAgent(RelentlessAgent):
                     default_base_prompt = SYSTEM_PROMPT_LITE
                 else:
                     classification = self._classify_task_once(
-                        model_name, prompt_template, model_config,
-                        arguments=arguments,
+                        model_name, task_text, model_config,
                     )
                     default_base_prompt = (
                         SYSTEM_PROMPT_LITE
@@ -2391,6 +2442,7 @@ class SorcarAgent(RelentlessAgent):
                         (model_config or {}).get("system_instruction")
                     ),
                     use_memory_override=use_memory,
+                    profile_has_memory=allowed is None or bool(allowed & MEMORY_TOOL_NAMES),
                 )
                 if memory_root is not None:
                     self._memory_tools = MemoryTools(
@@ -2401,15 +2453,12 @@ class SorcarAgent(RelentlessAgent):
                 # caller's tools, whatever profile it names.
                 if allowed is not None and self._append_basic_tools:
                     # The note lists what :meth:`_get_tools` will build,
-                    # never a tool this run cannot have: the docker toolset
-                    # has no job registry (see the docker ``Bash`` shim),
+                    # never a tool this run cannot have:
                     # the browser needs the settings panel's "Use web
                     # tools", the fan-out needs parallel mode, memory needs
                     # a memory root, ``decide`` the decisions model and
                     # ``skill`` a configured user or project skill.
                     offered = set(allowed)
-                    if docker_image:
-                        offered.discard("bash_job")
                     if not web_tools:
                         offered -= BROWSER_TOOL_NAMES
                     if not is_parallel:
@@ -2442,9 +2491,7 @@ class SorcarAgent(RelentlessAgent):
                     # the model's first turn, done here for free and
                     # keyed by the whole task text (P2 of the 2026-10-24
                     # trajectory audit).
-                    recalled = self._memory_tools.recall(
-                        substitute_prompt_args(prompt_template, arguments)
-                    )
+                    recalled = self._memory_tools.recall(task_text)
                     if recalled:
                         prompt += "\n\n" + recalled
                 if attachments:
@@ -2522,6 +2569,7 @@ class SorcarAgent(RelentlessAgent):
             self.set_printer(printer)
         self._unisolated_repos = set()
         self._worktree_finish_gate_used = False
+        self._evidence_gate = EvidenceGate()
         self._written_files = set()
         if self._wts:
             self._retire_after_task_saved()
@@ -2642,19 +2690,11 @@ class SorcarAgent(RelentlessAgent):
     def _wt(self) -> GitWorktree | None:
         """The pending worktree the work dir is in, else the first one; ``None`` when idle."""
         work_dir = Path(self.work_dir).resolve() if self.work_dir else None
-        for wt in self._wts.values():
+        wts = self.worktrees  # snapshot: the task thread mutates ``_wts``
+        for wt in wts:
             if work_dir is not None and _path_inside(work_dir, wt.wt_dir) is not None:
                 return wt
-        return next(iter(self._wts.values()), None)
-
-    @_wt.setter
-    def _wt(self, wt: GitWorktree | None) -> None:
-        """Make *wt* the only pending worktree (``None``: none).
-
-        Production code fills ``_wts`` directly; this setter is the
-        seam the worktree tests use to seed one pending worktree.
-        """
-        self._wts = {} if wt is None else {_repo_key(wt): wt}
+        return wts[0] if wts else None
 
     def _continuation_state(self) -> str:
         """Return the worktree and written-files block of a continuation's first message.
@@ -2665,7 +2705,7 @@ class SorcarAgent(RelentlessAgent):
         refused main-checkout command nor re-reads what it wrote.
         """
         lines: list[str] = []
-        for wt in self._wts.values():
+        for wt in self.worktrees:
             lines.append(
                 f"- Active worktree (unmerged; call commit_and_merge when done): {wt.wt_dir} "
                 f"on branch {wt.branch} of {wt.repo_root}; edit files under it, not under "
@@ -2843,16 +2883,14 @@ class SorcarAgent(RelentlessAgent):
         if moves_work_dir:
             self._enter_work_dir(str(wt_work_dir))
         self._worktree_finish_gate_used = False
-        printer = getattr(self, "printer", None)
-        if printer is not None and hasattr(printer, "broadcast"):
-            event: dict[str, object] = {
-                "type": "worktree_created",
-                "worktreeDir": str(wt.wt_dir),
-                "branch": wt.branch,
-            }
-            if moves_work_dir:
-                event["worktreeWorkDir"] = str(wt_work_dir)
-            self._broadcast_to_watchers(printer, event)
+        event: dict[str, object] = {
+            "type": "worktree_created",
+            "worktreeDir": str(wt.wt_dir),
+            "branch": wt.branch,
+        }
+        if moves_work_dir:
+            event["worktreeWorkDir"] = str(wt_work_dir)
+        self._broadcast_to_watchers(event)
         created = (
             f"Created worktree {wt.wt_dir} on branch '{wt.branch}' "
             f"(from '{wt.original_branch}')."
@@ -2909,16 +2947,14 @@ class SorcarAgent(RelentlessAgent):
                 # agent could not resolve) and retry, instead of editing
                 # the user's checkout while the worktree counts as active.
                 message += self._reattach_after_failed_merge(wt)
-            printer = getattr(self, "printer", None)
-            if printer is not None and hasattr(printer, "broadcast"):
-                self._broadcast_to_watchers(printer, {
-                    "type": "worktree_result",
-                    "action": "merge",
-                    "branch": branch,
-                    "worktreeDir": str(wt.wt_dir),
-                    "success": merged,
-                    "message": message,
-                })
+            self._broadcast_to_watchers({
+                "type": "worktree_result",
+                "action": "merge",
+                "branch": branch,
+                "worktreeDir": str(wt.wt_dir),
+                "success": merged,
+                "message": message,
+            })
             messages.append(message)
         text = "\n\n".join(messages)
         if not self._wts:
@@ -3109,7 +3145,7 @@ class SorcarAgent(RelentlessAgent):
         reclaim in :meth:`_try_setup_worktree` so a concurrent live
         agent's active worktree is never adopted, merged, or removed.
         """
-        branches = {wt.branch for wt in self._wts.values()}
+        branches = {wt.branch for wt in self.worktrees}
         live = getattr(
             getattr(self, "printer", None), "live_worktree_branches", None,
         )
@@ -3298,9 +3334,6 @@ class SorcarAgent(RelentlessAgent):
             subject: First non-empty line of the commit message (the
                 toast body for ``"committed"``).
         """
-        printer = getattr(self, "printer", None)
-        if printer is None or not hasattr(printer, "broadcast"):
-            return
         severity = "info"
         if stage == "generating":
             message = "Generating commit message"
@@ -3323,11 +3356,13 @@ class SorcarAgent(RelentlessAgent):
         if stage == "generating":
             event["sticky"] = True
         try:
-            self._broadcast_to_watchers(printer, event)
+            self._broadcast_to_watchers(event)
         except Exception:  # pragma: no cover — best-effort UI hook
             logger.debug("commit notification broadcast failed", exc_info=True)
 
-    def _broadcast_to_watchers(self, printer: Any, event: dict[str, object]) -> None:
+    def _broadcast_to_watchers(
+        self, event: dict[str, object], printer: Any = None,
+    ) -> bool:
         """Broadcast *event* so it reaches this agent's tab.
 
         The printer's ``broadcast_transient`` primitive resolves every
@@ -3336,14 +3371,24 @@ class SorcarAgent(RelentlessAgent):
         copy stamped with the tab id directly.
 
         Args:
-            printer: A ``broadcast``-capable printer.
             event: The event to route; must not carry ``tabId``.
+            printer: The printer to broadcast through; ``None`` uses
+                this agent's own ``printer`` attribute.
+
+        Returns:
+            False when there is no ``broadcast``-capable printer (the
+            event is dropped), True once it was broadcast.
         """
+        if printer is None:
+            printer = getattr(self, "printer", None)
+        if printer is None or not hasattr(printer, "broadcast"):
+            return False
         transient = getattr(printer, "broadcast_transient", None)
         if callable(transient):
             transient(event, task_id=_persisted_task_id(self) or None, tab_id=self._tab_id)
-            return
-        printer.broadcast({**event, "tabId": self._tab_id})
+        else:
+            printer.broadcast({**event, "tabId": self._tab_id})
+        return True
 
     def _commit_and_clean_worktree(
         self, wt: GitWorktree,
@@ -3385,14 +3430,17 @@ class SorcarAgent(RelentlessAgent):
         self._restore_work_dir_after_teardown(wt)
         return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
 
-    def _finalize_worktree(self, wt: GitWorktree | None = None) -> bool:
+    def _finalize_worktree(
+        self, wt: GitWorktree | None = None,
+    ) -> _WorktreeCleanupOutcome:
         """Commit, remove worktree, prune; log why a worktree was preserved.
 
         Args:
             wt: The worktree to finalize; ``None`` for the first pending one.
 
         Returns:
-            True if the worktree was cleaned up successfully.  False if
+            :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED` when the
+            worktree was cleaned up.  A ``PRESERVED_*`` outcome when
             uncommitted changes remain after both the commit and the
             retry, or ignored output could not be rescued — the
             worktree directory is preserved so no work is lost.
@@ -3401,7 +3449,6 @@ class SorcarAgent(RelentlessAgent):
             wt = self._wt
         assert wt is not None
         outcome, leftover = self._commit_and_clean_worktree(wt)
-        self._last_preserve_outcome = outcome
         if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
                 "Worktree has uncommitted changes after commit and retry "
@@ -3409,21 +3456,19 @@ class SorcarAgent(RelentlessAgent):
                 "concurrent write); preserving %s\ngit status --porcelain:\n%s",
                 wt.wt_dir, leftover,
             )
-            return False
-        if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+        elif outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
             logger.warning(
                 "Git-ignored task output in worktree '%s' could not be "
                 "rescued into the main repository; preserving %s",
                 wt.branch, wt.wt_dir,
             )
-            return False
-        return True
+        return outcome
 
     def _do_merge(
         self,
         wt: GitWorktree,
         conflict_resolver: MergeConflictResolver | None = None,
-    ) -> tuple[MergeResult, str, str]:
+    ) -> tuple[MergeResult, bool, str, str]:
         """Stash, checkout, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` and the cross-process flock so
@@ -3438,18 +3483,17 @@ class SorcarAgent(RelentlessAgent):
                 branch, still under the merge locks; it must leave the
                 tree clean again unless it returns
                 :attr:`MergeResult.SUCCESS` with the merge committed.
-                ``_last_merge_resolved_by_agent`` records a success.
 
         Returns:
-            ``(result, stash_warning, cleanup_warning)`` where *result*
-            is the merge outcome, *stash_warning* is non-empty if
-            stash-pop failed, and *cleanup_warning* is non-empty when
-            the merge succeeded but the task branch could not be
-            deleted.  A dirty main tree whose ``git stash push`` failed
-            returns :attr:`MergeResult.STASH_FAILED` without touching
-            the repo.
+            ``(result, resolved_by_agent, stash_warning, cleanup_warning)``
+            where *result* is the merge outcome, *resolved_by_agent* is
+            True when the merge conflicted and *conflict_resolver*
+            completed it, *stash_warning* is non-empty if stash-pop
+            failed, and *cleanup_warning* is non-empty when the merge
+            succeeded but the task branch could not be deleted.  A dirty
+            main tree whose ``git stash push`` failed returns
+            :attr:`MergeResult.STASH_FAILED` without touching the repo.
         """
-        self._last_merge_resolved_by_agent = False
         return interruptible_locked_call(
             repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver,
         )
@@ -3458,13 +3502,14 @@ class SorcarAgent(RelentlessAgent):
         self,
         wt: GitWorktree,
         conflict_resolver: MergeConflictResolver | None,
-    ) -> tuple[MergeResult, str, str]:
+    ) -> tuple[MergeResult, bool, str, str]:
         """Body of :meth:`_do_merge`; the caller holds ``repo_lock(wt.repo_root)``."""
         original_branch = wt.original_branch
         if original_branch is None:
-            return (MergeResult.CHECKOUT_FAILED, "", "")
+            return (MergeResult.CHECKOUT_FAILED, False, "", "")
         stash_warning = ""
         cleanup_warning = ""
+        resolved_by_agent = False
         with _reclaim_process_lock(wt.repo_root):
             try:
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
@@ -3475,8 +3520,10 @@ class SorcarAgent(RelentlessAgent):
             try:
                 did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
                 if did_stash is None:
-                    return (MergeResult.STASH_FAILED, "", "")
-                result = self._merge_stashed(wt, original_branch, conflict_resolver)
+                    return (MergeResult.STASH_FAILED, False, "", "")
+                result, resolved_by_agent = self._merge_stashed(
+                    wt, original_branch, conflict_resolver,
+                )
             except BaseException:
                 # The runner's stop lands at the first bytecode after
                 # whichever git call is in flight (a slow pre-commit
@@ -3538,14 +3585,14 @@ class SorcarAgent(RelentlessAgent):
                     "remove it."
                 )
 
-        return (result, stash_warning, cleanup_warning)
+        return (result, resolved_by_agent, stash_warning, cleanup_warning)
 
     def _merge_stashed(
         self,
         wt: GitWorktree,
         original_branch: str,
         conflict_resolver: MergeConflictResolver | None,
-    ) -> MergeResult:
+    ) -> tuple[MergeResult, bool]:
         """Checkout, squash-merge and resolve for :meth:`_do_merge_locked`.
 
         Runs with the main tree stashed clean; the caller pops the
@@ -3557,23 +3604,25 @@ class SorcarAgent(RelentlessAgent):
             conflict_resolver: See :meth:`_do_merge`.
 
         Returns:
-            The merge outcome; :attr:`MergeResult.CHECKOUT_FAILED` when
-            *original_branch* could not be checked out.
+            ``(result, resolved_by_agent)``: the merge outcome
+            (:attr:`MergeResult.CHECKOUT_FAILED` when *original_branch*
+            could not be checked out) and whether *conflict_resolver*
+            turned a conflict into a success.
         """
         if GitWorktreeOps.current_branch(wt.repo_root) != original_branch:
             ok, err = GitWorktreeOps.checkout(wt.repo_root, original_branch)
             if not ok:
                 logger.warning("Cannot checkout '%s': %s", original_branch, err)
-                return MergeResult.CHECKOUT_FAILED
+                return MergeResult.CHECKOUT_FAILED, False
         user_prompt, task_result = self._commit_context()
         result = GitWorktreeOps.squash_merge(
             wt.repo_root, wt.branch, wt.baseline_commit,
             user_prompt=user_prompt, task_result=task_result,
         )
-        if result == MergeResult.CONFLICT and conflict_resolver is not None:
-            result = conflict_resolver(self, wt, user_prompt, task_result)
-            self._last_merge_resolved_by_agent = result == MergeResult.SUCCESS
-        return result
+        if result != MergeResult.CONFLICT or conflict_resolver is None:
+            return result, False
+        result = conflict_resolver(self, wt, user_prompt, task_result)
+        return result, result == MergeResult.SUCCESS
 
     def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:
         """Merge every pending task branch into its original branch.
@@ -3624,13 +3673,14 @@ class SorcarAgent(RelentlessAgent):
             )
 
         progress_log = _read_progress_log(wt)
-        if not self._finalize_worktree(wt):
-            if self._last_preserve_outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
-                return (
-                    "Cannot merge: " + _rescue_failed_warning(wt)
-                    + "\n\nFix the destination in the main repository, "
-                    "then retry the merge."
-                )
+        outcome = self._finalize_worktree(wt)
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            return (
+                "Cannot merge: " + _rescue_failed_warning(wt)
+                + "\n\nFix the destination in the main repository, "
+                "then retry the merge."
+            )
+        if outcome is not _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED:
             return (
                 f"Cannot merge: committing '{wt.branch}' failed "
                 "(a pre-commit hook may have rejected the commit). "
@@ -3641,11 +3691,11 @@ class SorcarAgent(RelentlessAgent):
                 "Then retry the merge."
             )
 
-        result, stash_warning, cleanup_warning = self._do_merge(
+        result, resolved_by_agent, stash_warning, cleanup_warning = self._do_merge(
             wt, conflict_resolver=conflict_resolver,
         )
         stash_suffix = ""
-        if self._last_merge_resolved_by_agent:
+        if resolved_by_agent:
             stash_suffix = " The merge agent resolved the conflicts."
         if stash_warning:
             stash_suffix += "\n\n⚠️  " + stash_warning
@@ -3835,8 +3885,6 @@ class SorcarAgent(RelentlessAgent):
         (a hook refusing it) the directory is kept instead, because it
         is then the only copy of the work.
 
-        Records the cleanup outcome in ``_last_preserve_outcome``.
-
         Returns:
             True when a pending worktree was preserved (or had no
             uncommitted work and was just cleaned up).  False when
@@ -3845,7 +3893,6 @@ class SorcarAgent(RelentlessAgent):
             still returns True but stays pending (``self._wt`` is still
             set on return).
         """
-        self._last_preserve_outcome = None
         if not self._wts:
             return False
         # Undelivered warnings stay: ``add_warning`` appends, so an
@@ -3856,14 +3903,16 @@ class SorcarAgent(RelentlessAgent):
             self._preserve_one_for_review(wt)
         return True
 
-    def _preserve_one_for_review(self, wt: GitWorktree) -> None:
+    def _preserve_one_for_review(self, wt: GitWorktree) -> _WorktreeCleanupOutcome:
         """Preserve one pending worktree (see :meth:`_retire_previous_worktree`).
 
         Args:
             wt: A pending worktree of this agent.
+
+        Returns:
+            The cleanup outcome of the worktree's commit.
         """
         outcome, leftover = self._commit_and_clean_worktree(wt)
-        self._last_preserve_outcome = outcome
         if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
                 "Worktree '%s' has uncommitted changes after "
@@ -3892,12 +3941,12 @@ class SorcarAgent(RelentlessAgent):
                 f"'{wt.original_branch}'). Merge or delete it when you are "
                 "ready."
             )
-        if not self._keep_for_review(wt):
-            # The worktree is preserved on disk, but the keep decision
-            # is not durable yet: keep the claim so a later retry (or an
-            # explicit merge/discard) can still make it so.
-            return
-        self._wts.pop(_repo_key(wt), None)
+        if self._keep_for_review(wt):
+            self._wts.pop(_repo_key(wt), None)
+        # Otherwise the worktree is preserved on disk, but the keep
+        # decision is not durable yet: keep the claim so a later retry
+        # (or an explicit merge/discard) can still make it so.
+        return outcome
 
     def _keep_for_review(self, wt: GitWorktree) -> bool:
         """Make the "keep *wt* for manual review" decision durable.
@@ -3986,7 +4035,7 @@ class SorcarAgent(RelentlessAgent):
         """
         from kiss.agents.sorcar.persistence import _add_late_task_usage, _append_chat_event
 
-        task_id = str(getattr(self, "last_task_id", "") or "")
+        task_id = _persisted_task_id(self)
         if not task_id or (d_budget <= 0 and d_tokens <= 0):
             return
         try:
@@ -4055,7 +4104,7 @@ class SorcarAgent(RelentlessAgent):
         if not warning:
             return
         try:
-            self._broadcast_to_watchers(printer, {"type": "warning", "message": warning})
+            self._broadcast_to_watchers({"type": "warning", "message": warning}, printer)
         except Exception:
             logger.debug("warning broadcast failed", exc_info=True)
             self.add_warning(warning, prepend=True)
@@ -4160,6 +4209,7 @@ class SorcarAgent(RelentlessAgent):
         self.pre_step_hook = None
         self.tool_call_guard = None
         self.context_reset_hook = None
+        self._useful_tools = None
 
     def _mark_unmerged_worktree_preserved(self) -> None:
         """Record on disk that the pending worktree awaits the user's decision.
@@ -4178,12 +4228,35 @@ class SorcarAgent(RelentlessAgent):
                     "process may merge it", wt.branch,
                 )
 
+    def _guard_evidence(self, name: str, args: dict[str, Any]) -> str | None:
+        """Evidence guardrail: the first hedged ``finish(success=True)`` is refused once.
+
+        The :class:`EvidenceGate` refuses a success whose summary says the
+        result was guessed or not verified.  A run without the edit tools
+        (a read-only reviewer) reports rather than claims work, so its
+        ``finish`` is not gated.
+
+        Args:
+            name: The tool being called.
+            args: Its arguments.
+
+        Returns:
+            The refusal text, or ``None`` to let the call through.
+        """
+        if "Edit" not in self._run_tool_names:
+            return None
+        if name == "finish":
+            return self._evidence_gate.verdict(args)
+        self._evidence_gate.observe(name, args)
+        return None
+
     def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
         """The run's tool-call guard: every reason a call is rejected, first one wins."""
         return (
             self._block_finish_when_user_message_pending(name, args)
             or self._block_finish_with_live_jobs(name, args)
             or self._guard_worktree(name, args)
+            or self._guard_evidence(name, args)
         )
 
 

@@ -24,8 +24,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness.js');
-const {lastMsg} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness.js');
 
 // The work dir the active tab stamps on the file picker's getFiles.
 function pickerWorkDir(win, posted) {

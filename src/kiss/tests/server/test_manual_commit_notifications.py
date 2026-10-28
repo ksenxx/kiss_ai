@@ -95,7 +95,6 @@ class _ManualCommitHarness(unittest.TestCase):
             f"task-{tab_id}", tab_id=tab_id, server_owned=True,
         )
         state.last_user_prompt = "please update the readme"
-        state.last_result_summary = "updated the readme"
         agent_state.register(state)
 
     def _manual_commit(self, tab_id: str, work_dir: str) -> dict:

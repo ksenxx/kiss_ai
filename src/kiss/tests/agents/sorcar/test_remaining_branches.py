@@ -16,7 +16,10 @@ import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.sorcar import persistence as th
+from kiss.agents.sorcar import web_use_tool as wut
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import (
     _stop_monitor,
@@ -246,15 +249,16 @@ class TestSorcarAgentDockerBranch:
 class TestWebUseToolTruncation:
     """Cover _get_ax_tree truncation branch (line 157)."""
 
-    def test_ax_tree_truncated(self, tmp_path: Path) -> None:
+    def test_ax_tree_truncated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Large accessibility tree gets truncated."""
+        monkeypatch.setattr(wut, "_AX_TREE_MAX_CHARS", 100)
         buttons = "\n".join(f'<button>Button{i}</button>' for i in range(200))
         html_file = tmp_path / "big.html"
         html_file.write_text(f"<html><body>{buttons}</body></html>")
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            result = tool._get_ax_tree(max_chars=100)
+            result = tool._get_ax_tree()
             assert "[truncated]" in result
         finally:
             tool.close()

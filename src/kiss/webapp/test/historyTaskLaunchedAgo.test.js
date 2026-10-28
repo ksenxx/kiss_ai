@@ -20,13 +20,11 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
 const path = require('path');
 const {
   makePage: makeChatPage,
   captureTimers,
-  loadMainCss,
-  MEDIA,
+  loadRemoteCss,
 } = require('./simplify2_harness');
 const {loadHistory, makeSession, historyRows} = require('./history_helpers');
 
@@ -42,15 +40,8 @@ const DAY_MS = 24 * HOUR_MS;
 function makePage(captureTimeouts) {
   let timeouts;
   const {win, posted} = makeChatPage({
-    bodyClass: 'remote-chat',
     beforeScripts(win) {
-      loadMainCss(win);
-      const remoteStyle = win.document.createElement('style');
-      remoteStyle.textContent = fs.readFileSync(
-        path.join(MEDIA, 'remote-codex.css'),
-        'utf8',
-      );
-      win.document.head.appendChild(remoteStyle);
+      loadRemoteCss(win);
       if (captureTimeouts) timeouts = captureTimers(win);
     },
   });
@@ -265,36 +256,7 @@ function testPeriodicRefresh() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The label must not break the action strip's behaviour: the toggle
-//    still expands/collapses and clicks do not bubble into the row.
-// ---------------------------------------------------------------------------
-
-function testActionsStillWork() {
-  const {win, posted} = makePage();
-  loadHistory(win, [makeSession({startTs: Date.now() - 5 * MINUTE_MS})]);
-  const row = historyRows(win)[0];
-  const toggle = row.querySelector('.sidebar-item-collapse');
-  assert.ok(row.classList.contains('collapsed'), 'collapsed first');
-  toggle.click();
-  assert.ok(
-    !row.classList.contains('collapsed'),
-    'the show-details toggle still expands the panel',
-  );
-  assert.ok(
-    !posted.some(m => m.type === 'resumeSession'),
-    'the toggle click must not bubble into the row click',
-  );
-  row.click();
-  assert.ok(
-    posted.some(m => m.type === 'resumeSession'),
-    'clicking the row body still opens the chat',
-  );
-  win.close();
-  console.log('  ok - action strip behaviour is unchanged');
-}
-
-// ---------------------------------------------------------------------------
-// 6. A window that never renders history must not keep the host process
+// 5. A window that never renders history must not keep the host process
 //    alive: the refresh sweep is an on-demand timeout chain, not a
 //    permanent interval. Regression: a plain setInterval(…, 30000) at
 //    load time made every jsdom suite that leaves a window open hang
@@ -326,7 +288,6 @@ function testNoTimerWithoutLabels() {
 }
 
 testUnitLadder();
-testActionsStillWork();
 testTimestampSources();
 testFutureClockSkew();
 testNoTimerWithoutLabels();

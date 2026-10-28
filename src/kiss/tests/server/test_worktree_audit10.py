@@ -30,6 +30,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 @pytest.fixture(autouse=True)
@@ -153,9 +154,9 @@ class TestBug49StashPopOnMergeFailure:
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
-        agent._wt = wt
+        seed_worktree(agent, wt)
 
-        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
+        result, _resolved, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.CONFLICT
 
         status = subprocess.run(
@@ -212,9 +213,9 @@ class TestBug49StashPopOnMergeFailure:
             original_branch="main",
             wt_dir=wt_dir,
         )
-        agent._wt = wt
+        seed_worktree(agent, wt)
 
-        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
+        result, _resolved, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.MERGE_FAILED
 
         status = subprocess.run(
@@ -255,9 +256,9 @@ class TestBug49StashPopOnMergeFailure:
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
-        agent._wt = wt
+        seed_worktree(agent, wt)
 
-        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
+        result, _resolved, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.SUCCESS
 
         status = subprocess.run(
@@ -291,10 +292,10 @@ class TestBug49StashPopOnMergeFailure:
 
         agent = ChatSorcarAgent("test")
         agent._chat_id = "bug49e"
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
-        )
+        ))
 
         msg = agent.merge()
         assert "stash" in msg.lower(), (
@@ -326,12 +327,12 @@ class TestBug50MergeOrphansBranch:
 
         agent = ChatSorcarAgent("test")
         agent._chat_id = "bug50a"
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=None,
             wt_dir=wt_dir,
-        )
+        ))
 
         msg = agent.merge()
         assert agent._wt is not None, "the branch stays pending"
@@ -361,10 +362,10 @@ class TestBug50MergeOrphansBranch:
 
         agent = ChatSorcarAgent("test")
         agent._chat_id = "bug50b"
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
-        )
+        ))
 
         msg = agent.merge()
         assert "Successfully merged" in msg
@@ -406,13 +407,13 @@ class TestBug51DiffFailureSilentDiscard:
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51a-tab", agent)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus_baseline,
-        )
+        ))
 
         changed = server._get_worktree_changed_files("bug51a-tab")
 
@@ -434,10 +435,10 @@ class TestBug51DiffFailureSilentDiscard:
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51b-tab", agent)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
-        )
+        ))
 
         changed = server._get_worktree_changed_files("bug51b-tab")
         assert "agent.txt" in changed
@@ -454,10 +455,10 @@ class TestBug51DiffFailureSilentDiscard:
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51c-tab", agent)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
-        )
+        ))
 
         changed = server._get_worktree_changed_files("bug51c-tab")
         assert changed == [], (
@@ -487,11 +488,11 @@ class TestBug51DiffFailureSilentDiscard:
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
         _register_wt_tab("bug51d-tab", agent)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus,
-        )
+        ))
 
         changed = server._get_worktree_changed_files("bug51d-tab")
         assert len(changed) > 0, (

@@ -44,11 +44,13 @@ import time
 import urllib.request
 import wave
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.speech_synthesis import _env_timeout_seconds, audio_timeout_seconds
+from kiss.core.utils import replace_waiting_for_readers
 
 #: The wake word, matched in transcripts.  "Abracadabra" replaced the
 #: earlier "Hey Sorcar" because it is long, rare in conversation and a
@@ -396,7 +398,8 @@ def _download_url_to_file(url: str, dest: Path) -> None:
     raw socket read, so with the per-read timeout every loop iteration
     finishes promptly and the deadline is honoured within one read.
     """
-    deadline = time.monotonic() + download_total_timeout_seconds()
+    total = download_total_timeout_seconds()
+    deadline = time.monotonic() + total
     with (
         urllib.request.urlopen(  # noqa: S310 — vosk mirror / test URL
             url, timeout=download_timeout_seconds()
@@ -406,13 +409,63 @@ def _download_url_to_file(url: str, dest: Path) -> None:
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    f"download of {url} exceeded the "
-                    f"{download_total_timeout_seconds():g}s total deadline"
+                    f"download of {url} exceeded the {total:g}s total deadline"
                 )
             chunk = response.read1(65536)
             if not chunk:
                 break
             out.write(chunk)
+
+
+def _is_downloaded(dest: Path) -> bool:
+    """Whether *dest* is a published download: a directory or a non-empty file."""
+    return dest.is_dir() or (dest.is_file() and dest.stat().st_size > 0)
+
+
+def download_once(
+    url: str, dest: Path, publish: Callable[[Path, Path], None] = replace_waiting_for_readers,
+) -> Path:
+    """Download *url* once and publish it atomically at *dest*.
+
+    Safe against concurrent callers, including SEPARATE PROCESSES
+    sharing ``$KISS_HOME/models`` (two daemons; the wake-model download
+    at startup racing the speaker-model lazy download in the worker):
+    the whole check → download → publish sequence is serialised by an
+    exclusive lock on ``dest.parent / ".<name>.lock"``, the download
+    goes to a per-PID temp file (no interleaved writes to a shared temp
+    name), and *publish* makes *dest* appear atomically, so no caller
+    can observe (and treat as complete) a half-written download.  The
+    lock wait is bounded to twice :func:`download_total_timeout_seconds`:
+    a sibling holds the lock for at most one download (that deadline
+    plus a last stalled read) and its publish, so a longer wait means a
+    wedged holder and raises ``TimeoutError``.
+
+    Args:
+        url: What to download.
+        dest: The file or directory to publish; returned as is when it
+            already exists (a directory, or a non-empty file).
+        publish: ``publish(tmp, dest)`` turns the downloaded temp file
+            into *dest*; the default renames it onto *dest*.  The temp
+            file is removed afterwards whether or not it succeeded.
+
+    Returns:
+        *dest*.
+    """
+    if _is_downloaded(dest):
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest.parent / f".{dest.name}.lock", "w", encoding="utf-8") as lock_file:
+        lock_exclusive(lock_file, timeout=2 * download_total_timeout_seconds())
+        if _is_downloaded(dest):
+            return dest
+        print(f"downloading {url} ...", file=sys.stderr, flush=True)
+        tmp = dest.parent / f".{dest.name}.{os.getpid()}.download"
+        try:
+            _download_url_to_file(url, tmp)
+            publish(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return dest
 
 
 _LANGUAGE_TAG_RE = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*")
@@ -626,15 +679,9 @@ def _ensure_downloaded_model(
 ) -> Path:
     """Return the local directory of *model_name*, downloading it once.
 
-    W2-F12: safe against concurrent callers — including SEPARATE
-    PROCESSES sharing ``$KISS_HOME/models`` (two daemons, or the
-    wake-model download at startup racing the speaker-model lazy
-    download in the worker).  The whole check → download → extract
-    sequence is serialised via an exclusive file lock on a lock
-    file next to the model, the download uses a per-PID temp name (no
-    interleaved writes to a shared temp file), and the model directory
-    appears ATOMICALLY via extract-to-temp + ``rename`` — so no caller
-    can ever observe (and treat as complete) a half-extracted model.
+    :func:`download_once` serialises concurrent callers (threads and
+    sibling processes) and :func:`_publish_model_zip` makes the
+    unpacked directory appear atomically.
 
     Args:
         models_dir: Directory that caches downloaded models.
@@ -646,39 +693,36 @@ def _ensure_downloaded_model(
     Returns:
         Path to the unpacked model directory.
     """
-    model_dir = models_dir / model_name
-    if model_dir.is_dir():
-        return model_dir
-    models_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = models_dir / f".{model_name}.lock"
-    with open(lock_path, "w", encoding="utf-8") as lock_file:
-        lock_exclusive(lock_file)
-        if model_dir.is_dir():
-            return model_dir
-        if url is None:
-            url = MODEL_ZIP_URL_TEMPLATE.format(model_name)
-        print(f"downloading {url} ...", file=sys.stderr, flush=True)
-        tmp_zip = models_dir / f".{model_name}.{os.getpid()}.zip.tmp"
-        extract_dir = models_dir / f".{model_name}.{os.getpid()}.extract"
-        try:
-            _download_url_to_file(url, tmp_zip)
-            extract_dir.mkdir(exist_ok=True)
-            with zipfile.ZipFile(tmp_zip) as zf:
-                zf.extractall(extract_dir)
-            extracted = extract_dir / model_name
-            if not extracted.is_dir():
-                entries = [p for p in extract_dir.iterdir() if p.is_dir()]
-                if len(entries) != 1:
-                    raise RuntimeError(
-                        f"Unexpected archive layout for {model_name}: "
-                        f"{sorted(p.name for p in extract_dir.iterdir())}",
-                    )
-                extracted = entries[0]
-            extracted.rename(model_dir)
-        finally:
-            tmp_zip.unlink(missing_ok=True)
-            shutil.rmtree(extract_dir, ignore_errors=True)
-    return model_dir
+    if url is None:
+        url = MODEL_ZIP_URL_TEMPLATE.format(model_name)
+    return download_once(url, models_dir / model_name, _publish_model_zip)
+
+
+def _publish_model_zip(tmp_zip: Path, model_dir: Path) -> None:
+    """Unpack the downloaded *tmp_zip* and rename its model directory onto *model_dir*.
+
+    Publisher for :func:`download_once`: the archive is extracted into
+    a per-PID sibling directory, so *model_dir* appears ATOMICALLY with
+    the final ``rename``.  The archive is expected to contain a single
+    top-level directory, ideally named like *model_dir*.
+    """
+    extract_dir = model_dir.parent / f".{model_dir.name}.{os.getpid()}.extract"
+    extract_dir.mkdir(exist_ok=True)
+    try:
+        with zipfile.ZipFile(tmp_zip) as zf:
+            zf.extractall(extract_dir)
+        extracted = extract_dir / model_dir.name
+        if not extracted.is_dir():
+            entries = [p for p in extract_dir.iterdir() if p.is_dir()]
+            if len(entries) != 1:
+                raise RuntimeError(
+                    f"Unexpected archive layout for {model_dir.name}: "
+                    f"{sorted(p.name for p in extract_dir.iterdir())}",
+                )
+            extracted = entries[0]
+        extracted.rename(model_dir)
+    finally:
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def ensure_model(models_dir: Path) -> Path:

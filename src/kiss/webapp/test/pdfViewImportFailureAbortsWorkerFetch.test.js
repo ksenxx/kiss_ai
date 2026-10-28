@@ -66,6 +66,7 @@ async function main() {
     'a worker download whose import failed is aborted, not orphaned',
   );
   viewer.dispose();
+  win.close();
   console.log('pdfViewImportFailureAbortsWorkerFetch.test.js passed');
 }
 

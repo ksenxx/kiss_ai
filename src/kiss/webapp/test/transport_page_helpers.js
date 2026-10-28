@@ -12,16 +12,13 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {newDom, waitFor} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
-
-/** Eval panelCopy.js, api.js and main.js into *win*, in that order. */
-function loadPageScripts(win) {
-  for (const f of ['panelCopy.js', 'api.js', 'main.js']) {
-    win.eval(fs.readFileSync(path.join(MEDIA, f), 'utf8'));
-  }
-}
+const {
+  MEDIA,
+  newDom,
+  waitFor,
+  loadPageScripts,
+  settle,
+} = require('./simplify2_harness');
 
 /** The source of media/transport.js (the webapp shim). */
 function readShimJs() {
@@ -32,8 +29,12 @@ function readShimJs() {
  * The minimal page the shim needs outside chat.html: the loading overlay
  * with its message node, a hidden `#app`, and the password dialog.
  * Scripts run `outside-only`: the suite evals the shim itself.
+ *
+ * @param {string} [url] The page URL (default `https://example.test/`).
+ * @param {{virtualConsole?: object}} [opts] Extra JSDOM options, e.g. a
+ *   `VirtualConsole` that observes the navigations jsdom cannot do.
  */
-function newAuthDom(url) {
+function newAuthDom(url, opts) {
   const html = `<!DOCTYPE html><html><head></head><body>
     <div id="kiss-server-loading" role="status">
       <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div></div>
@@ -49,7 +50,20 @@ function newAuthDom(url) {
     runScripts: 'outside-only',
     pretendToBeVisual: true,
     url: url || 'https://example.test/',
+    ...(opts || {}),
   });
+}
+
+/** Print a passed check of a transport suite. */
+function ok(msg) {
+  console.log('  ok -', msg);
+}
+
+/** Print a failed check of a transport suite and exit 1. */
+function fail(msg, err) {
+  console.error('  FAIL -', msg);
+  if (err) console.error('       ', err.message || err);
+  process.exit(1);
 }
 
 /**
@@ -127,13 +141,9 @@ function installFakeWebSocket(win, sockets, opts) {
   win.WebSocket = FakeWebSocket;
 }
 
-function parseFrame(data) {
-  return JSON.parse(data);
-}
-
 /** The frames sent on a fake socket, parsed. */
 function frames(sock) {
-  return sock.sent.map(parseFrame);
+  return sock.sent.map(data => JSON.parse(data));
 }
 
 /**
@@ -175,7 +185,7 @@ function makeWebappClient() {
   assert.ok(sock, 'the webapp shim must open a WebSocket');
   sock.onopen();
   assert.strictEqual(
-    parseFrame(sock.sent[0]).type,
+    JSON.parse(sock.sent[0]).type,
     'auth',
     'the shim must authenticate before sending commands',
   );
@@ -183,16 +193,81 @@ function makeWebappClient() {
   const posted = [];
   function drain() {
     while (posted.length < sock.sent.length) {
-      posted.push(parseFrame(sock.sent[posted.length]));
+      posted.push(JSON.parse(sock.sent[posted.length]));
     }
     return posted;
   }
   return {win, posted, drain, sock};
 }
 
+/**
+ * Replace *win*'s `setTimeout` / `clearTimeout` with a recorder, so the
+ * shim's reconnect backoff (0.5-1 s, doubling) never sleeps for real:
+ * the suite fires the recorded timer by hand (`openNextSocket`).
+ * Install BEFORE `bootShim`.  Returns the ledger, one
+ * `{fn, ms, cleared, ran}` per armed timer in arming order; a timer's
+ * id is its 1-based index.
+ *
+ * With `{intervals, clock}` the shim's `setInterval` / `clearInterval`
+ * are recorded the same way into `intervals` and `Date.now()` reads
+ * `clock.now`, so a suite ages an outage by moving the clock and running
+ * the recorded ticks.
+ *
+ * @param {object} win The jsdom window.
+ * @param {{intervals?: Array<object>, clock?: {now: number}}} [opts]
+ */
+function installFakeTimers(win, opts) {
+  const timers = [];
+  win.setTimeout = function (fn, ms) {
+    timers.push({fn, ms, cleared: false, ran: false});
+    return timers.length;
+  };
+  win.clearTimeout = function (id) {
+    if (timers[id - 1]) timers[id - 1].cleared = true;
+  };
+  const {intervals, clock} = opts || {};
+  if (intervals) {
+    win.setInterval = function (fn, ms) {
+      intervals.push({fn, ms, cleared: false});
+      return intervals.length;
+    };
+    win.clearInterval = function (id) {
+      if (intervals[id - 1]) intervals[id - 1].cleared = true;
+    };
+  }
+  if (clock) win.Date.now = () => clock.now;
+  return timers;
+}
+
+/** The recorded timers that are neither cleared nor fired yet. */
+function pendingTimers(timers) {
+  return timers.filter(t => !t.cleared && !t.ran);
+}
+
+/** Fire a recorded timer, once. */
+function fireTimer(timer) {
+  timer.ran = true;
+  timer.fn();
+}
+
+/**
+ * Fire the one pending reconnect timer (the shim arms it at >= 500 ms;
+ * the dialog's focus timer is 0 ms), so socket *n + 1* opens on the
+ * fake WebSocket; return that socket.
+ */
+function openNextSocket(sockets, timers, n) {
+  const pending = pendingTimers(timers).filter(t => t.ms >= 500);
+  assert.strictEqual(pending.length, 1, 'one reconnect timer is pending');
+  fireTimer(pending[0]);
+  assert.strictEqual(sockets.length, n + 2, 'the timer opened the next socket');
+  return sockets[n + 1];
+}
+
 module.exports = {
   newDom,
   newAuthDom,
+  ok,
+  fail,
   bootShim,
   loadPageScripts,
   readShimJs,
@@ -200,4 +275,9 @@ module.exports = {
   frames,
   waitForSocket,
   makeWebappClient,
+  installFakeTimers,
+  pendingTimers,
+  fireTimer,
+  openNextSocket,
+  settle,
 };

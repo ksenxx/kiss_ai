@@ -2,19 +2,25 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The git steps behind ``/sync``: fetch a remote branch, merge it, push.
+"""The git steps behind ``/sync``: commit, fetch a remote branch, merge it, push.
 
 :func:`sync` is the ``git_sync`` tool of
-:mod:`kiss.agents.seas.sync.sync_sea`.  It runs the sequence a "pull,
-merge and push" prompt used to make the chat agent type by hand,
+:mod:`kiss.agents.seas.sync.sync_sea`.  It runs the sequence a "commit,
+pull, merge and push" prompt used to make the chat agent type by hand,
 deterministically and in one call:
 
-1. ``git fetch <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>``
+1. ``git add -A`` and ``git commit`` when the working tree has
+   uncommitted changes (edited, deleted or new files that are not
+   ignored), so they ride along on the current branch instead of
+   staying behind on one machine and blocking the merge of a file the
+   remote changed too; the message names their number and the host
+   (:func:`commit_message`);
+2. ``git fetch <remote> +refs/heads/<branch>:refs/remotes/<remote>/<branch>``
    for the ref to merge (``origin/main`` by default; the explicit
    refspec updates the tracking ref also in a single-branch clone);
-2. ``git merge --no-edit <remote>/<branch>`` when the current branch is
+3. ``git merge --no-edit <remote>/<branch>`` when the current branch is
    behind it (a fast-forward when it has no commits of its own);
-3. ``git push <remote> HEAD`` — the current branch to the remote branch
+4. ``git push <remote> HEAD`` — the current branch to the remote branch
    of the same name.
 
 A merge that stops on conflicts is left in progress and reported with
@@ -37,6 +43,7 @@ the machine's daemon has opened (:func:`locate_checkout`) instead.
 from __future__ import annotations
 
 import re
+import socket
 import subprocess
 from pathlib import Path
 
@@ -51,6 +58,9 @@ _REJECTED_PUSH_HINTS = ("fetch first", "non-fast-forward", "cannot lock ref")
 
 _CONFLICT_MARKER_PATTERN = r"^(<<<<<<< |>>>>>>> )"
 """The ``git grep -E`` pattern for conflict markers; ``=======`` alone is an RST underline."""
+
+LISTED_FILES = 20
+"""How many of the committed files the report names before ``... and N more``."""
 
 
 class GitSyncError(Exception):
@@ -90,12 +100,6 @@ def _output(repo: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def _lines(repo: Path, *args: str) -> list[str]:
-    """Return the non-empty stdout lines of ``git *args`` (empty on failure)."""
-    proc = _git(repo, *args)
-    return [line for line in proc.stdout.splitlines() if line] if proc.returncode == 0 else []
-
-
 def _paths(repo: Path, command: str, *args: str) -> list[str]:
     """Return the paths ``git <command> -z *args`` prints: NUL-separated, never quoted."""
     proc = _git(repo, command, "-z", *args)
@@ -110,13 +114,120 @@ def _split_ref(ref: str) -> tuple[str, str]:
     return remote, branch
 
 
+def commit_message(count: int, branch: str, host: str) -> str:
+    """Return the message of the commit that gathers *count* uncommitted changes.
+
+    It names the branch and the machine (``socket.gethostname()``) so
+    the history shows where a change was left behind: ``sync: commit 3
+    uncommitted change(s) on main (my-laptop)``.
+    """
+    return f"sync: commit {count} uncommitted change(s) on {branch} ({host})"
+
+
+def _listed(names: list[str]) -> str:
+    """Return *names* joined for a report line, at most :data:`LISTED_FILES` of them."""
+    shown = ", ".join(names[:LISTED_FILES])
+    rest = len(names) - LISTED_FILES
+    return f"{shown} ... and {rest} more" if rest > 0 else shown
+
+
+def _status_paths(top: Path) -> list[str]:
+    """Return the paths ``git status`` shows as changed or untracked in the whole tree.
+
+    ``--untracked-files=all`` names every new file, whatever
+    ``status.showUntrackedFiles`` is set to; a rename's second record
+    (the old name) is skipped.
+    """
+    records = _paths(top, "status", "--porcelain", "--untracked-files=all")
+    paths: list[str] = []
+    skip = False
+    for record in records:
+        if skip:
+            skip = False
+            continue
+        paths.append(record[3:])
+        skip = "R" in record[:2] or "C" in record[:2]
+    return paths
+
+
+def _commit_changes(top: Path, branch: str) -> str | None:
+    """Commit the uncommitted changes of the checkout whose top-level directory is *top*.
+
+    Every change ``git status`` shows is committed on *branch* with
+    ``git add -A``: edited, deleted and renamed tracked files and new
+    files that are not ignored (what the task-worktree merge commits
+    too).  Run at the top so that the ``git diff`` checks cover the
+    whole tree like ``status`` and ``add -A`` do, whatever
+    ``diff.relative`` says.  Returns the report line (a second line
+    names the changes ``git add -A`` could not stage, edits inside a
+    submodule, which stay as they are), or ``None`` when the tree is
+    clean.
+
+    Raises:
+        GitSyncError: When the tree has unmerged paths (a conflict left
+            from an earlier merge or a failed stash pop: ``git add -A``
+            would mark them resolved, markers and all), or when ``git
+            commit`` fails (no committer identity, a pre-commit hook).
+    """
+    unmerged = _paths(top, "diff", "--name-only", "--diff-filter=U")
+    if unmerged:
+        raise GitSyncError(
+            f"{len(unmerged)} unmerged path(s) in the working tree, left from an earlier "
+            "merge: " + _listed(unmerged) + "\nResolve them, `git add` the files and "
+            "`git commit`, then call git_sync again."
+        )
+    if not _status_paths(top):
+        return None
+    _output(top, "add", "-A")
+    staged = _paths(top, "diff", "--cached", "--name-only")
+    line = ""
+    if staged:
+        _output(top, "commit", "-q", "-m", commit_message(len(staged), branch, _hostname()))
+        sha = _output(top, "rev-parse", "HEAD")[:12]
+        line = f"Committed {len(staged)} uncommitted change(s) on {branch} as {sha}: "
+        line += _listed(staged)
+    left = _status_paths(top)
+    if left:
+        note = (
+            f"{len(left)} change(s) `git add -A` cannot stage from this checkout (edits "
+            f"inside a submodule?), left as they are: {_listed(left)}"
+        )
+        line = f"{line}\n{note}" if line else note
+    return line or None
+
+
+def _toplevel(path: Path) -> str:
+    """Return the top-level directory of the checkout at *path*, as git prints it.
+
+    Only git's final newline is removed, not whitespace a directory name
+    may end in: the commit step runs there (:func:`_commit_changes`).
+
+    Raises:
+        GitSyncError: When *path* is not inside a git checkout.
+    """
+    proc = _git(path, "rev-parse", "--show-toplevel")
+    if proc.returncode != 0:
+        raise GitSyncError(
+            f"git rev-parse --show-toplevel failed:\n{(proc.stderr or proc.stdout).strip()}"
+        )
+    return proc.stdout.removesuffix("\n")
+
+
+def _hostname() -> str:
+    """Return this machine's host name for :func:`commit_message` (``unknown`` when it has none)."""
+    try:
+        return socket.gethostname() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def _merge(repo: Path, ref: str) -> str:
     """Merge *ref* into the current branch and return the report line.
 
     Raises:
         GitSyncError: The merge stopped on conflicts (left in progress,
             the conflicted files listed) or did not start (for example an
-            uncommitted change would be overwritten).
+            ignored file would be overwritten).
     """
     before = _output(repo, "rev-parse", "HEAD")
     proc = _git(repo, "merge", "--no-edit", ref)
@@ -323,7 +434,7 @@ def locate_checkout(repo: str, remote: str, url: str) -> tuple[Path, str]:
 
 
 def sync(repo: str, ref: str = "origin/main", url: str = "") -> str:
-    """Fetch *ref*, merge it into the current branch of *repo* and push the branch.
+    """Commit the changes of *repo*, fetch *ref*, merge it into the current branch and push.
 
     Args:
         repo: Absolute path of the git checkout (the run's work directory).
@@ -335,13 +446,15 @@ def sync(repo: str, ref: str = "origin/main", url: str = "") -> str:
 
     Returns:
         A line-per-step report: the checkout and its remote's URL, the
-        branch, what was fetched, whether the merge was a fast-forward,
-        a merge commit or nothing to do, and what the push did.
+        branch, the uncommitted changes committed (when there were
+        any), what was fetched, whether the merge was a fast-forward, a
+        merge commit or nothing to do, and what the push did.
 
     Raises:
         GitSyncError: With the report of the step that failed: not a
             checkout (of *url*), a detached HEAD, a merge already in
-            progress, a fetch or push error, or a merge that stopped on
+            progress or unmerged paths left from one, a commit that
+            failed, a fetch or push error, or a merge that stopped on
             conflicts (left in place for the caller to resolve).  When
             the checkout synced is not *repo*, the message starts by
             naming it, so a conflict is resolved in the right place.
@@ -368,7 +481,7 @@ def sync(repo: str, ref: str = "origin/main", url: str = "") -> str:
 def _sync_checkout(
     path: Path, ref: str, remote: str, remote_branch: str, report: list[str],
 ) -> str:
-    """Fetch, merge and push in the checkout at *path*; the steps of :func:`sync`.
+    """Commit, fetch, merge and push in the checkout at *path*; the steps of :func:`sync`.
 
     Args:
         path: The checkout (an existing directory).
@@ -385,7 +498,7 @@ def _sync_checkout(
     Raises:
         GitSyncError: As :func:`sync`.
     """
-    top = _output(path, "rev-parse", "--show-toplevel")
+    top = _toplevel(path)
     branch = _output(path, "symbolic-ref", "--short", "HEAD")
     if _git(path, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
         raise GitSyncError(
@@ -396,13 +509,24 @@ def _sync_checkout(
     where = _remote_url(path, remote)
     shown = public_url(where) if where else "no URL"
     report.append(f"Checkout {top}, branch {branch}, syncing with {ref} ({remote} = {shown}).")
-    dirty = _lines(path, "status", "--porcelain", "--untracked-files=no")
-    if dirty:
-        report.append(f"{len(dirty)} uncommitted change(s) in the working tree, left as they are.")
+    committed = _commit_changes(Path(top), branch)
+    if committed:
+        report.append(committed)
+
+    def fetch_and_merge(name: str) -> None:
+        # A merge that fails after the commit says so first: the agent
+        # (and the summary) must know the changes are on the branch now.
+        try:
+            _fetch_and_merge(path, remote, name, branch, report)
+        except GitSyncError as exc:
+            if committed:
+                raise GitSyncError(f"{committed}\n{exc}") from None
+            raise
+
     attempt = 0
     while True:
         attempt += 1
-        _fetch_and_merge(path, remote, remote_branch, branch, report)
+        fetch_and_merge(remote_branch)
         push = _git(path, "push", remote, "HEAD")
         error = (push.stderr or push.stdout).strip()
         if push.returncode == 0:
@@ -414,6 +538,6 @@ def _sync_checkout(
                 f"{remote}/{branch} moved since the fetch; merging it, then pushing again."
             )
             if branch != remote_branch:
-                _fetch_and_merge(path, remote, branch, branch, report)
+                fetch_and_merge(branch)
             continue
         raise GitSyncError("\n".join(report) + f"\ngit push {remote} HEAD failed:\n{error}")

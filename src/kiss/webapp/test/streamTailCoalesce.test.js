@@ -30,6 +30,10 @@ const {
   send,
   stubRaf,
   nextFrames,
+  stubGeometry,
+  fakeGeometry,
+  bottom,
+  startRunningTask,
 } = require('./simplify2_harness');
 
 function makePage(opts) {
@@ -41,26 +45,7 @@ function makePage(opts) {
       // Class-keyed fake geometry lets a test give scroll geometry to
       // panels that are created *during* event handling (per-element
       // fakeGeometry own properties still take precedence).
-      const geoByClass = {};
-      win._geoByClass = geoByClass;
-      Object.defineProperty(win.Element.prototype, 'scrollHeight', {
-        configurable: true,
-        get() {
-          for (const k in geoByClass)
-            if (this.classList && this.classList.contains(k))
-              return geoByClass[k].sh;
-          return 0;
-        },
-      });
-      Object.defineProperty(win.Element.prototype, 'clientHeight', {
-        configurable: true,
-        get() {
-          for (const k in geoByClass)
-            if (this.classList && this.classList.contains(k))
-              return geoByClass[k].ch;
-          return 0;
-        },
-      });
+      stubGeometry(win);
 
       // Environments (and many existing suites) where rAF runs the
       // callback synchronously and returns 0: the flush handle stays 0,
@@ -68,34 +53,6 @@ function makePage(opts) {
       if (opts.syncRaf) stubRaf(win);
     },
   });
-}
-
-function fakeGeometry(el, geo) {
-  Object.defineProperty(el, 'scrollHeight', {
-    get: () => geo.sh,
-    configurable: true,
-  });
-  Object.defineProperty(el, 'clientHeight', {
-    get: () => geo.ch,
-    configurable: true,
-  });
-}
-
-function bottom(geo) {
-  return Math.max(0, geo.sh - geo.ch);
-}
-
-function startRunningTask(win, posted) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  win._testApi.hideWelcome();
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: ready.tabId,
-    startTs: Date.now() - 2000,
-  });
-  return ready.tabId;
 }
 
 const label = 'remote webapp';

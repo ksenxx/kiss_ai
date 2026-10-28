@@ -15,33 +15,22 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
-const {historyRows, visibleTitles, lastGetHistory} = require('./history_helpers');
+const {
+  historyRows,
+  visibleTitles,
+  lastGetHistory,
+  finishedSession,
+  sendHistory,
+  selectFilter,
+} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({bodyClass: 'remote-chat'});
 }
 
+/** A finished row `chat-<id>` titled `title` that ran in `workDir`. */
 function session(id, title, workDir, extra) {
-  return Object.assign(
-    {
-      id: 'chat-' + id,
-      task_id: 'task-' + id,
-      title,
-      timestamp: 1_700_000_000 + id * 100,
-      preview: title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: workDir,
-      startTs: (1_700_000_000 + id * 100) * 1000,
-      endTs: (1_700_000_000 + id * 100) * 1000 + 10_000,
-    },
-    extra || {},
-  );
+  return finishedSession(id, title, Object.assign({work_dir: workDir}, extra));
 }
 
 const KISS = '/home/u/kiss';
@@ -54,18 +43,13 @@ const SESSIONS = [
 ];
 const WORK_DIRS = [KISS, PAPER];
 
-// The reply to the page's latest getHistory request: it must echo
-// that request's generation (a filter change bumps it and refetches).
-function historyReply(posted, sessions, workDirs) {
-  const last = lastGetHistory(posted);
-  const reply = {
-    type: 'history',
-    sessions,
-    offset: 0,
-    generation: last ? last.generation : 0,
-  };
-  if (workDirs) reply.workDirs = workDirs;
-  return reply;
+// Answer the page's latest getHistory (echoing its generation: a filter
+// change bumps it and refetches) with `sessions` and, when given, the
+// daemon's `workDirs` list plus any `more` reply fields.
+function sendReply(win, posted, sessions, workDirs, more) {
+  const extra = Object.assign({}, more || {});
+  if (workDirs) extra.workDirs = workDirs;
+  sendHistory(win, posted, sessions, extra);
 }
 
 function options(win) {
@@ -75,9 +59,7 @@ function options(win) {
 }
 
 function selectWorkDir(win, value) {
-  const sel = win.document.getElementById('hf-workdir');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
+  selectFilter(win, 'hf-workdir', value);
 }
 
 function testOptionsComeFromTheReply() {
@@ -86,7 +68,7 @@ function testOptionsComeFromTheReply() {
   assert.ok(sel && sel.tagName === 'SELECT', 'hf-workdir select must exist');
   assert.ok(!sel.parentElement.hidden, 'the WORKDIR filter is always shown');
   assert.deepStrictEqual(options(win), [['', 'All']]);
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   assert.deepStrictEqual(options(win), [
     ['', 'All'],
     [KISS, KISS],
@@ -96,19 +78,19 @@ function testOptionsComeFromTheReply() {
   // select clamps its width).
   assert.strictEqual(sel.options[1].title, KISS);
   // The daemon's order (most recently used first) is kept, not sorted.
-  send(win, historyReply(posted, SESSIONS, [PAPER, KISS, '/home/u/a']));
+  sendReply(win, posted, SESSIONS, [PAPER, KISS, '/home/u/a']);
   assert.deepStrictEqual(
     options(win).map(o => o[0]),
     ['', PAPER, KISS, '/home/u/a'],
   );
   // A reply without the field (an older daemon) leaves the options alone;
   // non-string and empty entries are skipped.
-  send(win, historyReply(posted, SESSIONS));
+  sendReply(win, posted, SESSIONS);
   assert.deepStrictEqual(
     options(win).map(o => o[0]),
     ['', PAPER, KISS, '/home/u/a'],
   );
-  send(win, historyReply(posted, SESSIONS, [KISS, '', 7, null]));
+  sendReply(win, posted, SESSIONS, [KISS, '', 7, null]);
   assert.deepStrictEqual(options(win), [
     ['', 'All'],
     [KISS, KISS],
@@ -117,26 +99,18 @@ function testOptionsComeFromTheReply() {
   console.log('  ok - WORKDIR options come from the history reply');
 }
 
-function testRowsCarryTheirWorkDir() {
+function testSelectingADirectoryFiltersRowsAndRefetches() {
   const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   const seen = {};
   historyRows(win).forEach(r => {
     seen[r.querySelector('.sidebar-item-text').textContent] = r.dataset.workDir;
   });
-  assert.deepStrictEqual(seen, {
-    'kiss one': KISS,
-    'paper one': PAPER,
-    'kiss two': KISS,
-    nowhere: '',
-  });
-  win.close();
-  console.log('  ok - rows carry data-work-dir');
-}
-
-function testSelectingADirectoryFiltersRowsAndRefetches() {
-  const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  assert.deepStrictEqual(
+    seen,
+    {'kiss one': KISS, 'paper one': PAPER, 'kiss two': KISS, nowhere: ''},
+    'rows carry data-work-dir',
+  );
   assert.strictEqual(visibleTitles(win).length, 4, 'All shows every row');
   const pill = win.document.getElementById('hf-workdir').parentElement;
   assert.ok(!pill.classList.contains('active'));
@@ -168,11 +142,9 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
     session(2, 'other paper', PAPER, {sea: 'write_paper_sea'}),
     session(3, 'kiss plain', KISS),
   ];
-  send(win, historyReply(posted, fixture, WORK_DIRS));
+  sendReply(win, posted, fixture, WORK_DIRS);
   selectWorkDir(win, KISS);
-  const sea = win.document.getElementById('hf-sea');
-  sea.value = 'write_paper_sea';
-  sea.dispatchEvent(new win.Event('change', {bubbles: true}));
+  selectFilter(win, 'hf-sea', 'write_paper_sea');
   assert.deepStrictEqual(visibleTitles(win), ['kiss paper']);
   win.close();
   console.log('  ok - selecting a directory filters rows and refetches');
@@ -180,12 +152,12 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
 
 function testSelectionSurvivesRefreshesAndRemoval() {
   const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   selectWorkDir(win, PAPER);
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
   // A refresh listing the same directories keeps the selection, the
   // filter and the accent, and does not refetch.
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   const sel = win.document.getElementById('hf-workdir');
   assert.strictEqual(sel.value, PAPER);
   assert.ok(sel.parentElement.classList.contains('active'));
@@ -197,14 +169,7 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   );
   // The daemon no longer listing the chosen directory (its rows were
   // deleted) falls back to All and refetches for All.
-  send(
-    win,
-    historyReply(
-      posted,
-      SESSIONS.filter(s => s.work_dir !== PAPER),
-      [KISS],
-    ),
-  );
+  sendReply(win, posted, SESSIONS.filter(s => s.work_dir !== PAPER), [KISS]);
   assert.strictEqual(sel.value, '');
   assert.ok(!sel.parentElement.classList.contains('active'));
   assert.strictEqual(visibleTitles(win).length, 3, 'all rows after fallback');
@@ -227,7 +192,7 @@ function testSelectingADirectoryKeepsChatsCollapsed() {
     session(2, 'kiss two', KISS, {id: 'chat-a'}),
     session(3, 'paper one', PAPER, {id: 'chat-b'}),
   ];
-  send(win, historyReply(posted, fixture, WORK_DIRS));
+  sendReply(win, posted, fixture, WORK_DIRS);
   const groups = () =>
     Array.from(
       win.document
@@ -239,7 +204,7 @@ function testSelectingADirectoryKeepsChatsCollapsed() {
   // A directory scopes the list like a machine: it is no search, so
   // every chat stays as folded as it was.
   selectWorkDir(win, KISS);
-  send(win, historyReply(posted, fixture.slice(0, 2), WORK_DIRS));
+  sendReply(win, posted, fixture.slice(0, 2), WORK_DIRS);
   assert.deepStrictEqual(
     groups()
       .filter(g => g.style.display !== 'none')
@@ -252,7 +217,7 @@ function testSelectingADirectoryKeepsChatsCollapsed() {
 
 function testStaleReplyLeavesTheSelectionAlone() {
   const {win, posted} = makePage();
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   selectWorkDir(win, PAPER);
   const current = lastGetHistory(posted);
   assert.strictEqual(current.workDir, PAPER);
@@ -281,7 +246,7 @@ function testStaleReplyLeavesTheSelectionAlone() {
     'no refetch from a stale reply',
   );
   // The current reply then renders and is filtered as asked.
-  send(win, historyReply(posted, [SESSIONS[1]], WORK_DIRS));
+  sendReply(win, posted, [SESSIONS[1]], WORK_DIRS);
   assert.deepStrictEqual(visibleTitles(win), ['paper one']);
   win.close();
   console.log('  ok - a stale-generation reply leaves the selection alone');
@@ -290,16 +255,10 @@ function testStaleReplyLeavesTheSelectionAlone() {
 function testADirectoryResetsAndLocksTheMachineFilter() {
   const {win, posted} = makePage();
   // A remote machine is registered and selected.
-  send(
-    win,
-    Object.assign(historyReply(posted, SESSIONS, WORK_DIRS), {
-      machines: ['box'],
-      localMachine: 'myhost',
-    }),
-  );
+  const machines = {machines: ['box'], localMachine: 'myhost'};
+  sendReply(win, posted, SESSIONS, WORK_DIRS, machines);
   const machine = win.document.getElementById('hf-machine');
-  machine.value = 'box';
-  machine.dispatchEvent(new win.Event('change', {bubbles: true}));
+  selectFilter(win, 'hf-machine', 'box');
   assert.strictEqual(lastGetHistory(posted).machine, 'box');
   assert.strictEqual(visibleTitles(win).length, 0, 'no local row is a box row');
   // Choosing a directory (a path on this machine) resets the machine
@@ -314,13 +273,7 @@ function testADirectoryResetsAndLocksTheMachineFilter() {
   const request = lastGetHistory(posted);
   assert.strictEqual(request.workDir, KISS);
   assert.strictEqual(request.machine, '');
-  send(
-    win,
-    Object.assign(historyReply(posted, SESSIONS.slice(0, 1), WORK_DIRS), {
-      machines: ['box'],
-      localMachine: 'myhost',
-    }),
-  );
+  sendReply(win, posted, SESSIONS.slice(0, 1), WORK_DIRS, machines);
   assert.deepStrictEqual(visibleTitles(win), ['kiss one']);
   assert.strictEqual(machine.value, '', 'the rebuild keeps All');
   assert.ok(machine.disabled, 'still locked after a reply');
@@ -359,7 +312,7 @@ function testAnAdoptedDirectoryJoinsTheOptionsAtOnce() {
     ['', KISS, PAPER],
     'the filter offers the header directories from configData',
   );
-  send(win, historyReply(posted, SESSIONS, WORK_DIRS));
+  sendReply(win, posted, SESSIONS, WORK_DIRS);
   selectWorkDir(win, PAPER);
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
   // Another browser adopts a new directory: the daemon's broadcast
@@ -441,20 +394,19 @@ function testAnAdoptedDirectoryJoinsTheOptionsAtOnce() {
   console.log('  ok - an adopted directory joins the options at once');
 }
 
-function runTests() {
-  testOptionsComeFromTheReply();
-  testRowsCarryTheirWorkDir();
-  testSelectingADirectoryFiltersRowsAndRefetches();
-  testSelectionSurvivesRefreshesAndRemoval();
-  testSelectingADirectoryKeepsChatsCollapsed();
-  testStaleReplyLeavesTheSelectionAlone();
-  testADirectoryResetsAndLocksTheMachineFilter();
-  testAnAdoptedDirectoryJoinsTheOptionsAtOnce();
-}
+const TESTS = [
+  testOptionsComeFromTheReply,
+  testSelectingADirectoryFiltersRowsAndRefetches,
+  testSelectionSurvivesRefreshesAndRemoval,
+  testSelectingADirectoryKeepsChatsCollapsed,
+  testStaleReplyLeavesTheSelectionAlone,
+  testADirectoryResetsAndLocksTheMachineFilter,
+  testAnAdoptedDirectoryJoinsTheOptionsAtOnce,
+];
 
 try {
-  runTests();
-  console.log('\n8 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

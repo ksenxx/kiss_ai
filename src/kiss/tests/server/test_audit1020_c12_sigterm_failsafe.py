@@ -70,7 +70,11 @@ server = RemoteAccessServer(
 )
 
 
+wedged = threading.Event()
+
+
 async def swallow_everything_forever():
+    wedged.set()
     while True:
         try:
             await asyncio.sleep(0)
@@ -86,7 +90,15 @@ def wedge_the_loop_and_open_a_terminal():
     )
     terminals = server._agent_server.terminals
     terminals.open("hup-tab", "conn-1", str(tmp), 80, 24)
-    (tmp / "shell_pid.txt").write_text(str(terminals._sessions["hup-tab"].pid))
+    # The pid file is the test's cue to send SIGTERM: publish it only once
+    # the loop is wedged (a SIGTERM before that unwinds the loop normally
+    # and never reaches the failsafe), and atomically: this thread shares
+    # the GIL with the wedged loop, so a plain write_text leaves the file
+    # empty for long enough to be read as such.
+    wedged.wait()
+    partial = tmp / "shell_pid.txt.partial"
+    partial.write_text(str(terminals._sessions["hup-tab"].pid))
+    os.replace(partial, tmp / "shell_pid.txt")
 
 
 threading.Thread(target=wedge_the_loop_and_open_a_terminal, daemon=True).start()

@@ -170,6 +170,47 @@ class TestRemoteWorkspaceViews(IsolatedAsyncioTestCase):
         self.assertEqual(saved["token"], "t-saveFile")
         self.assertEqual((self.box_work / "box-file.txt").read_text(), "saved from afar\n")
 
+    async def test_big_html_page_on_the_machine_arrives_in_pieces(self) -> None:
+        """An HTML page of the machine bigger than one ``fileContent``
+        frame comes back whole: the machine's daemon sends it in pieces
+        (``more`` on every one but the last), the link joins them, and
+        this daemon relays the reply to its client in pieces again,
+        each stamped ``machine``, ``tabId`` and ``token``."""
+        from kiss.server import web_server
+
+        chunk = web_server._FILE_CONTENT_CHUNK_CHARS
+        filler = "<p>" + "z" * 1000 + "</p>\n"
+        text = (
+            "<!DOCTYPE html><html><body>\n"
+            + filler * (chunk // len(filler) + 1)
+            + "</body></html>\n"
+        )
+        # ``newline=""``: the daemon serves the file's bytes as they are,
+        # so the text must not pick up ``\r\n`` on Windows.
+        (self.box_work / "box-page.html").write_text(text, encoding="utf-8", newline="")
+        await self._send(self._on_box({"type": "openFile", "path": "box-page.html"}))
+        pieces: list[dict[str, Any]] = []
+        while True:
+            line = await asyncio.wait_for(self.reader.readline(), timeout=60.0)
+            assert line, "local connection closed"
+            msg: dict[str, Any] = json.loads(line.decode("utf-8"))
+            if msg.get("type") != "fileContent":
+                continue
+            pieces.append(msg)
+            if msg.get("more") is not True:
+                break
+        self.assertEqual(len(pieces), 2)
+        self.assertEqual(pieces[0].get("error", ""), "")
+        self.assertEqual(pieces[0]["name"], "box-page.html")
+        self.assertNotIn("version", pieces[0])  # past the editor cap: read-only
+        for piece in pieces:
+            self.assertEqual(piece["machine"], "box")
+            self.assertEqual(piece["tabId"], "tab-box")
+            self.assertEqual(piece["token"], "t-openFile")
+            self.assertEqual(piece["path"], pieces[0]["path"])
+        self.assertEqual(len(pieces[0]["content"]), chunk)
+        self.assertEqual("".join(p["content"] for p in pieces), text)
+
     async def test_git_show_and_git_action_run_on_the_machine(self) -> None:
         shown = await self._ask(self._on_box({
             "type": "gitShow", "sha": self.box_sha, "mode": "patch",

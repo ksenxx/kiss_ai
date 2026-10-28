@@ -3,22 +3,17 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (jsdom) test: a message sent while a task is running
-// carries the files attached to it.  The composer used to refuse such a
-// send ("A message added to a running task is text only"); now the
-// ``appendUserMessage`` command carries the attachments in the same
-// wire shape as ``submit`` and the composer is cleared like after any
-// send.
+// End-to-end (jsdom) test: a text-only message sent while a task is
+// running goes out as an ``appendUserMessage`` with an empty attachment
+// list, in the same wire shape as ``submit``.  The case with a pasted
+// photo riding along is pinned by
+// audit1012_mainjs3_append_drops_attachments.test.js.
 
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage: makeChatPage,
-  send,
-  stubRaf,
-  waitFor,
-} = require('./simplify2_harness');
+const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {typeAndEnter} = require('./attachment_helpers');
 
 function makePage() {
   const {win, posted} = makeChatPage({
@@ -33,93 +28,23 @@ function makePage() {
   return {win, posted, tab};
 }
 
-function pastePng(win, bytes) {
-  const inp = win.document.getElementById('task-input');
-  const png = new win.File([new Uint8Array(bytes)], 'shot.png', {
-    type: 'image/png',
-  });
-  const paste = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(paste, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => png}]},
-  });
-  inp.dispatchEvent(paste);
-}
-
-function pressEnter(win) {
-  const inp = win.document.getElementById('task-input');
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
-}
-
-async function testSteeringMessageCarriesTheAttachment() {
+function testTextOnlySteeringMessageSendsNoAttachments() {
   const {win, posted, tab} = makePage();
-  const inp = win.document.getElementById('task-input');
-  pastePng(win, [137, 80, 78, 71, 13, 10, 26, 10]);
-  await waitFor(
-    () => win.document.querySelector('.file-chip'),
-    'the photo chip is shown',
-  );
-  inp.value = 'use this screenshot';
   posted.length = 0;
-  pressEnter(win);
-  await waitFor(
-    () => posted.some(m => m.type === 'appendUserMessage'),
-    'the steering message was never sent',
-  );
+  typeAndEnter(win, 'just text');
   const sent = posted.filter(m => m.type === 'appendUserMessage');
-  assert.strictEqual(
-    sent.length,
-    1,
-    'the running task gets the message: ' + JSON.stringify(posted),
-  );
-  assert.strictEqual(sent[0].prompt, 'use this screenshot');
+  assert.strictEqual(sent.length, 1, JSON.stringify(posted));
+  assert.strictEqual(sent[0].prompt, 'just text');
   assert.strictEqual(sent[0].tabId, tab);
-  assert.strictEqual(sent[0].attachments.length, 1, 'the photo rides along');
-  assert.strictEqual(sent[0].attachments[0].name, 'shot.png');
-  assert.strictEqual(sent[0].attachments[0].mimeType, 'image/png');
-  assert.strictEqual(
-    sent[0].attachments[0].data,
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString('base64'),
-    'the bytes travel base64-encoded, as for a submit',
-  );
-  assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
-  assert.strictEqual(inp.value, '', 'the composer is cleared');
-  assert.strictEqual(
-    win.document.querySelector('.file-chip'),
-    null,
-    'the chip is gone',
-  );
-  assert.ok(
-    !Array.from(win.document.querySelectorAll('.notification, .notice')).some(
-      el => /text only/.test(el.textContent),
-    ),
-    'no "text only" refusal',
-  );
-  win.close();
-  console.log('  ok - a message to a running task carries its attachment');
-}
-
-async function testTextOnlySteeringMessageSendsNoAttachments() {
-  const {win, posted} = makePage();
-  const inp = win.document.getElementById('task-input');
-  inp.value = 'just text';
-  posted.length = 0;
-  pressEnter(win);
-  const sent = posted.filter(m => m.type === 'appendUserMessage');
-  assert.strictEqual(sent.length, 1);
+  // The array is the jsdom realm's, so no deepStrictEqual against [].
   assert.ok(
     Array.isArray(sent[0].attachments) && sent[0].attachments.length === 0,
   );
+  assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
+  assert.strictEqual(win.document.getElementById('task-input').value, '');
   win.close();
   console.log('  ok - a text-only message carries an empty attachment list');
 }
 
-(async () => {
-  await testSteeringMessageCarriesTheAttachment();
-  await testTextOnlySteeringMessageSendsNoAttachments();
-  console.log('steerMessageAttachments.test.js passed');
-})().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+testTextOnlySteeringMessageSendsNoAttachments();
+console.log('steerMessageAttachments.test.js passed');

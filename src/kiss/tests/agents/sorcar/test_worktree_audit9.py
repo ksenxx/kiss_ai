@@ -47,6 +47,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _manual_merge_cmd,
 )
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -93,12 +94,12 @@ class TestBug40Inc4Fix:
         (wt_dir / "file.txt").write_text("agent work")
         GitWorktreeOps.commit_all(wt_dir, "agent work")
 
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="nonexistent-branch",
             wt_dir=wt_dir,
-        )
+        ))
 
         message = agent.merge()
 

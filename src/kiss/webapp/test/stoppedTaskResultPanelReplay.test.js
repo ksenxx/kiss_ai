@@ -10,7 +10,9 @@ const {makePage, send} = require('./simplify2_harness');
 
 const TASK_ID = 'stopped-task-1';
 
-function stoppedTaskEventsWithoutResult() {
+/** The events of a task the user stopped: the daemon's failed `result`
+ * precedes `task_stopped`. */
+function stoppedTaskEvents() {
   return [
     {type: 'prompt', text: 'review the repo', ts: 1000, taskId: TASK_ID},
     {type: 'text_delta', delta: 'Looking at the repo…', ts: 1500, taskId: TASK_ID},
@@ -21,44 +23,23 @@ function stoppedTaskEventsWithoutResult() {
       ts: 2000,
       taskId: TASK_ID,
     },
+    {
+      type: 'result',
+      text: 'Task stopped by user',
+      success: false,
+      total_tokens: 0,
+      cost: '$0.0000',
+      step_count: 0,
+      ts: 2500,
+      taskId: TASK_ID,
+    },
     {type: 'task_stopped', ts: 3000},
     {type: 'followup_suggestion', text: 'Resume the stopped task.', ts: 3001},
   ];
 }
 
-function stoppedTaskEventsWithResult() {
-  const evs = stoppedTaskEventsWithoutResult();
-  evs.splice(3, 0, {
-    type: 'result',
-    text: 'Task stopped by user',
-    success: false,
-    total_tokens: 0,
-    cost: '$0.0000',
-    step_count: 0,
-    ts: 2500,
-    taskId: TASK_ID,
-  });
-  return evs;
-}
-
 function resultPanels(win) {
   return Array.from(win.document.querySelectorAll('.ev.rc'));
-}
-
-function testSymptomNoResultRowMeansNoPanel() {
-  const {win} = makePage();
-  send(win, {
-    type: 'task_events',
-    task: 'review the repo',
-    task_id: TASK_ID,
-    events: stoppedTaskEventsWithoutResult(),
-  });
-  assert.strictEqual(
-    resultPanels(win).length,
-    0,
-    'a stream with no persisted result row must render no Result panel',
-  );
-  console.log('  ok - pre-fix stream (no result row) reproduces the symptom');
 }
 
 function testHistoryReplayShowsStoppedResultPanel() {
@@ -67,7 +48,7 @@ function testHistoryReplayShowsStoppedResultPanel() {
     type: 'task_events',
     task: 'review the repo',
     task_id: TASK_ID,
-    events: stoppedTaskEventsWithResult(),
+    events: stoppedTaskEvents(),
   });
   const panels = resultPanels(win);
   assert.strictEqual(panels.length, 1, 'history replay must render 1 Result panel');
@@ -79,7 +60,7 @@ function testHistoryReplayShowsStoppedResultPanel() {
 
 function testLiveStopShowsResultPanel() {
   const {win} = makePage();
-  for (const ev of stoppedTaskEventsWithResult()) {
+  for (const ev of stoppedTaskEvents()) {
     send(win, Object.assign({}, ev));
   }
   const panels = resultPanels(win);
@@ -112,7 +93,7 @@ function testAdjacentTaskReplayShowsStoppedResultPanel() {
     direction: 'prev',
     task: 'review the repo',
     task_id: TASK_ID,
-    events: stoppedTaskEventsWithResult(),
+    events: stoppedTaskEvents(),
   });
   const adjacent = win.document.querySelector('.adjacent-task');
   assert.ok(adjacent, 'adjacent task block rendered');
@@ -127,7 +108,6 @@ function testAdjacentTaskReplayShowsStoppedResultPanel() {
 }
 
 function main() {
-  testSymptomNoResultRowMeansNoPanel();
   testHistoryReplayShowsStoppedResultPanel();
   testLiveStopShowsResultPanel();
   testAdjacentTaskReplayShowsStoppedResultPanel();

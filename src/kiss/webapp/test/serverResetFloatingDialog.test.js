@@ -81,26 +81,8 @@ async function testOkPostsOneReset() {
   win.close();
 }
 
-async function testNoRunningTaskResetsAtOnce() {
-  const {win, posted} = makePage();
-  clickInWindow(win, 'cfg-server-reset-btn');
-  assert.strictEqual(
-    isFloatingModalOpen(win),
-    false,
-    'with no running agent, the floating confirmation box must NOT open',
-  );
-  await waitFor(
-    () => resets(posted).length === 1,
-    'no-agent click must post serverReset immediately',
-  );
-  assert.strictEqual(
-    win.document.querySelectorAll('.kiss-notification').length,
-    0,
-    'the page must NOT render any in-page confirmation toast',
-  );
-  win.close();
-}
-
+// With no running agent (here: one that has stopped) the click resets
+// at once, with neither the floating dialog nor an in-page toast.
 async function testStoppedTaskResetsAtOnce() {
   const {win, posted} = pageWithRunningTask();
   send(win, {
@@ -117,6 +99,11 @@ async function testStoppedTaskResetsAtOnce() {
     isFloatingModalOpen(win),
     false,
     'a click after the agent stopped must NOT open the floating dialog',
+  );
+  assert.strictEqual(
+    win.document.querySelectorAll('.kiss-notification').length,
+    0,
+    'the page must NOT render any in-page confirmation toast',
   );
   win.close();
 }
@@ -168,7 +155,6 @@ async function testCancelThenOkPostsOneReset() {
 async function main() {
   await testMarkup();
   await testOkPostsOneReset();
-  await testNoRunningTaskResetsAtOnce();
   await testStoppedTaskResetsAtOnce();
   await testDoubleClickThenOk();
   await testCancelThenOkPostsOneReset();

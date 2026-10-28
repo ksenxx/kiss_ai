@@ -755,14 +755,6 @@ _ALL_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max"
 """Union of every vendor scale, used when sweeping generated ``-{level}``
 aliases regardless of which scale produced them."""
 
-_ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-"""The Anthropic ``output_config.effort`` scale for direct ``claude-*``
-models (https://platform.claude.com/docs/en/build-with-claude/effort),
-sent by ``AnthropicModel`` when ``model_config["reasoning_effort"]`` or a
-generated ``-{level}`` alias selects a level. Opus 4.7 / 4.8 / 5 / 5.5,
-Sonnet 5 / 5.5 and Fable 5 / 5.1 accept all five levels (verified live
-2026-10-07)."""
-
 _ANTHROPIC_EFFORT_LEVELS_NO_XHIGH: tuple[str, ...] = ("low", "medium", "high", "max")
 """Effort scale of Opus 4.6 and Sonnet 4.6: ``max`` is accepted but ``xhigh``
 returns HTTP 400 ("Not every model that supports max supports xhigh")."""
@@ -781,7 +773,15 @@ def _anthropic_effort_scale(model_name: str) -> tuple[str, ...]:
     * Opus 4.5 → ``low`` / ``medium`` / ``high``;
     * Opus 4.6 and Sonnet 4.6 → ``low`` / ``medium`` / ``high`` / ``max``;
     * every other Claude (Opus 4.7+, Sonnet 5+, Fable, Mythos, ...) → the
-      full :data:`_ANTHROPIC_EFFORT_LEVELS` ladder.
+      full :data:`kiss.core.models.anthropic_model.ANTHROPIC_EFFORT_LEVELS`
+      ladder.  ``AnthropicModel`` sends the level
+      ``model_config["reasoning_effort"]`` selects, else the catalog
+      ``thinking`` level of the entry — the base entry's own level
+      (``high``, the cap :func:`_write_entry_with_thinking_split` stores on
+      a base) for a bare name, the suffix level for a generated
+      ``-{level}`` alias — exactly as the OpenAI adapters send
+      ``reasoning_effort``; so the probe result written here is the effort
+      the bare name runs at, not a nominal cap.
 
     Models that reject the parameter altogether (Haiku 4.5, Sonnet 4.5)
     fail every probe in :func:`detect_thinking_level`, so the scale
@@ -793,7 +793,7 @@ def _anthropic_effort_scale(model_name: str) -> tuple[str, ...]:
     Returns:
         The ordered tuple of effort levels to probe and alias.
     """
-    from kiss.core.models.anthropic_model import _parse_claude_version
+    from kiss.core.models.anthropic_model import ANTHROPIC_EFFORT_LEVELS, _parse_claude_version
 
     version = _parse_claude_version(model_name)
     if version is not None:
@@ -802,7 +802,7 @@ def _anthropic_effort_scale(model_name: str) -> tuple[str, ...]:
             return _ANTHROPIC_EFFORT_LEVELS_OPUS_4_5
         if family in ("opus", "sonnet") and major == 4 and minor == 6:
             return _ANTHROPIC_EFFORT_LEVELS_NO_XHIGH
-    return _ANTHROPIC_EFFORT_LEVELS
+    return ANTHROPIC_EFFORT_LEVELS
 
 _MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
     "kimi-",

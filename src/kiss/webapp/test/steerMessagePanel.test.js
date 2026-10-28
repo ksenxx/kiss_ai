@@ -16,19 +16,19 @@ const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {readyTabId, output} = harness;
 
-/** The harness page with main.css applied; `win.__posted` is its ledger. */
+/** A harness page with main.css applied: {win, posted}. */
 function makePage() {
-  const {win, posted} = harness.makePage();
-  harness.loadMainCss(win);
-  win.__posted = posted;
+  return harness.makePage({beforeScripts: harness.loadMainCss});
+}
+
+/** The window of a fresh page on which *task* has been started. */
+function startedPage(task) {
+  const {win, posted} = makePage();
+  harness.startTask(win, posted, task);
   return win;
 }
 
 const send = harness.send;
-
-function startTask(win, task) {
-  harness.startTask(win, win.__posted, task);
-}
 
 function sendStep(win, i) {
   send(win, {type: 'thinking_start'});
@@ -49,8 +49,7 @@ function sendStep(win, i) {
 }
 
 function testSteerPromptRendersLikeTaskPanel() {
-  const win = makePage();
-  startTask(win, 'Fix the login bug');
+  const win = startedPage('Fix the login bug');
   sendStep(win, 1);
   send(win, {
     type: 'prompt',
@@ -107,8 +106,7 @@ function testSteerPromptRendersLikeTaskPanel() {
 }
 
 function testPlainPromptStaysPromptPanel() {
-  const win = makePage();
-  startTask(win, 'Plain prompt');
+  const win = startedPage('Plain prompt');
   send(win, {type: 'prompt', text: 'authoritative prompt text'});
   assert.strictEqual(
     output(win).querySelectorAll('.ev.user-msg').length,
@@ -122,8 +120,7 @@ function testPlainPromptStaysPromptPanel() {
 }
 
 function testMessagePanelNeverAutoFolded() {
-  const win = makePage();
-  startTask(win, 'Never fold the message');
+  const win = startedPage('Never fold the message');
   sendStep(win, 1);
   send(win, {type: 'prompt', text: 'steer one', steer: true});
   for (let i = 2; i <= 5; i++) sendStep(win, i);
@@ -145,7 +142,7 @@ function testMessagePanelNeverAutoFolded() {
   win.close();
 
   // A replayed, finished task keeps it open too.
-  const win2 = makePage();
+  const {win: win2, posted: posted2} = makePage();
   const events = [{type: 'prompt', text: 'replayed'}];
   for (let i = 1; i <= 2; i++) {
     events.push({
@@ -167,7 +164,7 @@ function testMessagePanelNeverAutoFolded() {
     type: 'task_events',
     events,
     task: 'replayed',
-    tabId: readyTabId(win2.__posted),
+    tabId: readyTabId(posted2),
     chat_id: 'c-replay',
   });
   send(win2, {type: 'status', running: false});
@@ -196,8 +193,7 @@ function testMessagePanelNeverAutoFolded() {
 }
 
 function testMessagePanelFoldsByClick() {
-  const win = makePage();
-  startTask(win, 'Fold by hand');
+  const win = startedPage('Fold by hand');
   send(win, {type: 'prompt', text: 'fold me please', steer: true});
   const msg = output(win).querySelector('.ev.user-msg');
   const hdr = msg.querySelector('.collapse-header');

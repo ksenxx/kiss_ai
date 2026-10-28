@@ -40,6 +40,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome, OfflineFastModel
 
 _TAB = "huge-merge-tab"
@@ -82,9 +83,9 @@ class _Env:
                 encoding="utf-8",
             )
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=self.repo, branch=branch, original_branch=original, wt_dir=wt_dir,
-        )
+        ))
         return agent
 
     def cleanup(self) -> None:

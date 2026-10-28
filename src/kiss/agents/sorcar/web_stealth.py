@@ -13,8 +13,24 @@ costco), Anubis (dblp, archwiki), Imperva (cato.org), PerimeterX
 (walmart) and Google's ``/sorry/`` "unusual traffic" page.  Measured
 against 14 of those URLs from the same machine, the stock configuration
 (Playwright driver, headless Chromium) got 4 pages; Patchright driving a
-headed Chromium on a virtual display got 11.  Three groups of helpers,
-all consumed by :mod:`kiss.agents.sorcar.web_use_tool`:
+headed Chromium on a virtual display got 11.  Re-measured in Oct 2026
+(Patchright 1.63, Google Chrome 154 on Xvfb) all 13 hosts load; what
+remained was PerimeterX's press-and-hold widget on walmart product pages
+and fiverr (now pressed like a person, see :func:`press_hold_secs`),
+Anubis proof-of-work pages that needed more than 12 s on a loaded VM
+(see :func:`challenge_wait_secs`), and two article pages that merely
+*talked* about "press and hold" being mistaken for the widget (the
+patterns below now require the block page's own wording).  The hold
+itself is what HUMAN's widget wants: whenever the widget's state could
+be read, the bar said "HUMAN CHALLENGE COMPLETED, PLEASE WAIT" after
+about 4 s of holding, and fiverr then served the real page (three
+natural challenges; a challenge forced with a ``PhantomJS`` user agent
+re-serves itself, as HUMAN's docs say).  Whether the vendor *accepts* a
+solution is decided on its side from the IP's and session's score: in
+two sessions on this datacenter IP the challenge stayed after two holds,
+and the page is then reported for the user, as a person stuck in the
+same loop would be.  Three groups of helpers, all consumed by
+:mod:`kiss.agents.sorcar.web_use_tool`:
 
 * **Engine**: :func:`playwright_api` prefers Patchright, a patched
   Playwright driver that does not send the ``Runtime.enable`` CDP command
@@ -26,9 +42,13 @@ all consumed by :mod:`kiss.agents.sorcar.web_use_tool`:
   is the single strongest bot signal (benchmark: 100% -> 40% bypass for
   the same engine, https://github.com/techinz/browsers-benchmark).
 * **Human input**: :func:`mouse_path` (Bezier pointer paths),
-  :func:`typing_chunks` (uneven typing cadence) and
-  :func:`challenge_vendor` (recognise a bot-protection page so the tool
-  can wait for it to clear and report it plainly).
+  :func:`typing_chunks` (uneven typing cadence), :func:`hold_tremor`
+  (the resting hand on a held button) and :func:`challenge_vendor`
+  (recognise a bot-protection page so the tool can wait for it to clear,
+  press its widget, and report it plainly), with
+  :func:`challenge_wait_secs` / :func:`press_hold_secs` /
+  :func:`widget_presses` / :data:`PRESS_AND_HOLD_BOX_JS` describing how
+  each vendor's page is waited on and pressed.
 """
 
 from __future__ import annotations
@@ -58,8 +78,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _API_MODULE: ModuleType | None = None
+_API_LOCK = threading.RLock()
 
 
+@locked(_API_LOCK)
 def playwright_api() -> ModuleType:
     """Return the sync Playwright API module to drive Chromium with.
 
@@ -68,16 +90,22 @@ def playwright_api() -> ModuleType:
     Akamai and DataDome fingerprint; it is used whenever it is importable
     and the stock ``playwright`` package is the fallback.
 
+    Task threads call this concurrently; the lock makes the import and
+    the dead-driver guard install one critical section, and the module
+    is published only once it is guarded, so no caller drives an
+    unguarded API and ``SyncBase._sync`` is wrapped exactly once.
+
     Returns:
         ``patchright.sync_api`` or ``playwright.sync_api``.
     """
     global _API_MODULE
     if _API_MODULE is None:
         try:
-            _API_MODULE = import_module("patchright.sync_api")
+            api = import_module("patchright.sync_api")
         except ImportError:  # pragma: no cover — patchright is a declared dependency
-            _API_MODULE = import_module("playwright.sync_api")
-        _guard_sync_api_against_dead_driver(_API_MODULE)
+            api = import_module("playwright.sync_api")
+        _guard_sync_api_against_dead_driver(api)
+        _API_MODULE = api
     return _API_MODULE
 
 
@@ -225,6 +253,103 @@ def disabled_blink_features(unattended: bool) -> str:
     return "--disable-blink-features=" + ",".join(features)
 
 
+# Headless Chrome's user agent carries ``HeadlessChrome/<version>`` where
+# a window carries ``Chrome/<version>``.  Rewriting the token from inside
+# the page (an init script redefining ``navigator.userAgent``) is itself
+# a tell: ``navigator.appVersion`` keeps the raw token, so the two
+# strings disagree, and the redefined property is an *own* property of
+# ``navigator`` where a real browser has it on the prototype.  Measured
+# in Oct 2026 on this machine (Chrome 154, Patchright 1.63): with that
+# script, real headless mode failed every Cloudflare managed challenge
+# (dl.acm.org, sciencedirect, patents.justia.com, espacenet: 0 of 4);
+# with Chrome's own ``--user-agent`` switch and no script, 4 of 4 — the
+# switch sets the header, ``userAgent`` and ``appVersion`` natively and
+# leaves the client-hint brands (``Sec-CH-UA``) untouched.  Those
+# blocks had hit the macOS daemon, where there is no Xvfb and the
+# browser must run in real headless mode.
+HEADLESS_UA_TOKEN = "HeadlessChrome"
+_HEADED_UA_TOKEN = "Chrome"
+# Channel -> headed user agent; single dict operations, no lock needed.
+_HEADED_USER_AGENTS: dict[str, str] = {}
+
+
+def headed_user_agent(user_agent: str) -> str | None:
+    """Return *user_agent* as the same browser would report it headed.
+
+    Args:
+        user_agent: ``navigator.userAgent`` of a freshly launched browser.
+
+    Returns:
+        The string with ``HeadlessChrome`` replaced by ``Chrome``, or
+        ``None`` when *user_agent* carries no headless token (a headed
+        browser, or one already launched with :func:`user_agent_switch`).
+    """
+    if HEADLESS_UA_TOKEN not in user_agent:
+        return None
+    return user_agent.replace(HEADLESS_UA_TOKEN, _HEADED_UA_TOKEN)
+
+
+def user_agent_switch(channel: str) -> str | None:
+    """Return the ``--user-agent=...`` switch remembered for *channel*, if any.
+
+    The headed user agent of a browser build is only known once that
+    build has been launched and asked (see :func:`remember_user_agent`);
+    this returns it for every later launch in the process so a headless
+    browser starts with the right user agent the first time instead of
+    being relaunched.
+
+    Args:
+        channel: The Playwright channel (:func:`chrome_channel`).
+
+    Returns:
+        The complete command-line switch, or ``None`` when no headless
+        launch of *channel* has been seen yet in this process.
+    """
+    user_agent = _HEADED_USER_AGENTS.get(channel)
+    return None if user_agent is None else f"--user-agent={user_agent}"
+
+
+def remember_user_agent(channel: str, user_agent: str) -> None:
+    """Record the headed user agent of *channel* for :func:`user_agent_switch`.
+
+    Args:
+        channel: The Playwright channel (:func:`chrome_channel`).
+        user_agent: The headed string from :func:`headed_user_agent`.
+    """
+    _HEADED_USER_AGENTS[channel] = user_agent
+
+
+def forget_user_agent(channel: str) -> None:
+    """Drop the user agent remembered for *channel* (the build has changed).
+
+    Args:
+        channel: The Playwright channel (:func:`chrome_channel`).
+    """
+    _HEADED_USER_AGENTS.pop(channel, None)
+
+
+_CHROME_MAJOR_RE = re.compile(r"\bChrome/(\d+)\.")
+
+
+def user_agent_matches_version(user_agent: str, version: str) -> bool:
+    """Whether *user_agent* names the major version of a browser reporting *version*.
+
+    A daemon keeps running while Chrome updates underneath it; the
+    remembered string would then carry the old major version while the
+    client hints, which the switch does not touch, carry the new one — a
+    mismatch a challenge script can see.
+
+    Args:
+        user_agent: A user-agent string or ``--user-agent=`` switch.
+        version: ``Browser.version`` such as ``"154.0.8037.57"``.
+
+    Returns:
+        True when the ``Chrome/<major>`` token equals *version*'s major.
+    """
+    match = _CHROME_MAJOR_RE.search(user_agent)
+    return match is not None and match.group(1) == version.split(".")[0]
+
+
 # ---------------------------------------------------------------------------
 # Virtual display (Xvfb)
 # ---------------------------------------------------------------------------
@@ -298,11 +423,14 @@ def virtual_display() -> str | None:
         if write_fd >= 0:
             os.close(write_fd)
         os.close(read_fd)
-        if proc is not None and display is None:
-            # Timed out, exited early, or a Stop injected into the task
-            # thread while the display number was awaited: the wrapper
-            # (and its Xvfb) must not outlive this call unowned, since
-            # ``_XVFB_PROC`` is still ``None`` and nothing could reap it.
+        if proc is not None and display is None and proc.poll() is None:
+            # Timed out, or a Stop injected into the task thread while
+            # the display number was awaited: the wrapper (and its Xvfb)
+            # must not outlive this call unowned, since ``_XVFB_PROC`` is
+            # still ``None`` and nothing could reap it.  A wrapper that
+            # ``_read_display_number`` already saw exit is reaped and its
+            # group gone (the wrapper kills Xvfb before it exits), so its
+            # pgid may belong to someone else by now: no signal.
             terminate_process_group(proc)
     if display is None:
         logger.warning("Xvfb did not start; falling back to headless Chromium")
@@ -450,12 +578,23 @@ def typing_duration_secs(chunks: list[tuple[str, int]]) -> float:
 # co-occurring body phrases.  Standalone prose such as the word "captcha"
 # or "You don't have permission" appears in ordinary articles and must not
 # trigger the challenge wait.
+CLOUDFLARE_CHALLENGE = "Cloudflare challenge"
+ANUBIS_CHECK = "Anubis proof-of-work check"
+PERIMETERX_CHECK = "PerimeterX press-and-hold check"
+
 _TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Cloudflare block", re.compile(r"^Attention Required! \| Cloudflare$", re.I)),
-    ("Cloudflare challenge", re.compile(r"^Just a moment\.\.\.$", re.I)),
-    ("Anubis proof-of-work check", re.compile(r"^Making sure you're not a bot!?$", re.I)),
+    (CLOUDFLARE_CHALLENGE, re.compile(r"^Just a moment\.\.\.$", re.I)),
+    (ANUBIS_CHECK, re.compile(r"^Making sure you're not a bot!?$", re.I)),
     ("Akamai block", re.compile(r"^Access Denied$", re.I)),
-    ("PerimeterX press-and-hold check", re.compile(r"^Robot or human\?$", re.I)),
+    # walmart.com/blocked, fiverr, and PerimeterX's stock block page.
+    (
+        PERIMETERX_CHECK,
+        re.compile(
+            r"^Robot or human\?$|^It needs a human touch$|^Access to this page has been denied\.?$",
+            re.I,
+        ),
+    ),
     ("CAPTCHA", re.compile(r"^Are you a robot\?$|^Security check required$", re.I)),
 )
 # (vendor label, both patterns must match the body head)
@@ -471,7 +610,7 @@ _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
         re.compile(r"Ray ID|Cloudflare", re.I),
     ),
     (
-        "Cloudflare challenge",
+        CLOUDFLARE_CHALLENGE,
         re.compile(
             r"Performing security verification|Verify(?:ing)? you are human|"
             r"Enable JavaScript and cookies to continue",
@@ -480,7 +619,7 @@ _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
         re.compile(r"Ray ID|Cloudflare", re.I),
     ),
     (
-        "Anubis proof-of-work check",
+        ANUBIS_CHECK,
         re.compile(r"Sad Anubis|Oh noes!", re.I),
         re.compile(r"Anubis", re.I),
     ),
@@ -495,9 +634,17 @@ _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
         re.compile(r"Incapsula incident ID", re.I),
     ),
     (
-        "PerimeterX press-and-hold check",
-        re.compile(r"Press & Hold|press and hold", re.I),
-        re.compile(r"human", re.I),
+        # The widget's label or the page's heading, plus the block page's
+        # own sentence.  Articles about the widget ("a simple press and
+        # hold challenge", "Please verify you are Human: Press & Hold")
+        # quote the label but not the sentence.
+        PERIMETERX_CHECK,
+        re.compile(r"Press & Hold|Activate and hold the button|Robot or human\?", re.I),
+        re.compile(
+            r"confirm that you.re human|Please verify you are a human|"
+            r"using automation tools to browse|Reference ID",
+            re.I,
+        ),
     ),
 )
 
@@ -521,6 +668,100 @@ def challenge_vendor(title: str, body_head: str) -> str | None:
         if first.search(body_head) and second.search(body_head):
             return label
     return None
+
+
+# How long a vendor's page is given to clear on its own.  Cloudflare's
+# managed challenge takes 3-8 s in a browser it rates human.  Anubis makes
+# the browser find a SHA-256 hash with (by default) five leading zero
+# nibbles, about a million hashes in a Web Worker
+# (https://anubis.techaro.lol/docs/design/how-anubis-works), which took
+# longer than 12 s on this loaded VM six times in the task history.
+_CHALLENGE_WAIT_SECS = 12.0
+_ANUBIS_WAIT_SECS = 45.0
+
+
+def challenge_wait_secs(vendor: str) -> float:
+    """How long *vendor*'s interstitial is given to clear before it is reported.
+
+    Args:
+        vendor: A label returned by :func:`challenge_vendor`.
+
+    Returns:
+        Seconds; longer for Anubis, whose proof-of-work is CPU-bound.
+    """
+    return _ANUBIS_WAIT_SECS if vendor == ANUBIS_CHECK else _CHALLENGE_WAIT_SECS
+
+
+def press_hold_secs(vendor: str) -> float:
+    """How long the button stays down when *vendor*'s widget is pressed.
+
+    Cloudflare's Turnstile box is a click (a person's 60-140 ms).  HUMAN's
+    "Press & Hold" bar fills over several seconds and the hold must
+    outlast it (https://docs.humansecurity.com/applications/human-challenge:
+    "clicking / tapping on it until the bar is full and then release
+    it"); 8 s cleared fiverr's widget from this machine.
+
+    Args:
+        vendor: A label returned by :func:`challenge_vendor`.
+
+    Returns:
+        Seconds, drawn afresh on each call.
+    """
+    if vendor == PERIMETERX_CHECK:
+        return random.uniform(8.0, 10.0)
+    return random.uniform(0.06, 0.14)
+
+
+def widget_presses(vendor: str) -> int:
+    """How many times *vendor*'s widget is pressed before the page is reported.
+
+    Turnstile's box is ticked once: a second tick on a box that has not
+    cleared is what a person does not do (and unticks it).  HUMAN's
+    two-step variant asks to "press again when prompted".
+
+    Args:
+        vendor: A label returned by :func:`challenge_vendor`.
+
+    Returns:
+        2 for the press-and-hold bar, 1 for the Turnstile box, 0 for pages
+        with nothing to press.
+    """
+    if vendor == PERIMETERX_CHECK:
+        return 2
+    return 1 if vendor == CLOUDFLARE_CHALLENGE else 0
+
+
+def hold_tremor(x: float, y: float) -> tuple[float, float]:
+    """Where a resting finger has drifted to while holding a button at (*x*, *y*).
+
+    A pointer that stays on the exact same pixel for eight seconds is a
+    script; a hand drifts by a pixel or so.
+
+    Args:
+        x: Pressed x in viewport pixels.
+        y: Pressed y in viewport pixels.
+
+    Returns:
+        A point within about 1.5 px of the pressed one.
+    """
+    return x + random.uniform(-1.5, 1.5), y + random.uniform(-1.5, 1.5)
+
+
+# The box of HUMAN / PerimeterX's press-and-hold widget, in main-frame
+# viewport pixels, as a one-element list, or an empty list (a list because
+# the tool's bounded page read waits for a truthy result).  The widget is
+# the ``#px-captcha`` element of the block page (walmart.com/blocked,
+# fiverr's "It needs a human touch", PerimeterX's stock page); its button
+# fills the element.  Content pages of those sites also carry an empty
+# ``#px-captcha`` placeholder, which is why the page text decides that a
+# check is showing and this only locates the widget.
+PRESS_AND_HOLD_BOX_JS = """() => {
+  const el = document.querySelector('#px-captcha');
+  if (!el) return [];
+  const r = el.getBoundingClientRect();
+  if (r.width < 40 || r.height < 20) return [];
+  return [{x: r.x, y: r.y, width: r.width, height: r.height}];
+}"""
 
 
 _GOOGLE_SEARCH_HOST_RE = re.compile(r"^(www\.)?google\.[a-z.]+$", re.I)

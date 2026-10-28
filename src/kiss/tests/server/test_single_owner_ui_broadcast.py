@@ -34,6 +34,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import run_git
 
@@ -167,7 +168,7 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
             wt_dir=wt_dir,
         )
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = wt
+        seed_worktree(agent, wt)
         self.owner.agent = cast(ChatSorcarAgent, agent)
         return wt
 

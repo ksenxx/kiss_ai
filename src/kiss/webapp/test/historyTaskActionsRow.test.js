@@ -23,10 +23,11 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
-const {makePage: makeChatPage, MEDIA} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  loadRemoteCss,
+  stubClipboard,
+} = require('./simplify2_harness');
 const {loadHistory, makeSession} = require('./history_helpers');
 
 // The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
@@ -70,19 +71,8 @@ function assertCompactIcon(win, svg, what) {
   );
 }
 
-/** Append main.css and remote-codex.css, design tokens inlined, to *win*. */
-function loadRemoteCss(win) {
-  for (const name of ['main.css', 'remote-codex.css']) {
-    const style = win.document.createElement('style');
-    style.textContent = inlineDesignTokens(
-      fs.readFileSync(path.join(MEDIA, name), 'utf8'),
-    );
-    win.document.head.appendChild(style);
-  }
-}
-
 function makePage() {
-  return makeChatPage({bodyClass: 'remote-chat', beforeScripts: loadRemoteCss});
+  return makeChatPage({beforeScripts: win => loadRemoteCss(win, true)});
 }
 
 function historyRow(win) {
@@ -95,13 +85,11 @@ function px(value) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. The buttons live on their own line.
+// 1. The buttons live on their own line.  (Tests 1-3 read and then click
+//    the same rendered row, so they share one page.)
 // ---------------------------------------------------------------------------
 
-function testActionsOnSeparateLine() {
-  const {win} = makePage();
-  loadHistory(win, [makeSession()]);
-
+function testActionsOnSeparateLine(win) {
   const row = historyRow(win);
   assert.ok(row, `history row rendered`);
 
@@ -175,7 +163,6 @@ function testActionsOnSeparateLine() {
     `no CSS 'order' trickery may re-shuffle the action strip`,
   );
 
-  win.close();
   console.log(`  ok - action buttons sit on their own line`);
 }
 
@@ -183,9 +170,7 @@ function testActionsOnSeparateLine() {
 // 2. The buttons keep the compact sidebar size.
 // ---------------------------------------------------------------------------
 
-function testActionsKeepCompactSize() {
-  const {win} = makePage();
-  loadHistory(win, [makeSession()]);
+function testActionsKeepCompactSize(win) {
   const row = historyRow(win);
   const compact = win.document.createElement('button');
   compact.className = 'sidebar-item-copy';
@@ -242,7 +227,6 @@ function testActionsKeepCompactSize() {
     assertCompactIcon(win, svg, `${sel}`);
   });
 
-  win.close();
   console.log(`  ok - action buttons keep the compact size`);
 }
 
@@ -250,9 +234,7 @@ function testActionsKeepCompactSize() {
 // 3. The compact icon size survives every innerHTML rewrite.
 // ---------------------------------------------------------------------------
 
-function testIconSizeSurvivesStateChanges() {
-  const {win, posted} = makePage();
-  loadHistory(win, [makeSession()]);
+function testIconSizeSurvivesStateChanges(win, posted) {
   const row = historyRow(win);
 
   // Favouriting swaps the outline star for the filled star via innerHTML.
@@ -277,18 +259,12 @@ function testIconSizeSurvivesStateChanges() {
 
   // The copy button swaps in a check mark after a successful copy.
   const copy = row.querySelector('.sidebar-item-copy');
-  let copied = '';
-  win.navigator.clipboard = {
-    writeText: t => {
-      copied = t;
-      return Promise.resolve();
-    },
-  };
+  const clip = stubClipboard(win);
   copy.click();
   // The flash follows PanelCopy.copyText's promise chain: wait a macrotask.
   return new Promise(r => setTimeout(r, 0)).then(() => {
     assert.strictEqual(
-      copied,
+      clip.last(),
       'refactor the parser',
       `the copy button still copies the task text`,
     );
@@ -348,40 +324,7 @@ function testRowWithoutTaskIdKeepsOwnLine() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The strip on its own line must not break the existing row behaviour.
-// ---------------------------------------------------------------------------
-
-function testBehaviourUnchanged() {
-  const {win, posted} = makePage();
-  loadHistory(win, [makeSession()]);
-  const row = historyRow(win);
-
-  const toggle = row.querySelector('.sidebar-item-collapse');
-  assert.ok(
-    row.classList.contains('collapsed'),
-    `the task panel is still collapsed by default`,
-  );
-  toggle.click();
-  assert.ok(
-    !row.classList.contains('collapsed'),
-    `the chevron still expands the panel`,
-  );
-  assert.ok(
-    !posted.some(m => m.type === 'resumeSession'),
-    `button clicks must not bubble into the row click handler`,
-  );
-
-  row.click();
-  assert.ok(
-    posted.some(m => m.type === 'resumeSession'),
-    `clicking the row body still opens the chat`,
-  );
-  win.close();
-  console.log(`  ok - row behaviour is unchanged`);
-}
-
-// ---------------------------------------------------------------------------
-// 6. Only the *history* task panels change - the promptlets list keeps
+// 5. Only the *history* task panels change - the promptlets list keeps
 //    its compact inline buttons.
 // ---------------------------------------------------------------------------
 
@@ -415,11 +358,12 @@ function testTricksListUnaffected() {
 }
 
 async function main() {
-  testActionsOnSeparateLine();
-  testActionsKeepCompactSize();
+  const {win, posted} = makePage();
+  loadHistory(win, [makeSession()]);
+  testActionsOnSeparateLine(win);
+  testActionsKeepCompactSize(win);
+  await testIconSizeSurvivesStateChanges(win, posted);
   testRowWithoutTaskIdKeepsOwnLine();
-  testBehaviourUnchanged();
-  await testIconSizeSurvivesStateChanges();
   testTricksListUnaffected();
   console.log('All historyTaskActionsRow tests passed');
 }

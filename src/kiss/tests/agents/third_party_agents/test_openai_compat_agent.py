@@ -63,24 +63,17 @@ def api_server(isolated_home: Path) -> Iterator[tuple[str, OpenAICompatChannelBa
         backend.disconnect()
 
 
-def test_agent_instantiation_and_unauthenticated_tools(isolated_home: Path) -> None:
-    """Fresh agent: correct name, unauthenticated, only the auth trio."""
+def test_authenticate_persists_config_and_clear(isolated_home: Path) -> None:
+    """authenticate persists config with 0600 mode; clear removes it.
+
+    The fresh-agent auth-trio contract is pinned for every channel by
+    test_base_channel_agent.py; only the name and the unconfigured
+    check wording are channel-specific.
+    """
     agent = OpenAICompatAgent()
     assert agent.name == "OpenAI-compatible API Agent"
-    assert agent._is_authenticated() is False
-    names = sorted(fn.__name__ for fn in agent._get_tools())
-    assert names == [
-        "authenticate_openai_compat",
-        "check_openai_compat_auth",
-        "clear_openai_compat_auth",
-    ]
-    assert "Not configured" in auth_tools(agent)["check_openai_compat_auth"]()
-
-
-def test_authenticate_persists_config_and_clear(isolated_home: Path) -> None:
-    """authenticate persists config with 0600 mode; clear removes it."""
-    agent = OpenAICompatAgent()
     tools = auth_tools(agent)
+    assert "Not configured" in tools["check_openai_compat_auth"]()
     result = tools["authenticate_openai_compat"](
         _API_KEY, port="18099", bind_host="127.0.0.1", model_name="some-model"
     )

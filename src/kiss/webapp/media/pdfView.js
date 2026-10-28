@@ -287,6 +287,10 @@
      * overwritten by a scroll; the field catches up when it is left).
      */
     function updatePageIndicator() {
+      // A direct call (a zoom, a resize) supersedes the frame a scroll
+      // scheduled: cancel it, or it would run too and a later scroll
+      // would stack a second pending frame dispose() cannot see.
+      cancelAnimationFrame(state.scrollFrame);
       state.scrollFrame = 0;
       if (state.disposed || !state.pages.length) return;
       if (document.activeElement === pageInput) return;
@@ -674,17 +678,22 @@
       if (state.resizeObserver) state.resizeObserver.disconnect();
       for (const entry of state.pages) cancelRender(entry);
       // Free the document on both sides of the port, then drop pdf.js's
-      // handle on the port and stop the viewer's own worker.
+      // handle on the port and stop the viewer's own worker.  A worker
+      // started before getDocument threw has no document to free and
+      // is stopped at once.
       const worker = state.worker;
       const pdfWorker = state.pdfWorker;
+      function stopWorker() {
+        if (pdfWorker) pdfWorker.destroy();
+        if (worker) worker.terminate();
+      }
       if (state.loadingTask) {
         state.loadingTask
           .destroy()
           .catch(() => {})
-          .then(() => {
-            pdfWorker.destroy();
-            worker.terminate();
-          });
+          .then(stopWorker);
+      } else {
+        stopWorker();
       }
       root.remove();
     }

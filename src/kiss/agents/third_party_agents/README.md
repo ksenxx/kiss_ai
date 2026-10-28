@@ -452,7 +452,9 @@ on, but ways for *other software* to send prompts to your daemon.
   `token` gates inbound JSON-RPC POSTs (the agent card `GET` is public); a
   20-messages-per-`contextId`-per-hour cap (per backend instance) stops ping-pong
   loops; inbound JSON-RPC requests land in `a2a_audit.jsonl`. Config:
-  `a2a/config.json`.
+  `a2a/config.json` (`bind_host`, default `127.0.0.1`, and `port`, default
+  `18091`, set by `authenticate_a2a`; a `port` of `0` binds an OS-assigned port,
+  and the card's `url` then advertises the port actually bound).
 
 ### Task Q&A: the `/ask` command
 
@@ -712,7 +714,11 @@ pointer to the existing job (a job that has finished for good — a one-shot tha
 an `until_delivered` poll that fired — is not a duplicate, so it can be scheduled
 again). Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
 inherits the rule never to ask questions or wait for approval; when blocked, the child
-reports the blocker in its summary and finishes.
+reports the blocker in its summary and finishes. The daemon decides that a run is
+unattended from the task text as submitted (the cron preamble at its start, or the
+child preamble at its end) and stamps the verdict on the agent before any SEA
+`prompt()` rewrites the text, so a scheduled slash command whose SEA replaces its task
+(`/recommendations`) still refuses `ask_user_question` (`cron_agent.is_unattended`).
 
 What a prompt job's run is given, and what the scheduler does around it
 (`cron_agent.py`, `cron_prompt_sea.py`):
@@ -766,6 +772,20 @@ What a prompt job's run is given, and what the scheduler does around it
   A run that ends while the store is damaged still delivers its result and appends it
   to the job's output file; only the outcome (status, summary, watermark, back-off) is
   not recorded: the scheduler logs a warning and leaves the store as it is.
+- *Jobs follow the daemon across brand homes.* Each home keeps its own store
+  (`~/.kiss/cron/jobs.json`, `~/.s10s/cron/jobs.json`, ...) and only the running
+  daemon's store ticks, so a brand install or an `rsorcar` deploy that moves the daemon
+  to another home would silently stop every job scheduled in the old one. On startup
+  (before the default jobs are seeded; `kiss-cron --daemon` does the same) the daemon
+  records its home in `~/.kiss-web-home` and, when that marker named a different home,
+  copies every job of that home's store whose name this store lacks
+  (`cron_agent.adopt_previous_home_jobs`): paused jobs included, with a clean failure
+  streak; a repeating job gets a fresh next run, a one-shot keeps its deadline, and a
+  job that has finished for good stays finished. A job already present under the same
+  name is left as it is, a store that cannot be read or written is left alone, and the
+  marker moves on either way, so a later start does not adopt what you removed in
+  between. A `KISS_HOME` that is not directly under your home directory (tests, ad-hoc
+  runs) is nobody's brand home and takes part in no hand-over.
 
 **16. Scheduled brief delivered where you already read** (Muse tips 6 and 7):
 

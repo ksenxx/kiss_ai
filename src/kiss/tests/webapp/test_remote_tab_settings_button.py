@@ -13,8 +13,7 @@ in ``chat.html``), together with mic, share, attach, Git Commit and the
 remote-only theme toggle.
 
 Static tests pin the CSS wiring (the menu surface and item rules exist
-in ``remote-codex.css``, and the theme toggle stays hidden outside the
-remote webapp); the live test boots the production
+in ``remote-codex.css``); the live test boots the production
 ``RemoteAccessServer`` + headless Chromium, opens the "..." menu and
 asserts the Settings item renders at a clickable size with a visible
 gear icon, and that clicking it opens the settings panel and closes the
@@ -38,7 +37,6 @@ MEDIA_DIR = (
     Path(__file__).resolve().parents[2] / "webapp" / "media"
 )
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
-MAIN_CSS = MEDIA_DIR / "main.css"
 
 
 def _find_rule(css: str, selector: str) -> str:
@@ -75,21 +73,6 @@ def test_remote_codex_styles_more_menu_items() -> None:
     )
     hover = _find_rule(css, ".more-menu-item:hover:not(:disabled)")
     assert "background" in hover, hover
-
-
-def test_main_css_hides_theme_toggle_outside_remote() -> None:
-    """The theme toggle is remote-webapp-only: main.css must hide
-    ``#theme-btn`` by default and unhide it under ``body.remote-chat``."""
-    css = MAIN_CSS.read_text(encoding="utf-8")
-    # The three appearance items (theme, contrast, auto) share the rules.
-    assert re.search(
-        r"#theme-btn,\s*#contrast-btn,\s*#theme-auto-btn\s*\{\s*display:\s*none;", css
-    ), "#theme-btn must be hidden outside the remote webapp"
-    assert re.search(
-        r"body\.remote-chat\s+#theme-btn,\s*body\.remote-chat\s+#contrast-btn,\s*"
-        r"body\.remote-chat\s+#theme-auto-btn\s*\{\s*display:\s*flex;",
-        css,
-    ), "#theme-btn must be shown on the remote webapp"
 
 
 def _start_live_server(

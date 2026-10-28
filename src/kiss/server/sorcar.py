@@ -189,41 +189,6 @@ def _job_dir_is_contained(
     return resolved.parent in allowed_roots
 
 
-def _trajectory_sort_key(trajectory: dict) -> float:
-    """Sort key for trajectories: ascending run start timestamp."""
-    value = trajectory.get("run_start_timestamp", 0)
-    return float(value) if isinstance(value, (int, float)) else 0.0
-
-
-def _load_trajectories_from_dir(job_dir: Path) -> list[dict]:
-    """Load all trajectory YAML files directly from *job_dir*.
-
-    Mirrors ``kiss.viz_trajectory.server.load_job_trajectories`` but
-    reads from the ALREADY-authorized directory instead of re-resolving
-    the job name through ``find_job_dir`` — the re-resolution prefers
-    the primary root and follows symlinks, so it can select a different
-    (older or symlinked out-of-tree) directory than the one the caller
-    just validated against the discovery allow-list.
-
-    Args:
-        job_dir: The validated job directory to read.
-
-    Returns:
-        The parsed trajectory dicts sorted by ascending
-        ``run_start_timestamp``.
-    """
-    from kiss.viz_trajectory.server import _parse_trajectory_yaml
-
-    trajectories: list[dict] = []
-    for file_path in sorted((job_dir / "trajectories").glob("trajectory_*.yaml")):
-        try:
-            trajectories.append(_parse_trajectory_yaml(file_path))
-        except Exception:
-            logger.debug("Error loading %s", file_path, exc_info=True)
-    trajectories.sort(key=_trajectory_sort_key)
-    return trajectories
-
-
 @dataclass(frozen=True)
 class ApiCommand:
     """One command of the Sorcar server API.
@@ -488,6 +453,12 @@ def _auth_result(kind: AuthKind, msg: Any) -> Auth:
     return Auth(kind, link=isinstance(msg, dict) and msg.get("link") is True)
 
 
+def _frame_token(msg: Any) -> str:
+    """Return the ``token`` of the ``auth`` frame *msg*: ``""`` unless it is a string."""
+    token = msg.get("token", "") if isinstance(msg, dict) else ""
+    return token if isinstance(token, str) else ""
+
+
 def _is_legacy_vscode_client(websocket: Any) -> bool:
     """Whether *websocket* looks like the retired VS Code extension's client.
 
@@ -530,7 +501,7 @@ _NO_PASSWORD_REFUSAL: dict[str, Any] = {
     "code": "localhost_only",
     "text": "Remote access is turned off: no remote password is set, so "
             "only this computer may connect. Set one in Settings > Remote "
-            "password on the computer running KISS Sorcar (or run "
+            f"password on the computer running {PRODUCT_NAME} (or run "
             "install.sh there).",
 }
 #: The private (``local_only``) daemon's answer to any peer that is not
@@ -757,6 +728,13 @@ class ServerApi:
         # (``worktreeAction``): the event loop keeps only weak
         # references to tasks.
         self._background_replies: set[asyncio.Task[None]] = set()
+        # Machine registry changes and work-dir round trips run as
+        # background tasks (so a slow handshake never holds up the
+        # connection's other commands) but in command order: the tasks
+        # start in the order the commands arrived and this lock hands
+        # itself on first come, first served, so two ``setWorkDir``
+        # for one machine apply, and answer, in the order they were sent.
+        self._machine_lock = asyncio.Lock()
         # The subpanel forward in flight per (connection, command,
         # machine): a poll repeated while its predecessor is still
         # waiting on the machine is dropped (see ``_spawn_panel_reply``).
@@ -857,7 +835,7 @@ class ServerApi:
             reply: dict[str, Any] = {"type": "error", "text": error}
             if tab_id:
                 reply["tabId"] = tab_id
-            await self._backend._printer._locked_send(ctx.endpoint, json.dumps(reply))
+            await self._backend._reply_direct(ctx.endpoint, reply, str(cmd.get("type")))
             return
         if tab_id:
             self._record_tab(tab_id, ctx)
@@ -1245,7 +1223,9 @@ class ServerApi:
         host = urlsplit(origin).hostname or ""
         return host == "localhost" or is_loopback_ip(host)
 
-    async def _admit_loopback_browser(self, msg: Any, websocket: Any) -> Auth | None:
+    async def _admit_loopback_browser(
+        self, msg: Any, websocket: Any, token: str
+    ) -> Auth | None:
         """Admit a token-less ``auth`` frame from a loopback browser page, else ``None``.
 
         The web app opened at ``127.0.0.1`` on this machine itself needs
@@ -1259,6 +1239,8 @@ class ServerApi:
         Args:
             msg: The decoded first frame.
             websocket: The connection it arrived on.
+            token: The frame's ``token`` as a string (``""`` when absent
+                or not a string, see :func:`_frame_token`).
 
         Returns:
             The loopback :class:`Auth` after ``auth_ok`` was sent, or
@@ -1266,8 +1248,7 @@ class ServerApi:
         """
         if self._backend.local_only or not isinstance(msg, dict) or msg.get("type") != "auth":
             return None
-        token = msg.get("token", "")
-        if (isinstance(token, str) and token) or not self._is_loopback_browser(websocket):
+        if token or not self._is_loopback_browser(websocket):
             return None
         await websocket.send(json.dumps({"type": "auth_ok", "local": False}))
         return _auth_result("loopback", msg)
@@ -1419,8 +1400,7 @@ class ServerApi:
                 await self._refuse(websocket, _NOT_AUTH_REFUSAL)
                 return None
             logger.info("Machine link from %s admitted with a certificate of %s", ip, trusted_ca)
-            await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
-            return _auth_result("local", msg)
+            return await self._admit_local(websocket, msg)
         lock_remaining = backend._auth_lock_remaining(ip)
         if lock_remaining > 0.0:
             # The lockout is per IP, and every peer reaching loopback
@@ -1433,7 +1413,7 @@ class ServerApi:
             try:
                 if msg is not None and self._is_local_auth(msg, websocket):
                     return await self._admit_local(websocket, msg)
-                auth = await self._admit_loopback_browser(msg, websocket)
+                auth = await self._admit_loopback_browser(msg, websocket, _frame_token(msg))
                 if auth is not None:
                     return auth
             except Exception:
@@ -1476,10 +1456,8 @@ class ServerApi:
                     # The private daemon admits no password at all.
                     await self._refuse(websocket, _LOCAL_ONLY_REFUSAL)
                     return None
-                token = msg.get("token", "")
-                if not isinstance(token, str):
-                    token = ""
-                auth = await self._admit_loopback_browser(msg, websocket)
+                token = _frame_token(msg)
+                auth = await self._admit_loopback_browser(msg, websocket, token)
                 if auth is not None:
                     return auth
                 # Re-load the configured password before every compare
@@ -1926,7 +1904,10 @@ class ServerApi:
         Applied by :func:`kiss.server.sidebar_panels.machine_action`; the
         direct reply is a ``machines`` message (as for ``getMachines``,
         pinged anew) carrying the ``action`` and an ``error`` text when
-        it was refused.
+        it was refused.  Produced by a background task like
+        ``getMachines``: an ``add`` of an unreachable host runs its
+        handshakes to their timeouts, which must not hold up the
+        connection's ``submit``, ``stop`` or ``ping``.
 
         Args:
             cmd: The ``machineAction`` command (``action``: ``add`` or
@@ -1936,12 +1917,27 @@ class ServerApi:
                 ``password`` is this daemon's credential).
             ctx: The transport context of the current call.
         """
-        error = await asyncio.to_thread(
-            sidebar_panels.machine_action,
-            str(cmd["action"]), str(cmd["name"]), str(cmd.get("address") or ""),
-            str(cmd.get("machinePassword") or ""),
-        )
-        await self._reply_machines(ctx.endpoint, True, str(cmd["action"]), error, "machineAction")
+        self._spawn_reply(self._reply_machine_action(ctx.endpoint, cmd))
+
+    async def _reply_machine_action(self, endpoint: Any, cmd: dict[str, Any]) -> None:
+        """Apply the ``machineAction`` *cmd* and send the fresh ``machines`` reply to *endpoint*.
+
+        An exception the action lets through (``machine_action`` turns
+        only ``MachineError`` into its error text) becomes the reply's
+        ``error`` instead of killing this background task unanswered.
+        """
+        action = str(cmd["action"])
+        try:
+            async with self._machine_lock:
+                error = await asyncio.to_thread(
+                    sidebar_panels.machine_action,
+                    action, str(cmd["name"]), str(cmd.get("address") or ""),
+                    str(cmd.get("machinePassword") or ""),
+                )
+        except Exception as exc:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("machineAction %s failed", action, exc_info=True)
+            error = str(exc) or type(exc).__name__
+        await self._reply_machines(endpoint, True, action, error, "machineAction")
 
     async def get_machine_work_dirs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the working directories of a registered machine.
@@ -1956,15 +1952,44 @@ class ServerApi:
         [{"path", "ts"}, ...], "maxBudget": <number or null>, "error":
         ""}`` from :func:`kiss.server.sidebar_panels.machine_work_dirs`
         (an unreachable or unknown machine answers with ``error``).
+        The machine round trip runs in a background task so it never
+        holds up the connection's other commands.
 
         Args:
             cmd: The ``getMachineWorkDirs`` command (``machine``).
             ctx: The transport context of the current call.
         """
-        reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, str(cmd["machine"]))
-        await self._backend._reply_direct(
-            ctx.endpoint, {"type": "machineWorkDirs", **reply}, "getMachineWorkDirs"
-        )
+        self._spawn_reply(self._reply_machine_work_dirs(
+            ctx.endpoint, str(cmd["machine"]), None, "getMachineWorkDirs",
+        ))
+
+    async def _reply_machine_work_dirs(
+        self, endpoint: Any, machine: str, work_dir: str | None, command: str,
+    ) -> None:
+        """Send *endpoint* the ``machineWorkDirs`` of *machine* (after adopting *work_dir* there).
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            machine: The registered machine's name.
+            work_dir: The directory the machine's daemon adopts first,
+                or ``None`` to only read; the reply is then stamped
+                ``set: true``.
+            command: The command being answered (for the reply log).
+        """
+        try:
+            async with self._machine_lock:
+                if work_dir is None:
+                    reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, machine)
+                else:
+                    reply = await asyncio.to_thread(
+                        sidebar_panels.machine_work_dirs, machine, work_dir,
+                    )
+                    reply["set"] = True
+                await self._backend._reply_direct(
+                    endpoint, {"type": "machineWorkDirs", **reply}, command,
+                )
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("%s reply failed", command, exc_info=True)
 
     async def set_work_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Make ``workDir`` the global working directory -- here or on a machine.
@@ -1987,12 +2012,9 @@ class ServerApi:
         if not machine:
             await self.forward(cmd, ctx)
             return
-        reply = await asyncio.to_thread(
-            sidebar_panels.machine_work_dirs, machine, str(cmd["workDir"]),
-        )
-        await self._backend._reply_direct(
-            ctx.endpoint, {"type": "machineWorkDirs", **reply, "set": True}, "setWorkDir"
-        )
+        self._spawn_reply(self._reply_machine_work_dirs(
+            ctx.endpoint, machine, str(cmd["workDir"]), "setWorkDir",
+        ))
 
     async def get_spend_report(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the task history's spend for its Spend subpanel.
@@ -2378,10 +2400,8 @@ class ServerApi:
         if cmd.get("id") != VSCODE_RETIRED_NOTICE_ID:
             return
         await asyncio.to_thread(dismiss_vscode_retired_notice)
-        broadcast_to_conn(
-            self._backend._printer,
+        self._backend._printer.broadcast(
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
-            "",
         )
 
     def _signin_reply(self, conn_id: str) -> Callable[[dict[str, Any], bool], None]:
@@ -2474,8 +2494,8 @@ class ServerApi:
             ctx: The transport context of the current call; the reply
                 goes to this sender only.
         """
-        await self._backend._printer._locked_send(
-            ctx.endpoint, json.dumps({"type": "pong", "machine": local_machine_name()}),
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "pong", "machine": local_machine_name()}, "ping",
         )
 
     async def auth(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -2540,7 +2560,7 @@ class ServerApi:
             when the job directory does not exist.
         """
         from kiss.server import web_server as _ws
-        from kiss.viz_trajectory.server import discover_job_dirs
+        from kiss.viz_trajectory.server import discover_job_dirs, load_job_trajectories
 
         job_name = path[len("/api/jobs/") : -len("/trajectories")]
         # Reject the empty segment and path separators/NUL; a harmless
@@ -2570,11 +2590,12 @@ class ServerApi:
                 {"error": f"Job '{job_name}' not found"}
             ).encode("utf-8")
             return (404, "application/json", body)
-        # Load from the ALREADY-validated directory.  Passing
-        # ``(root, name)`` through ``load_job_trajectories`` would
+        # Load from the ALREADY-validated directory: with ``job_dir``
+        # given, ``load_job_trajectories`` reads it as is and does not
         # re-resolve the name via ``find_job_dir`` (primary-root
-        # preference, follows symlinks), discarding the containment
-        # check above and reintroducing the TOCTOU/duplicate-selection
-        # bypass it exists to prevent.
-        body = json.dumps(_load_trajectories_from_dir(job_dir)).encode("utf-8")
+        # preference, follows symlinks), which would discard the
+        # containment check above.
+        body = json.dumps(
+            load_job_trajectories(jobs_root, job_name, job_dir=job_dir)
+        ).encode("utf-8")
         return (200, "application/json", body)

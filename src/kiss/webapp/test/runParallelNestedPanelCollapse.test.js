@@ -30,6 +30,7 @@ const {
   subagentTabEls,
   togglePanel,
   bootParallelRun: bootSharedRun,
+  spawnSubagent,
 } = require('./subagent_tab_helpers');
 const {makeWebappClient} = require('./transport_page_helpers');
 
@@ -309,24 +310,10 @@ function testCollapseForgetsGrandchildSubagentTabs() {
     tabId: childId,
     extras: {tasks: JSON.stringify(['deep'])},
   });
-  const before = st.posted.length;
-  st.deliver({
-    type: 'new_tab',
-    task_id: 'deep-task',
-    parent_tab_id: childId,
-    taskId: '',
-  });
-  const deepResume = st.posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'deep-task');
-  assert.ok(deepResume, "the sub-agent's own fan-out must open a tab");
-  const grandchildId = deepResume.tabId;
-  st.deliver({
-    type: 'openSubagentTab',
-    tab_id: grandchildId,
-    parent_tab_id: childId,
-    task_id: 'deep-task',
-    isDone: true,
+  // The sub-agent's own fan-out must open a tab.
+  const grandchildId = spawnSubagent(st, childId, 'deep-task', 'deep', 0, {
+    deliver: st.deliver,
+    extra: {isDone: true},
   });
   assert.strictEqual(
     subagentTabEls(st.win).length,

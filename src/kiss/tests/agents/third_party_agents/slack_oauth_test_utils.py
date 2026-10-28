@@ -33,8 +33,9 @@ CLIENT_ID = "kiss-test-slack-client"
 class SlackOAuthState:
     """Token-endpoint behaviour and a record of every grant it received."""
 
-    def __init__(self, expires_in: int = 43200) -> None:
-        self.expires_in = expires_in
+    def __init__(self) -> None:
+        # Lifetime of every issued token; tests lower it to force a refresh.
+        self.expires_in = 43200
         self.forms: list[dict[str, str]] = []
         self.issued = 0
         self.refresh_token = ""

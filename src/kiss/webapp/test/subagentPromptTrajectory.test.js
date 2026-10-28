@@ -7,6 +7,13 @@
 
 const assert = require('assert');
 const {makePage, send, clickTab} = require('./simplify2_harness');
+const {bootParallelRun} = require('./subagent_tab_helpers');
+
+// A prompt injected into a running sub-agent is echoed back as a
+// `prompt` event tagged with the sub-agent tab: it renders in THAT tab's
+// trajectory, survives a tab switch and comes back on a replay.  The
+// send / stop routing of a sub-agent tab is pinned by
+// subagentRunningInput.test.js.
 
 function promptPanels(win, text) {
   return Array.from(win.document.querySelectorAll('.ev.prompt')).filter(el =>
@@ -15,76 +22,8 @@ function promptPanels(win, text) {
 }
 
 function bootWithSubagent() {
-  const {win, posted} = makePage();
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  const parentId = ready.tabId;
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub 1'])},
-  });
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-1',
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'sub-task-1');
-  assert.ok(resume, 'new_tab must make the page post resumeSession');
-  const subTabId = resume.tabId;
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    isSubagentTab: true,
-    isDone: false,
-  });
-  send(win, {type: 'status', running: true, tabId: subTabId, startTs: 0});
-  return {win, posted, parentId, subTabId};
-}
-
-function testSendPostsAppendUserMessageForSubTab() {
-  const {win, posted, subTabId} = bootWithSubagent();
-  clickTab(win, subTabId);
-
-  const inp = win.document.getElementById('task-input');
-  assert.ok(inp, '#task-input must exist');
-  inp.value = 'HELLO SUBAGENT INJECTION';
-  const before = posted.length;
-  win.document.getElementById('send-btn').click();
-  const appended = posted
-    .slice(before)
-    .find(m => m.type === 'appendUserMessage');
-  assert.ok(
-    appended,
-    'Send on a running sub-agent tab must post ' +
-      'appendUserMessage (not submit)',
-  );
-  assert.strictEqual(
-    appended.tabId,
-    subTabId,
-    'the injected prompt must be routed to the SUB-AGENT tab',
-  );
-  assert.strictEqual(appended.prompt, 'HELLO SUBAGENT INJECTION');
-  assert.ok(
-    !posted.slice(before).some(m => m.type === 'submit'),
-    'no fresh submit must be posted for a running sub-agent tab',
-  );
-  console.log('ok - send posts appendUserMessage with the sub tab id');
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
+  return {win, parentId, subTabId: subTabIds[0]};
 }
 
 function testEchoedPromptRendersInSubagentTrajectory() {
@@ -152,30 +91,10 @@ function testReplayRendersRecordedPrompt() {
   console.log('ok - task_events replay renders the recorded prompt');
 }
 
-function testStopPostsSubagentTabId() {
-  const {win, posted, subTabId} = bootWithSubagent();
-  clickTab(win, subTabId);
-
-  const stopBtn = win.document.getElementById('stop-btn');
-  assert.ok(stopBtn, '#stop-btn must exist');
-  const before = posted.length;
-  stopBtn.click();
-  const stops = posted.slice(before).filter(m => m.type === 'stop');
-  assert.strictEqual(stops.length, 1, 'exactly one stop must be posted');
-  assert.strictEqual(
-    stops[0].tabId,
-    subTabId,
-    'Stop on a sub-agent tab must stop ONLY that sub-agent',
-  );
-  console.log('ok - stop posts the sub-agent tab id only');
-}
-
 function main() {
-  testSendPostsAppendUserMessageForSubTab();
   testEchoedPromptRendersInSubagentTrajectory();
   testInjectedPromptSurvivesTabSwitch();
   testReplayRendersRecordedPrompt();
-  testStopPostsSubagentTabId();
   console.log('All subagentPromptTrajectory tests passed.');
 }
 

@@ -59,9 +59,10 @@ _LOCK_TIMEOUT_S = 30.0
 
 The cross-process ``flock`` blocks in C, so a holder wedged in a
 debugger or on a slow filesystem would otherwise stall the writer for
-good — and, since the writer also holds ``_config_lock``, every config
-read in the daemon with it.  A legitimate holder is done in well under a
-second (the legacy-key migration's RC sourcing, the slowest, in five),
+good — and, since the writer also holds ``_config_lock``, every other
+config writer and the key-store importers with it.  A legitimate
+holder is done in well under a second (the legacy-key migration's RC
+sourcing, the slowest, in five),
 so a wait past this bound is a wedged holder: the ``TimeoutError`` is
 the writer's error.
 """
@@ -126,6 +127,12 @@ DEFAULTS: dict[str, Any] = {
     # hashed embedder (kiss.core.memoryfield.index.default_embedder).
     "use_memory": True,
     "memory_dir": "",
+    # Chrome bridge (kiss.agents.sorcar.chrome_bridge): the daemon starts
+    # the loopback server for the "KISS Sorcar Bridge" extension at boot,
+    # so the user's everyday Chrome is reachable (``use_my_chrome``) from
+    # the first call.  Off: the server starts on the first call instead
+    # and that call may have to wait for the extension to reconnect.
+    "chrome_bridge": False,
     # Claude Code (``cc/`` models) bills the Claude subscription the
     # ``claude`` CLI is logged in to (or CLAUDE_CODE_OAUTH_TOKEN) rather
     # than an API key: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are kept
@@ -695,6 +702,29 @@ def _shell_would_expand(raw: str) -> bool:
     return False
 
 
+def _split_assignment(
+    line: str, pattern: re.Pattern[str]
+) -> tuple[str, str, list[str] | None] | None:
+    """Match one ``NAME=value`` line of *pattern* and ``shlex``-split its value.
+
+    Returns ``None`` when *line* is no assignment or its value would
+    need shell expansion (see :func:`_shell_would_expand`); otherwise
+    ``(name, raw, words)`` with the stripped raw value and its ``shlex``
+    words, ``None`` for a remainder ``shlex`` cannot parse (unbalanced
+    quote).
+    """
+    m = pattern.match(line)
+    if m is None:
+        return None
+    name, raw = m.group(1), m.group(2).strip()
+    if _shell_would_expand(raw):
+        return None
+    try:
+        return name, raw, shlex.split(raw)
+    except ValueError:
+        return name, raw, None
+
+
 def _parse_env_assignment(line: str) -> tuple[str, str] | None:
     """Parse one ``api_keys.env`` line into ``(name, value)``, or ``None``.
 
@@ -712,21 +742,15 @@ def _parse_env_assignment(line: str) -> tuple[str, str] | None:
     line assigns; a remainder ``shlex`` cannot parse at all (unbalanced
     quote) is kept as the raw text.
     """
-    m = _ENV_ASSIGNMENT_RE.match(line)
-    if m is None:
+    split = _split_assignment(line, _ENV_ASSIGNMENT_RE)
+    if split is None:
         return None
-    name, raw = m.group(1), m.group(2).strip()
+    name, raw, parts = split
     if _SHELL_ONLY_ENV_VAR_RE.match(name):
         return None
-    if _shell_would_expand(raw):
-        return None
-    try:
-        parts = shlex.split(raw)
-    except ValueError:
+    if parts is None:
         return name, raw
-    if not parts:
-        return name, ""
-    return name, parts[0]
+    return name, parts[0] if parts else ""
 
 
 def _remove_systemd_mirror() -> None:
@@ -767,13 +791,16 @@ def _api_keys_store_flock() -> Iterator[None]:
         yield
 
 
-def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
+def _edit_api_keys_env_file_locked(
+    mutations: dict[str, str | None], trailer: str = ""
+) -> None:
     """Apply *mutations* to the canonical key store atomically.
 
     Each entry maps a variable name to its new value, or to ``None`` to
     delete every line assigning it.  Existing assignment lines are
     replaced in place; new keys are appended as ``export NAME=value``
-    with the value ``shlex.quote``-d.  Unrelated lines — including ones
+    with the value ``shlex.quote``-d, followed by *trailer* (a comment
+    line ending in a newline, or empty).  Unrelated lines — including ones
     this module would not import, such as RC-distilled ``PATH``
     entries — pass through byte-for-byte.
 
@@ -806,11 +833,16 @@ def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
         if value is not None and hit not in replaced:
             new_lines.append(f"export {hit}={shlex.quote(value)}\n")
         replaced.add(hit)
-    for name, value in mutations.items():
-        if value is not None and name not in replaced:
-            if new_lines and not new_lines[-1].endswith("\n"):
-                new_lines[-1] += "\n"
-            new_lines.append(f"export {name}={shlex.quote(value)}\n")
+    tail = [
+        f"export {name}={shlex.quote(value)}\n"
+        for name, value in mutations.items()
+        if value is not None and name not in replaced
+    ]
+    if trailer:
+        tail.append(trailer)
+    if tail and new_lines and not new_lines[-1].endswith("\n"):
+        new_lines[-1] += "\n"
+    new_lines += tail
     # The store holds API keys: never world-readable, never observed
     # half-written by a shell that is sourcing it.
     atomic_write_text(env_path, "".join(new_lines), mode=0o600)
@@ -1262,15 +1294,11 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
     found: dict[str, str] = {}
     pattern = _FISH_ASSIGNMENT_RE if shell == "fish" else _ENV_ASSIGNMENT_RE
     for line in text.splitlines():
-        m = pattern.match(line)
-        if m is None:
+        split = _split_assignment(line, pattern)
+        if split is None:
             continue
-        name, raw = m.group(1), m.group(2).strip()
-        if name not in wanted or _shell_would_expand(raw):
-            continue
-        try:
-            parts = shlex.split(raw)
-        except ValueError:
+        name, _raw, parts = split
+        if name not in wanted or parts is None:
             continue
         if len(parts) == 1 and parts[0] and "\x00" not in parts[0]:
             found[name] = parts[0]
@@ -1418,11 +1446,8 @@ def _migrate_legacy_rc_keys() -> None:
         )
         if sourcing:
             found.update(_source_rc_for_keys(still_missing))
-        if found:
+        if found or sourcing:
             mutations: dict[str, str | None] = dict(found)
-            _edit_api_keys_env_file_locked(mutations)
-        if sourcing:
-            text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-            if text and not text.endswith("\n"):
-                text += "\n"
-            atomic_write_text(env_path, text + _RC_SOURCED_MARKER + "\n", mode=0o600)
+            _edit_api_keys_env_file_locked(
+                mutations, trailer=_RC_SOURCED_MARKER + "\n" if sourcing else ""
+            )

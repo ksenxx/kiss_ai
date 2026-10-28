@@ -30,7 +30,6 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.git_worktree import _WorktreeCleanupOutcome
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 
@@ -95,9 +94,6 @@ def test_preserve_warning_names_failed_rescue_not_hook(
     _make_rescue_fail(env, agent)
     assert agent._retire_previous_worktree() is True
     assert wt.wt_dir.exists(), "worktree deleted with the only copy of out/"
-    assert agent._last_preserve_outcome is (
-        _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED
-    )
     warning = agent._merge_conflict_warning or ""
     assert "ignored" in warning, warning
     assert "pre-commit" not in warning, warning
@@ -129,9 +125,6 @@ def test_preserve_hook_wording_is_kept(
     finally:
         hook.unlink()
     assert wt.wt_dir.exists(), "worktree deleted with the only copy of the work"
-    assert agent._last_preserve_outcome is (
-        _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
-    )
     assert "pre-commit hook" in (agent._merge_conflict_warning or "")
 
 
@@ -148,9 +141,6 @@ def test_merge_still_blames_hook_when_commit_was_rejected(
     finally:
         hook.unlink()
     assert agent._wt is wt
-    assert agent._last_preserve_outcome is (
-        _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
-    )
     assert "pre-commit hook" in message, message
     assert "sub-agent" not in message and "ignored" not in message
 

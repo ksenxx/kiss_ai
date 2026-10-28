@@ -70,25 +70,18 @@ def test_add_task_rejects_collision_of_parent_task_id_and_subagent(temp_db: Path
         )
 
 
-def test_resolve_task_id_falls_back_on_int_task_id(temp_db: Path) -> None:  # noqa: ARG001
+def test_resolve_task_id_rejects_an_int_task_id(temp_db: Path) -> None:  # noqa: ARG001
     persistence._add_task("alpha")
-    real_id, _ = persistence._add_task("beta")
+    persistence._add_task("beta")
     db = persistence._get_db()
-    resolved = persistence._resolve_task_id(db, 42, "beta")  # type: ignore[arg-type]
-    assert resolved == real_id
-
-
-def test_resolve_task_id_falls_back_on_non_uuid_string(temp_db: Path) -> None:  # noqa: ARG001
-    real_id, _ = persistence._add_task("gamma")
-    db = persistence._get_db()
-    resolved = persistence._resolve_task_id(db, "not-a-uuid", "gamma")
-    assert resolved == real_id
+    resolved = persistence._resolve_task_id(db, 42)  # type: ignore[arg-type]
+    assert resolved is None
 
 
 def test_resolve_task_id_returns_real_id_on_valid_match(temp_db: Path) -> None:  # noqa: ARG001
     real_id, _ = persistence._add_task("delta")
     db = persistence._get_db()
-    resolved = persistence._resolve_task_id(db, real_id, "delta")
+    resolved = persistence._resolve_task_id(db, real_id)
     assert resolved == real_id
 
 

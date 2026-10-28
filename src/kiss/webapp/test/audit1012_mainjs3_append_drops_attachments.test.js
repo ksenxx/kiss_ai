@@ -26,16 +26,14 @@ async function main() {
   const png = new win.File([new Uint8Array([137, 80, 78, 71])], 'shot.png', {
     type: 'image/png',
   });
-  paste(win, png);
-  await settle();
   const chips = win.document.getElementById('file-chips');
-  assert.strictEqual(
-    chips.querySelectorAll('.file-chip:not(.pending):not(.error)').length,
-    1,
-    'precondition: the photo is attached and ready',
-  );
+  const readyChips = () =>
+    chips.querySelectorAll('.file-chip:not(.pending):not(.error)').length;
+  paste(win, png);
+  await settle(() => readyChips() === 1);
+  assert.strictEqual(readyChips(), 1, 'precondition: the photo is attached and ready');
   typeAndEnter(win, 'and look at this photo');
-  await settle();
+  await settle(() => posted.some(m => m && m.type === 'appendUserMessage'));
   assert.ok(
     !posted.some(m => m && m.type === 'submit'),
     'no second task is submitted while one is running',

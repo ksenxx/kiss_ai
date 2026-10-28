@@ -41,7 +41,15 @@ function previewText(panel) {
   return prev ? prev.textContent : '';
 }
 
-for (const endType of ['task_stopped', 'task_error', 'task_interrupted']) {
+// Every way a task ends takes the same tail: a progress line still up
+// when the daemon reports the end must not be counted.
+for (const end of [
+  {type: 'task_stopped'},
+  {type: 'task_error'},
+  {type: 'task_interrupted'},
+  {type: 'task_done', success: true},
+]) {
+  const endType = end.type;
   const {win} = makeTab();
   send(win, {type: 'prompt', tabId: TAB, text: 'normal event before the end'});
   send(win, {type: 'text_end', tabId: TAB});
@@ -51,7 +59,7 @@ for (const endType of ['task_stopped', 'task_error', 'task_interrupted']) {
     1,
     'the progress line is on screen before the task ends',
   );
-  send(win, {type: endType, tabId: TAB});
+  send(win, Object.assign({tabId: TAB}, end));
 
   const panel = trajectory(win);
   assert.ok(panel, endType + ': the events fold into a Trajectory panel');
@@ -75,25 +83,6 @@ for (const endType of ['task_stopped', 'task_error', 'task_interrupted']) {
   console.log(
     '  ok - ' + endType + ' removes the progress line before folding',
   );
-}
-
-// task_done takes the same tail: a progress line still up when the
-// daemon reports the task done must not be counted either.
-{
-  const {win} = makeTab();
-  send(win, {type: 'prompt', tabId: TAB, text: 'done with progress up'});
-  send(win, {type: 'text_end', tabId: TAB});
-  send(win, {type: 'worktree_progress', tabId: TAB, message: 'Merging...'});
-  send(win, {type: 'task_done', tabId: TAB, success: true});
-  const panel = trajectory(win);
-  assert.ok(panel, 'task_done: the events fold into a Trajectory panel');
-  assert.strictEqual(previewText(panel), '1 event');
-  assert.strictEqual(
-    win.document.querySelectorAll('#output .ev.wt-progress').length,
-    0,
-  );
-  win.close();
-  console.log('  ok - task_done removes the progress line before folding');
 }
 
 // The line is the only foldable event: nothing is left to fold, so no

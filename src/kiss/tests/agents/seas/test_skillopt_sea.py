@@ -45,9 +45,9 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
 )
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError, resolve_settings
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError
 from kiss.core.tool_verdict import ALLOW, refuse
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, tool_names
+from kiss.tests.agents.seas.sea_contract import assert_worker_contract, tool_names
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -79,6 +79,17 @@ def _copy_sh_sea(tmp_path: Path) -> Path:
     dest = tmp_path / "sh_sea.py"
     shutil.copy(_SH_SEA, dest)
     return dest
+
+
+def _assigned_span(source: str, name: str) -> tuple[int, int]:
+    """Return the 1-based first and last line of the value assigned to *name* in *source*."""
+    (value,) = [
+        stmt.value
+        for stmt in ast.parse(source).body
+        if isinstance(stmt, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == name for t in stmt.targets)
+    ]
+    return value.lineno, value.end_lineno or value.lineno
 
 
 def _evals(tmp_path: Path, tasks: list[dict[str, Any]], **extra: Any) -> Path:
@@ -130,12 +141,12 @@ def test_sea_target_reads_splices_and_validates_the_prompt_constant(tmp_path: Pa
     # The folds the SEA does not override are ``BaseSea``'s identities.
     assert kwargs["tools_hook"]([greet_stub]) == [greet_stub]
     assert kwargs["prompt"]("run it") == "run it"
-    original_lines = _SH_SEA.read_text(encoding="utf-8").splitlines()
+    original = _SH_SEA.read_text(encoding="utf-8")
+    original_lines = original.splitlines()
     candidate_lines = candidate.path.read_text(encoding="utf-8").splitlines()
-    start = original_lines.index("SYSTEM_PROMPT = (")
-    end = original_lines.index(")", start)
-    assert candidate_lines[: start + 1] == original_lines[: start + 1]
-    assert candidate_lines[-(len(original_lines) - end) :] == original_lines[end:]
+    first, last = _assigned_span(original, "SYSTEM_PROMPT")
+    assert candidate_lines[: first - 1] == original_lines[: first - 1]
+    assert candidate_lines[-(len(original_lines) - last) :] == original_lines[last:]
     proposal = target.write_proposal("single line prompt")
     assert proposal == target.path.with_name("sh_sea.py.proposed")
     assert "'single line prompt'" in proposal.read_text(encoding="utf-8")
@@ -1133,22 +1144,9 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert [t.__name__ for t in skillopt.tools([])] == ["optimize", "status"]
     assert skillopt.tools([greet_stub])[0] is greet_stub
     declared = {"tool_profile": "shell"}
-    assert skillopt.settings({}) == declared
-    assert skillopt.settings({"model": "m"}) == {"model": "m", **declared}
-    # ``WorkerSea`` lays its defaults under the SEA's own keys:
-    # classifier, browser and memory off; ``system_prompt`` is a
-    # method, not a settings key.
-    effective = {
-        "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
-        "tool_profile": "shell",
-    }
-    assert resolve_settings(WORKER_DEFAULTS | declared) == effective
+    assert_worker_contract(skillopt_sea, skillopt, declared)
     assert skillopt.system_prompt("") == skillopt_sea.SYSTEM_PROMPT
-    # The class is the contract: the module keeps no getter of the old shape.
-    assert_no_removed_getters(skillopt_sea)
-    assert sea_commands.sea_settings(_SKILLOPT_SEA) == effective
+    assert sea_commands.sea_settings(_SKILLOPT_SEA) == WORKER_DEFAULTS | declared
     cmd: dict[str, Any] = {"seaPath": str(_SKILLOPT_SEA), "prompt": "x.py evals.json"}
     # The hooks are written on every run, so the set lists the settings only.
     assert apply_sea(cmd) == {

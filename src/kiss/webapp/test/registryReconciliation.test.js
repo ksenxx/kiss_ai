@@ -120,18 +120,8 @@ function testNewChatOpensAChatInPlace() {
 function testSubagentTabs() {
   const {win, posted} = makePage();
   const boot = win._testApi.getActiveTabId();
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: 'sub-1',
-    parent_tab_id: 'not-in-this-page',
-    description: 'foreign sub-agent',
-    task_id: 'task-x',
-  });
-  assert.strictEqual(
-    win._testApi.openTabs().length,
-    1,
-    "an unknown chat's sub-agent is ignored",
-  );
+  // That a foreign chat's sub-agent is ignored is pinned by
+  // runParallelSubagentTabDedupe.test.js (testUnknownParentSpawnsNoPhantomTab).
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-2',

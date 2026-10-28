@@ -31,8 +31,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 function budgetField(win) {
   return win.document.getElementById('cfg-max-budget').value;
@@ -74,15 +74,13 @@ function testServerValueIsShownAndSavedBack() {
   );
 
   closeSettings(win);
-  const save = lastMsg(posted, 'saveConfig');
-  assert.ok(save, 'closing a populated panel must save the form');
   assert.strictEqual(
-    save.config.max_budget,
-    250,
-    'an untouched budget must round-trip unchanged',
+    lastMsg(posted, 'saveConfig'),
+    null,
+    'an untouched budget is not re-sent: the daemon keeps its 250',
   );
   win.close();
-  console.log('  ok - the server value is shown and round-trips');
+  console.log('  ok - the server value is shown and left alone');
 }
 
 // The regression: the client used to answer an unparseable box with its

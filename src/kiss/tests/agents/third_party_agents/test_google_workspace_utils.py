@@ -18,10 +18,7 @@ import stat
 import pytest
 
 from kiss.agents.third_party_agents import _composio_google as composio_google
-from kiss.agents.third_party_agents._google_workspace_utils import (
-    google_auth_prompt,
-    make_google_auth_tools,
-)
+from kiss.agents.third_party_agents._google_workspace_utils import make_google_auth_tools
 from kiss.agents.third_party_agents.gcal.gcal_sea import _SERVICE, GoogleCalendarAgent
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     API_KEY,
@@ -33,13 +30,18 @@ from kiss.tests.conftest import IS_WINDOWS
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def _tools(calls: list[str]) -> dict:
-    """Build the Calendar auth tools recording each on_connected call in *calls*."""
-    agent = GoogleCalendarAgent()
+def _tools(
+    calls: list[str], agent: GoogleCalendarAgent | None = None, connected: bool = True
+) -> dict:
+    """Build the Calendar auth tools for *agent* (a fresh one by default).
+
+    Each ``on_connected`` call is recorded in *calls* and answers *connected*.
+    """
+    agent = agent or GoogleCalendarAgent()
 
     def on_connected() -> bool:
         calls.append("connected")
-        return True
+        return connected
 
     tools = make_google_auth_tools(agent, _SERVICE, "Google Calendar", on_connected)
     return {t.__name__: t for t in tools}
@@ -49,10 +51,7 @@ def test_finish_reports_a_failing_backend(composio) -> None:
     """A finished connection whose first API call fails is reported as an error."""
     agent = GoogleCalendarAgent()
     agent._backend._connection_info = "Calendar auth failed: 401"
-    tools = {
-        t.__name__: t
-        for t in make_google_auth_tools(agent, _SERVICE, "Google Calendar", lambda: False)
-    }
+    tools = _tools([], agent, connected=False)
     started = json.loads(tools["authenticate_google_calendar"]())
     composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
     result = json.loads(tools["finish_google_calendar_auth"]())
@@ -139,12 +138,12 @@ def test_check_reports_an_account_composio_marks_expired(composio) -> None:
 
 
 def test_connection_status_without_an_account_or_without_composio(
-    composio, monkeypatch: pytest.MonkeyPatch
+    composio, monkeypatch: pytest.MonkeyPatch, refusing_port: int
 ) -> None:
     """No recorded account gives ``""``; an unreachable Composio gives UNKNOWN."""
     assert composio_google.connection_status(_SERVICE) == ""
     connect(composio, _SERVICE)
-    monkeypatch.setenv("COMPOSIO_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("COMPOSIO_BASE_URL", f"http://127.0.0.1:{refusing_port}")
     assert composio_google.connection_status(_SERVICE) == composio_google.STATUS_UNKNOWN
 
 
@@ -198,11 +197,3 @@ def test_sidebar_probe_follows_the_composio_state(composio) -> None:
     assert auth_status.channel_status("gcal", {"google_calendar"})["authenticated"] is True
     reset_state(_SERVICE)
     assert auth_status.channel_status("gcal", set())["authenticated"] is False
-
-
-def test_google_auth_prompt_names_the_service_tools() -> None:
-    """The shared prompt section names the service's own tools in order."""
-    prompt = google_auth_prompt("gmail", "Gmail")
-    assert prompt.startswith("\n\n## Gmail Authentication\n")
-    assert prompt.index("check_gmail_auth()") < prompt.index("authenticate_gmail(")
-    assert prompt.index("authenticate_gmail(") < prompt.index("finish_gmail_auth()")

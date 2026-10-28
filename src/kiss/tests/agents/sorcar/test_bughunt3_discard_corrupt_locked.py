@@ -29,6 +29,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -68,13 +69,13 @@ def _setup_pending_agent(repo: Path, branch: str) -> tuple[ChatSorcarAgent, Path
     wt_dir = repo / ".kiss-worktrees" / slug
     assert GitWorktreeOps.create(repo, branch, wt_dir)
     agent = ChatSorcarAgent("bh3-discard")
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch=branch,
         original_branch="main",
         wt_dir=wt_dir,
         baseline_commit=None,
-    )
+    ))
     return agent, wt_dir
 
 

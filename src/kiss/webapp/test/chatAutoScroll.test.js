@@ -23,35 +23,11 @@ const {
   makePage: makeChatPage,
   send,
   nextFrames,
+  stubGeometry,
+  fakeGeometry,
+  bottom,
+  startRunningTask,
 } = require('./simplify2_harness');
-
-/**
- * Class-keyed fake geometry lets a test give scroll geometry to panels
- * that are created *during* event handling (per-element fakeGeometry
- * own properties still take precedence).
- */
-function stubGeometry(win) {
-  const geoByClass = {};
-  win._geoByClass = geoByClass;
-  Object.defineProperty(win.Element.prototype, 'scrollHeight', {
-    configurable: true,
-    get() {
-      for (const k in geoByClass)
-        if (this.classList && this.classList.contains(k))
-          return geoByClass[k].sh;
-      return 0;
-    },
-  });
-  Object.defineProperty(win.Element.prototype, 'clientHeight', {
-    configurable: true,
-    get() {
-      for (const k in geoByClass)
-        if (this.classList && this.classList.contains(k))
-          return geoByClass[k].ch;
-      return 0;
-    },
-  });
-}
 
 function makePage() {
   const {win, posted} = makeChatPage({
@@ -62,37 +38,9 @@ function makePage() {
   return {win, posted};
 }
 
-function fakeGeometry(el, geo) {
-  Object.defineProperty(el, 'scrollHeight', {
-    get: () => geo.sh,
-    configurable: true,
-  });
-  Object.defineProperty(el, 'clientHeight', {
-    get: () => geo.ch,
-    configurable: true,
-  });
-}
-
-function bottom(geo) {
-  return Math.max(0, geo.sh - geo.ch);
-}
-
 function userScroll(win, el, top) {
   el.scrollTop = top;
   el.dispatchEvent(new win.Event('scroll'));
-}
-
-function startRunningTask(win, posted) {
-  const ready = posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  win._testApi.hideWelcome();
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: ready.tabId,
-    startTs: Date.now() - 2000,
-  });
-  return ready.tabId;
 }
 
 // --------------------------------------------------------------------
@@ -120,9 +68,23 @@ async function testOuterChatFollowsLocksAndResumes() {
     'BUG: streamed bash output did not auto-scroll the chat to the end',
   );
 
-  // Even a SMALL user scroll up must DISABLE auto-scroll: the chat
-  // must never scroll to the end unless the user is at the end.
-  const smallTop = bottom(geo) - 40;
+  // 1px above the bottom is within the fractional-scroll tolerance:
+  // auto-scroll stays on.
+  userScroll(win, O, bottom(geo) - 1);
+  geo.sh += 100;
+  send(win, {type: 'system_output', text: 'line 2\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    bottom(geo),
+    'BUG: a 1px scroll offset (fractional-scroll tolerance) disabled ' +
+      'auto-scroll',
+  );
+
+  // Even a SMALL user scroll up (2px, just past the tolerance) must
+  // DISABLE auto-scroll: the chat must never scroll to the end unless
+  // the user is at the end.
+  const smallTop = bottom(geo) - 2;
   userScroll(win, O, smallTop);
   send(win, {type: 'thinking_start'});
   geo.sh += 300;
@@ -343,17 +305,31 @@ async function testBashPanelAutoScrolls() {
     'BUG: streamed bash output did not scroll the chat to its end',
   );
 
-  // After the user scrolls the bash panel up, its own lock engages:
-  // more output must leave the bash panel where the user put it while
-  // the chat keeps following.
-  userScroll(win, bp, 40);
+  // 1px above the subpanel's bottom is within the fractional-scroll
+  // tolerance: its auto-scroll stays on.
+  userScroll(win, bp, bottom(geoB) - 1);
+  geoB.sh += 100;
+  send(win, {type: 'system_output', text: 'line 2\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    bp.scrollTop,
+    bottom(geoB),
+    'BUG: a 1px offset (fractional-scroll tolerance) disabled the ' +
+      "bash panel's auto-scroll",
+  );
+
+  // After the user scrolls the bash panel up (2px, just past the
+  // tolerance), its own lock engages: more output must leave the bash
+  // panel where the user put it while the chat keeps following.
+  const lockedTop = bottom(geoB) - 2;
+  userScroll(win, bp, lockedTop);
   geoB.sh += 300;
   geoO.sh += 300;
   send(win, {type: 'system_output', text: 'c'.repeat(120) + '\n'});
   await nextFrames(win);
   assert.strictEqual(
     bp.scrollTop,
-    40,
+    lockedTop,
     'BUG: streamed bash output auto-scrolled the bash panel although ' +
       'the user had scrolled it up',
   );
@@ -361,6 +337,19 @@ async function testBashPanelAutoScrolls() {
     O.scrollTop,
     bottom(geoO),
     "BUG: the locked bash panel disabled the chat's auto-scroll",
+  );
+
+  // Scrolling down, but not to the bottom, keeps the lock engaged.
+  const nearBottom = bottom(geoB) - 30;
+  userScroll(win, bp, nearBottom);
+  geoB.sh += 100;
+  send(win, {type: 'system_output', text: 'line 4\n'});
+  await nextFrames(win);
+  assert.strictEqual(
+    bp.scrollTop,
+    nearBottom,
+    "BUG: a subpanel's auto-scroll resumed before the user reached its " +
+      'bottom',
   );
 
   // Scrolling the bash panel back to its bottom releases its lock.
@@ -507,8 +496,10 @@ async function testThoughtsPanelAutoScrolls() {
 }
 
 // --------------------------------------------------------------------
-// Replaying a task (opening an existing chat) must land the chat at
-// the end of the latest event panel.
+// Replaying a RUNNING task (opening a chat whose task is still going)
+// must land the chat at the end of the latest event panel, where the
+// live output arrives.  A finished task's replay lands on its task
+// panel instead: test/openedTaskLanding.test.js.
 // --------------------------------------------------------------------
 
 async function testReplayLandsAtEnd() {
@@ -518,6 +509,12 @@ async function testReplayLandsAtEnd() {
   fakeGeometry(O, geoO);
   const ready = posted.find(m => m.type === 'ready');
   win._testApi.hideWelcome();
+  send(win, {
+    type: 'status',
+    running: true,
+    tabId: ready.tabId,
+    startTs: Date.now() - 2000,
+  });
   userScroll(win, O, 33);
   send(win, {
     type: 'task_events',
@@ -540,10 +537,10 @@ async function testReplayLandsAtEnd() {
   assert.strictEqual(
     O.scrollTop,
     bottom(geoO),
-    'BUG: replaying task events did not land the chat at the end',
+    'BUG: replaying a running task did not land the chat at the end',
   );
   win.close();
-  console.log('  ok - task replay lands at the end of the latest panel');
+  console.log('  ok - a running task replay lands at the end');
 }
 
 // --------------------------------------------------------------------
@@ -927,164 +924,6 @@ async function testTabRestoreLandsAtEnd() {
   );
   win.close();
   console.log('  ok - tab restore lands at the end of the latest panel');
-}
-
-// --------------------------------------------------------------------
-// The scroll lock engages on ANY scroll away from the bottom (a 1px
-// tolerance absorbs fractional scroll positions), and it only releases
-// at the very bottom.
-// --------------------------------------------------------------------
-
-async function testScrollLockThresholdAndResume() {
-  const {win, posted} = makePage();
-  const O = win.document.getElementById('output');
-  const geo = {sh: 2000, ch: 400};
-  fakeGeometry(O, geo);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'tool_call', name: 'Bash', command: 'tail -f log'});
-  send(win, {type: 'system_output', text: 'line 1\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    bottom(geo),
-    'streaming must pin the chat to the bottom first',
-  );
-
-  // 1px above the bottom is within the fractional-scroll tolerance:
-  // auto-scroll stays on.
-  userScroll(win, O, bottom(geo) - 1);
-  geo.sh += 100;
-  send(win, {type: 'system_output', text: 'line 2\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    bottom(geo),
-    'BUG: a 1px scroll offset (fractional-scroll tolerance) disabled ' +
-      'auto-scroll',
-  );
-
-  // 2px above the bottom: auto-scroll must be disabled.
-  const lockedTop = bottom(geo) - 2;
-  userScroll(win, O, lockedTop);
-  geo.sh += 100;
-  send(win, {type: 'system_output', text: 'line 3\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    lockedTop,
-    'BUG: scrolling up away from the bottom did not disable auto-scroll',
-  );
-
-  // Scrolling further up keeps the lock engaged.
-  const higher = bottom(geo) - 300;
-  userScroll(win, O, higher);
-  geo.sh += 100;
-  send(win, {type: 'system_output', text: 'line 4\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    higher,
-    'BUG: auto-scroll resumed before the user reached the bottom',
-  );
-
-  // At the bottom, the lock releases and auto-scroll resumes.
-  userScroll(win, O, bottom(geo));
-  geo.sh += 100;
-  send(win, {type: 'system_output', text: 'line 5\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    O.scrollTop,
-    bottom(geo),
-    'BUG: auto-scroll did not resume once the user scrolled to the ' + 'bottom',
-  );
-  win.close();
-  console.log(
-    '  ok - lock engages on any scroll away from the bottom and ' +
-      'releases at the bottom',
-  );
-}
-
-// --------------------------------------------------------------------
-// Subpanel scroll lock threshold: a subpanel's lock engages on ANY
-// user scroll away from its bottom beyond the 1px fractional-scroll
-// tolerance, and releases only at the subpanel's bottom.
-// --------------------------------------------------------------------
-
-async function testSubpanelLockThresholdAndResume() {
-  const {win, posted} = makePage();
-  const O = win.document.getElementById('output');
-  const geoO = {sh: 3000, ch: 500};
-  fakeGeometry(O, geoO);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'tool_call', name: 'Bash', command: 'tail -f log'});
-  const bp = O.querySelector('.bash-panel-content');
-  const geoB = {sh: 1000, ch: 200};
-  fakeGeometry(bp, geoB);
-  send(win, {type: 'system_output', text: 'line 1\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    bp.scrollTop,
-    bottom(geoB),
-    'streaming must pin the bash panel to its bottom first',
-  );
-
-  // 1px above the subpanel's bottom is within the fractional-scroll
-  // tolerance: its auto-scroll stays on.
-  userScroll(win, bp, bottom(geoB) - 1);
-  geoB.sh += 100;
-  send(win, {type: 'system_output', text: 'line 2\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    bp.scrollTop,
-    bottom(geoB),
-    'BUG: a 1px offset (fractional-scroll tolerance) disabled the ' +
-      "bash panel's auto-scroll",
-  );
-
-  // 2px above the bottom: the subpanel's auto-scroll must be disabled.
-  const lockedTop = bottom(geoB) - 2;
-  userScroll(win, bp, lockedTop);
-  geoB.sh += 100;
-  send(win, {type: 'system_output', text: 'line 3\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    bp.scrollTop,
-    lockedTop,
-    'BUG: scrolling a subpanel away from its bottom did not disable ' +
-      'its auto-scroll',
-  );
-
-  // Scrolling down, but not to the bottom, keeps the lock engaged.
-  const nearBottom = bottom(geoB) - 30;
-  userScroll(win, bp, nearBottom);
-  geoB.sh += 100;
-  send(win, {type: 'system_output', text: 'line 4\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    bp.scrollTop,
-    nearBottom,
-    "BUG: a subpanel's auto-scroll resumed before the user reached its " +
-      'bottom',
-  );
-
-  // At the subpanel's bottom, the lock releases and it follows again.
-  userScroll(win, bp, bottom(geoB));
-  geoB.sh += 100;
-  send(win, {type: 'system_output', text: 'line 5\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    bp.scrollTop,
-    bottom(geoB),
-    "BUG: a subpanel's auto-scroll did not resume once the user " +
-      'scrolled it to its bottom',
-  );
-  win.close();
-  console.log(
-    '  ok - subpanel lock engages away from its bottom and releases ' +
-      'at its bottom',
-  );
 }
 
 // --------------------------------------------------------------------
@@ -1537,8 +1376,6 @@ async function main() {
   await testBashFlushOnNextToolCallScrolls();
   await testBannersActionResultsAndFollowupsRespectLock();
   await testTabRestoreLandsAtEnd();
-  await testScrollLockThresholdAndResume();
-  await testSubpanelLockThresholdAndResume();
   await testSubpanelStaleLockReleasedByShrink();
   await testSubpanelLockSurvivesTabSwitch();
   await testSendMessageKeepsLock();

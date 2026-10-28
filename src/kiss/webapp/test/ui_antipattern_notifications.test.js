@@ -12,6 +12,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {captureTimers} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -64,14 +65,11 @@ async function main() {
     win.close();
   });
 
-  await test('an error toast survives the old 7.5 s timeout and closes on its X', async () => {
+  await test('an error toast survives the old 7.5 s timeout and closes on its X', () => {
     const {win} = h.makePage();
-    // Speed the auto-dismiss clock up so the wait is short: a fake
-    // setTimeout that fires everything 1000x sooner.
-    const realSetTimeout = win.setTimeout;
-    win.setTimeout = function (fn, ms) {
-      return realSetTimeout.call(win, fn, Math.max(1, (ms || 0) / 1000));
-    };
+    // The auto-dismiss timers are recorded and fired by hand: an error
+    // arms none, the info arms its 5 s one.
+    const timers = captureTimers(win);
     h.send(win, {
       type: 'notification',
       id: 'err-2',
@@ -84,7 +82,9 @@ async function main() {
       message: 'ok',
       severity: 'info',
     });
-    await h.sleep(60);
+    const dismiss = timers.filter(t => t.ms >= 5000);
+    assert.strictEqual(dismiss.length, 1, 'one auto-dismiss timer, the info one');
+    dismiss[0].cb();
     assert.strictEqual(
       h.toast(win, 'info-2'),
       null,

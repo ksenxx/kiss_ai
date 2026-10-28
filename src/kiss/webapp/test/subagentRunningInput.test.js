@@ -7,7 +7,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {bootParallelRun, subagentTabEls} = require('./subagent_tab_helpers');
+const {bootParallelRun} = require('./subagent_tab_helpers');
 
 const {makePage, send} = harness;
 
@@ -124,27 +124,8 @@ function testTabSwitchTogglesInputByRunningState() {
   console.log('  ok - tab switch toggles input by sub-agent running state');
 }
 
-function testSubagentDoneRemovesInput() {
-  const {win, subTabIds} = bootParallelRun(2, makePage());
-
-  clickTab(win, subTabIds[0]);
-  assert.ok(inputVisible(win), 'input must be visible while running');
-
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-
-  assert.ok(
-    !subagentTabEls(win).some(e => e.dataset.tabId === subTabIds[0]),
-    'the finished sub-agent tab must close on subagentDone',
-  );
-  const active = activeTabEl(win);
-  assert.notStrictEqual(
-    active.dataset.tabId,
-    subTabIds[0],
-    'the finished sub-agent tab must not stay active',
-  );
-  win.close();
-  console.log('  ok - subagentDone removes the finished sub-agent input');
-}
+// subagentDone closing the active sub-agent tab and landing the user on
+// the parent chat tab is pinned by subagentDoneAdjacencyNoReport.
 
 function testSendInjectsPromptWithSubagentTabId() {
   const {win, posted, subTabIds} = bootParallelRun(2, makePage());
@@ -196,8 +177,9 @@ function testStopPostsStopWithSubagentTabId() {
     .getElementById('stop-btn')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 
-  const stop = posted.slice(before).find(m => m.type === 'stop');
-  assert.ok(stop, 'clicking Stop on a sub-agent tab must post stop');
+  const stops = posted.slice(before).filter(m => m.type === 'stop');
+  assert.strictEqual(stops.length, 1, 'exactly one stop must be posted');
+  const stop = stops[0];
   assert.strictEqual(
     stop.tabId,
     subTabIds[0],
@@ -235,7 +217,6 @@ function main() {
   testRunningSubagentTabShowsInput();
   testOpenSubagentTabActiveRespectsRunningState();
   testTabSwitchTogglesInputByRunningState();
-  testSubagentDoneRemovesInput();
   testSendInjectsPromptWithSubagentTabId();
   testStopPostsStopWithSubagentTabId();
   testStatusNotRunningRemovesInputOnActiveSubTab();

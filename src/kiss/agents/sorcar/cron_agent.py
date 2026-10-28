@@ -250,7 +250,7 @@ def _jobs_lock(blocking: bool) -> Any:
     return exclusive_file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking)
 
 
-def load_jobs(strict: bool = False) -> list[dict[str, Any]]:
+def load_jobs(strict: bool = False, path: Path | None = None) -> list[dict[str, Any]]:
     """Load all cron jobs from the JSON store.
 
     A gateway command job stored with a channel delivery target (by a
@@ -263,6 +263,9 @@ def load_jobs(strict: bool = False) -> list[dict[str, Any]]:
             but is damaged.  Every read-modify-write caller passes it:
             saving what a damaged store reads as would replace the user's
             schedules with the one job being saved.
+        path: The store to read; this home's (:func:`_jobs_path`) when
+            ``None``.  :func:`adopt_previous_home_jobs` reads another
+            home's store with it.
 
     Returns:
         The list of job dicts; an empty list when the store does not
@@ -273,7 +276,7 @@ def load_jobs(strict: bool = False) -> list[dict[str, Any]]:
             not a JSON list.
     """
     try:
-        data = json.loads(read_bytes_waiting_for_writer(_jobs_path()).decode("utf-8"))
+        data = json.loads(read_bytes_waiting_for_writer(path or _jobs_path()).decode("utf-8"))
     except FileNotFoundError:
         return []
     except (OSError, ValueError):
@@ -878,19 +881,19 @@ def _job_work_dir(job: dict[str, Any], scratch_dir: Path) -> Path:
     return chat_dir
 
 
-def _run_outcome(text: str, success: bool) -> tuple[str, str | None]:
+def _run_outcome(summary: str, success: bool) -> tuple[str, str | None]:
     """Turn a run's summary into the ``(status, summary)`` a prompt job reports.
 
     Args:
-        text: The run's summary text (may be empty).
+        summary: The run's summary text
+            (:func:`~kiss.agents.sorcar.agent_dispatch.result_summary`;
+            may be empty).
         success: Whether the run succeeded.
 
     Returns:
         ``("silent", None)`` for an empty or ``[SILENT]`` summary,
-        otherwise ``("ok" | "error", summary)`` where a failed run with
-        no text reads ``"Task failed"``.
+        otherwise ``("ok" | "error", summary)``.
     """
-    summary = text or ("" if success else "Task failed")
     if not summary or _is_silent(summary):
         return "silent", None
     return ("ok" if success else "error"), summary
@@ -953,6 +956,7 @@ def _run_in_chat_job(
     # dispatched cron session's ``run_now`` runs (see
     # :data:`_daemon_endpoint_file`).
     from kiss.agents.sorcar.agent_dispatch import _daemon_endpoint_file as daemon_endpoint_file
+    from kiss.agents.sorcar.agent_dispatch import result_summary
 
     try:
         result = daemon_client.run(
@@ -972,9 +976,13 @@ def _run_in_chat_job(
             f"in-chat job timed out after {timeout:g}s; the stop was not confirmed, "
             f"so the task MAY STILL BE RUNNING (and spending) on the daemon: {exc}"
         ) from exc
+    except daemon_client.StoppedOnTimeoutError:
+        # The daemon confirmed the stop: a plain failed run, like a
+        # prompt job's confirmed stop (nothing is left running).
+        return "error", f"in-chat job timed out after {timeout:g}s and was stopped"
     except (OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
-    return _run_outcome(result.text, result.success)
+    return _run_outcome(result_summary(result), result.success)
 
 
 def _run_prompt_job(
@@ -987,8 +995,11 @@ def _run_prompt_job(
     exactly as a chat task launches any SEA: the task text is
     the Hermes-style preamble followed by the job's prompt, and the
     job's ``model`` and ``max_budget`` (``""`` / ``None`` mean "daemon
-    default") and *run_dir* travel as the tool's arguments and
-    ``options``.  A prompt that is a slash command with text
+    default") travel as the tool's arguments; *run_dir* travels as the
+    ``work_dir`` option only when the job names one — *scratch_dir* is
+    already the tool's default, and an explicit value would clash with
+    a SEA that locks its work directory (a channel's ``/slack …``).  A
+    prompt that is a slash command with text
     (``/recommendations now``, see
     :func:`kiss.agents.sorcar.sea_commands.slash_command_task`) runs
     that SEA instead, on the preamble plus the trailing text, without a
@@ -1052,7 +1063,9 @@ def _run_prompt_job(
     task = PROMPT_PREAMBLE + run_context(job) + "\n\n" + (
         prompt if command is None else command[0]
     )
-    options: dict[str, Any] = {"work_dir": str(run_dir)}
+    options: dict[str, Any] = {}
+    if run_dir != scratch_dir:
+        options["work_dir"] = str(run_dir)
     if command is not None:
         options["auto_classify"] = False
     run_agent = make_run_agent_tool(str(scratch_dir))
@@ -1166,15 +1179,12 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
             kill_process_group(proc.pid, SIGKILL)
         proc.kill()
         return
-    own_pgid = os.getpgrp()
     for _ in range(3):
         survivors = _proc_descendants(proc.pid)
         with contextlib.suppress(OSError):  # group already gone
             kill_process_group(proc.pid, SIGKILL)
         escaped = False
         for pid in survivors:
-            if pid == os.getpid():  # pragma: no cover — defensive
-                continue
             try:
                 pgid = os.getpgid(pid)
             except OSError:
@@ -1183,14 +1193,33 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
                 continue  # covered by the group kill above
             escaped = True
             # Kill the escapee's own group first (a setsid child leads
-            # a new group holding its subtree), then the pid itself.
-            if pgid != own_pgid:  # pragma: no branch — never our own group
-                with contextlib.suppress(OSError):
-                    os.killpg(pgid, 9)
+            # a new group holding its subtree; the command's session is
+            # not ours, so the group is never our own), then the pid.
+            with contextlib.suppress(OSError):
+                os.killpg(pgid, 9)
             with contextlib.suppress(OSError):
                 os.kill(pid, 9)
         if not escaped:
             break
+
+
+def _reap_killed_command(proc: subprocess.Popen) -> None:
+    """Drain and reap *proc* after :func:`_kill_command_tree`, bounded.
+
+    The tree is dead, so the pipes close and the drain returns
+    promptly; the bounded retry guards a straggler that survived the
+    best-effort tree kill holding the pipes open, in which case the
+    pipes are abandoned to it and the (killed) shell reaped so the
+    ``Popen`` does not linger as a zombie.
+    """
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
 
 
 def _run_command_job(
@@ -1201,7 +1230,8 @@ def _run_command_job(
     The command runs under the same shell as the agent's ``Bash`` tool
     (``sh`` on POSIX, Git bash on Windows; see
     :func:`~kiss.agents.sorcar.useful_tools._popen_kwargs`) in its own
-    process group, and a timeout kills the WHOLE process tree — not
+    process group, and a timeout — or an interrupt of the calling
+    thread, which is re-raised — kills the WHOLE process tree, not
     just the shell; see :func:`_kill_command_tree` for the exact
     guarantees and residual limitations per platform.
 
@@ -1234,20 +1264,17 @@ def _run_command_job(
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_command_tree(proc)
-        # The tree is dead, so the pipes close and this drain returns
-        # promptly; the bounded retry guards a straggler that survived
-        # the best-effort tree kill holding the pipes open.
-        try:
-            proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            # Abandon the pipes to the straggler and reap the (killed)
-            # shell, so the Popen does not linger as a zombie.
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    pipe.close()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5)
+        _reap_killed_command(proc)
         return "error", f"command timed out after {timeout:g}s"
+    except BaseException:
+        # The waiting thread was interrupted (the daemon's Stop of the
+        # cron agent's task while ``cron_job("run_now")`` runs the job,
+        # Ctrl-C under ``kiss-cron --run``): the command sits in its own
+        # process group, so without this it would run on unattended
+        # from a scratch directory ``_execute_job`` is about to remove.
+        _kill_command_tree(proc)
+        _reap_killed_command(proc)
+        raise
     output = stdout.strip()
     if proc.returncode != 0:
         detail = (output + "\n" + stderr.strip()).strip()
@@ -1482,6 +1509,9 @@ def tick(now: float | None = None, wait: bool = True) -> int:
                 job["enabled"] = False
             due.append(job)
             changed = True
+        # The claim (advanced ``next_run_at``, disabled one-shot) is
+        # persisted BEFORE anything runs: a store that cannot be written
+        # launches nothing, so a job never runs twice for one occurrence.
         if changed:
             save_jobs(jobs)
         # Launched while holding the store lock: a job that finishes
@@ -1689,6 +1719,94 @@ def seed_default_jobs() -> list[str]:
     return done
 
 
+def _daemon_home_marker() -> Path | None:
+    """The file naming the home the last kiss-web daemon of this user ran from.
+
+    Brand homes (the stock one and every ``~/.<brand>``) are
+    dot-directories of the user's home, so the marker sits beside them
+    as ``~/.kiss-web-home``.  A ``KISS_HOME`` anywhere else (tests,
+    ad-hoc runs) is nobody's brand home and takes part in no hand-over:
+    ``None``.
+    """
+    home = kiss_home()
+    if home.parent != Path.home():
+        return None
+    return home.parent / ".kiss-web-home"
+
+
+def adopt_previous_home_jobs(now: float | None = None) -> list[str]:
+    """Carry the jobs of the home the previous daemon ran from into this one.
+
+    Each brand keeps its own store (``$KISS_HOME/cron/jobs.json`` of
+    the stock home and of every ``~/.<brand>`` home) and only the
+    running daemon's store ticks, so a reinstall or deploy that moves
+    the daemon to another home (a brand install, an ``rsorcar`` deploy)
+    would silently stop every job scheduled in the old one.  Called by
+    the kiss-web daemon on startup, before :func:`seed_default_jobs`:
+    records this home in :func:`_daemon_home_marker` and, when the
+    marker named a different home, copies every job of that home's
+    store whose name this store lacks (the user's jobs, paused ones
+    included) with a clean failure streak.  A repeating job gets a fresh
+    next run; a one-shot keeps its deadline, and a finished job (a
+    one-shot that ran, a delivered ``until_delivered`` poll: no next
+    run) stays finished, so it is neither resumed nor a duplicate of a
+    job created anew.  A job already here under the same name, a
+    default's former name included, stands as it is.
+    Never raises: a store that cannot be read, locked or written is
+    left alone and the marker still moves on, so a later start does not
+    adopt what the user removed in between.
+
+    Args:
+        now: The current time in epoch seconds; ``time.time()`` when ``None``.
+
+    Returns:
+        The names of the adopted jobs, in store order.
+    """
+    marker = _daemon_home_marker()
+    if marker is None:
+        return []
+    home = kiss_home()
+    adopted: list[str] = []
+    try:
+        previous = marker.read_text("utf-8").strip() if marker.is_file() else ""
+        atomic_write_text(marker, f"{home}\n")
+        if not previous or Path(previous) == home:
+            return []
+        old_jobs = load_jobs(path=Path(previous) / "cron" / "jobs.json")
+        if not old_jobs:
+            return []
+        now = time.time() if now is None else now
+        with _jobs_lock(blocking=True):
+            jobs = load_jobs(strict=True)
+            names = {_current_default_name(str(j.get("name"))) for j in jobs}
+            ids = {j["id"] for j in jobs}
+            for job in old_jobs:
+                name = str(job.get("name"))
+                if _current_default_name(name) in names:
+                    continue
+                next_run = job.get("next_run_at")
+                if next_run is not None and not job.get("one_shot"):
+                    next_run = compute_next_run(str(job.get("schedule", "")), now)
+                job = {**job, "next_run_at": next_run, "failure_streak": 0}
+                if job["id"] in ids:
+                    job["id"] = uuid.uuid4().hex[:8]
+                jobs.append(job)
+                names.add(_current_default_name(name))
+                ids.add(job["id"])
+                adopted.append(name)
+            if adopted:
+                save_jobs(jobs)
+    except Exception as exc:  # noqa: BLE001 - startup must not fail on the store
+        logger.warning("could not adopt the cron jobs of the previous home: %s", exc)
+        return []
+    if adopted:
+        logger.info(
+            "kiss-cron: adopted %d job(s) from the previous home %s: %s",
+            len(adopted), previous, ", ".join(adopted),
+        )
+    return adopted
+
+
 def stop_scheduler_thread(stop_event: SchedulerStop) -> None:
     """Stop a scheduler started by :func:`start_scheduler_thread`.
 
@@ -1796,15 +1914,10 @@ def _update(job: dict[str, Any], name: str, schedule: str, what: str) -> str:
     return ""
 
 
-def _is_running(running: dict[str, threading.Thread], job_id: str) -> bool:
-    """``True`` when *running* holds a live thread for *job_id*."""
-    current = running.get(job_id)
-    return current is not None and current.is_alive()
-
-
 def _claim_run(running: dict[str, threading.Thread], job_id: str, me: threading.Thread) -> bool:
     """Register *me* as the thread running *job_id* in *running*; ``False`` when one is alive."""
-    if _is_running(running, job_id):
+    current = running.get(job_id)
+    if current is not None and current.is_alive():
         return False
     running[job_id] = me
     return True
@@ -1816,7 +1929,7 @@ def _release_run(running: dict[str, threading.Thread], job_id: str, me: threadin
         del running[job_id]
 
 
-def _launch(job: dict[str, Any]) -> threading.Thread:
+def _launch(job: dict[str, Any]) -> threading.Thread | None:
     """Start *job*'s run thread and register it in :data:`_running` (locked).
 
     The caller holds :data:`_running_lock`: a thread only counts as
@@ -1827,19 +1940,21 @@ def _launch(job: dict[str, Any]) -> threading.Thread:
         job: The stored job record to execute.
 
     Returns:
-        The started daemon thread.
+        The started daemon thread, or ``None`` when the job is already
+        running in this process (:func:`_claim_run`).
     """
     thread = threading.Thread(
         target=_execute_job, args=(job,),
         name=f"kiss-cron-job-{job['id']}", daemon=True,
     )
-    _running[job["id"]] = thread
+    if not _claim_run(_running, job["id"], thread):
+        return None
     try:
         thread.start()
     except BaseException:
         # A thread the process cannot start (its thread limit) must not
         # sit in the registry as a job that looks launched.
-        del _running[job["id"]]
+        _release_run(_running, job["id"], thread)
         raise
     return thread
 
@@ -1857,7 +1972,8 @@ def _launch_or_record(job: dict[str, Any]) -> threading.Thread | None:
         job: The stored job record to execute.
 
     Returns:
-        The started thread, or ``None`` when it could not start.
+        The started thread, or ``None`` when it could not start (or the
+        job is already running, which a tick's due list excludes).
     """
     try:
         return _launch(job)
@@ -1882,9 +1998,8 @@ def start_job(job: dict[str, Any]) -> str:
         already running in this process).
     """
     with _running_lock:
-        if _is_running(_running, job["id"]):
+        if _launch(job) is None:
             return f"job {job['id']!r} is already running"
-        _launch(job)
     return ""
 
 
@@ -2586,15 +2701,6 @@ def cron_work_dir() -> str:
 
 def main() -> None:
     """Run the ``kiss-cron`` CLI: manage jobs or run the scheduler."""
-    if len(sys.argv) <= 1:
-        print(
-            "Usage: kiss-cron (--daemon [--interval SECONDS] | --tick | --list |\n"
-            "  --create NAME --schedule S (--prompt P | --command C)\n"
-            "    [--deliver TARGETS] [-m MODEL] [-b BUDGET] [--until-delivered]\n"
-            "    [--work-dir DIR] [--timeout SECONDS] |\n"
-            "  --remove ID | --pause ID | --resume ID | --run ID)"
-        )
-        sys.exit(1)
     parser = argparse.ArgumentParser(prog="kiss-cron")
     parser.add_argument("--daemon", action="store_true", help="Run the scheduler loop")
     parser.add_argument(
@@ -2627,11 +2733,15 @@ def main() -> None:
     parser.add_argument("--pause", default="", metavar="ID", help="Pause a job")
     parser.add_argument("--resume", default="", metavar="ID", help="Resume a job")
     parser.add_argument("--run", default="", metavar="ID", help="Run a job now")
+    if len(sys.argv) <= 1:
+        parser.print_usage()
+        sys.exit(1)
     args = parser.parse_args()
 
     if args.daemon:
         logging.basicConfig(level=logging.INFO)
         print(f"kiss-cron scheduler running (every {args.interval:.0f}s); Ctrl-C to stop")
+        adopt_previous_home_jobs()
         run_scheduler(threading.Event(), args.interval)
     elif args.tick:
         print(f"ran {tick()} job(s)")

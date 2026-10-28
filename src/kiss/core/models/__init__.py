@@ -7,18 +7,6 @@
 
 from kiss.core.models.model import Attachment, Model, import_provider_module
 
-__all__ = [
-    "Attachment",
-    "Model",
-    "AnthropicModel",
-    "ClaudeCodeModel",
-    "CodexModel",
-    "DecisionsModel",
-    "OpenAICompatibleModel",
-    "OpenAICompatibleModel2",
-    "GeminiModel",
-]
-
 _LAZY_IMPORTS = {
     "AnthropicModel": "kiss.core.models.anthropic_model",
     "ClaudeCodeModel": "kiss.core.models.claude_code_model",
@@ -28,6 +16,8 @@ _LAZY_IMPORTS = {
     "OpenAICompatibleModel2": "kiss.core.models.openai_compatible_model2",
     "GeminiModel": "kiss.core.models.gemini_model",
 }
+
+__all__ = ["Attachment", "Model", *_LAZY_IMPORTS]
 
 
 def __getattr__(name: str) -> type:

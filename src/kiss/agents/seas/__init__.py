@@ -21,6 +21,11 @@ a skill or of another SEA against an eval set (SkillOpt), or
 the system prompt so the prose it produces is concise, professional
 American English for a general audience that reads as if a person wrote
 it, or
+:mod:`kiss.agents.seas.devtools.devtools_sea`, which switches the browser
+tools on and adds the DevTools workflow (act, then verify with the console,
+the network log, ``wait_for`` and ``evaluate_script``) to the system prompt
+so a web app is driven and debugged with evidence rather than by re-reading
+its accessibility tree, or
 :mod:`kiss.agents.seas.write_paper.write_paper_sea`, which writes or revises a
 research paper under the rules of ``templates/write_paper_prompt.md``
 with tools for the AI-slop gates and the LaTeX build, or

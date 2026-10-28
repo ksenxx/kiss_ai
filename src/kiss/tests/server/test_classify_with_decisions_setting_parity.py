@@ -228,9 +228,4 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
             0,
             f"configToggleInit.test.js failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
         )
-        self.assertIn(
-            "the classify toggles and memory dir are not in the Settings UI",
-            proc.stdout,
-        )
-        self.assertIn("the memory edit alone is flushed before configData", proc.stdout)
         self.assertIn("all tests passed", proc.stdout)

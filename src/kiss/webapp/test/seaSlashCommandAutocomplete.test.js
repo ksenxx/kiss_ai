@@ -24,6 +24,9 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness.js');
+const {makeRunner} = require('./ui_antipattern_harness');
+
+const {test, report} = makeRunner();
 
 // Every page built, closed together at the end so no timer of theirs
 // keeps the process alive.
@@ -81,8 +84,7 @@ function seaCommandSectionLabels(win) {
 }
 
 function main() {
-  // The daemon-pushed command list -----------------------------------
-  {
+  test('the daemon-pushed command list', () => {
     const {win} = makePage();
     send(win, {
       type: 'seaCommands',
@@ -100,10 +102,9 @@ function main() {
     // The first item is preselected and carries the "tab" hint.
     assert.ok(allItems[0].classList.contains('sel'));
     assert.ok(allItems[0].querySelector('.ac-hint'));
-  }
+  });
 
-  // Prefix filtering + accept via click -------------------------------
-  {
+  test('prefix filtering, accept via click', () => {
     const {win} = makePage();
     send(win, {
       type: 'seaCommands',
@@ -129,19 +130,16 @@ function main() {
     assert.strictEqual(inp.value, '/gmail ');
     assert.strictEqual(inp.selectionStart, inp.value.length);
     assert.strictEqual(isPickerOpen(win), false);
-  }
+  });
 
-  // Prefix that matches nothing -> popup hides -----------------------
-  {
+  test('a prefix that matches nothing hides the popup', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
     setInput(win, '/zzz');
     assert.strictEqual(isPickerOpen(win), false, 'popup hides with no matches');
-  }
+  });
 
-  // A slash anywhere in the text opens the popup -----------------------
-  // ... after a space, and accepting keeps the text before the slash.
-  {
+  test('a slash after a space opens the popup; accepting keeps the text before it', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
     const inp = setInput(win, 'please fix this /gm');
@@ -154,9 +152,9 @@ function main() {
     assert.strictEqual(inp.value, 'please fix this /gmail ');
     assert.strictEqual(inp.selectionStart, inp.value.length);
     assert.strictEqual(isPickerOpen(win), false);
-  }
-  // ... on a later line, with text after the cursor left untouched.
-  {
+  });
+
+  test('a slash on a later line leaves the text after the cursor untouched', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack']});
     const inp = win.document.getElementById('task-input');
@@ -169,9 +167,9 @@ function main() {
     // second one is added.
     assert.strictEqual(inp.value, 'plain text\n/slack tail');
     assert.strictEqual(inp.selectionStart, 'plain text\n/slack'.length);
-  }
-  // ... but a slash inside a path or an @-mention is NOT a command.
-  {
+  });
+
+  test('a slash inside a path or an @-mention is not a command', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'src']});
     setInput(win, 'look at src/');
@@ -180,10 +178,9 @@ function main() {
     assert.strictEqual(isPickerOpen(win), false, 'src/s is a path');
     setInput(win, 'see @docs/s');
     assert.strictEqual(isPickerOpen(win), false, '@docs/s is a mention');
-  }
+  });
 
-  // Recent, then frequent, then the rest --------------------------------
-  {
+  test('recent, then frequent, then the rest', () => {
     const {win} = makePage();
     send(win, {
       type: 'seaCommands',
@@ -223,10 +220,9 @@ function main() {
       seaCommandItems(win).map(el => el.dataset.text),
       ['eps'],
     );
-  }
+  });
 
-  // Opening the popup asks the daemon for a fresh list ONCE -----------
-  {
+  test('opening the popup asks the daemon for a fresh list once', () => {
     const {win, posted} = makePage();
     send(win, {type: 'seaCommands', commands: ['slack', 'gmail']});
     const before = seaCommandRequests(posted);
@@ -249,11 +245,9 @@ function main() {
     assert.strictEqual(isPickerOpen(win), false);
     setInput(win, '/zzz');
     assert.strictEqual(seaCommandRequests(posted), before + 2);
-  }
+  });
 
-  // A reply with the same lists keeps the arrow-key selection; -------
-  // a reply with a new ranking reflows the popup.
-  {
+  test('a reply with the same lists keeps the arrow-key selection; a new ranking reflows the popup', () => {
     const {win, posted} = makePage();
     const event = {
       type: 'seaCommands',
@@ -291,10 +285,9 @@ function main() {
       seaCommandItems(win).map(el => el.dataset.text),
       ['alpha', 'beta', 'gamma'],
     );
-  }
+  });
 
-  // A rescan pushed while the popup is open re-flows it --------------
-  {
+  test('a rescan pushed while the popup is open re-flows it', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['alpha']});
     setInput(win, '/');
@@ -303,10 +296,9 @@ function main() {
     // The popup MUST reflect the fresh list without needing another
     // keystroke.
     assert.strictEqual(seaCommandItems(win).length, 2);
-  }
+  });
 
-  // A stale ``files`` reply must NOT hide an open slash popup -------
-  {
+  test('a stale files reply does not hide an open slash popup', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['alpha']});
     // Open a slash popup.
@@ -319,11 +311,9 @@ function main() {
       isPickerOpen(win),
       'stale @-files reply does not close the slash popup',
     );
-  }
+  });
 
-  // A ``ghost`` reply arriving while the slash popup is open --------
-  // must NOT paint an inline ghost suggestion over the composer.
-  {
+  test('a ghost reply while the slash popup is open paints no inline ghost', () => {
     const {win} = makePage();
     send(win, {type: 'seaCommands', commands: ['gmail', 'gcal']});
     setInput(win, '/g');
@@ -335,9 +325,7 @@ function main() {
       !ghost || !ghost.textContent || ghost.style.display === 'none',
       'ghost overlay must not paint under slash popup',
     );
-  }
-
-  console.log('  ok - SEA slash-command autocomplete');
+  });
 }
 
 try {
@@ -345,3 +333,4 @@ try {
 } finally {
   windows.forEach(w => w.close());
 }
+report('seaSlashCommandAutocomplete');

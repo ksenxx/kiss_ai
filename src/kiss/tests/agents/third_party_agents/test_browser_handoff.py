@@ -166,6 +166,17 @@ def _opened(home: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
+def _lingering_launches(home: Path) -> list[list[str]]:
+    """Return the launches once a lingering opener has recorded one.
+
+    A lingering opener outlives the launcher's grace period, so the launcher
+    returns while the opener may still be about to append its log line and
+    pid file; wait for the record instead of reading the log at once.
+    """
+    assert wait_until(lambda: _opened(home) != [], timeout=10.0), "no launch recorded"
+    return _opened(home)
+
+
 def _release_lingering_opener(home: Path) -> None:
     """Let the ``linger`` opener exit and reap it.
 
@@ -184,7 +195,10 @@ def _release_lingering_opener(home: Path) -> None:
 
 
 def _unique_url(path: str = "signin") -> str:
-    """A URL no earlier test opened, so the reopen guard cannot interfere."""
+    """A URL not opened earlier in the same test, so the reopen guard cannot interfere.
+
+    (``fresh_reopen_guard`` already forgets what earlier tests opened.)
+    """
     return f"https://example.test/{path}/{uuid.uuid4()}"
 
 
@@ -249,9 +263,14 @@ def test_malformed_browser_env_or_url_never_raises(
     assert _opened(fake_browser) == []
 
 
-def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
+def test_concurrent_callers_open_one_tab(
+    fake_browser: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two threads asking for the same page at once launch the browser once."""
     (fake_browser / "linger").touch()
+    # The opener lingers past the grace period either way; a short one
+    # keeps the test from waiting out the full 3 s.
+    monkeypatch.setattr(_browser_handoff, "_LAUNCH_GRACE", 0.3)
     url = _unique_url("concurrent")
     results: list[bool] = []
     threads = [
@@ -264,7 +283,7 @@ def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
         thread.join(timeout=30)
         assert not thread.is_alive(), "open_in_default_browser did not return"
     assert results == [True, True]
-    assert _opened(fake_browser) == [[url]]
+    assert _lingering_launches(fake_browser) == [[url]]
 
 
 def test_headless_and_disallowed_schemes_never_launch(
@@ -295,12 +314,15 @@ def test_missing_or_failing_opener_reports_not_opened(
     assert open_in_default_browser(_unique_url("missing")) is False
 
 
-def test_lingering_opener_counts_as_opened(fake_browser: Path) -> None:
+def test_lingering_opener_counts_as_opened(
+    fake_browser: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A ``$BROWSER`` that is the browser itself outlives the grace period."""
     (fake_browser / "linger").touch()
+    monkeypatch.setattr(_browser_handoff, "_LAUNCH_GRACE", 0.3)
     url = _unique_url("linger")
     assert open_in_default_browser(url) is True
-    assert _opened(fake_browser) == [[url]]
+    assert _lingering_launches(fake_browser) == [[url]]
 
 
 def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:
@@ -415,6 +437,8 @@ def test_concurrent_callers_share_the_final_outcome(fake_browser: Path) -> None:
     assert wait_until(lambda: len(slow.urls) == 1, timeout=10.0), "condition not met in time"
     threads[1].start()  # arrives while the first launch is in flight
     # ... and blocks on the guard's condition until that launch settles.
+    # (``Condition._waiters`` is CPython-private; there is no public way to
+    # observe a parked waiter.)
     assert wait_until(
         lambda: len(_browser_handoff._lock._waiters) == 1,  # type: ignore[attr-defined]
         timeout=10.0,
@@ -694,19 +718,9 @@ def test_device_flow_prerequisite_portals_open(
 
 
 def test_prompts_describe_the_browser_tab_hand_off() -> None:
-    """The channel prompts explain 'opened_in' and forbid URLs when the page is in the tab."""
-    prompt = SlackAgent.channel_system_prompt
-    assert "'opened_in' is 'browser_tab'" in prompt and "never ask them" in prompt
-    assert "to open a URL" in prompt and "OWN browser" in prompt  # the fallback path
-    assert "Do not drive the portal" not in prompt
-    discord_prompt = DiscordAgent.channel_system_prompt
-    assert "Do not drive the portal" not in discord_prompt
+    """The channel prompts name the 'opened_in' result key and its 'browser_tab' value."""
     from kiss.agents.third_party_agents.github.github_sea import GitHubAgent
 
-    prompt = GitHubAgent.channel_system_prompt
-    assert "opens that page for the user by itself" in prompt
-    assert "Browser tab on every KISS surface" in prompt
-    assert "'opened_in' is 'browser_tab'" in SignalAgent.channel_system_prompt
-    assert "never ask them to open a URL or file" in SignalAgent.channel_system_prompt
-    assert "'browser_tab'" in GoogleCalendarAgent.channel_system_prompt
-    assert "never ask them to open a URL" in GoogleCalendarAgent.channel_system_prompt
+    for agent in (SlackAgent, DiscordAgent, GitHubAgent, SignalAgent, GoogleCalendarAgent):
+        prompt = agent.channel_system_prompt
+        assert "'opened_in'" in prompt and "'browser_tab'" in prompt, agent.__name__

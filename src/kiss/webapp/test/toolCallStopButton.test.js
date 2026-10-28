@@ -9,7 +9,7 @@
 // `interruptTool` for the panel's tab and tool; the `tool_interrupt_ack`
 // receipt resets a rejected click; the arriving tool_result hides it.
 
-/* global require, console, process, setTimeout */
+/* global require, console, process */
 
 'use strict';
 
@@ -24,6 +24,8 @@ const {
   loadMainCss,
   click,
   MEDIA,
+  recordTimers,
+  fireTimers,
 } = require('./simplify2_harness');
 
 const {test, report} = makeRunner();
@@ -388,6 +390,8 @@ async function panelStopBody() {
   });
   const win = dom.window;
   const doc = win.document;
+  // The 30 ms reset timer is recorded and fired by hand below.
+  const resetTimers = recordTimers(win, 30);
   const s = doc.createElement('script');
   s.textContent = fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8');
   doc.head.appendChild(s);
@@ -435,11 +439,10 @@ async function panelStopBody() {
 
   click(win, btn);
   assert.strictEqual(stops, 2);
-  // The 30 ms reset timer is a jsdom window timer; it is armed before
-  // this node timer, so it fires first.  The assertions run here, in
-  // the test body: an assertion thrown inside a jsdom timer callback is
-  // swallowed by jsdom's error reporting and cannot fail the suite.
-  await new Promise(resolve => setTimeout(resolve, 80));
+  // The first click's timer was cleared by `_kissClearStopping`; only
+  // the second click's reset fires.
+  assert.strictEqual(resetTimers.filter(t => !t.cleared).length, 1);
+  fireTimers(resetTimers);
   assert.ok(
     !btn.classList.contains('stopping'),
     'the stopping state clears by itself after resetMs',

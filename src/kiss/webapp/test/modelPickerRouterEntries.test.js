@@ -62,7 +62,7 @@ function openPicker(win) {
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
-test('the router rows show their cost_label, priced rows show prices', () => {
+test('the router rows show their cost_label in their own vendor group, priced rows show prices', () => {
   const {win} = makePage();
   send(win, {type: 'models', models: MODEL_LIST, selected: REAL_MODEL});
 
@@ -75,14 +75,6 @@ test('the router rows show their cost_label, priced rows show prices', () => {
   const real = rows.find(r => r.name === REAL_MODEL);
   assert.ok(real, 'the picker must list the real model');
   assert.strictEqual(real.cost, '$5.00 / $25.00');
-  win.close();
-});
-
-test('the router rows sit in their own vendor group', () => {
-  const {win} = makePage();
-  send(win, {type: 'models', models: MODEL_LIST, selected: REAL_MODEL});
-
-  openPicker(win);
   const groups = Array.from(
     win.document.querySelectorAll('#model-list .model-group-hdr'),
   ).map(el => el.textContent);

@@ -31,7 +31,6 @@ from pathlib import Path
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
-from kiss.agents.sorcar.sorcar_agent import _WorktreeCleanupOutcome
 from kiss.tests.agents.sorcar.test_audit1020_merge_stop_stash import (
     USER_NOTES,
     _make_repo,
@@ -128,9 +127,7 @@ class TestCleanupStatusFailure(_MergeStopHarness):
 
             assert self.agent._retire_previous_worktree()
 
-            assert (
-                self.agent._last_preserve_outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
-            )
+            assert self.wt.wt_dir.exists(), "worktree deleted with the only copy"
             assert only_copy.read_text() == "exists nowhere else\n"
             warning = self.agent._merge_conflict_warning or ""
             assert str(self.wt.wt_dir) in warning and "git status failed" in warning

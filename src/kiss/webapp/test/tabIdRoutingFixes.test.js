@@ -18,10 +18,6 @@ function tabRecord(win, tabId) {
   return win._testApi.openTabs().find(t => t.id === tabId) || null;
 }
 
-function notificationToasts(win) {
-  return Array.from(win.document.querySelectorAll('[data-notification-id]'));
-}
-
 function testPhantomSubagentTabNotMaterialised() {
   const {win} = makePage();
   send(win, {
@@ -98,52 +94,8 @@ function testUnknownParentStillDropped() {
   console.log('  ok - unknown-parent openSubagentTab still dropped');
 }
 
-function testForeignTabNotificationDropped() {
-  const {win, posted} = makePage();
-  const ownTab = initialTabId(posted);
-
-  send(win, {
-    type: 'notification',
-    id: 'n-own',
-    severity: 'info',
-    message: 'own-tab toast',
-    tabId: ownTab,
-  });
-  assert.strictEqual(
-    notificationToasts(win).length,
-    1,
-    'a toast stamped with a LOCAL tab id must render',
-  );
-
-  send(win, {
-    type: 'notification',
-    id: 'n-foreign',
-    severity: 'info',
-    message: 'foreign-window toast',
-    tabId: 'foreign-window-tab',
-  });
-  const ids = notificationToasts(win).map(el =>
-    el.getAttribute('data-notification-id'),
-  );
-  assert.ok(
-    !ids.includes('n-foreign'),
-    "another window's tab-stamped notification must not render here",
-  );
-
-  send(win, {
-    type: 'notification',
-    id: 'n-global',
-    severity: 'info',
-    message: 'global toast',
-  });
-  assert.ok(
-    notificationToasts(win)
-      .map(el => el.getAttribute('data-notification-id'))
-      .includes('n-global'),
-    'a tabless (global) notification must still render',
-  );
-  console.log('  ok - notifications route by local tab ownership');
-}
+// Notification routing by tab ownership (local, foreign, tabless) is
+// pinned by taskToastRouting.test.js.
 
 function testBackgroundTabErrorRetained() {
   const {win, posted} = makePage();
@@ -202,7 +154,6 @@ function main() {
   testPhantomSubagentTabNotMaterialised();
   testOwnedTabConversionStillWorks();
   testUnknownParentStillDropped();
-  testForeignTabNotificationDropped();
   testBackgroundTabErrorRetained();
   testForeignTabErrorDropped();
   testActiveTabErrorRendered();

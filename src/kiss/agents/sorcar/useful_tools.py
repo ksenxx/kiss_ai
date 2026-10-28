@@ -368,7 +368,7 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
             while end < len(command) and not re.match(_PATH_END, command[end]):
                 end += 1
             hit = command[m.start() : end]
-            if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
+            if Path(hit).is_relative_to(wt_root):
                 continue
             if _worktree_index(Path(hit).parts[len(Path(main_repo).parts) :]) is not None:
                 # The worktree of a repository nested under the parent
@@ -610,26 +610,81 @@ def _edit_pairs(edits: str) -> list[tuple[str, str, bool]] | str:
     return pairs
 
 
+def _moved_by_later_edit(
+    placed: list[tuple[int, int, str]], starts: list[int], old_len: int, new: str,
+) -> list[tuple[int, int, str]]:
+    """Return the earlier edits' ``(position, occurrences, text)`` after a later edit.
+
+    The later edit replaced *old_len* characters at each of *starts*
+    (ascending, non-overlapping) with *new*.  An earlier edit below an
+    occurrence moves by the occurrence's net length; one inside an
+    occurrence was swallowed by it, so its report now points at the
+    replacement that stands there (never at a negative position).
+    """
+    shift = len(new) - old_len
+    moved: list[tuple[int, int, str]] = []
+    for at, count, text in placed:
+        above = sum(1 for s in starts if s + old_len <= at)
+        covering = [s for s in starts if s <= at < s + old_len]
+        if covering:
+            at, text = covering[0], new
+        moved.append((at + shift * above, count, text))
+    return moved
+
+
 def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
-    """Return whether *pattern* occurs in the job log at *log_path* (unreadable = no)."""
+    """Return whether *pattern* occurs in the job log at *log_path* (unreadable = no).
+
+    The whole log is searched every time: an anchored or multi-line
+    pattern (``^READY``, ``START[\\s\\S]*END``) only keeps its meaning
+    against the full text.
+    """
     try:
         return pattern.search(log_path.read_text(encoding="utf-8", errors="replace")) is not None
     except OSError:
         return False
 
 
-_FOREGROUND_SLEEP = re.compile(r"(?:^|[;&|(]\s*)sleep\s+(\d+(?:\.\d+)?)(?:\s*[;&|)]|\s*$)")
+#: A ``sleep N`` that starts a simple command (the separators and the
+#: trailing context are left in place so adjacent sleeps both match).
+_SLEEP_COMMAND = re.compile(
+    r"(?:^|[;&|(`\n][ \t]*)sleep[ \t]+(\d+(?:\.\d+)?)(?=[ \t]*(?:[;&|)`\n]|$))"
+)
+#: A heredoc from its ``<<TAG`` line through its terminator line: the
+#: ``<<TAG`` line, the quote around the tag (``''`` when unquoted), the
+#: tag and the body.
+_HEREDOC = re.compile(
+    r"(<<-?[ \t]*(['\"]?)(\w+)\2[^\n]*\n)((?:.*\n)*?[ \t]*\3[ \t]*$)", re.MULTILINE,
+)
+_COMMAND_SUBSTITUTION = re.compile(r"\$\(|`")
 FOREGROUND_SLEEP_MAX_SECONDS = 30
 
 
+def _drop_literal_heredoc_body(heredoc: re.Match[str]) -> str:
+    """Return the heredoc's ``<<TAG`` line alone when the shell only copies its body.
+
+    A quoted tag (``<<'EOF'``) makes the body literal; an unquoted one
+    expands ``$(...)`` and backticks, so such a body is kept for the
+    sleep scan.
+    """
+    if heredoc.group(2) or not _COMMAND_SUBSTITUTION.search(heredoc.group(4)):
+        return heredoc.group(1)
+    return heredoc.group(0)
+
+
 def sleep_guard(command: str) -> str | None:
-    """Refuse a foreground ``sleep N`` with N over :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
+    """Refuse a ``sleep N`` with N over :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
 
     A long sleep is a polling turn: the model pays a full step to wait.
     The wait belongs in ``bash_job(action="wait", until=<regex>,
     timeout_seconds=N)``, which blocks server-side at no step cost.
+    A ``sleep N &`` is refused too: the child keeps the call's output
+    pipe, so the call blocks until the sleep ends all the same.  Only a
+    sleep the shell never runs (a heredoc body without a command
+    substitution) is allowed.
     """
-    for match in _FOREGROUND_SLEEP.finditer(command):
+    command = _HEREDOC.sub(_drop_literal_heredoc_body, command)
+    for match in _SLEEP_COMMAND.finditer(command):
         if float(match.group(1)) > FOREGROUND_SLEEP_MAX_SECONDS:
             return (
                 f"REFUSED: the Bash call did NOT run: a foreground sleep of {match.group(1)}s "
@@ -772,6 +827,9 @@ def _run_one_command(
         launch), the combined output, and the wall time spent.
     """
     guard, timeout_seconds = _refuse_or_lift(command, work_dir, timeout_seconds)
+    # Every command of the fan-out is a foreground wait for the caller,
+    # so a long sleep is refused as in a foreground ``Bash`` call.
+    guard = guard or sleep_guard(command)
     if guard is not None:
         return -1, guard, 0.0
     started = time.monotonic()
@@ -809,16 +867,16 @@ def _stop_requested(stop_event: threading.Event | None) -> bool:
 
 
 def run_commands_pool(
-    commands: list[str],
+    commands: str,
     run_one: CommandRunner,
     max_workers: int,
     stop_event: threading.Event | None,
     max_output_chars: int,
 ) -> str:
-    """Run *commands* concurrently through *run_one* and render the report.
+    """Validate the ``run_commands_parallel`` arguments, run them via *run_one*, render the report.
 
-    The one engine behind both ``run_commands_parallel`` tools (host
-    shell and Docker container).  The workers watch ONE cancel event,
+    The one engine behind the ``run_commands_parallel`` tools (host
+    shell, Docker container, exec bridge).  The workers watch ONE cancel event,
     set here when the task's *stop_event* or the tool panel's Stop
     (:func:`kiss.core.tool_interrupt.current_tool_interrupt_event`,
     thread-local and therefore invisible to workers) fires; queued
@@ -828,7 +886,8 @@ def run_commands_pool(
     cancels everything before propagating.
 
     Args:
-        commands: The shell commands, already validated.
+        commands: The tool's ``commands`` argument: a JSON-encoded list of
+            shell command strings.
         run_one: ``run_one(command, cancel) -> (exit_code, output,
             seconds)``; must not raise.
         max_workers: Concurrency bound; ``0`` runs all commands at once.
@@ -836,15 +895,26 @@ def run_commands_pool(
         max_output_chars: Per-command output cap in the report.
 
     Returns:
-        The report (see :func:`_format_parallel_report`).
+        A report starting with a tally line
+        (``N commands: K succeeded, F failed, T timed out``) followed by
+        one section per command, in input order, giving its exit code,
+        wall time and (truncated) output (see
+        :func:`_format_parallel_report`).  A string starting with
+        ``Error:`` when the arguments were invalid.
 
     Raises:
         ToolCallInterrupted: When the tool panel's Stop was pressed.
     """
-    cancel = threading.Event()
-    pool = ThreadPoolExecutor(max_workers=max_workers or len(commands))
     try:
-        futures = [pool.submit(run_one, command, cancel) for command in commands]
+        command_list = parse_tasks_json(commands, name="commands")
+    except ValueError as e:
+        return f"Error: {e.args[0]}"
+    if max_workers < 0:
+        return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
+    cancel = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=max_workers or len(command_list))
+    try:
+        futures = [pool.submit(run_one, command, cancel) for command in command_list]
         while not all(f.done() for f in futures):
             if _stop_requested(stop_event):
                 cancel.set()
@@ -860,7 +930,7 @@ def run_commands_pool(
     pool.shutdown(wait=True)
     tool_interrupt.raise_if_interrupted()
     results = [(-1, NOT_STARTED, 0.0) if f.cancelled() else f.result() for f in futures]
-    return _format_parallel_report(commands, results, max_output_chars)
+    return _format_parallel_report(command_list, results, max_output_chars)
 
 
 def _format_parallel_report(
@@ -1561,8 +1631,8 @@ class UsefulTools:
                 return self._unread_edit_refusal(file_path, resolved, pairs[0][0])
             content = resolved.read_text(encoding="utf-8", newline="")
             crlf = "\r\n" in content
-            reports: list[str] = []
-            total = 0
+            # (position in the final content, occurrences, new text) per edit.
+            placed: list[tuple[int, int, str]] = []
             for index, (old, new, every) in enumerate(pairs, 1):
                 label = f"edit {index}: " if len(pairs) > 1 else ""
                 if old == new:
@@ -1585,9 +1655,17 @@ class UsefulTools:
                         f"Use replace_all=True to replace all occurrences."
                     )
                 position = content.find(old)
+                starts = (
+                    [m.start() for m in re.finditer(re.escape(old), content)]
+                    if every else [position]
+                )
+                placed = _moved_by_later_edit(placed, starts, len(old), new)
+                placed.append((position, count if every else 1, new))
                 content = content.replace(old, new) if every else content.replace(old, new, 1)
-                replaced = count if every else 1
-                total += replaced
+            resolved.write_text(content, encoding="utf-8", newline="")
+            self.written_files.add(resolved)
+            reports: list[str] = []
+            for index, (position, replaced, new) in enumerate(placed, 1):
                 first = line_of(content, position)
                 last = first + new.rstrip("\n").count("\n")
                 head = f"edit {index} ({replaced} occurrence(s)); " if len(pairs) > 1 else ""
@@ -1595,8 +1673,7 @@ class UsefulTools:
                     f"{head}lines {max(1, first - 3)}-{last + 3} after the edit:\n"
                     + numbered_region(content, first - 3, last + 3)
                 )
-            resolved.write_text(content, encoding="utf-8", newline="")
-            self.written_files.add(resolved)
+            total = sum(replaced for _, replaced, _ in placed)
             return (
                 f"Successfully replaced {total} occurrence(s) in {file_path}\n"
                 + "\n\n".join(reports)
@@ -1872,24 +1949,12 @@ class UsefulTools:
             ``Error:`` when the arguments were invalid.
         """
         del description
-        try:
-            command_list = parse_tasks_json(commands, name="commands")
-        except ValueError as e:
-            return f"Error: {e.args[0]}"
-        if max_workers < 0:
-            return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
         run_one = functools.partial(
             self._run_one_command_noting_views,
             work_dir=self.work_dir,
             timeout_seconds=timeout_seconds,
         )
-        return run_commands_pool(
-            command_list,
-            run_one,
-            max_workers,
-            self.stop_event,
-            max_output_chars,
-        )
+        return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
 
     def _consume_stream(
         self,

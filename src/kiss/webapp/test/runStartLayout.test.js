@@ -25,7 +25,7 @@ const {
   makePage: makeChatPage,
   click,
   send,
-  fakeMatchMedia,
+  stubDesktop,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -37,14 +37,9 @@ const FOLD_KEY = 'kiss-content-pane-folded';
  */
 function makePage(opts) {
   const {desktop = true} = opts || {};
-  function beforeScripts(win) {
-    win.Element.prototype.setPointerCapture = function () {};
-    win.Element.prototype.releasePointerCapture = function () {};
-    fakeMatchMedia(win, desktop);
-  }
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
-    beforeScripts,
+    beforeScripts: w => stubDesktop(w, desktop),
     sourceUrl: 'runstart-main.js',
   });
   OPEN_WINDOWS.push(win);

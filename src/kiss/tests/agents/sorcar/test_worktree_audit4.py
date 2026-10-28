@@ -33,7 +33,8 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
     repo_lock,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _WorktreeCleanupOutcome
+from kiss.tests.conftest import seed_worktree
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -174,13 +175,13 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
             (wt_dir / "work.txt").write_text("important work")
             GitWorktreeOps.commit_all(wt_dir, "important agent work")
 
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 branch="kiss/wt-test12",
                 original_branch="main",
                 wt_dir=wt_dir,
                 baseline_commit=baseline,
-            )
+            ))
 
             hooks_dir = repo / ".git" / "hooks"
             hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -281,18 +282,18 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         (wt_dir / "work.txt").write_text("work")
         GitWorktreeOps.commit_all(wt_dir, "committed work")
 
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch="kiss/wt-test16b",
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         result = agent._finalize_worktree()
 
-        assert result is True, (
-            "_finalize_worktree should return True on successful cleanup"
+        assert result is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, (
+            "_finalize_worktree should report COMMITTED_AND_REMOVED on successful cleanup"
         )
         assert not wt_dir.exists(), (
             "Worktree directory should be removed on success"
@@ -316,13 +317,13 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch="kiss/wt-test16c",
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         msg = agent.merge()
         hook.unlink()

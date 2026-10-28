@@ -35,6 +35,7 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
     _git,
 )
+from kiss.tests.conftest import seed_worktree
 
 PROMPT = "make the history panel occupy 1/4th of the browser screen"
 RESULT = "History panel now occupies 1/4 of the screen; 43 tests green."
@@ -362,13 +363,13 @@ class TestAgentMergeCarriesPromptAndResult:
 
         agent = ChatSorcarAgent("wt-merge-msg-test")
         baseline = GitWorktreeOps.head_sha(wt_dir)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             wt_dir=wt_dir,
             branch=branch,
             original_branch="main",
             baseline_commit=baseline,
-        )
+        ))
         return agent
 
     def test_merge_appends_prompt_and_result(self) -> None:
@@ -403,13 +404,13 @@ class TestAgentMergeCarriesPromptAndResult:
             from kiss.agents.sorcar.git_worktree import GitWorktree
 
             agent = self._make_agent(repo, branch, wt_dir)
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 wt_dir=wt_dir,
                 branch=branch,
                 original_branch="main",
                 baseline_commit=None,
-            )
+            ))
             agent_msg = _agent_manual_commit(wt_dir)
             agent._last_user_prompt = PROMPT
             agent._last_result_summary = RESULT

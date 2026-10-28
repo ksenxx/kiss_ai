@@ -21,75 +21,33 @@
 // in the sub-agent tab's transcript -- both while the tab is in the
 // background (rendered into its detached fragment) and once the user
 // activates it -- and must NOT leak into the parent tab's transcript.
-//
-// The page runs on the REAL webapp transport (media/transport.js
-// driving a fake WebSocket), so the frames the daemon would see are
-// exactly the ones the assertions inspect.
 
 /* global require, console */
 
 'use strict';
 
 const assert = require('assert');
-const {makeWebappClient} = require('./transport_page_helpers');
-const {send, clickTab} = require('./simplify2_harness');
+const {makePage, send, clickTab} = require('./simplify2_harness');
+const {bootParallelRun} = require('./subagent_tab_helpers');
 
 // ---------------------------------------------------------------------------
 // scenario helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Boot a client, run a one-task fan-out and answer the client's
+ * Boot a page, run a one-task fan-out and answer the page's
  * `resumeSession` the way `_replay_session` does for a sub-agent that
  * has not persisted any events yet.
  *
- * @returns {object} {win, all, parentId, taskId, subTabId}.
+ * @returns {object} {win, parentId, taskId, subTabId}.
  */
 function bootLiveSubagent() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  const ready = all().find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'the client must post ready with a tabId');
-  const parentId = ready.tabId;
+  const {win, parentId, taskIds, subTabIds} = bootParallelRun(1, makePage());
+  const taskId = taskIds[0];
+  const subTabId = subTabIds[0];
 
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: parentId,
-    startTs: Date.now(),
-  });
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub 1'])},
-  });
-
-  const taskId = 'sub-task-live-1';
-  send(win, {
-    type: 'new_tab',
-    task_id: taskId,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = all()
-    .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
-    .pop();
-  assert.ok(resume, 'new_tab must make the client resume the sub-agent');
-  const subTabId = resume.tabId;
-
-  // The daemon's reply for a just-started sub-agent: openSubagentTab,
-  // status running, then the (empty) transcript replay.
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: taskId,
-    isSubagentTab: true,
-    isDone: false,
-  });
+  // The daemon's reply for a just-started sub-agent continues after
+  // openSubagentTab with status running, then the (empty) transcript.
   send(win, {
     type: 'status',
     running: true,
@@ -105,7 +63,7 @@ function bootLiveSubagent() {
     chat_id: 'chat-live',
     extra: '',
   });
-  return {win, all, parentId, taskId, subTabId};
+  return {win, parentId, taskId, subTabId};
 }
 
 /**

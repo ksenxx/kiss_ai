@@ -173,7 +173,9 @@ class TestChatEvents:
         assert row["timestamp"] > 0
 
     def test_save_task_result_no_matching_task(self):
-        th._save_task_result(result="result", task="nonexistent")
+        th._save_task_result(
+            result="result", task_id="0123456789abcdef0123456789abcdef",
+        )
 
 
 class TestSaveTaskExtra:
@@ -211,15 +213,10 @@ class TestSaveTaskExtra:
         assert stored["is_parallel"] is True
         assert stored["steps"] == 9
 
-    def test_save_extra_by_task_name(self):
-        th._add_task("lookup task")
-        th._save_task_extra({"model": "gpt-4o"}, task="lookup task")
-        entries = th._load_history(limit=1)
-        stored = json.loads(str(entries[0]["extra"]))
-        assert stored["model"] == "gpt-4o"
-
     def test_save_extra_no_matching_task(self):
-        th._save_task_extra({"model": "x"}, task="nonexistent")
+        th._save_task_extra(
+            {"model": "x"}, task_id="0123456789abcdef0123456789abcdef",
+        )
 
     def test_extra_default_empty(self):
         th._add_task("no extra")

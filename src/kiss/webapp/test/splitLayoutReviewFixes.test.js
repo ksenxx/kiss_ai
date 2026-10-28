@@ -13,15 +13,14 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeSharedPage,
   send,
-  fakeMatchMedia,
-  MEDIA,
+  stubDesktop,
+  captureTimers,
+  loadMainCss,
 } = require('./simplify2_harness');
-const {inlineDesignTokens} = require('./designTokens');
+const {installTokenisedCss} = require('./designTokens');
 
 function makePage(opts) {
   const {desktopMatches = true} = opts || {};
@@ -29,9 +28,7 @@ function makePage(opts) {
   const {win, posted} = makeSharedPage({
     bodyClass: 'remote-chat',
     beforeScripts: win => {
-      win.Element.prototype.setPointerCapture = function () {};
-      win.Element.prototype.releasePointerCapture = function () {};
-      fireChange = fakeMatchMedia(win, desktopMatches);
+      ({fireChange} = stubDesktop(win, desktopMatches));
       stubBrowserTabView(win);
     },
   });
@@ -104,7 +101,7 @@ function openBrowser(win) {
   });
 }
 
-async function testRegistryChatIsRetiredOnlyOnceItsStateIsKnown() {
+function testRegistryChatIsRetiredOnlyOnceItsStateIsKnown() {
   const {win} = makePage();
   twoChats(win);
   assert.strictEqual(activeId(win), 'a1', 'the first registry chat is shown');
@@ -136,7 +133,7 @@ async function testRegistryChatIsRetiredOnlyOnceItsStateIsKnown() {
   win.close();
 }
 
-async function testEmptiedRegistryKeepsAChatBesideOpenFiles() {
+function testEmptiedRegistryKeepsAChatBesideOpenFiles() {
   const {win} = makePage();
   send(win, {
     type: 'tabs_state',
@@ -182,7 +179,7 @@ async function testEmptiedRegistryKeepsAChatBesideOpenFiles() {
   win.close();
 }
 
-async function testBrowserTabComesBackAfterStackedRoundTrip() {
+function testBrowserTabComesBackAfterStackedRoundTrip() {
   const {win, fireChange} = makePage();
   twoChats(win);
   openBrowser(win);
@@ -206,7 +203,7 @@ async function testBrowserTabComesBackAfterStackedRoundTrip() {
   win.close();
 }
 
-async function testComposerFocusRetriesLeaveTheBrowserScreen() {
+function testComposerFocusRetriesLeaveTheBrowserScreen() {
   const {win} = makePage();
   twoChats(win);
   openBrowser(win);
@@ -224,9 +221,13 @@ async function testComposerFocusRetriesLeaveTheBrowserScreen() {
   // user clicks into the browser before they fire.
   inp.focus();
   assert.strictEqual(win.document.activeElement, inp);
+  const timers = captureTimers(win);
   send(win, {type: 'focusInput'});
+  const retries = timers.filter(t => t.ms === 100 || t.ms === 300);
+  assert.strictEqual(retries.length, 2, 'the two retries are armed');
   screen.focus();
-  await new Promise(r => setTimeout(r, 450));
+  // The retries are fired by hand instead of waited for.
+  for (const t of retries) t.cb();
   assert.strictEqual(
     win.document.activeElement,
     screen,
@@ -235,63 +236,63 @@ async function testComposerFocusRetriesLeaveTheBrowserScreen() {
   win.close();
 }
 
-const CSS = inlineDesignTokens(
-  fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
-);
-
-function cssRule(selector) {
-  const source = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(source + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`, 'g');
-  let body = null;
-  let m;
-  while ((m = re.exec(CSS)) !== null) body = m[1];
-  assert.ok(body !== null, `CSS rule for ${selector} missing`);
-  return body;
+/**
+ * The computed split-grid styles of a desktop page with a content tab
+ * open: `#app`'s columns and the "new output" button's cell.  jsdom
+ * never matches a width media feature, so `desktopMedia` installs
+ * remote-codex.css's `@media (width >= 900px)` block as `@media screen`
+ * (false leaves it unmatched, as on a stacked phone layout).
+ */
+function splitGridStyles(desktopMedia) {
+  const {win} = makePage();
+  loadMainCss(win);
+  installTokenisedCss(win, 'remote-codex.css', {
+    applyMedia: desktopMedia ? /\(width >= 900px\)/ : null,
+  });
+  const doc = win.document;
+  doc.body.classList.add('content-pane-open');
+  const btn = doc.createElement('button');
+  btn.className = 'new-output-btn';
+  doc.getElementById('app').appendChild(btn);
+  const styles = {
+    columns: win.getComputedStyle(doc.getElementById('app')).gridTemplateColumns,
+    button: win.getComputedStyle(btn),
+  };
+  win.close();
+  return styles;
 }
 
-async function testGridFitsBetweenDockedPanels() {
-  // The split grid (two panes) applies while a content tab is open;
-  // without one #app is the chat column alone.
-  const app = cssRule('body.remote-chat.remote-desktop.content-pane-open #app');
-  const columns = /grid-template-columns:\s*([^;]+);/.exec(app);
-  assert.ok(columns, 'the split grid declares its columns');
-  const mins = columns[1].match(/minmax\(\s*min\(280px, 30%\)/g) || [];
+function testGridFitsBetweenDockedPanels() {
+  const {columns, button} = splitGridStyles(true);
+  const mins = columns.match(/minmax\(\s*min\(280px, 30%\)/g) || [];
   assert.strictEqual(
     mins.length,
     2,
-    'each pane yields below 280px when #app is narrow: ' + columns[1].trim(),
+    'each pane yields below 280px when #app is narrow: ' + columns,
   );
-  const btn = cssRule('body.remote-chat.remote-desktop .new-output-btn');
-  assert.ok(btn.includes('grid-area: chat'), 'the button shares the chat cell');
-  assert.ok(btn.includes('align-self: end'), 'pinned to the cell bottom');
-  assert.ok(btn.includes('justify-self: center'), 'centred in the cell');
-  // The rule belongs to the desktop grid: it must sit inside the
-  // >= 900px media block, never leak into the stacked flex layout.
-  const at = CSS.indexOf('body.remote-chat.remote-desktop .new-output-btn');
-  const mediaOpen = CSS.lastIndexOf('@media (width >= 900px)', at);
-  assert.ok(mediaOpen >= 0, 'the button rule is under a desktop media query');
-  const between = CSS.slice(mediaOpen, at);
-  let depth = 0;
-  for (const ch of between) {
-    if (ch === '{') depth += 1;
-    else if (ch === '}') depth -= 1;
-  }
-  assert.strictEqual(depth, 1, 'the button rule is inside that media block');
+  assert.strictEqual(button.gridArea, 'chat', 'the button shares the chat cell');
+  assert.strictEqual(button.alignSelf, 'end', 'pinned to the cell bottom');
+  assert.strictEqual(button.justifySelf, 'center', 'centred in the cell');
+  // The rule belongs to the desktop grid: outside the >= 900px media
+  // block (the stacked flex layout) neither the grid nor the cell apply.
+  const stacked = splitGridStyles(false);
+  assert.strictEqual(stacked.columns, 'none', 'no split grid when stacked');
+  assert.notStrictEqual(stacked.button.gridArea, 'chat', 'no chat cell when stacked');
 }
 
-(async () => {
-  const tests = [
-    testRegistryChatIsRetiredOnlyOnceItsStateIsKnown,
-    testEmptiedRegistryKeepsAChatBesideOpenFiles,
-    testBrowserTabComesBackAfterStackedRoundTrip,
-    testComposerFocusRetriesLeaveTheBrowserScreen,
-    testGridFitsBetweenDockedPanels,
-  ];
+const tests = [
+  testRegistryChatIsRetiredOnlyOnceItsStateIsKnown,
+  testEmptiedRegistryKeepsAChatBesideOpenFiles,
+  testBrowserTabComesBackAfterStackedRoundTrip,
+  testComposerFocusRetriesLeaveTheBrowserScreen,
+  testGridFitsBetweenDockedPanels,
+];
+try {
   for (const t of tests) {
-    await t();
+    t();
     console.log('ok -', t.name);
   }
-})().catch(e => {
+} catch (e) {
   console.error(e);
   process.exit(1);
-});
+}

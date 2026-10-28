@@ -929,11 +929,18 @@ def _inherit_from_parent(
         ),
     )
     docker_image = options.docker_image
-    container = getattr(getattr(parent_agent, "docker_manager", None), "container", None)
+    manager = getattr(parent_agent, "docker_manager", None)
+    container = getattr(manager, "container", None)
     if not docker_image and container is not None and getattr(container, "id", None):
         from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX
 
         docker_image = ATTACH_PREFIX + str(container.id)
+    elif not docker_image and (bridge_url := getattr(manager, "url", None)):
+        # The parent's tools run on a remote environment through an exec
+        # bridge (ExecBridge): the child shares it, never the host.
+        from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX
+
+        docker_image = BRIDGE_PREFIX + str(bridge_url)
     return Inherited(model_name, budget, options, docker_image)
 
 
@@ -967,6 +974,14 @@ def notice_job_id(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def result_summary(result: TaskResult) -> str:
+    """Return the summary text to report for *result*.
+
+    The run's text; a failed run without one reads ``"Task failed"``.
+    """
+    return result.text or ("" if result.success else "Task failed")
+
+
 def format_dispatch_result(
     result: TaskResult | str, timeout: float, alias: str = "", machine: str = "",
 ) -> str:
@@ -982,13 +997,12 @@ def format_dispatch_result(
     """
     if isinstance(result, str):
         return result
-    summary = result.text or ("" if result.success else "Task failed")
     ran = run_config_line({**result.settings, "timeout": timeout}, alias)
     return str(yaml.safe_dump(
         {
             "ran": f"{ran} machine={machine}" if machine else ran,
             "success": result.success,
-            "summary": summary,
+            "summary": result_summary(result),
         },
         sort_keys=False,
     ))
@@ -1246,10 +1260,9 @@ def dispatch_command(
     # task that reads as a review but asks for changes ("review and fix
     # ...") is an implementation task and keeps the full share, as it
     # keeps the full toolset (:meth:`SorcarAgent._tool_profile`).
+    review_task = is_review_task(prompt)
     is_review = options.tool_profile == "review" or (
-        not options.tool_profile
-        and is_review_task(prompt)
-        and not is_implementation_task(prompt)
+        not options.tool_profile and review_task and not is_implementation_task(prompt)
     )
     budget_cap = review_budget(work_dir) if budget is None and inherit and is_review else None
     inherited = inherit_from_parent(
@@ -1283,7 +1296,7 @@ def dispatch_command(
         "scope_work_dir": scope_work_dir,
         "parent_task_id": parent_task_id,
         "parent_tab_id": parent_tab_id,
-        "parent_reviewer": parent_reviewer or is_review_task(prompt),
+        "parent_reviewer": parent_reviewer or review_task,
         # A cron run's sub-tasks are cron rows too (an in-chat job's
         # children carry no unattended text, so the flag travels).
         "cron_job": cron_agent.is_cron_run(parent_agent),
@@ -1494,15 +1507,23 @@ def plan_run_agent(
     inherit = not channel and run_options.inherit is not False
     base_dir = parent_work_dir or str(kiss_home() / "agent_work")
     sea_command = ""
+    # The ``ran:`` line names the command a call that reached a
+    # registered SEA by its path could have used; a call by name needs
+    # no such hint.
+    show_alias = is_sea_path(agent.strip())
     if machine_name:
         # The call's own option is a path on the machine; the SEA's
         # ``work_dir`` setting is a path here, and the machine's copy of
         # the SEA applies its own there.
         work_dir = run_options.work_dir
         sea_path, sea_command = remote_sea(sea_path)
+        # ``remote_sea`` already walked the command registry: its
+        # ``sea_command`` is the alias (the default agent has none).
+        alias = sea_command if show_alias else ""
     else:
         chosen = run_options.work_dir or str(settings.get("work_dir") or "")
         work_dir = anchored_work_dir(chosen, base_dir) if chosen else base_dir
+        alias = command_alias(sea_path) if show_alias else ""
     kwargs: dict[str, Any] = {
         "name": name, "prompt": sub_task_prompt(task, parent_work_dir, inherit, machine_name),
         "sea_path": sea_path, "work_dir": work_dir,
@@ -1511,7 +1532,7 @@ def plan_run_agent(
         "options": run_options, "inherit": inherit, "settings": settings,
         "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
         "siblings": siblings, "machine": machine_name, "sea_command": sea_command,
-        "alias": command_alias(resolved[0]) if is_sea_path(agent.strip()) else "",
+        "alias": alias,
     }
     return kwargs
 
@@ -1600,13 +1621,17 @@ def _run_agent(
         blocking = _parse_bool("wait", wait) is not False
     except ValueError as e:
         return f"Error: {e}"
-    job = start_run_agent(
-        parent_work_dir, task, agent, model, tool_profile, max_budget, timeout, options,
-        parent_agent, machine=machine,
-    )
-    if isinstance(job, str):
-        return job
+    # The job is started inside the ``try``: a Stop landing between
+    # the start and the wait would otherwise leave a job nobody owns
+    # (a cron ``run_now`` dispatch) running on.
+    job: AgentJob | str | None = None
     try:
+        job = start_run_agent(
+            parent_work_dir, task, agent, model, tool_profile, max_budget, timeout, options,
+            parent_agent, machine=machine,
+        )
+        if isinstance(job, str):
+            return job
         if blocking:
             join_agent_job(job, job.timeout)
         else:
@@ -1617,7 +1642,8 @@ def _run_agent(
             # there is no tab and nothing to wait for, so the error is
             # the answer, as for a blocking call.
     except BaseException:
-        _abandon_job(job)
+        if isinstance(job, AgentJob):
+            _abandon_job(job)
         raise
     return _collect_job(job)
 
@@ -1719,9 +1745,9 @@ def run_agents_parallel(
     return str(yaml.safe_dump([_collect_job(job) for job in started], sort_keys=False))
 
 
-@dataclass
+@dataclass(eq=False)
 class AgentJob:
-    """A ``run_agent`` sub-task running on its own thread.
+    """A ``run_agent`` sub-task running on its own thread (identity equality).
 
     Every dispatch is one: a blocking call joins the thread for its
     ``timeout`` and takes the result when the thread finishes in time;
@@ -1854,9 +1880,24 @@ def start_agent_job(
 
 
 def _register_and_start(job: AgentJob) -> None:
-    """Enter *job* in the registry and start its thread; caller holds ``_AGENT_JOBS_LOCK``."""
+    """Enter *job* in the registry and start its thread; caller holds ``_AGENT_JOBS_LOCK``.
+
+    A thread that cannot start (the ``RuntimeError`` of thread
+    exhaustion, raised before any native thread exists) leaves no entry
+    behind: a registered job whose thread never runs would never
+    finish, so ``agent_job`` could neither wait for nor kill it, its
+    budget would stay reserved and the finish gate would name it until
+    the owner's run ends.  Only that error unregisters: a Stop's
+    ``KeyboardInterrupt`` landing inside ``start()`` may leave a thread
+    that runs later, which must stay registered for ``kill_jobs_of``
+    (see :func:`start_agent_job`).
+    """
     _AGENT_JOBS[job.job_id] = job
-    job.thread.start()
+    try:
+        job.thread.start()
+    except RuntimeError:
+        del _AGENT_JOBS[job.job_id]
+        raise
 
 
 def wait_until_started(job: AgentJob) -> None:
@@ -1888,7 +1929,7 @@ def _finish_agent_job(job: AgentJob, kwargs: dict[str, Any]) -> None:
             return
         job.outcome = dispatch_result(**kwargs)
         job.result = format_dispatch_result(
-            job.outcome, kwargs["timeout"], alias, kwargs.get("machine", ""),
+            job.outcome, job.timeout, alias, kwargs.get("machine", ""),
         )
     except BaseException as exc:  # noqa: BLE001 — the thread must record any failure
         logger.warning("agent job %s failed", job.job_id, exc_info=True)

@@ -92,9 +92,9 @@ logger = logging.getLogger(__name__)
 def inject_keyboard_interrupt(tid: int) -> int:
     """Raise ``KeyboardInterrupt`` asynchronously in thread *tid*.
 
-    Single shared wrapper (C-R5) used by
-    :meth:`_TaskRunnerMixin._force_stop_thread` and the shutdown path
-    in ``RemoteAccessServer._stop_active_agent_tasks``; the
+    Single shared wrapper (C-R5) behind :func:`inject_if_owned`, the
+    guarded step both the Stop watchdog and the shutdown sweep go
+    through (tests patch this name as the injection seam); the
     ``PyThreadState_SetAsyncExc`` call itself lives in
     :func:`kiss.core.tool_interrupt.inject_async_exception`, shared
     with the per-tool-call interrupt.
@@ -112,7 +112,7 @@ def inject_keyboard_interrupt(tid: int) -> int:
 
 def inject_if_owned(
     thread: threading.Thread,
-    still_owns: Callable[[], bool] | None,
+    still_owns: Callable[[], bool],
 ) -> int | None:
     """Inject ``KeyboardInterrupt`` into *thread* unless ownership was lost.
 
@@ -127,7 +127,7 @@ def inject_if_owned(
 
     Args:
         thread: The live worker thread to interrupt.
-        still_owns: Ownership guard (``None`` injects unconditionally).
+        still_owns: Ownership guard; ``False`` refuses the injection.
 
     Returns:
         ``None`` when *still_owns* refused (nothing injected), else the
@@ -138,14 +138,14 @@ def inject_if_owned(
     if tid is None:  # pragma: no cover — callers only pass started threads
         return 0
     with agent_state.STATE_LOCK:
-        if still_owns is not None and not still_owns():
+        if not still_owns():
             return None
         return inject_keyboard_interrupt(tid)
 
 
 def wait_for_thread_start(
     thread: threading.Thread,
-    still_owns: Callable[[], bool] | None,
+    still_owns: Callable[[], bool],
     deadline: float,
 ) -> bool:
     """Wait until *thread* has actually started, or ownership is lost.
@@ -180,10 +180,9 @@ def wait_for_thread_start(
         dropped or *deadline* passed first.
     """
     while thread.ident is None:
-        if still_owns is not None:
-            with agent_state.STATE_LOCK:
-                if not still_owns():
-                    return False
+        with agent_state.STATE_LOCK:
+            if not still_owns():
+                return False
         if time.monotonic() > deadline:  # pragma: no cover — only by stalling start()
             return False
         time.sleep(0.01)
@@ -416,6 +415,20 @@ def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
         seen.add(id(cur))
         cur = cur.__cause__ or cur.__context__
     return False
+
+
+def _is_cancellation(exc: BaseException, state: AgentState) -> bool:
+    """True when *exc* is the run's cancellation: a bare or wrapped ``KeyboardInterrupt``.
+
+    The bare interrupt is the stop (or shutdown) injected into the
+    task thread; the wrapped form is the same interrupt converted by the
+    SEA loader into its diagnostic error (:func:`_stop_interrupt_wrapped`).
+
+    Args:
+        exc: The exception a run step raised.
+        state: The run's registered agent state.
+    """
+    return isinstance(exc, KeyboardInterrupt) or _stop_interrupt_wrapped(exc, state)
 
 
 def build_task_extra_payload(
@@ -1307,20 +1320,16 @@ class _TaskRunnerMixin:
                 # Idempotent after a loop that ended on its own; for a
                 # setup failure it is the only end-of-loop call.
                 locked_call(self._state_lock, _end_run_before_loop, state)
-            if state is not None and (
-                isinstance(exc, KeyboardInterrupt) or _stop_interrupt_wrapped(exc, state)
-            ):
+            if state is not None and _is_cancellation(exc, state):
                 # A cancellation that landed before ``_run_task_inner``'s
                 # own handlers (setup, or the inner prologue) — as the
                 # bare ``KeyboardInterrupt``, or wrapped into the
-                # SEA loader's ``SeaError`` when the
-                # injection hit inside a getter.  It goes
-                # through the SAME helper as the inner sites, FIRST:
-                # ``_cancel_outcome`` acknowledges the stop, and until
-                # it has, the Stop watchdog keeps re-injecting into
-                # whatever this thread does next — including the
-                # logging and broadcasting below, which can block.  It
-                # also labels a shutdown as a shutdown.
+                # SEA loader's ``SeaError`` when the injection hit
+                # inside a getter.  ``_end_run_before_loop`` above has
+                # already acknowledged the stop (so the watchdog no
+                # longer re-injects into the logging and broadcasting
+                # below); ``_cancel_outcome`` is the same helper the
+                # inner sites use and labels a shutdown as a shutdown.
                 setup_fail_text, _ = self._cancel_outcome(state)
                 logger.info(
                     "%s during setup: tab_id=%s",
@@ -2142,9 +2151,7 @@ class _TaskRunnerMixin:
         agent.classify_task_for_run(
             model_name=model,
             task=_classify_task_text,
-            model_config=(
-                _agent_model_config if _agent_model_config is not None else _model_config
-            ),
+            model_config=_effective_config,
             enabled=_classify_enabled,
         )
         if getattr(agent, "_wt_pending", False):
@@ -2320,7 +2327,6 @@ class _TaskRunnerMixin:
                 # what was submitted.
                 _is_slash_run = display_prompt is not prompt and subtask_index == 0
                 state.last_user_prompt = display_prompt if _is_slash_run else task_prompt
-                state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
                 # publish an earlier subtask's suggestion.
                 suggested_next_task = ""
@@ -2346,11 +2352,7 @@ class _TaskRunnerMixin:
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
                         live_browser=self.browser_tabs,
                         use_memory=_agent_memory,
-                        model_config=(
-                            _agent_model_config
-                            if _agent_model_config is not None
-                            else _model_config
-                        ),
+                        model_config=_effective_config,
                         tools_hook=_tools_hook,
                         append_basic_tools=_append_basic_tools,
                         inherited_tools=_inherited_tools,
@@ -2480,7 +2482,6 @@ class _TaskRunnerMixin:
                     # an agent that has never published a row.
                     row_after_run = getattr(agent, "last_task_id", "") or None
                     task_history_id = row_after_run if row_after_run != row_before_run else None
-                    state.last_result_summary = result_summary
                 if subtask_failed:
                     # A failure aborts the queued follow-ups, so no
                     # further drain will happen: close the queue so
@@ -2551,44 +2552,30 @@ class _TaskRunnerMixin:
                     )
                 subtask_index += 1
         except BaseException as _outer_exc:
-            if result_summary == "Agent Failed Abruptly":
-                # ``_stop_interrupt_wrapped``: a stop injected while
-                # the SEA loader ran caller code surfaces here
-                # as an ``SeaError`` wrapping the interrupt — a
-                # cancellation, not a task error.
-                if isinstance(
-                    _outer_exc,
-                    KeyboardInterrupt,
-                ) or _stop_interrupt_wrapped(_outer_exc, state):
-                    result_summary, _cancel_event = self._cancel_outcome(state)
-                    task_end_event = task_end_event or _cancel_event
-                else:
-                    _exc_name = type(_outer_exc).__name__
-                    result_summary = f"Task failed: {_exc_name}: {_outer_exc}"
-                    task_end_event = task_end_event or {
-                        "type": "task_error",
-                        "text": f"{_exc_name}: {_outer_exc}",
-                    }
-            elif isinstance(
-                _outer_exc,
-                KeyboardInterrupt,
-            ) or _stop_interrupt_wrapped(_outer_exc, state):
-                # A stop/shutdown interrupt landing in the
-                # between-subtask bookkeeping — after ``agent.run``
-                # returned, before the next subtask started — misses
-                # the sentinel check above because ``result_summary``
-                # already carries the finished subtask's success
-                # summary.  ``_cancel_outcome`` must still run: it
-                # acknowledges the stop (without it the watchdog
-                # re-injected into the end-of-run cleanup, aborting
-                # persistence and the worktree presentation), labels a
-                # shutdown as a shutdown, and its label/event replace
-                # the success ones so the stopped run is not persisted
-                # — and auto-merged — as a completed success.
+            # Raised outside the per-subtask handlers: in the setup
+            # before the first ``agent.run`` (an unknown tool profile,
+            # the SEA loader, where a stop injected while caller code
+            # ran surfaces as an ``SeaError`` wrapping the interrupt)
+            # or in the between-subtask bookkeeping, where
+            # ``result_summary`` and ``task_end_event`` still carry the
+            # finished subtask's success.  Either way the raise is the
+            # run's outcome.  A cancellation goes through
+            # ``_cancel_outcome`` whatever the summary holds: it
+            # acknowledges the stop (without it the watchdog
+            # re-injected into the end-of-run cleanup, aborting
+            # persistence and the worktree presentation), labels a
+            # shutdown as a shutdown, and its label/event replace the
+            # success ones so the stopped run is not persisted — and
+            # auto-merged — as a completed success.
+            if _is_cancellation(_outer_exc, state):
                 result_summary, task_end_event = self._cancel_outcome(state)
             else:
-                task_end_event = task_end_event or {"type": "task_stopped"}
-            state.last_result_summary = result_summary
+                _exc_name = type(_outer_exc).__name__
+                result_summary = f"Task failed: {_exc_name}: {_outer_exc}"
+                task_end_event = {
+                    "type": "task_error",
+                    "text": f"{_exc_name}: {_outer_exc}",
+                }
             self._broadcast_failure_result(
                 agent=agent,
                 result_summary=result_summary,
@@ -2701,11 +2688,7 @@ class _TaskRunnerMixin:
                             task_id=hist_id,
                             tab_id=tab_id,
                         )
-                        _append_chat_event(
-                            dict(followup_event),
-                            task_id=hist_id,
-                            task=prompt,
-                        )
+                        _append_chat_event(dict(followup_event), task_id=hist_id)
                     self.printer.cleanup_task(hist_id)
                     task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
@@ -2966,7 +2949,7 @@ class _TaskRunnerMixin:
             {"type": "task_done"} if success else {"type": "task_error"},
             task_id=task_id,
         )
-        _save_task_result(result=text, task_id=task_id, task=prompt, success=success)
+        _save_task_result(result=text, task_id=task_id, success=success)
         self.printer.cleanup_task(str(task_id))
 
     def _task_printed_a_result(self, agent: object) -> bool:
@@ -3341,7 +3324,7 @@ class _TaskRunnerMixin:
             task_thread = owner_state.task_thread if owner_state is not None else None
             owner_task_id = owner_state.task_id if owner_state is not None else ""
 
-        # Ident-aware liveness, matching ``AgentState.thread_alive()``
+        # Ident-aware liveness of the thread captured under the lock
         # (S3-05 / C-R4): ``_cmd_run`` installs and registers the
         # worker thread, then writes the tab registry and broadcasts
         # ``clear`` BEFORE ``thread.start()``.  A stop processed in
@@ -3350,9 +3333,7 @@ class _TaskRunnerMixin:
         # watchdog — leaving nothing to enforce the stop against the
         # run's untrusted setup code (SEA getters, tools
         # files), which never checks the cooperative event.
-        thread_alive = task_thread is not None and (
-            task_thread.ident is None or task_thread.is_alive()
-        )
+        thread_alive = agent_state.thread_alive(task_thread)
         if stop_event is None and not thread_alive:
             # A stop the server cannot route used to vanish behind a
             # disabled logger.debug, so a mis-targeted click looked
@@ -3456,7 +3437,7 @@ class _TaskRunnerMixin:
     @staticmethod
     def _force_stop_thread(
         task_thread: threading.Thread,
-        still_owns: Callable[[], bool] | None = None,
+        still_owns: Callable[[], bool],
     ) -> None:
         """Watchdog that forces ``KeyboardInterrupt`` in *task_thread*.
 
@@ -3469,7 +3450,7 @@ class _TaskRunnerMixin:
 
         Args:
             task_thread: The thread running the task being stopped.
-            still_owns: Optional ownership guard evaluated — under
+            still_owns: Ownership guard evaluated — under
                 :data:`agent_state.STATE_LOCK` — immediately
                 before every injection.  When it returns ``False`` the
                 watchdog exits without injecting: the task being
@@ -3520,11 +3501,7 @@ class _TaskRunnerMixin:
     ) -> None:
         """Under ``_state_lock``: drop stale answers, record *question* as pending, broadcast it."""
         if q is not None:
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
+            agent_state.drain_queue(q)
         if state is not None:
             state.pending_ask_question = question
         self.printer.broadcast({"type": "askUser", "question": question})

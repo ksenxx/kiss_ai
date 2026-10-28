@@ -322,6 +322,23 @@ class TabRegistry:
         """Return a deep copy of the ordered tab entries."""
         return locked_call(self._lock, self._snapshot_locked)
 
+    def work_dir_of(self, tab_id: str) -> str:
+        """Return the work directory pinned to *tab_id*.
+
+        Args:
+            tab_id: The shared tab identifier.
+
+        Returns:
+            The tab's ``workDir``; ``""`` when the tab is not listed or
+            has none pinned.
+        """
+        return locked_call(self._lock, self._work_dir_of_locked, tab_id)
+
+    def _work_dir_of_locked(self, tab_id: str) -> str:
+        """Under ``_lock``: the body of :meth:`work_dir_of`."""
+        entry = self._find_locked(tab_id)
+        return entry["workDir"] if entry is not None else ""
+
     def _snapshot_locked(self) -> list[dict[str, str]]:
         """Under ``_lock``: the body of :meth:`snapshot`."""
         return [dict(entry) for entry in self._tabs]
@@ -650,11 +667,12 @@ class TabRegistry:
 
     def _close_tab_locked(self, tab_id: str) -> int:
         """Under ``_lock``: the body of :meth:`close_tab`."""
-        entry = self._find_locked(_clean_str(tab_id))
+        tab_id = _clean_str(tab_id)
+        entry = self._find_locked(tab_id)
         if entry is None:
             return 0
         self._tabs.remove(entry)
-        self._generations.pop(_clean_str(tab_id), None)
+        self._generations.pop(tab_id, None)
         token = self._removal_token_locked()
         self._save_locked()
         return token
@@ -723,6 +741,43 @@ class TabRegistry:
         self._generations.pop(tab_id, None)
         self._save_locked()
         return True
+
+    def retitle_if_generation(self, tab_id: str, title: str, generation: int) -> bool:
+        """Set *tab_id*'s title only if nobody republished it since *generation*.
+
+        The conditional twin of a title-only :meth:`update_tab` for a
+        caller taking back the title its OWN publication replaced (a
+        submit of a bound tab that turned out to open a file, see
+        :mod:`kiss.server.remote_tabs`): when a later publication
+        stamped the tab with a newer token, the stale restore no-ops
+        instead of overwriting the newer owner's title.  The token
+        comparison and the update are one atomic operation under the
+        registry lock; a restore that applies is a publication of its
+        own (it re-stamps the tab).
+
+        Args:
+            tab_id: The shared tab identifier.
+            title: The title to put back.
+            generation: The token returned by the publication being
+                undone.
+
+        Returns:
+            ``True`` when the tab still carried *generation* and its
+            title changed.
+        """
+        tab_id = _clean_str(tab_id)
+        if generation <= 0:
+            return False
+        return locked_call(
+            self._lock, self._retitle_if_generation_locked, tab_id, title, generation,
+        )
+
+    def _retitle_if_generation_locked(self, tab_id: str, title: str, generation: int) -> bool:
+        """Under ``_lock``: the body of :meth:`retitle_if_generation`."""
+        if self._generations.get(tab_id, 0) != generation:
+            return False
+        changed, _, _ = self._update_tab_locked(tab_id, None, title, None, None, None, False)
+        return changed
 
     def update_tab(
         self,

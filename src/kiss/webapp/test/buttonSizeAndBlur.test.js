@@ -80,9 +80,8 @@ function testInputFooterButtonsAreBigger() {
     assertAtLeast(svg.getAttribute('height'), 16, '#' + id + ' svg height');
   }
   const uploadSvg = cssRule(win, '#upload-btn svg');
-  if (uploadSvg && uploadSvg.width) {
-    assertAtLeast(uploadSvg.width, 16, '#upload-btn svg CSS width');
-  }
+  assert.ok(uploadSvg, 'main.css must size #upload-btn svg');
+  assertAtLeast(uploadSvg.width, 16, '#upload-btn svg CSS width');
   win.close();
   console.log('  ok - input-footer buttons are bigger');
 }
@@ -212,7 +211,10 @@ function testButtonsLoseFocusAfterClick() {
   console.log('  ok - buttons lose focus after click');
 }
 
-function testTipsCloseLosesFocusAndClosesPanel() {
+// The tips X removes the whole panel (tips.js `this.remove()`), which is
+// what takes focus off the button: a detached element can never be the
+// document's activeElement, so no separate blur assertion is meaningful.
+function testTipsCloseClosesPanel() {
   const {win} = makePage();
   const doc = win.document;
 
@@ -230,13 +232,8 @@ function testTipsCloseLosesFocusAndClosesPanel() {
     null,
     'clicking the tips X must remove the panel',
   );
-  assert.notStrictEqual(
-    doc.activeElement,
-    close,
-    'the tips X must not keep focus after being clicked',
-  );
   win.close();
-  console.log('  ok - tips X closes the panel without keeping focus');
+  console.log('  ok - tips X closes the panel');
 }
 
 function main() {
@@ -245,7 +242,7 @@ function main() {
   testTabBarPlusAndSettingsAreBigger();
   testCloseButtonsAreBigger();
   testButtonsLoseFocusAfterClick();
-  testTipsCloseLosesFocusAndClosesPanel();
+  testTipsCloseClosesPanel();
   console.log('all ok');
 }
 

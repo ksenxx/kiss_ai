@@ -408,22 +408,27 @@ def test_path_unsafe_params_rejected(backend) -> None:
     assert server.requests == []
 
 
+def _call_every_tool(b: GoogleSheetsChannelBackend) -> list[str]:
+    """Invoke every backend tool once with valid arguments; return the results."""
+    return [
+        b.gsheets_create_spreadsheet("t"),
+        b.gsheets_get_info("ss1"),
+        b.gsheets_get_values("ss1", "A1"),
+        b.gsheets_update_values("ss1", "A1", "[[1]]"),
+        b.gsheets_append_values("ss1", "A1", "[[1]]"),
+        b.gsheets_clear_values("ss1", "A1"),
+        b.gsheets_add_sheet("ss1", "T"),
+        b.gsheets_batch_update("ss1", "[]"),
+        b.gsheets_list_spreadsheets(),
+    ]
+
+
 def test_unauthorized_token_returns_ok_false(backend, composio) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
     b, _ = backend
     composio.token = "wrong-token"
-    for call in (
-        lambda: b.gsheets_create_spreadsheet("t"),
-        lambda: b.gsheets_get_info("ss1"),
-        lambda: b.gsheets_get_values("ss1", "A1"),
-        lambda: b.gsheets_update_values("ss1", "A1", "[[1]]"),
-        lambda: b.gsheets_append_values("ss1", "A1", "[[1]]"),
-        lambda: b.gsheets_clear_values("ss1", "A1"),
-        lambda: b.gsheets_add_sheet("ss1", "T"),
-        lambda: b.gsheets_batch_update("ss1", "[]"),
-        lambda: b.gsheets_list_spreadsheets(),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert "401" in result["error"]
 
@@ -444,18 +449,8 @@ def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> Non
     b, _ = backend
     b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._drive_base_url = f"http://127.0.0.1:{refusing_port}/drive/v3"
-    for call in (
-        lambda: b.gsheets_create_spreadsheet("t"),
-        lambda: b.gsheets_get_info("ss1"),
-        lambda: b.gsheets_get_values("ss1", "A1"),
-        lambda: b.gsheets_update_values("ss1", "A1", "[[1]]"),
-        lambda: b.gsheets_append_values("ss1", "A1", "[[1]]"),
-        lambda: b.gsheets_clear_values("ss1", "A1"),
-        lambda: b.gsheets_add_sheet("ss1", "T"),
-        lambda: b.gsheets_batch_update("ss1", "[]"),
-        lambda: b.gsheets_list_spreadsheets(),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert result["error"]
 

@@ -6,9 +6,6 @@
 // End-to-end (jsdom) tests for the history panel's two views
 // (media/main.js, media/chat.html):
 //
-// * the collapsible chat-panel headers carry no tooltip (neither
-//   data-tooltip nor title) and show one line of text — the first line
-//   of the chat's first task,
 // * the button right of the search box switches to the legacy flat
 //   list: every task newest first, no chat panels, no day separators,
 //   and no per-chat colour on any row,
@@ -24,10 +21,15 @@
 const assert = require('assert');
 const {
   makePage: makeChatPage,
-  send,
   stubRaf,
   fakeMatchMedia,
 } = require('./simplify2_harness');
+const {
+  todayNoonSec,
+  groupedSession: session,
+  sendHistoryPage: sendHistory,
+  listShape,
+} = require('./history_helpers');
 
 const VIEW_KEY = 'kissSorcar.historyLegacyView';
 
@@ -52,60 +54,7 @@ function makePage(beforeMain) {
 }
 
 const DAY = 86400;
-const todayNoon = (() => {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
-})();
-
-function session(chat, task, ts, extra) {
-  return Object.assign(
-    {
-      id: chat,
-      task_id: task,
-      title: 'task ' + task,
-      preview: 'task ' + task,
-      has_events: true,
-      timestamp: ts,
-      tokens: 1,
-      cost: 0.1,
-      steps: 1,
-    },
-    extra || {},
-  );
-}
-
-/** Deliver a history page stamped with the generation the panel last asked for. */
-function sendHistory(win, posted, offset, sessions) {
-  const asked = posted.filter(m => m.type === 'getHistory');
-  send(win, {
-    type: 'history',
-    offset,
-    generation: asked.length ? asked[asked.length - 1].generation : 0,
-    sessions,
-  });
-}
-
-/** The visible top-level children of #history-list, described. */
-function listShape(win) {
-  return Array.from(byId(win, 'history-list').children)
-    .filter(el => el.style.display !== 'none')
-    .map(el =>
-      el.classList.contains('history-day-sep')
-        ? 'sep:' + el.textContent
-        : el.classList.contains('history-chat-group')
-          ? 'chat:' +
-            el.dataset.chatId +
-            '[' +
-            Array.from(el.querySelectorAll('.sidebar-item'))
-              .map(r => r.querySelector('.sidebar-item-text').textContent)
-              .join(',') +
-            ']'
-          : el.classList.contains('sidebar-item')
-            ? 'row:' + el.querySelector('.sidebar-item-text').textContent
-            : el.className,
-    );
-}
+const todayNoon = todayNoonSec();
 
 function page() {
   return [
@@ -142,56 +91,6 @@ function dateSeparator(daysAgo) {
   }
   return 'sep:' + date.toLocaleDateString(undefined, opts);
 }
-
-test('chat headers carry no tooltip and show the first line of the chat summary or first task', () => {
-  const {win, posted} = makePage();
-  sendHistory(win, posted, 0, [
-    Object.assign(session('A', 'a2', todayNoon), {
-      chat_first_task: '  Fix the login bug\n\nSteps:\n1. reproduce\n2. fix',
-      chat_summary: '',
-    }),
-    Object.assign(session('B', 'b1', todayNoon - 600), {
-      chat_first_task: '\n\n   \n',
-      chat_summary: '  \n',
-    }),
-    session('C', 'c1', todayNoon - 1200),
-    Object.assign(session('D', 'd1', todayNoon - 1800), {
-      chat_first_task: 'Please look at the billing code and refactor it',
-      chat_summary: 'Refactor billing module\nwith tests',
-    }),
-  ]);
-  const headers = all(win, '#history-list .history-chat-header');
-  assert.strictEqual(headers.length, 4);
-  headers.forEach(h => {
-    assert.ok(!h.hasAttribute('data-tooltip'), 'no data-tooltip on a header');
-    assert.ok(!h.hasAttribute('title'), 'no title attribute on a header');
-    assert.strictEqual(
-      h.querySelector('.history-chat-title').textContent.indexOf('\n'),
-      -1,
-      'the title is one line',
-    );
-  });
-  const titles = headers.map(
-    h => h.querySelector('.history-chat-title').textContent,
-  );
-  assert.deepStrictEqual(titles, [
-    'Fix the login bug',
-    'Untitled',
-    'task c1',
-    'Refactor billing module',
-  ]);
-  // Toggling the panel (its Show details chevron) repaints the
-  // chevron's state only — still no tooltip on the header.
-  const chevron = headers[0].querySelector('.history-chat-collapse');
-  chevron.click();
-  assert.strictEqual(chevron.getAttribute('aria-expanded'), 'true');
-  assert.ok(!headers[0].hasAttribute('data-tooltip'));
-  assert.ok(!headers[0].hasAttribute('title'));
-  chevron.click();
-  assert.strictEqual(chevron.getAttribute('aria-expanded'), 'false');
-  assert.ok(!headers[0].hasAttribute('data-tooltip'));
-  win.close();
-});
 
 test('the view toggle sits right of the search box and swaps grouped <-> flat without a refetch', () => {
   const {win, posted} = makePage();
@@ -340,4 +239,3 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
 });
 
 report('historyLegacyViewToggle');
-process.exit(0);

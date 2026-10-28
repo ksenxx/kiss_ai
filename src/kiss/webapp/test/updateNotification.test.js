@@ -8,12 +8,13 @@
 // The sticky update notification's markup (sticky flag, SVG icon, aria
 // label) and its lifecycle across `available: false` / re-broadcast.  The
 // badge icon and the Update click posting `runUpdate` are pinned by
-// simplify2_update_badge.test.js.
+// simplify2_update_badge.test.js.  main.js renders the toast
+// synchronously inside its message handler, so every check is direct.
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send} = require('./simplify2_harness');
 
-async function runTests() {
+function runTests() {
   const wv = makePage();
   try {
     send(wv.win, {
@@ -23,8 +24,9 @@ async function runTests() {
       current: '2026.6.29',
     });
 
-    const toast = await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification'),
+    const toast = wv.win.document.querySelector('.kiss-notification');
+    assert.ok(
+      toast,
       'update_available with available:true must render a permanent page notification',
     );
 
@@ -65,8 +67,8 @@ async function runTests() {
       latest: '',
       current: '',
     });
-    await waitFor(
-      () => !wv.win.document.querySelector('.kiss-notification'),
+    assert.ok(
+      !wv.win.document.querySelector('.kiss-notification'),
       'available:false broadcast must dismiss the permanent update notification',
     );
 
@@ -76,8 +78,8 @@ async function runTests() {
       latest: '9999.0.0',
       current: '2026.6.29',
     });
-    await waitFor(
-      () => wv.win.document.querySelector('.kiss-notification'),
+    assert.ok(
+      wv.win.document.querySelector('.kiss-notification'),
       'second broadcast must re-create the permanent notification',
     );
   } finally {
@@ -85,13 +87,10 @@ async function runTests() {
   }
 }
 
-runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.stack ? err.stack : err);
-    process.exit(1);
-  },
-);
+try {
+  runTests();
+  console.log('\nAll tests passed');
+} catch (err) {
+  console.error('FAIL:', err && err.stack ? err.stack : err);
+  process.exit(1);
+}

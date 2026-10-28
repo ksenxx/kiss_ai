@@ -17,6 +17,10 @@
 
 #### `kiss.core.kiss_agent` — *Core KISS agent implementation with native function calling support.*
 
+##### `class NativeTurn` — The record of one turn's natively run tool calls.
+
+**Constructor:** `NativeTurn() -> None`
+
 ##### `class KISSAgent(Base)` — A KISS agent using native function calling.
 
 **Constructor:** `KISSAgent(name: str) -> None`
@@ -64,6 +68,8 @@
 - `args`: The arguments of the call.
 - `tool`: The tool callable, for its ``unknown_arguments_hint``.
 - **Returns:** The hint (starting with a newline), or ``""`` when every argument is a parameter or the tool takes no ``options``.
+
+**`stop_reason_of`** — Why the provider ended *response*: Anthropic's ``stop_reason``, OpenAI's finish reason. Chat completions carry ``choices[0].finish_reason``; the Responses API ``status`` (``completed``) or ``incomplete_details.reason`` (``max_output_tokens``).  ``None`` when the response says nothing.<br/>`def stop_reason_of(response: Any) -> str | None`
 
 ---
 
@@ -168,7 +174,7 @@
   - `inherited_tools`: Extra tools taken over from the task that dispatched this run (a ``run_agent`` sub-task gets the caller's SEA ``tools()``, see ``task_runner``).  Added after the built-in toolset and *tools*; one whose name this run already has (a built-in the caller lacked, or one of *tools*) is skipped rather than registered twice.  ``None`` (default) adds nothing.
   - `llm_call_hook`: Optional hook forwarded to the underlying :meth:`kiss.core.kiss_agent.KISSAgent.run` of every sub-session this agent runs (see that docstring): called before every LLM call with the new messages about to be sent, and its return value replaces them.  Applies to this agent only, not to ``run_parallel`` sub-agents. Defaults to None (no hook).
   - `tool_call_hook`: Optional hook forwarded to the underlying :meth:`kiss.core.kiss_agent.KISSAgent.run` of every sub-session this agent runs (see that docstring): called before every tool call with the tool's name and arguments and returns a :class:`~kiss.core.tool_verdict.Verdict` (``ALLOW``, or ``refuse(text)``: the call is suppressed and the model reads *text* as its result).  Applies to this agent only, not to ``run_parallel`` sub-agents.  Defaults to None (no hook).
-  - `use_memory`: Per-run persistent-memory toggle (:mod:`kiss.core.memoryfield`).  ``True`` gives the run the ``memory_*`` tools and the ``MEMORY_PROTOCOL`` prompt block, ``False`` withholds them, and ``None`` (the default) falls back to the ``KISS_USE_MEMORY`` environment variable / the stored ``use_memory`` setting (see :func:`_memory_settings`).  A boolean never bypasses the hard gates of :func:`_memory_root_for_run` (stripped basic tools, Docker runs, a caller ``model_config["system_instruction"]``).  Forwarded to every ``run_parallel`` sub-agent, so one override governs the whole task tree.
+  - `use_memory`: Per-run persistent-memory toggle (:mod:`kiss.core.memoryfield`).  ``True`` gives the run the ``memory_*`` tools and the ``MEMORY_PROTOCOL`` prompt block, ``False`` withholds them, and ``None`` (the default) falls back to the ``KISS_USE_MEMORY`` environment variable / the stored ``use_memory`` setting (see :func:`_memory_settings`).  A boolean never bypasses the hard gates of :func:`_memory_root_for_run` (stripped basic tools, a tool profile without memory tools, Docker runs, a caller ``model_config["system_instruction"]``).  Forwarded to every ``run_parallel`` sub-agent, so one override governs the whole task tree.
   - `tool_profile`: Name of the tool profile this run's built-in toolset is cut down to — a key of :data:`TOOL_PROFILES` (the composites ``"full"``, ``"review"``, ``"assistant"``, ``"bash"`` or the groups ``"shell"``, ``"edit"``, ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``, ``"skills"``, ``"user"``, ``"decide"``, ``"control"``), several keys joined with ``+`` (``"shell+edit+browser"`` keeps the union of their tools; see :func:`resolve_tool_profile`), or ``""`` (the default) to let :meth:`_tool_profile` decide (``full`` for a top-level task, ``review`` for a reviewer sub-agent). Applies to this agent only: ``run_parallel`` children pick their own profile.
   - `system_prompt_hook`: The SEA's ``system_prompt`` method (:func:`kiss.agents.sorcar.sea_commands.base_system_prompt`): called once with the assembled system prompt (base or *base_system_prompt*, plus *system_prompt*) and its return value is the run's system prompt, verbatim.  Not forwarded to sub-agents (their own SEA layers apply theirs; they inherit *base_system_prompt* and *system_prompt* as given).  ``None`` (default) changes nothing.
   - `tools_hook`: The SEA's ``tools`` method (:func:`kiss.agents.sorcar.sea_commands.base_tools`): called once by :meth:`perform_task` with the built-in toolset plus *tools* and *inherited_tools*, and its return value is the run's toolset.  ``None`` (default) changes nothing.
@@ -222,7 +228,7 @@
 - `name`: The profile name, e.g. ``"review"`` or ``"shell+edit+browser"``.
 - **Returns:** The allowed tool names, or ``None`` for everything.
 
-**`summary`** — Record a progress summary at a natural checkpoint (a plan made, a milestone reached). The framework writes a recap of the tool calls every 10 steps on its own; call this only when you have something the recap cannot say.<br/>`def summary(description: str) -> str`
+**`summary`** — Every 10 steps: summarize your steps since the last `summary` call.<br/>`def summary(description: str) -> str`
 
 - `description`: Natural language summary in 5-10 sentences of what the agent did since the last call to `summary`, written in Markdown format (use bullet lists for the steps, and ``**bold**`` / backtick code spans).
 - **Returns:** A short confirmation string.
@@ -233,7 +239,7 @@
 - `user_prompt`: The user's task prompt, woven into the commit message (or its fallback), or ``None`` when unavailable.
 - `message_fn`: Callable producing a commit message from ``(commit_dir, user_prompt, task_result)``.
 - `task_result`: The task's result summary, appended to the commit message (or its fallback) under a ``Result:`` heading, or ``None`` when unavailable.
-- `notify_fn`: Optional UI callback invoked at two life-cycle points so the chat page can render toasts: - ``notify_fn("generating", "")`` immediately before *message_fn* runs (typically a slow LLM call) so the user sees "Generating commit message" while the LLM works. - ``notify_fn("committed", subject)`` immediately after a successful commit, where *subject* is the first non-empty line of the committed message. Both hooks are SKIPPED when there is nothing to commit (no staged diff after the initial ``stage_all``), so the chat page never sees a misleading "Generating commit message" toast without a follow-up.  When ``commit_staged`` returns ``False`` after *message_fn* (e.g. a pre-commit hook rejected the commit), ``notify_fn("failed", "")`` is invoked instead so the sticky "generating" toast always gets a terminal update. All ``notify_fn`` exceptions are swallowed so a broken UI hook can never block the commit itself.
+- `notify_fn`: Optional UI callback invoked at two life-cycle points so the chat page can render toasts: - ``notify_fn("generating", "")`` immediately before *message_fn* runs (typically a slow LLM call) so the user sees "Generating commit message" while the LLM works. - ``notify_fn("committed", subject)`` immediately after a successful commit, where *subject* is the first non-empty line of the committed message. Both hooks are SKIPPED when there is nothing to commit (no staged diff after the initial ``stage_all``), so the chat page never sees a misleading "Generating commit message" toast without a follow-up.  When ``commit_staged`` returns ``False`` after *message_fn* (e.g. a pre-commit hook rejected the commit), or when a Stop (``KeyboardInterrupt``) lands during *message_fn*, ``notify_fn("failed", "")`` is invoked instead so the sticky "generating" toast always gets a terminal update. All ``notify_fn`` exceptions are swallowed so a broken UI hook can never block the commit itself.
 - **Returns:** True if a commit was created, False if nothing to commit.
 
 **`subagent_parent_tab_id_of`** — Return the frontend tab id children of *parent_agent* hang off. The daemon's helper sub-agents (task update, merge-conflict resolver, ``run_agent`` dispatches) stamp this as their ``parent_tab_id``; it is :meth:`SorcarAgent._subagent_parent_tab_id` when the parent has it, else the parent's raw ``_tab_id`` (a duck-typed parent).  A parent that is itself a sub-agent carries a synthetic ``_tab_id`` no chat page has, so stamping that raw id would make every client drop the child's ``new_tab``.<br/>`def subagent_parent_tab_id_of(parent_agent: Any) -> str`
@@ -390,11 +396,11 @@
   - `ctx`: The transport context of the current call.
 
 - **broadcast_machines** — Send a fresh ``machines`` reply (pinged anew) to every connection. Called by the backend when ``machines.json`` changed under the daemon (a ``/machine add`` task or the CLI registered or removed a machine), so every surface's MACHINES subpanel refreshes at once -- and unfolds for a new machine -- instead of at its next poll.  The reply's ``action`` is ``""`` as for a poll.<br/>`async broadcast_machines() -> None`
-- **machine_action** — Add or remove a machine for the MACHINES subpanel and send the fresh list. Applied by :func:`kiss.server.sidebar_panels.machine_action`; the direct reply is a ``machines`` message (as for ``getMachines``, pinged anew) carrying the ``action`` and an ``error`` text when it was refused.<br/>`async machine_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **machine_action** — Add or remove a machine for the MACHINES subpanel and send the fresh list. Applied by :func:`kiss.server.sidebar_panels.machine_action`; the direct reply is a ``machines`` message (as for ``getMachines``, pinged anew) carrying the ``action`` and an ``error`` text when it was refused.  Produced by a background task like ``getMachines``: an ``add`` of an unreachable host runs its handshakes to their timeouts, which must not hold up the connection's ``submit``, ``stop`` or ``ping``.<br/>`async machine_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``machineAction`` command (``action``: ``add`` or ``remove``, ``name``, optional ``address`` and ``machinePassword`` for ``add``; the machine's own password travels under that name because the frame's ``password`` is this daemon's credential).
   - `ctx`: The transport context of the current call.
 
-- **get_machine_work_dirs** — Send a client the working directories of a registered machine. The chat header's WORKDIR drop-down of a tab bound to a machine lists that machine's directories: its daemon's working directory and the directories selected there so far; the task-info panel shows the directory and the machine's default task budget for a chat headed there whose task has no settings yet.  The direct reply is ``{"type": "machineWorkDirs", "machine": <name>, "workDir": <dir>, "recentWorkDirs": [{"path", "ts"}, ...], "maxBudget": <number or null>, "error": ""}`` from :func:`kiss.server.sidebar_panels.machine_work_dirs` (an unreachable or unknown machine answers with ``error``).<br/>`async get_machine_work_dirs(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **get_machine_work_dirs** — Send a client the working directories of a registered machine. The chat header's WORKDIR drop-down of a tab bound to a machine lists that machine's directories: its daemon's working directory and the directories selected there so far; the task-info panel shows the directory and the machine's default task budget for a chat headed there whose task has no settings yet.  The direct reply is ``{"type": "machineWorkDirs", "machine": <name>, "workDir": <dir>, "recentWorkDirs": [{"path", "ts"}, ...], "maxBudget": <number or null>, "error": ""}`` from :func:`kiss.server.sidebar_panels.machine_work_dirs` (an unreachable or unknown machine answers with ``error``). The machine round trip runs in a background task so it never holds up the connection's other commands.<br/>`async get_machine_work_dirs(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``getMachineWorkDirs`` command (``machine``).
   - `ctx`: The transport context of the current call.
 
@@ -552,9 +558,13 @@
 
 ##### `class StopUnconfirmedTimeoutError(TimeoutError)` — Timeout whose ``stop_on_timeout`` stop was sent but never confirmed.
 
+**Constructor:** `StopUnconfirmedTimeoutError(message: str, result: TaskResult) -> None`
+
 ##### `class CancelledError(Exception)` — The caller's *cancel* event was set while :func:`run` waited.
 
 **Constructor:** `CancelledError(message: str, result: TaskResult, confirmed: bool) -> None`
+
+##### `class RunRefusedError(Exception)` — The daemon turned the ``run`` down, so no task was started.
 
 ##### `class StoppedOnTimeoutError(TimeoutError)` — Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
 

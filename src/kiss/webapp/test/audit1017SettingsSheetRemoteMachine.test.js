@@ -23,13 +23,15 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, pickMachine, ofType} = require('./simplify2_harness');
-const {byId, click, typeInto} = require('./settings_helpers');
-
-const MACHINES = [
-  {name: 'laptop', status: 'reachable', local: true},
-  {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
-];
+const {
+  makePage,
+  send,
+  pickMachine,
+  ofType,
+  byId,
+  click,
+} = require('./simplify2_harness');
+const {typeInto, MACHINES} = require('./settings_helpers');
 
 const LAPTOP_CONFIG = {
   type: 'configData',

@@ -218,35 +218,42 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
     )
 
 
-def _load_skills_dir(root: Path, source: str) -> dict[str, Skill]:
-    """Load every ``<name>/SKILL.md`` directly under *root*."""
+def _load_skill_files(
+    root: Path, pattern: str, name_of: Callable[[Path], str], source: str
+) -> dict[str, Skill]:
+    """Parse every ``SKILL.md`` matching *pattern* under *root*, named by *name_of*."""
     skills: dict[str, Skill] = {}
     if not root.is_dir():
         return skills
-    for skill_md in sorted(root.glob("*/SKILL.md")):
-        skill = _parse_skill_file(skill_md, skill_md.parent.name, source)
+    for skill_md in sorted(root.glob(pattern)):
+        skill = _parse_skill_file(skill_md, name_of(skill_md), source)
         if skill is not None:
             skills[skill.name] = skill
     return skills
+
+
+def _dir_skill_name(skill_md: Path) -> str:
+    """Name of a ``<name>/SKILL.md`` skill: its directory name."""
+    return skill_md.parent.name
+
+
+def _bundled_skill_name(skill_md: Path) -> str:
+    """Name of a ``<plugin>/skills/<name>/SKILL.md`` skill: ``<plugin>:<name>``.
+
+    The namespace (Claude Code's plugin convention) keeps bundled skills
+    from ever clashing with user or project skills.
+    """
+    return f"{skill_md.parent.parent.parent.name}:{skill_md.parent.name}"
+
+
+def _load_skills_dir(root: Path, source: str) -> dict[str, Skill]:
+    """Load every ``<name>/SKILL.md`` directly under *root*."""
+    return _load_skill_files(root, "*/SKILL.md", _dir_skill_name, source)
 
 
 def _load_bundled_skills(root: Path) -> dict[str, Skill]:
-    """Load plugin-shipped skills under *root* (``<plugin>/skills/<name>/``).
-
-    Skill names are namespaced ``<plugin>:<name>`` (Claude Code's plugin
-    convention) so bundled skills can never clash with user or project
-    skills.
-    """
-    skills: dict[str, Skill] = {}
-    if not root.is_dir():
-        return skills
-    for skill_md in sorted(root.glob("*/skills/*/SKILL.md")):
-        plugin = skill_md.parent.parent.parent.name
-        name = f"{plugin}:{skill_md.parent.name}"
-        skill = _parse_skill_file(skill_md, name, "bundled")
-        if skill is not None:
-            skills[skill.name] = skill
-    return skills
+    """Load plugin-shipped skills under *root* (``<plugin>/skills/<name>/``)."""
+    return _load_skill_files(root, "*/skills/*/SKILL.md", _bundled_skill_name, "bundled")
 
 
 def load_permission_rules(key: str) -> dict[str, str]:

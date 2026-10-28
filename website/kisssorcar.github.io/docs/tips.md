@@ -118,10 +118,11 @@ Just type or speak your shell command in the chat input textbox.
 
 ## AI Discovery and Auto Research
 
-All you need to do is use a variant of the following prompt with KISS Sorcar:
+All you need to do is use a variant of the following prompt with KISS Sorcar (the `/discover`
+command runs the AI discovery loop):
 
 ```text
-Can you AI discover the lightest and fastest AI model that will give >95% accuracy and
+/discover Can you AI discover the lightest and fastest AI model that will give >95% accuracy and
 recall on the data at <</path/to/data>> at the cost of $0.25 per query? Use 'modal' CLI to
 train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000.
 Experiment with a smaller data subset and fewer model parameters to run experiments quickly,
@@ -130,10 +131,11 @@ then extrapolate. Do not STOP until you reach the goals. Create a detailed repor
 
 ## AI Optimization of Software and AI Systems
 
-All you need to do is use a variant of the following prompt with KISS Sorcar:
+All you need to do is use a variant of the following prompt with KISS Sorcar (the `/discover`
+command runs the AI discovery loop):
 
 ```text
-Can you run the command <<command>> in the background and monitor its output in real time
+/discover Can you run the command <<command>> in the background and monitor its output in real time
 to optimize the code at <<folder_name_or_url>> for the following metrics: <<speed, accuracy,
 recall, cost>>. Then use AI discovery to optimize. You may add diagnostic code that prints
 metrics, such as running time, at a finer granularity. Don't forget to remove the diagnostic

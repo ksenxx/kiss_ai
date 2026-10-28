@@ -380,20 +380,25 @@ def test_document_id_is_encoded_as_single_path_segment(backend) -> None:
     assert server.requests[-1]["path"] == "/documents/doc%201%252"
 
 
+def _call_every_tool(b: GoogleDocsChannelBackend) -> list[str]:
+    """Invoke every backend tool once with valid arguments; return the results."""
+    return [
+        b.gdocs_create_document("t"),
+        b.gdocs_read_document("doc123"),
+        b.gdocs_append_text("doc123", "t"),
+        b.gdocs_replace_text("doc123", "a", "b"),
+        b.gdocs_insert_text("doc123", "t", 1),
+        b.gdocs_batch_update("doc123", "[]"),
+        b.gdocs_list_documents(),
+    ]
+
+
 def test_unauthorized_token_returns_ok_false(backend, composio) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
     b, _ = backend
     composio.token = "wrong-token"
-    for call in (
-        lambda: b.gdocs_create_document("t"),
-        lambda: b.gdocs_read_document("doc123"),
-        lambda: b.gdocs_append_text("doc123", "t"),
-        lambda: b.gdocs_replace_text("doc123", "a", "b"),
-        lambda: b.gdocs_insert_text("doc123", "t", 1),
-        lambda: b.gdocs_batch_update("doc123", "[]"),
-        lambda: b.gdocs_list_documents(),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert "401" in result["error"]
 
@@ -414,16 +419,8 @@ def test_connection_refused_returns_ok_false(backend, refusing_port: int) -> Non
     b, _ = backend
     b._base_url = f"http://127.0.0.1:{refusing_port}"
     b._drive_base_url = f"http://127.0.0.1:{refusing_port}/drive/v3"
-    for call in (
-        lambda: b.gdocs_create_document("t"),
-        lambda: b.gdocs_read_document("doc123"),
-        lambda: b.gdocs_append_text("doc123", "t"),
-        lambda: b.gdocs_replace_text("doc123", "a", "b"),
-        lambda: b.gdocs_insert_text("doc123", "t", 1),
-        lambda: b.gdocs_batch_update("doc123", "[]"),
-        lambda: b.gdocs_list_documents(),
-    ):
-        result = json.loads(call())
+    for result_str in _call_every_tool(b):
+        result = json.loads(result_str)
         assert result["ok"] is False
         assert result["error"]
 

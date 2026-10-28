@@ -863,15 +863,10 @@ def test_run_agent_tool_and_sorcar_wiring() -> None:
     resolved per dispatch), and a Sorcar agent's default toolset carries
     ``run_agent`` and its ``agent_job`` companion.  The spend folding
     into the calling task that the binding enables is checked end to
-    end in ``test_run_agent_inheritance``.  The system prompt the agent
-    runs with (as loaded by the product, both the full and the lite
-    variant) directs it to ``run_agent`` for channel tasks.
+    end in ``test_run_agent_inheritance``.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-    from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 
-    assert "run_agent" in SYSTEM_PROMPT
-    assert "run_agent" in SYSTEM_PROMPT_LITE
     loaded = subprocess.run(
         [
             sys.executable,

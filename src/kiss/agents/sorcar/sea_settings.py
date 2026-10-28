@@ -310,11 +310,15 @@ CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
     ("scratch directory",
      "It runs in the shared `<home>/channel_work` scratch directory unless its own "
      "`work_dir` says otherwise (`/cron` runs in `<home>/cron/work`); `work_dir` is locked, "
-     "so it never works in the caller's project (`resolve_settings`)."),
+     "so it never works in the caller's project (`resolve_settings`); a cron prompt job "
+     "that runs a channel command (`/slack ...`) therefore passes no `work_dir` option "
+     "unless the job names a directory of its own (`cron_agent`: the scratch directory is "
+     "already the dispatch's default, and an explicit value would be refused by the "
+     "lock)."),
     ("no inheritance",
      "Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, "
-     "budget share, container or prompt suffixes; the `inherit: true` option is refused "
-     "(`agent_dispatch`)."),
+     "budget share, container or exec bridge, or prompt suffixes; the `inherit: true` "
+     "option is refused (`agent_dispatch`)."),
     ("workspace",
      "It holds its channel workspace — the `run_agent` option `workspace`, default "
      "`default`, the account its tools load credentials for — from before its `tools()` "

@@ -87,10 +87,13 @@ def lock_exclusive(
         blocking: Whether to wait for another holder to release the
             lock.  ``False`` gives up immediately instead.
         timeout: With *blocking*, the most seconds to wait; ``None``
-            waits without limit.  A bounded wait polls the non-blocking
+            waits without limit.  Every wait polls the non-blocking
             lock every ``_POLL_INTERVAL`` instead of blocking in the
-            kernel, so a holder that wedged costs the waiter at most
-            *timeout*.  Windows always polls this way: ``LK_LOCK`` sleeps
+            kernel: a holder that wedged costs the waiter at most
+            *timeout*, and a task Stop (a ``KeyboardInterrupt`` injected
+            into the waiting thread, which a blocking ``flock`` would
+            hold off until the lock is granted) lands between two
+            probes.  Windows always polls this way: ``LK_LOCK`` sleeps
             a full second between each of its ten internal attempts, so
             a holder that kept the lock for a millisecond still cost
             every waiter one second (two cron jobs finishing together
@@ -107,9 +110,6 @@ def lock_exclusive(
             by another process.
     """
     fd = _fileno(target)
-    if blocking and timeout is None and fcntl is not None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        return True
     deadline = None if timeout is None else time.monotonic() + timeout
     while not _try_lock(fd):
         if not blocking:

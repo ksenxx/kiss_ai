@@ -23,6 +23,7 @@ import os
 import platform
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -827,6 +828,13 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
     _Hits.paths = []
     _Hits.app_window_open = False
     _Hits.close = False
+    # Bound, not listening, while the daemon is "down": the probe is
+    # refused as it should be, and no other test process can take the
+    # port meanwhile (one did, under the full run: its site answered the
+    # probe and served the app, whose popup then retried its WebSocket
+    # against the site below).
+    reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    reserved.bind(("127.0.0.1", port))
     try:
         started = time.monotonic()
         proc = _run(["--url", url], env)
@@ -849,6 +857,7 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
         assert "already open" in proc.stdout
         time.sleep(3)
         assert standalone_app.macos_windows_on_screen(pid) == 1
+        reserved.close()
         httpd, _ = _site(port)
         try:
             assert _wait_for(lambda: "/" in _Hits.paths), _Hits.paths
@@ -887,6 +896,7 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
         finally:
             httpd.shutdown()
     finally:
+        reserved.close()
         subprocess.run(["pkill", "-f", f"user-data-dir={profile}"], check=False)
 
 

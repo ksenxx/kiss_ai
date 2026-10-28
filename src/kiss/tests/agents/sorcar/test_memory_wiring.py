@@ -233,12 +233,14 @@ class TestUseMemoryOverride:
     def test_true_never_bypasses_hard_gates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """An explicit True stays gated: stripped basic tools, Docker,
-        and a caller system_instruction all keep the run memory-free."""
+        """An explicit True stays gated: stripped basic tools, a profile
+        without memory tools, Docker, and a caller system_instruction all
+        keep the run memory-free."""
         _home(monkeypatch, tmp_path)
         gated = [
             _memory_root_for_run(False, None, use_memory_override=True
             ),
+            _memory_root_for_run(True, None, use_memory_override=True, profile_has_memory=False),
             _memory_root_for_run(True, "python:3.12", use_memory_override=True,
             ),
             _memory_root_for_run(
@@ -246,7 +248,7 @@ class TestUseMemoryOverride:
                 caller_system_instruction=True, use_memory_override=True,
             ),
         ]
-        assert gated == [None, None, None]
+        assert gated == [None, None, None, None]
 
 
 def _git_repo(path: Path) -> None:

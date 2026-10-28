@@ -31,6 +31,7 @@ from kiss.agents.third_party_agents import _composio_google as composio_google
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
+    recording_server,
     serving,
 )
 
@@ -89,6 +90,8 @@ class FakeComposioServer(RecordingServer):
         self.status_polled: dict[str, threading.Event] = {}
         self.status_holds: dict[str, tuple[threading.Event, threading.Event]] = {}
         self._counter = 0
+        # Guards the check-then-act steps handler threads share: the ID
+        # counter, a status-queue pop and a download's index.
         self._lock = threading.Lock()
 
     def next_id(self, prefix: str) -> str:
@@ -221,8 +224,9 @@ class _Handler(RecordingHandler):
                     # An expired hold is a test failure, never a normal answer.
                     self._json(503, {"error": {"message": "status poll hold expired"}})
                     return
-            queue = server.status_queue.get(account)
-            status = queue.pop(0) if queue else server.accounts[account]
+            with server._lock:
+                queue = server.status_queue.get(account)
+                status = queue.pop(0) if queue else server.accounts[account]
             polled = server.status_polled.get(api_key)
             if polled is not None:
                 polled.set()
@@ -282,9 +286,11 @@ class _Handler(RecordingHandler):
         elif not upstream.content or content_type.startswith("text/"):
             answer["data"] = upstream.text or None
         else:
-            server.downloads.append((content_type, upstream.content))
+            with server._lock:
+                server.downloads.append((content_type, upstream.content))
+                index = len(server.downloads) - 1
             answer["binary_data"] = {
-                "url": f"{server.base_url}/download/{len(server.downloads) - 1}",
+                "url": f"{server.base_url}/download/{index}",
                 "content_type": content_type,
                 "size": len(upstream.content),
             }
@@ -324,6 +330,28 @@ def start_fake_composio(monkeypatch: Any) -> Iterator[FakeComposioServer]:
 
 # :func:`start_fake_composio` as a context manager: ``with fake_composio(monkeypatch) as c:``.
 fake_composio = contextmanager(start_fake_composio)
+
+
+@contextmanager
+def connected_endpoint(
+    monkeypatch: Any, handler: type, service: str, upstream: str
+) -> Iterator[tuple[FakeComposioServer, RecordingServer]]:
+    """Run a local *handler* server in place of *upstream* with *service* connected.
+
+    Args:
+        monkeypatch: The test's ``monkeypatch`` fixture.
+        handler: Request handler class emulating the Google API.
+        service: KISS service name to connect through Composio.
+        upstream: The Google API origin to reroute (e.g.
+            ``https://gmail.googleapis.com``).
+
+    Yields:
+        ``(composio, server)``: the emulator and the local API server.
+    """
+    with recording_server(handler) as server, fake_composio(monkeypatch) as composio:
+        composio.upstream_overrides[upstream] = server.base_url
+        connect(composio, service)
+        yield composio, server
 
 
 def reset_state(service: str) -> None:

@@ -1517,7 +1517,7 @@ class WhatsAppAgent(BaseChannelAgent):
                             "get_whatsapp_qr_code() to refresh the page.",
                         }
                     )
-                time.sleep(2)
+                time.sleep(max(0.0, min(2.0, deadline - time.time())))
 
         def stop_whatsapp_bridge() -> str:
             """Stop the WhatsApp bridge process.

@@ -6,7 +6,7 @@
 
 The Inject instruction panel (sidebar button on the chat page)
 renders the strings returned by
-:func:`kiss.server.tricks.read_tricks` (Python side, used by
+:func:`kiss.server.tricks.read_tricks_data` (Python side, used by
 the kiss-web daemon HTML builder).  The contract:
 
 1. ``~/.kiss/MY_INJECTION.md`` is auto-seeded on first read with the
@@ -40,7 +40,7 @@ from kiss.core.config import kiss_home
 from kiss.server.tricks import (
     DEFAULT_MY_INJECTION,
     MY_INJECTION_DEFAULT_BODY,
-    read_tricks,
+    read_tricks_data,
 )
 from kiss.tests.conftest import is_root, posix_only
 
@@ -85,7 +85,7 @@ def test_my_injection_seeded_with_default_when_missing(
     """First read auto-creates ``~/.kiss/MY_INJECTION.md`` with the default."""
     my_path = kiss_home / "MY_INJECTION.md"
     assert not my_path.exists()
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert my_path.exists()
     assert my_path.read_text() == DEFAULT_MY_INJECTION
     assert tricks == [
@@ -104,7 +104,7 @@ def test_my_injection_first_then_bundled(
         "## Trick\n\nmy curated trick A\n\n"
         "## Trick\n\nmy curated trick B\n",
     )
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == [
         "my curated trick A",
         "my curated trick B",
@@ -121,7 +121,7 @@ def test_my_injection_user_edits_preserved(
     user = kiss_home / "MY_INJECTION.md"
     user.write_text("## Trick\n\nuser override\n")
     os.utime(user, (0, 0))
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert user.read_text() == "## Trick\n\nuser override\n"
     assert tricks == [
         "user override",
@@ -138,7 +138,7 @@ def test_empty_my_injection_falls_back_to_bundled_only(
     (kiss_home / "MY_INJECTION.md").write_text(
         "# just a heading\n\nno trick sections here\n",
     )
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == ["bundled trick one", "bundled trick two"]
 
 
@@ -152,9 +152,9 @@ def test_no_injections_md_written_to_kiss_home(  # noqa: N802 - test asserts on 
     This test guards against an accidental re-introduction of the
     install-time copy or a runtime seed.
     """
-    read_tricks()
+    read_tricks_data()
     assert not (kiss_home / "INJECTIONS.md").exists(), (
-        "read_tricks() must not create ~/.kiss/INJECTIONS.md — only "
+        "read_tricks_data() must not create ~/.kiss/INJECTIONS.md — only "
         "MY_INJECTION.md is auto-seeded."
     )
     assert (kiss_home / "MY_INJECTION.md").exists()
@@ -166,7 +166,7 @@ def test_read_tricks_handles_unreadable_my_injection_gracefully(
     """A binary-corrupted MY_INJECTION.md must not crash the daemon."""
     kiss_home.mkdir(parents=True, exist_ok=True)
     (kiss_home / "MY_INJECTION.md").write_bytes(b"\xff\xfe\x00\x00bogus")
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == ["bundled trick one", "bundled trick two"]
 
 
@@ -176,14 +176,14 @@ def test_web_server_read_tricks_uses_my_injection_first(
     """The daemon's tricks source returns MY_INJECTION first, then bundled.
 
     ``web_server`` builds its HTML from the public
-    :func:`kiss.server.tricks.read_tricks`, which must yield
+    :func:`kiss.server.tricks.read_tricks_data`, which must yield
     the merged ordered list.
     """
     kiss_home.mkdir(parents=True, exist_ok=True)
     (kiss_home / "MY_INJECTION.md").write_text(
         "## Trick\n\ndaemon-side user trick\n",
     )
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == [
         "daemon-side user trick",
         "bundled trick one",
@@ -204,7 +204,7 @@ def test_kiss_home_unwritable_still_returns_bundled(
     try:
         monkeypatch.setenv("KISS_HOME", str(readonly_parent / ".kiss"))
         assert kiss_home() == readonly_parent / ".kiss"
-        tricks = read_tricks()
+        tricks = read_tricks_data()["tricks"]
         assert tricks == ["bundled trick one", "bundled trick two"]
     finally:
         readonly_parent.chmod(0o700)
@@ -221,7 +221,7 @@ def test_missing_bundled_injections_returns_my_injection_only(
     auto-seeded user trick rather than crashing the daemon.
     """
     monkeypatch.setenv("KISS_INJECTIONS_PATH", str(tmp_path / "missing.md"))
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == [MY_INJECTION_DEFAULT_BODY]
 
 
@@ -232,7 +232,7 @@ def test_corrupt_bundled_injections_returns_my_injection_only(
     bundled = tmp_path / "bundled_bad.md"
     bundled.write_bytes(b"\xff\xfe\x00\x00bogus")
     monkeypatch.setenv("KISS_INJECTIONS_PATH", str(bundled))
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == [MY_INJECTION_DEFAULT_BODY]
 
 
@@ -249,7 +249,7 @@ def test_section_with_non_trick_heading_is_ignored(
     monkeypatch.setenv("KISS_INJECTIONS_PATH", str(bundled))
     kiss_home.mkdir(parents=True, exist_ok=True)
     (kiss_home / "MY_INJECTION.md").write_text("")
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == ["real trick"]
 
 
@@ -264,5 +264,5 @@ def test_trick_section_with_empty_body_is_ignored(
     monkeypatch.setenv("KISS_INJECTIONS_PATH", str(bundled))
     kiss_home.mkdir(parents=True, exist_ok=True)
     (kiss_home / "MY_INJECTION.md").write_text("")
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks == ["actual trick"]

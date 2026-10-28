@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, parse_qsl, urlsplit
 import pytest
 import requests
 
-from kiss.agents.third_party_agents import _oauth_apps
+from kiss.agents.third_party_agents import _device_auth, _oauth_apps
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents.discord.discord_sea import (
     DiscordAgent,
@@ -251,14 +251,23 @@ def test_user_sign_in_refuses_bot_only_features(discord_server: _DiscordServer) 
     assert missing["ok"] is False and "No Discord webhook" in missing["error"]
 
 
-def test_finish_pending_denied_and_rejected(discord_server: _DiscordServer) -> None:
-    """finish reports pending, provider denial, and a token Discord rejects."""
+def test_finish_denied_and_rejected(
+    discord_server: _DiscordServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """finish reports no session, a sign-in still open, a denial, and a token Discord rejects."""
     tools = auth_tools(DiscordAgent())
     assert "failed" in json.loads(tools["finish_discord_auth"]())["error"]
 
     started = json.loads(_start(tools))
-    assert json.loads(tools["finish_discord_auth"]())["status"] == "pending"
     state = parse_qs(urlsplit(started["verification_uri"]).query)["state"][0]
+    # While the user has not approved yet, finish answers "pending" after
+    # waiting ``_FINISH_WAIT_S`` for the callback; shorten that one wait
+    # (the later calls keep the default so the landed callback is seen).
+    with monkeypatch.context() as patch:
+        patch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
+        pending = json.loads(tools["finish_discord_auth"]())
+    assert pending["ok"] is False and pending["status"] == "pending"
+    assert "not authorized yet" in pending["error"]
     requests.get(
         _oauth_apps.LOOPBACK_REDIRECT_URI,
         params={"error": "access_denied", "state": state},
@@ -467,13 +476,13 @@ def test_missing_client_id(discord_server: _DiscordServer, monkeypatch: pytest.M
 
 
 def test_prompt_describes_click_allow_sign_in() -> None:
-    """The prompt drives the browser sign-in and names bot tokens once."""
+    """The prompt names the sign-in tools, the scope, and the bot-token form once."""
     prompt = DiscordAgent.channel_system_prompt
-    assert "authenticate_discord() with no arguments" in prompt
+    assert "authenticate_discord()" in prompt
     assert "finish_discord_auth()" in prompt
     assert "webhook.incoming" in prompt
     assert prompt.count("authenticate_discord(bot_token=...)") == 1
-    assert "Developer Portal" not in prompt and "developers/applications" not in prompt
+    assert "developers/applications" not in prompt
 
 
 # ``muse_env`` is requested after ``discord_server`` so its ``KISS_MUSE_AUTH=1``

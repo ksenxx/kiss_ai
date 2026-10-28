@@ -41,18 +41,21 @@ _SECRET = "kiss-qq-test-secret"
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def _test_key() -> Ed25519PrivateKey:
+def _derive_key(secret: str) -> Ed25519PrivateKey:
     """Derive the Ed25519 key exactly as the official QQ scheme does."""
-    seed = _SECRET.encode()
+    seed = secret.encode()
     while len(seed) < 32:
-        seed += _SECRET.encode()
+        seed += secret.encode()
     return Ed25519PrivateKey.from_private_bytes(seed[:32])
+
+
+_TEST_KEY = _derive_key(_SECRET)
 
 
 def _signed_headers(ts: str, raw: bytes) -> dict[str, str]:
     """Build valid Ed25519 webhook signature headers for a raw body."""
     return {
-        "X-Signature-Ed25519": _test_key().sign(ts.encode() + raw).hex(),
+        "X-Signature-Ed25519": _TEST_KEY.sign(ts.encode() + raw).hex(),
         "X-Signature-Timestamp": ts,
         "Content-Type": "application/json",
     }
@@ -116,20 +119,15 @@ def _authenticated_agent(api_base: str = "", token_url: str = "", port: str = ""
     return agent
 
 
-def test_unauthenticated_state() -> None:
-    """Fresh agent exposes only the auth trio and reports unconfigured."""
-    agent = QQAgent()
-    assert agent.name == "QQ Agent"
-    assert agent._is_authenticated() is False
-    tools = {t.__name__ for t in agent._get_tools()}
-    assert tools == {"check_qq_auth", "authenticate_qq", "clear_qq_auth"}
-    check = tools_by_name(agent)["check_qq_auth"]
-    assert "not configured" in check().lower()
-
-
 def test_auth_trio_persistence() -> None:
-    """authenticate persists 0600 config; check reports it; clear removes it."""
+    """authenticate persists 0600 config; check reports it; clear removes it.
+
+    The fresh-agent auth-trio contract is pinned for every channel by
+    test_base_channel_agent.py; only the name and the unconfigured check
+    wording (checked after clear) are channel-specific.
+    """
     agent = _authenticated_agent(api_base="http://127.0.0.1:1/")
+    assert agent.name == "QQ Agent"
     assert _config.path.exists()
     if sys.platform != "win32":
         assert _config.path.stat().st_mode & 0o777 == 0o600
@@ -145,6 +143,7 @@ def test_auth_trio_persistence() -> None:
     assert "cleared" in tools["clear_qq_auth"]().lower()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
+    assert "not configured" in tools["check_qq_auth"]().lower()
 
 
 def test_send_messages_with_cached_token() -> None:
@@ -180,7 +179,7 @@ def test_webhook_validation_challenge() -> None:
         assert resp.status_code == 200
         body = resp.json()
         assert body["plain_token"] == "PT0kEn"
-        public_key = _test_key().public_key()
+        public_key = _TEST_KEY.public_key()
         public_key.verify(bytes.fromhex(body["signature"]), b"1712345678PT0kEn")
         assert _derive_signing_key(_SECRET).public_key().public_bytes_raw() == (
             public_key.public_bytes_raw()

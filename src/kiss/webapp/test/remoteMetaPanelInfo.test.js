@@ -25,8 +25,9 @@
 // * the report body is sanitized: HTML content (starting with '<') is
 //   rendered as-is through kissSanitize, anything else through marked;
 //   scripts and event-handler attributes never reach the DOM,
-// * a reply with neither content, run nor error hides the subpanel
-//   with the refresh button enabled;
+// * a reply with no run yet but a dueAt (the daemon asks a minute
+//   after the task started) shows the "first update" paragraph and
+//   status "First update at HH:MM" with the refresh button enabled;
 // * running:true without content shows the "Preparing the first
 //   update…" paragraph, status "Updating…" and a disabled, spinning
 //   #meta-info-refresh button; a finished run shows "Updated HH:MM" plus
@@ -70,10 +71,12 @@ function makePage(opts) {
     bodyClass: 'remote-chat',
     beforeScripts,
     extraScripts: ['marked.min.js'],
-    sourceUrl: 'metainfo-main.js',
   });
+  OPEN_WINDOWS.push(win);
   return {win, posted, clock};
 }
+
+const OPEN_WINDOWS = [];
 
 function rowText(win, id) {
   return win.document.getElementById(id).textContent;
@@ -143,6 +146,7 @@ function reply(win, poll, fields) {
         running: false,
         cost: 0,
         updatedAt: 0,
+        dueAt: 0,
       },
       fields,
     ),
@@ -317,30 +321,43 @@ async function main() {
   );
 
   await test(
-    'a task with no run yet hides the subpanel with the refresh button ' +
-      'enabled; a finished run shows it',
+    'a task younger than a minute shows when its first update is due, ' +
+      'with the refresh button enabled',
     () => {
       const wv = runningPage();
       const win = wv.win;
       const poll = lastPoll(wv);
-      reply(win, poll, {sig: '0.000:0'});
-      assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
-      assert.strictEqual(statusText(win), '');
+      const due = 1700000060000;
+      reply(win, poll, {sig: '0.000:0', dueAt: due});
+      const pending = contentEl(win).querySelector('p.meta-info-pending');
+      assert.ok(pending, 'first-update paragraph rendered');
+      assert.strictEqual(
+        pending.textContent,
+        'The first update is asked a minute after the task starts; ' +
+          'press refresh to ask now.',
+      );
+      assert.ok(infoVisible(win), 'the waiting state shows the subpanel');
+      assert.strictEqual(
+        statusText(win),
+        'First update at ' + clockLabel(win, due),
+      );
       const btn = refreshBtn(win);
       assert.strictEqual(btn.disabled, false, 'refresh may ask now');
       assert.ok(!btn.classList.contains('spinning'));
 
+      // A finished run supersedes the due time: dueAt then names the
+      // NEXT run, which the status line does not show.
       const at = 1700000090000;
       reply(win, poll, {
         sig: 'done-1',
         content: '<p>answer</p>',
         updatedAt: at,
+        dueAt: at + 600000,
       });
-      assert.ok(infoVisible(win), 'a finished run shows the subpanel');
       assert.strictEqual(statusText(win), updatedLabel(win, at));
       assert.ok(contentEl(win).textContent.includes('answer'));
 
-      // A reply with neither content, run nor error hides it again.
+      // A reply with neither content, run, error nor due time hides it.
       reply(win, poll, {sig: 'empty-1'});
       assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
       assert.strictEqual(statusText(win), '');
@@ -363,7 +380,7 @@ async function main() {
       assert.ok(pending, 'pending paragraph rendered');
       assert.strictEqual(
         pending.textContent,
-        'Asking the task\u2026',
+        'Preparing the first update\u2026',
       );
       assert.ok(infoVisible(win), 'a pending report shows the subpanel');
       assert.strictEqual(statusText(win), 'Updating\u2026');
@@ -838,8 +855,9 @@ async function main() {
     },
   );
 
+  // The pages' timers would keep the process alive.
+  for (const win of OPEN_WINDOWS.splice(0)) win.close();
   report('remoteMetaPanelInfo');
-  process.exit(0);
 }
 
 main().catch(e => {

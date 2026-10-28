@@ -38,6 +38,7 @@ These tests drive a REAL browser (Playwright Chromium) against a REAL
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -232,6 +233,64 @@ class TestContentTabFileLinks:
             assert label.inner_text() == "page.html"
         finally:
             context.close()
+
+    def test_big_html_page_renders_read_only(self, browser, harness) -> None:
+        """An HTML page bigger than the editor cap (a shared chat page
+        of a long task) still opens: it renders in the sandboxed iframe
+        with no Save bar and no source toggle, since the daemon served
+        it without a version stamp instead of "File too large".  The
+        page spans several fileContent frames (``more`` on every one
+        but the last), which the webapp joins: the last paragraph,
+        from the last frame, renders along with the first."""
+        from kiss.server import web_server
+
+        big = harness.work_dir / "reports" / "chat-long-run-7.html"
+        made_dir = not big.parent.exists()
+        big.parent.mkdir(exist_ok=True)
+        filler = "<p>" + "y" * 1000 + "</p>\n"
+        big.write_text(
+            "<!DOCTYPE html><html><body><h1 id=\"marker\">KISS-BIG-MARKER</h1>\n"
+            + filler * (2 * web_server._FILE_CONTENT_CHUNK_CHARS // len(filler) + 1)
+            + "<p id=\"last\">KISS-LAST-PIECE</p></body></html>\n",
+            encoding="utf-8",
+        )
+        assert big.stat().st_size > 2 * web_server._FILE_CONTENT_CHUNK_CHARS
+        context, page, sent = _open_page(browser, harness)
+        try:
+            _inject_file_link(page, str(big), "lnk-big-html")
+            page.click("#lnk-big-html")
+            page.wait_for_selector(
+                "#content-tab-area .content-html-frame", timeout=60000,
+            )
+            frame = page.frame_locator("#content-tab-area .content-html-frame")
+            assert frame.locator("#marker").inner_text() == "KISS-BIG-MARKER"
+            assert frame.locator("#last").inner_text() == "KISS-LAST-PIECE"
+            paragraphs = 2 * web_server._FILE_CONTENT_CHUNK_CHARS // len(filler)
+            assert frame.locator("p").count() > paragraphs
+            assert page.locator("#content-tab-area .content-save-bar").count() == 0
+            assert page.locator("#content-tab-area .content-mode-btn").count() == 0
+            assert page.locator(".notification-toast, .notice").filter(
+                has_text="too large",
+            ).count() == 0
+            # One tab, opened once the last piece was in.
+            assert page.locator("#content-tab-list .chat-tab.content-tab").count() == 1
+            # Typing in the composer names the page as the file open in
+            # the editor but does not send its text back: a read-only
+            # preview has no buffer, said with an explicit null, and the
+            # daemon reads the file's head from disk itself.
+            page.fill("#task-input", "what does")
+            deadline = time.monotonic() + 15
+            while not [f for f in sent if f.get("type") == "complete"]:
+                assert time.monotonic() < deadline, "no completion request was sent"
+                page.wait_for_timeout(100)
+            complete = [f for f in sent if f.get("type") == "complete"][-1]
+            assert complete["activeFile"].endswith("chat-long-run-7.html"), complete
+            assert "activeFileContent" in complete and complete["activeFileContent"] is None
+        finally:
+            context.close()
+            big.unlink()
+            if made_dir:
+                big.parent.rmdir()
 
     def test_md_link_renders_converted_html_in_sandboxed_iframe(
         self, browser, harness,

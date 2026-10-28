@@ -99,22 +99,8 @@ function assertThoughtsVisible(win, where) {
   return panels.length;
 }
 
-function testThoughtsNeverCollapsedWhileStreaming() {
-  const win = makePage();
-  startTask(win, 'Keep the thoughts open');
-  for (let i = 1; i <= 5; i++) sendStep(win, i);
-  const n = assertThoughtsVisible(win, 'streaming');
-  assert.ok(n >= 5, 'one Thoughts panel per step: ' + n);
-  // The sweep still folds the older tool panels, so it did run.
-  const bash = Array.from(output(win).querySelectorAll('.tc-bash'));
-  assert.ok(bash.length >= 5);
-  assert.ok(
-    bash[0].classList.contains('collapsed'),
-    'the streaming sweep folds older Bash panels',
-  );
-  win.close();
-  console.log('  ok - Thoughts panels stay open while the task streams');
-}
+// Thoughts panels staying open while the task streams (the sweep folds
+// the tool panels only) is pinned by streamKeepsTwoPanelsOpen.test.js.
 
 function testSummaryFoldsThoughtsToo() {
   // The one automatic fold a Thoughts panel takes part in: a summary
@@ -422,7 +408,6 @@ function testHeadersAreMixedCase() {
 }
 
 function main() {
-  testThoughtsNeverCollapsedWhileStreaming();
   testSummaryFoldsThoughtsToo();
   testThoughtsNeverCollapsedOnReplayOrDigest();
   testThoughtsFoldOnlyByClick();

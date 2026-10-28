@@ -6,14 +6,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, readyTabId} = require('./simplify2_harness');
+const {makePage, send, readyTabId, click} = require('./simplify2_harness');
 const {
   subagentTabEls,
   togglePanel,
   clickClose,
   openSubTabIds,
   tabEl,
-  clickTab,
+  spawnSubagent,
 } = require('./subagent_tab_helpers');
 
 function runParallelPanels(win) {
@@ -23,43 +23,7 @@ function runParallelPanels(win) {
 function switchToTabEl(win, tabId) {
   const el = tabEl(win, tabId);
   assert.ok(el, 'tab ' + tabId + ' must be rendered in the tab bar');
-  clickTab(win, el);
-}
-
-function spawnSub(win, posted, parentId, taskId, desc, idx) {
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: taskId,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-  assert.ok(
-    resume,
-    'new_tab for ' +
-      taskId +
-      ' under parent ' +
-      parentId +
-      ' must make the page post resumeSession (a tab must open for ' +
-      'EVERY sub-agent, irrespective of how many run_parallel calls ' +
-      'the agent already made)',
-  );
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: resume.tabId,
-    parent_tab_id: parentId,
-    description: desc,
-    task_id: taskId,
-    taskIndex: idx,
-  });
-  assert.ok(
-    subagentTabEls(win).some(el => el.dataset.tabId === resume.tabId),
-    'sub-agent ' + taskId + ' must get its own OPEN tab',
-  );
-  return resume.tabId;
+  click(win, el);
 }
 
 function runParallelCall(win, posted, agentTabId, taskIds, descPrefix) {
@@ -69,13 +33,11 @@ function runParallelCall(win, posted, agentTabId, taskIds, descPrefix) {
     tabId: agentTabId,
     extras: {tasks: JSON.stringify(taskIds)},
   });
-  const subTabIds = [];
-  for (let i = 0; i < taskIds.length; i++) {
-    subTabIds.push(
-      spawnSub(win, posted, agentTabId, taskIds[i], descPrefix + (i + 1), i),
-    );
-  }
-  return subTabIds;
+  // A tab must open for EVERY sub-agent, irrespective of how many
+  // run_parallel calls the agent already made.
+  return taskIds.map((taskId, i) =>
+    spawnSubagent({win, posted}, agentTabId, taskId, descPrefix + (i + 1), i),
+  );
 }
 
 function bootRunningRoot() {
@@ -557,32 +519,12 @@ function testSpawnUnderFragmentlessParentStillOpensTab() {
   const {win, posted, rootId} = bootRunningRoot();
 
   const l1 = runParallelCall(win, posted, rootId, ['l1-a'], 'L1 ');
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: 'g-task',
-    parent_tab_id: l1[0],
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'g-task');
-  assert.ok(
-    resume,
-    'a sub-agent spawned under a DOM-less parent tab must still open ' +
-      'a tab (resumeSession posted)',
-  );
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: resume.tabId,
-    parent_tab_id: l1[0],
-    description: 'grandchild',
-    task_id: 'g-task',
-    taskIndex: 0,
-  });
+  // A sub-agent spawned under a DOM-less parent tab must still open a
+  // tab (resumeSession posted).
+  const gId = spawnSubagent({win, posted}, l1[0], 'g-task', 'grandchild', 0);
   assert.deepStrictEqual(
     openSubTabIds(win).sort(),
-    [l1[0], resume.tabId].sort(),
+    [l1[0], gId].sort(),
     'the grandchild tab must be open next to its parent sub-agent tab',
   );
 

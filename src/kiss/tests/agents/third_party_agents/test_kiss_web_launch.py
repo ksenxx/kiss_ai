@@ -51,7 +51,6 @@ import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._channel_agent_utils import (
     LAUNCH_KWARG_NAMES,
     BaseChannelAgent,
@@ -68,13 +67,13 @@ from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 from kiss.core.models import model_info
 from kiss.core.user_config import _refresh_config
 from kiss.server import agent_state
+from kiss.tests.agents.third_party_agents.channel_backends import RecordingBackend, ThreadBackend
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
-from kiss.tests.agents.third_party_agents.recording_http import start_serving
-from kiss.tests.agents.third_party_agents.test_hermes_runner import RecordingBackend, ThreadBackend
 from kiss.tests.server.parallel_agent_harness import (
     _PROVIDER_KEYS,
     STANDIN_MODEL,
     LocalDaemonTestCase,
+    StandInModelServer,
     _StandInHandler,
     finish_response,
     override_attribute,
@@ -162,7 +161,7 @@ class _LaunchHandler(_StandInHandler):
         super().do_POST()
 
 
-class LaunchModelServer:
+class LaunchModelServer(StandInModelServer):
     """Scripted OpenAI-compatible endpoint the launched tasks talk to.
 
     ``script`` holds the completions answered in order; once it is
@@ -173,6 +172,8 @@ class LaunchModelServer:
     test that needs to route on the request's content.
     """
 
+    handler_class = _LaunchHandler
+
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
@@ -182,21 +183,8 @@ class LaunchModelServer:
         self.answer: Callable[[dict[str, Any]], dict[str, Any]] = self._scripted
         self._holding = False
         self._gate = threading.Event()
-        server = ThreadedHTTPServer(("127.0.0.1", 0), _LaunchHandler)
-        cast(Any, server).launch = self
-        cast(Any, server).responder = self._record_and_answer
-        self._server = server
-        self._thread = start_serving(server)
-
-    @property
-    def url(self) -> str:
-        """Return the ``/v1`` base URL of this endpoint."""
-        return f"http://127.0.0.1:{self._server.server_address[1]}/v1"
-
-    @property
-    def model_config(self) -> dict[str, Any]:
-        """Return the ``model_config`` that points a run at this endpoint."""
-        return {"base_url": self.url, "api_key": "kiss-test-key"}
+        super().__init__(self._record_and_answer)
+        cast(Any, self._server).launch = self
 
     def hold(self) -> None:
         """Make every following call wait until :meth:`release`."""
@@ -209,7 +197,7 @@ class LaunchModelServer:
     def stop(self) -> None:
         """Release held calls, stop serving and join the server thread."""
         self.release()
-        stop_http_server(self._server, self._thread)
+        super().stop()
 
     def _record_and_answer(self, request: dict[str, Any]) -> dict[str, Any]:
         self.requests.append(request)
@@ -381,6 +369,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "clear_slack_auth",
         ):
             assert expected in names, f"missing channel tool {expected}"
+        assert "post_message" not in names, "backend tools must not be exposed when unauthenticated"
         assert any("Not authenticated with Slack" in out for out in _tool_results(second)), (
             "check_slack_auth must have run against the empty kiss home"
         )
@@ -532,16 +521,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
             "the env var must be removed once every launch has finished"
         )
-
-    def test_unauthenticated_backend_tools_excluded(self) -> None:
-        run_agent_via_kiss_web(
-            SlackAgent(),
-            "no backend",
-            work_dir=self.repo,
-        )
-        names = _tool_names(self._only_request())
-        assert "check_slack_auth" in names
-        assert "post_message" not in names, "backend tools must not be exposed when unauthenticated"
 
     def test_overrides_forwarded_through_run_command(self) -> None:
         # A second endpoint: only an explicitly forwarded ``model_config``
@@ -1047,15 +1026,6 @@ class Sea(BaseSea):
         channel, text, ts = outbox[0]
         assert (channel, ts) == ("C123", "1.0")
         assert "suppression promised" in text
-
-    def test_handle_message_sends_summary_when_no_reply(self) -> None:
-        runner, outbox = self._make_runner()
-        self.model_server.script = [finish_response("channel summary")]
-        runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
-        assert len(outbox) == 1
-        channel, text, ts = outbox[0]
-        assert (channel, ts) == ("C123", "1.0")
-        assert "channel summary" in text
 
     def test_handle_message_agent_error_sends_error_reply(self) -> None:
         runner, outbox = self._make_runner()

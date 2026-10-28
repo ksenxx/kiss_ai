@@ -49,6 +49,7 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict
+from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -229,8 +230,8 @@ class ChatSorcarAgent(SorcarAgent):
         # falls back to the task text (a library run).
         self.is_unattended: bool | None = None
         # The run's effective configuration beyond model / work dir /
-        # budget (see kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS):
-        # set per run by the task runner or the fan-out engine and
+        # budget (the keys kiss.agents.sorcar.run_config.run_config_line
+        # prints): set per run by the task runner or the fan-out engine and
         # folded into the ``task_settings`` event.  Empty for a run
         # that is neither a daemon task nor a sub-agent.
         self.run_config: dict[str, Any] = {}
@@ -350,13 +351,29 @@ class ChatSorcarAgent(SorcarAgent):
         )
 
     def _save_final_usage(
-        self, extra_payload: dict[str, Any], task_id: str,
+        self,
+        extra_payload: dict[str, Any],
+        task_id: str,
+        prompt: str = "",
+        parsed: dict[str, Any] | None = None,
+        result_summary: str = "",
     ) -> tuple[float, int, int]:
         """Stamp the ledger totals and the end time on the row (``TASK_USAGE_LOCK`` held).
+
+        A run that recorded no transcript events (one outside a chat
+        page) gets its replay events synthesized first, with the same
+        totals (:meth:`_persist_replay_events_if_missing`), so the one
+        ``endTs`` save derives the row's tags over the complete
+        trajectory (a secret in the augmented *prompt* is tagged).
 
         Args:
             extra_payload: The row's extra payload, completed in place.
             task_id: The task row.
+            prompt: The prompt the agent ran with, for the synthesized
+                ``prompt`` event.
+            parsed: The run's result mapping (:func:`_parse_result`), or
+                ``None``.
+            result_summary: The extracted human-readable summary text.
 
         Returns:
             The ``(cost, tokens, steps)`` triple that was saved.
@@ -373,6 +390,10 @@ class ChatSorcarAgent(SorcarAgent):
         # The run is over: stamp its end so sub-agents (which no server
         # runner finalises) get a duration too.
         extra_payload["endTs"] = int(time.time() * 1000)
+        self._persist_replay_events_if_missing(
+            task_id, prompt, parsed, result_summary,
+            usage=(final_cost, final_tokens, final_steps),
+        )
         _save_task_extra(extra_payload, task_id=task_id)
         return final_cost, final_tokens, final_steps
 
@@ -477,8 +498,8 @@ class ChatSorcarAgent(SorcarAgent):
             between machines and the s10s hub sync sends only the tasks
             that ran on the sending one), ``parent_task_id`` when there
             is one, ``sea`` when the run executes a SEA and
-            the :attr:`run_config` keys (see
-            :data:`kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS`).
+            the :attr:`run_config` keys (the ones
+            :func:`kiss.agents.sorcar.run_config.run_config_line` prints).
         """
         payload = self._build_extra_payload(model, work_dir, is_parallel, max_budget)
         del payload["version"]
@@ -544,8 +565,9 @@ class ChatSorcarAgent(SorcarAgent):
                 on the ``result`` event.
 
         Returns:
-            True when events were synthesized (the caller re-derives the
-            task's tags over them), False when a transcript already existed.
+            True when events were synthesized (:meth:`_save_final_usage`
+            calls this before its ``endTs`` save, so the task's tags are
+            derived over them), False when a transcript already existed.
         """
         if _task_has_transcript_events(task_id):
             return False
@@ -788,9 +810,8 @@ class ChatSorcarAgent(SorcarAgent):
         ):
             self._classify_task_once(
                 resolved_model,
-                prompt_template,
+                substitute_prompt_args(prompt_template, arguments),
                 model_config,
-                arguments=arguments,
             )
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
@@ -1014,17 +1035,7 @@ class ChatSorcarAgent(SorcarAgent):
                 # TASK_USAGE_LOCK, so a sub-task's late charge either
                 # lands on the ledger before this read or finds the
                 # finished row and adds to it (charge_side_channel_usage).
-                final_usage = locked_call(
+                locked_call(
                     TASK_USAGE_LOCK, self._save_final_usage, extra_payload, task_id,
+                    agent_prompt, parsed, result_summary,
                 )
-                if self._persist_replay_events_if_missing(
-                    task_id=task_id,
-                    prompt=agent_prompt,
-                    parsed=parsed,
-                    result_summary=result_summary,
-                    usage=final_usage,
-                ):
-                    # The synthesized events joined the trajectory after
-                    # its tags were derived: derive them again so a secret
-                    # in the augmented prompt is tagged.
-                    _save_task_extra({"endTs": extra_payload["endTs"]}, task_id=task_id)

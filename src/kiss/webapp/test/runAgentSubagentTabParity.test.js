@@ -41,7 +41,11 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {send} = harness;
-const {subagentTabEls} = require('./subagent_tab_helpers');
+const {
+  subagentTabEls,
+  spawnSubagent,
+  togglePanel,
+} = require('./subagent_tab_helpers');
 
 /** A fresh chat page plus the id of the tab it booted on. */
 function makePage() {
@@ -125,24 +129,16 @@ function liveChildFinishes(toolName) {
   const panel = toolPanel(win, toolName);
   assert.ok(panel, toolName + ' tool_call must render a panel');
 
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: CHILD,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === CHILD);
-  assert.ok(resume, 'new_tab must make the page resume the child');
-  const subTabId = resume.tabId;
-  announceSubagent(win, parentId, {
-    tab_id: subTabId,
-    description: 'child job',
-    task_id: CHILD,
-    isDone: false,
-  });
+  const subTabId = spawnSubagent(
+    {win, posted},
+    parentId,
+    CHILD,
+    'child job',
+    0,
+    {
+      extra: {isSubagentTab: true, isDone: false},
+    },
+  );
   send(win, {
     type: 'status',
     running: true,
@@ -308,7 +304,7 @@ function replayKeepsFinishedChildClosed(toolName) {
 function replayRepeatedReadyStaysClosed(toolName) {
   // Every reconnect replays the parent again: the second re-announce
   // must be as quiet as the first (one panel entry, still no tab).
-  const {win, parentId, subTabId} = replayFinishedParent(toolName);
+  const {win, posted, parentId, subTabId} = replayFinishedParent(toolName);
   announceSubagent(win, parentId, {
     tab_id: subTabId,
     description: 'child job',
@@ -321,11 +317,21 @@ function replayRepeatedReadyStaysClosed(toolName) {
     0,
     toolName + ': a repeated re-announce opens no tab either',
   );
-  const panel = toolPanel(win, toolName);
+  // The child is recorded once on its panel: expanding it reopens one
+  // tab and resumes the child once.
+  const before = posted.length;
+  togglePanel(win, toolPanel(win, toolName));
   assert.strictEqual(
-    (panel._rpSubagents || []).filter(en => String(en.taskId) === CHILD).length,
+    subagentTabEls(win).length,
     1,
-    toolName + ': the child is recorded once on its panel',
+    toolName + ': expanding the panel reopens the child once',
+  );
+  assert.strictEqual(
+    posted
+      .slice(before)
+      .filter(m => m.type === 'resumeSession' && m.taskId === CHILD).length,
+    1,
+    toolName + ': the child is resumed once',
   );
   win.close();
   console.log('  ok - ' + toolName + ': repeated ready replays stay closed');
@@ -352,6 +358,16 @@ function panelChildren(panels) {
   );
 }
 
+/** The task ids a collapsed fan-out panel resumes when expanded. */
+function expandedChildren(win, posted, panel) {
+  const before = posted.length;
+  togglePanel(win, panel);
+  return posted
+    .slice(before)
+    .filter(m => m.type === 'resumeSession')
+    .map(m => String(m.taskId));
+}
+
 function runAgentNoChildDoesNotStealNextSpawn() {
   const {win, posted, parentId} = makePage();
   send(win, {
@@ -373,11 +389,16 @@ function runAgentNoChildDoesNotStealNextSpawn() {
     tabId: parentId,
   });
   const agentPanel = fanoutPanels(win)[0];
-  assert.strictEqual(
-    (agentPanel._rpSubagents || []).length,
-    0,
-    'the failed dispatch recorded no child',
+  assert.ok(
+    agentPanel.classList.contains('collapsed'),
+    'the finished dispatch folds its panel',
   );
+  assert.deepStrictEqual(
+    expandedChildren(win, posted, agentPanel),
+    [],
+    'the failed dispatch recorded no child: expanding resumes nothing',
+  );
+  togglePanel(win, agentPanel);
 
   send(win, spawnCall('run_parallel', parentId, PARENT_TASK));
   const before = posted.length;
@@ -390,11 +411,6 @@ function runAgentNoChildDoesNotStealNextSpawn() {
   const panels = fanoutPanels(win);
   assert.strictEqual(panels.length, 2, 'both calls render a fan-out panel');
   assert.strictEqual(
-    panelChildren(panels),
-    JSON.stringify([[], ['parallel-child']]),
-    'the run_parallel spawn belongs to the run_parallel call, not to the empty run_agent panel',
-  );
-  assert.strictEqual(
     subagentTabEls(win).length,
     1,
     'the run_parallel child gets its tab',
@@ -404,6 +420,36 @@ function runAgentNoChildDoesNotStealNextSpawn() {
       .slice(before)
       .some(m => m.type === 'resumeSession' && m.taskId === 'parallel-child'),
     'the run_parallel child is resumed into its tab',
+  );
+  // The spawn belongs to the run_parallel call, not to the empty
+  // run_agent panel: once the child is history, only the run_parallel
+  // panel reopens it.
+  send(win, {
+    type: 'subagentDone',
+    tab_id: subagentTabEls(win)[0].dataset.tabId,
+  });
+  send(win, {
+    type: 'tool_result',
+    tool_name: 'run_parallel',
+    is_error: false,
+    content: 'done',
+    taskId: PARENT_TASK,
+    tabId: parentId,
+  });
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'the finished child closes',
+  );
+  assert.deepStrictEqual(
+    expandedChildren(win, posted, panels[0]),
+    [],
+    'the run_agent panel still owns no child',
+  );
+  assert.deepStrictEqual(
+    expandedChildren(win, posted, panels[1]),
+    ['parallel-child'],
+    'the run_parallel panel owns the child',
   );
   win.close();
   console.log(

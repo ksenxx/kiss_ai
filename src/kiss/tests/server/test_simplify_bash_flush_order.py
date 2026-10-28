@@ -67,12 +67,6 @@ def _emit_tool_call(printer: _GatedPrinter) -> None:
     printer.print("Bash", type="tool_call", tool_input={"command": "ls"})
 
 
-def _reset_and_record(printer: _GatedPrinter) -> None:
-    """Start a new turn: ``reset()`` then ``start_recording()``."""
-    printer.reset()
-    printer.start_recording()
-
-
 def _on_task_thread(
     printer: _GatedPrinter, task: str, emit: Callable[[_GatedPrinter], None]
 ) -> None:
@@ -118,13 +112,3 @@ def test_tool_call_waits_for_inflight_timer_flush() -> None:
     types = _run_gated(printer, "flush-order-call", _emit_tool_call)
     assert types[:2] == ["system_output", "text_end"], types
     assert "tool_call" in types
-
-
-def test_reset_waits_for_inflight_flush_and_new_turn_sees_no_stale_text() -> None:
-    """``reset()`` blocks behind a broadcasting flush; the next turn records nothing stale."""
-    printer = _GatedPrinter()
-    _buffer_fragment_with_armed_timer(printer, "flush-order-reset")
-    types = _run_gated(printer, "flush-order-reset", _reset_and_record)
-    assert types == ["system_output"], types
-    printer._thread_local.task_id = "flush-order-reset"
-    assert printer.stop_recording() == []

@@ -28,7 +28,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import _git, repo_lock
+from kiss.agents.sorcar.git_worktree import _GIT_TIMEOUT_SECONDS, _git, _git_command, repo_lock
+from kiss.core.processes import run_capped
 
 EXPLORER_EXCLUDED_NAMES: frozenset[str] = frozenset(
     {".git", ".svn", ".hg", ".DS_Store", "Thumbs.db"}
@@ -489,7 +490,7 @@ def _log_from(
         "--name-status",
         f"--format={fmt}",
     )
-    return _first_parent_merge(repo, args, ("-m",), (*starts, "--"))
+    return _first_parent_merge(repo, args, (*starts, "--"))[0]
 
 
 def parse_git_log(text: str) -> list[dict[str, Any]]:
@@ -514,7 +515,7 @@ def parse_git_log(text: str) -> list[dict[str, Any]]:
     commits: list[dict[str, Any]] = []
     i = 0
     while i + _LOG_HEADER_FIELDS <= len(tokens):
-        sha, parents, author, date, refs, subject, body = tokens[i : i + 7]
+        sha, parents, author, date, refs, subject, body = tokens[i : i + _LOG_HEADER_FIELDS]
         if not _SHA_RE.match(sha):
             break
         i += _LOG_HEADER_FIELDS
@@ -570,22 +571,63 @@ _REVISION_RE = re.compile(r"^[^\s\\]+$")
 """A revision the user typed (``main``, ``v1``, ``HEAD~2``, ``abc123^``)."""
 
 
-def _truncate(text: str) -> tuple[str, bool]:
-    """Cut *text* to :data:`GIT_SHOW_MAX_BYTES` of UTF-8; report whether it was.
+def _truncate(text: str) -> str:
+    """Cut *text* to :data:`GIT_SHOW_MAX_BYTES` of UTF-8.
 
-    The cap bounds what goes on the wire, so it counts encoded bytes,
-    not characters (a diff of emoji or CJK text is up to four bytes a
-    character).  Git output is decoded with ``surrogateescape`` (a
-    non-UTF-8 file name survives as lone surrogates); the cut keeps
-    those and only a multi-byte sequence split by the cut itself turns
-    into (at most three) such surrogates.  The client shows its own
-    "truncated" marker from the flag.
+    For output that is small in every normal case (a hook's chatter in
+    :func:`git_action`): the cap bounds what goes on the wire, so it
+    counts encoded bytes, not characters (a diff of emoji or CJK text
+    is up to four bytes a character).  Git output is decoded with
+    ``surrogateescape`` (a non-UTF-8 file name survives as lone
+    surrogates); the cut keeps those and only a multi-byte sequence
+    split by the cut itself turns into (at most three) such surrogates.
+    Output that can be huge (a patch, a blob) never reaches this: it is
+    streamed through :func:`_git_head`, which reads at most the cap
+    and kills git.
     """
     data = text.encode("utf-8", "surrogateescape")
     if len(data) <= GIT_SHOW_MAX_BYTES:
-        return text, False
-    cut = data[:GIT_SHOW_MAX_BYTES].decode("utf-8", "surrogateescape")
-    return cut, True
+        return text
+    return data[:GIT_SHOW_MAX_BYTES].decode("utf-8", "surrogateescape")
+
+
+_GIT_STDERR_MAX_BYTES = 64 * 1024
+"""Stderr kept of a streamed git command, for its error message."""
+
+
+def _git_head(*args: str, cwd: str) -> tuple[str, bool, str]:
+    """Run ``git *args*`` whose output may be huge; keep the first :data:`GIT_SHOW_MAX_BYTES`.
+
+    Stdout is streamed and git is killed once the cap is read
+    (``truncated``), so a 1 GiB blob or a patch adding a huge generated
+    file costs the daemon the cap, not the output.  The kept prefix is
+    the first cap bytes exactly, decoded as :func:`_git` decodes
+    (``surrogateescape``): both sides of a diff of one unchanged
+    non-UTF-8 file come back equal, and the text encodes back to at
+    most the cap (see :func:`_truncate`).  Git's stderr and status are
+    kept too: a git that failed is reported, a git the cap killed is
+    not a failure.
+
+    Returns:
+        ``(text, truncated, error)``; *error* is git's (bounded) stderr,
+        a timeout, or why git could not start, and then *text* is empty.
+    """
+    cmd, env = _git_command(args, cwd)
+    try:
+        out = run_capped(
+            cmd,
+            limit=GIT_SHOW_MAX_BYTES,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            env=env,
+            keep_stderr=_GIT_STDERR_MAX_BYTES,
+        )
+    except OSError as exc:
+        return "", False, f"git could not start: {exc}"
+    if out.timed_out:
+        return "", False, f"git timed out after {_GIT_TIMEOUT_SECONDS:g}s"
+    if out.returncode != 0 and not out.truncated:
+        return "", False, out.stderr.strip() or f"git exited with status {out.returncode}"
+    return out.stdout.decode("utf-8", "surrogateescape"), out.truncated, ""
 
 
 def _valid_sha(sha: str) -> bool:
@@ -593,24 +635,38 @@ def _valid_sha(sha: str) -> bool:
     return bool(re.match(r"^[0-9a-fA-F]{4,64}$", sha))
 
 
+def _repo_and_sha(work_dir: str, sha: str) -> tuple[str, dict[str, Any] | None]:
+    """Return *work_dir*'s repository and ``None``, or ``""`` and the error reply.
+
+    The preamble of every commit command: *work_dir* must be inside a
+    repository and *sha* must look like a commit id (:func:`_valid_sha`).
+    """
+    repo = repo_root(work_dir)
+    if not repo:
+        return "", {"error": f"Not a git repository: {work_dir}"}
+    if not _valid_sha(sha):
+        return "", {"error": f"Not a commit id: {sha}"}
+    return repo, None
+
+
 def _first_parent_merge(
     repo: str,
     args: tuple[str, ...],
-    fallback: tuple[str, ...],
     revs: tuple[str, ...],
-) -> subprocess.CompletedProcess[str]:
+) -> tuple[subprocess.CompletedProcess[str], bool]:
     """Run ``git <args> <merge option> <revs>`` with a merge shown against its first parent.
 
-    ``--diff-merges=first-parent`` needs git >= 2.31; an older git
-    rejects it and gets the *fallback* flags instead (``-m`` for a log
-    walk, ``--first-parent -m`` for ``show``).  The option goes BEFORE
-    *revs*, which end with ``--`` and any pathspec: after ``--`` git
-    would read it as a path.
+    Returns the completed process and whether git knew
+    ``--diff-merges=first-parent`` (git >= 2.31).  An older git rejects
+    it and gets ``-m`` instead: a log walk then lists a merge once per
+    parent, which :func:`git_log` folds back into one row.  The option
+    goes BEFORE *revs*, which end with ``--`` and any pathspec: after
+    ``--`` git would read it as a path.
     """
     result = _git(*args, "--diff-merges=first-parent", *revs, cwd=repo)
     if result.returncode != 0 and "diff-merges" in result.stderr:
-        result = _git(*args, *fallback, *revs, cwd=repo)
-    return result
+        return _git(*args, "-m", *revs, cwd=repo), False
+    return result, True
 
 
 def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
@@ -631,21 +687,29 @@ def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
         ``text`` is ``git show`` output (header + stat + unified diff,
         a merge against its first parent), or ``{"error": <message>}``.
     """
-    repo = repo_root(work_dir)
-    if not repo:
-        return {"error": f"Not a git repository: {work_dir}"}
-    if not _valid_sha(sha):
-        return {"error": f"Not a commit id: {sha}"}
+    repo, error = _repo_and_sha(work_dir, sha)
+    if error:
+        return error
     if path.startswith("/"):
         return {"error": f"Not a repository path: {path}"}
-    subject = _git("log", "-1", "--format=%s", sha, "--", cwd=repo)
+    # The subject lookup also validates the commit and probes whether
+    # this git knows ``--diff-merges`` (see :func:`_first_parent_merge`)
+    # before the patch is streamed.  ``-s`` keeps the probe from
+    # printing the merge's diff.
+    subject, modern = _first_parent_merge(repo, ("log", "-1", "-s", "--format=%s"), (sha, "--"))
     if subject.returncode != 0:
         return {"error": subject.stderr.strip() or f"Unknown commit: {sha}"}
+    # ``show`` on an old git needs ``--first-parent`` to restrict ``-m``
+    # to the one diff.
+    merge_option = ("--diff-merges=first-parent",) if modern else ("--first-parent", "-m")
     # --literal-pathspecs: a file literally named ``:(glob)*.txt`` or
     # ``*.py`` is that one file, not a pattern (``--`` only ends option
     # parsing, it does not switch pathspec magic off); after ``--`` a
-    # name such as ``--all`` is a path too.
-    args = (
+    # name such as ``--all`` is a path too.  Streamed: a commit that
+    # added a huge generated file costs the daemon the cap, not the
+    # patch.
+    revs = (sha, "--", path) if path else (sha, "--")
+    text, truncated, err = _git_head(
         "--literal-pathspecs",
         "show",
         "--no-color",
@@ -653,12 +717,12 @@ def git_show(work_dir: str, sha: str, path: str = "") -> dict[str, Any]:
         "--format=medium",
         "--stat",
         "--patch",
+        *merge_option,
+        *revs,
+        cwd=repo,
     )
-    revs = (sha, "--", path) if path else (sha, "--")
-    result = _first_parent_merge(repo, args, ("--first-parent", "-m"), revs)
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "git show failed"}
-    text, truncated = _truncate(result.stdout)
+    if err:
+        return {"error": err}
     return {
         "repo": repo,
         "sha": sha,
@@ -683,17 +747,14 @@ def git_file_at(work_dir: str, sha: str, path: str) -> dict[str, Any]:
         ``{"repo", "sha", "path", "text", "truncated"}`` or
         ``{"error": <message>}`` (also for a binary blob).
     """
-    repo = repo_root(work_dir)
-    if not repo:
-        return {"error": f"Not a git repository: {work_dir}"}
-    if not _valid_sha(sha):
-        return {"error": f"Not a commit id: {sha}"}
+    repo, error = _repo_and_sha(work_dir, sha)
+    if error:
+        return error
     if not path or path.startswith("/"):
         return {"error": f"Not a repository path: {path}"}
-    content, err = _blob_text(repo, f"{sha}:{path}")
-    if content is None:
+    text, truncated, err = _blob_text(repo, f"{sha}:{path}")
+    if text is None:
         return {"error": err or f"No {path} in commit {sha[:8]}"}
-    text, truncated = _truncate(content)
     return {
         "repo": repo,
         "sha": sha,
@@ -703,25 +764,27 @@ def git_file_at(work_dir: str, sha: str, path: str) -> dict[str, Any]:
     }
 
 
-def _blob_text(repo: str, spec: str) -> tuple[str | None, str]:
+def _blob_text(repo: str, spec: str) -> tuple[str | None, bool, str]:
     """Content of the blob ``rev:path`` *spec*, or ``None`` when absent.
 
-    Returns ``(text, "")`` for a text blob, ``(None, "")`` when the
-    path does not exist at that revision, and ``(None, <message>)`` for
-    a binary blob or any other git failure.
+    Returns ``(text, truncated, "")`` for a text blob (at most
+    :data:`GIT_SHOW_MAX_BYTES` of it, ``truncated`` when there was
+    more), ``(None, False, "")`` when the path does not exist at that
+    revision, and ``(None, False, <message>)`` for a binary blob or any
+    other git failure.  Streamed: a 1 GiB blob costs the daemon the
+    cap, not the blob.
     """
-    result = _git("show", spec, cwd=repo)
-    if result.returncode != 0:
-        err = result.stderr.strip()
+    text, truncated, err = _git_head("show", spec, cwd=repo)
+    if err:
         if "does not exist" in err or "exists on disk, but not in" in err:
-            return None, ""
-        return None, err or "git show failed"
-    if "\0" in result.stdout[:8192]:
-        return None, f"Cannot display binary file: {spec.split(':', 1)[-1]}"
-    return result.stdout, ""
+            return None, False, ""
+        return None, False, err
+    if "\0" in text[:8192]:
+        return None, False, f"Cannot display binary file: {spec.split(':', 1)[-1]}"
+    return text, truncated, ""
 
 
-def _worktree_file_text(repo: str, path: str) -> tuple[str | None, str]:
+def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
     """Content of the working-tree file *path* under *repo* (see :func:`_blob_text`).
 
     A symbolic link yields its target text, which is what git stores
@@ -731,19 +794,20 @@ def _worktree_file_text(repo: str, path: str) -> tuple[str | None, str]:
     full = os.path.join(repo, path)
     if os.path.islink(full):
         try:
-            return os.readlink(full), ""
+            return os.readlink(full), False, ""
         except OSError as exc:
-            return None, f"Cannot read {path}: {exc}"
+            return None, False, f"Cannot read {path}: {exc}"
     if not os.path.isfile(full):
-        return None, ""
+        return None, False, ""
     try:
         with open(full, "rb") as fh:
             data = fh.read(GIT_SHOW_MAX_BYTES + 1)
     except OSError as exc:
-        return None, f"Cannot read {path}: {exc}"
+        return None, False, f"Cannot read {path}: {exc}"
     if b"\0" in data[:8192]:
-        return None, f"Cannot display binary file: {path}"
-    return data.decode("utf-8", "surrogateescape"), ""
+        return None, False, f"Cannot display binary file: {path}"
+    text = data[:GIT_SHOW_MAX_BYTES].decode("utf-8", "surrogateescape")
+    return text, len(data) > GIT_SHOW_MAX_BYTES, ""
 
 
 def _repo_relative(path: str) -> bool:
@@ -806,27 +870,25 @@ def git_file_diff(
     # empty.
     parent = _git("rev-parse", "--verify", "--quiet", base_rev + "^{commit}", cwd=repo)
     parent_sha = _chomp(parent.stdout) if parent.returncode == 0 else ""
-    original, err = (
-        _blob_text(repo, f"{parent_sha}:{orig_path}") if parent_sha else (None, "")
+    original, cut_original, err = (
+        _blob_text(repo, f"{parent_sha}:{orig_path}") if parent_sha else (None, False, "")
     )
     if err:
         return {"error": err}
     if sha:
-        modified, err = _blob_text(repo, f"{sha}:{path}")
+        modified, cut_modified, err = _blob_text(repo, f"{sha}:{path}")
     else:
-        modified, err = _worktree_file_text(repo, path)
+        modified, cut_modified, err = _worktree_file_text(repo, path)
     if err:
         return {"error": err}
-    original_text, cut_original = _truncate(original or "")
-    modified_text, cut_modified = _truncate(modified or "")
     return {
         "repo": repo,
         "sha": sha,
         "parent": parent_sha,
         "path": path,
         "originalPath": orig_path,
-        "original": original_text,
-        "modified": modified_text,
+        "original": original or "",
+        "modified": modified or "",
         "originalMissing": original is None,
         "modifiedMissing": modified is None,
         "truncated": cut_original or cut_modified,
@@ -846,22 +908,24 @@ def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
         ``--stat`` summary followed by the unified diff) or
         ``{"error": <message>}``.
     """
-    repo = repo_root(work_dir)
-    if not repo:
-        return {"error": f"Not a git repository: {work_dir}"}
-    if not _valid_sha(sha):
-        return {"error": f"Not a commit id: {sha}"}
+    repo, error = _repo_and_sha(work_dir, sha)
+    if error:
+        return error
     if not base or base.startswith("-") or not _REVISION_RE.match(base):
         return {"error": f"Not a revision: {base}"}
     check = _git("rev-parse", "--verify", "--quiet", base + "^{commit}", cwd=repo)
     if check.returncode != 0:
         return {"error": f"Unknown revision: {base}"}
-    result = _git(
+    check = _git("rev-parse", "--verify", "--quiet", sha + "^{commit}", cwd=repo)
+    if check.returncode != 0:
+        return {"error": f"Unknown commit: {sha}"}
+    # Streamed: the diff costs the daemon the cap however far apart
+    # the two ends are.
+    text, truncated, err = _git_head(
         "diff", "--no-color", "--stat", "--patch", base, sha, "--", cwd=repo,
     )
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "git diff failed"}
-    text, truncated = _truncate(result.stdout)
+    if err:
+        return {"error": err}
     return {
         "repo": repo,
         "base": base,
@@ -905,13 +969,11 @@ def git_action(
         ``{"repo", "action", "sha", "ok": True, "output": <git output>}``
         or ``{"error": <git's message>}``.
     """
-    repo = repo_root(work_dir)
-    if not repo:
-        return {"error": f"Not a git repository: {work_dir}"}
+    repo, error = _repo_and_sha(work_dir, sha)
+    if error:
+        return error
     if action not in GIT_ACTIONS:
         return {"error": f"Unknown git action: {action}"}
-    if not _valid_sha(sha):
-        return {"error": f"Not a commit id: {sha}"}
     if action in ("createBranch", "createTag"):
         if not name or name.startswith("-") or not _REF_NAME_RE.match(name):
             return {"error": f"Not a valid name: {name!r}"}
@@ -936,13 +998,16 @@ def git_action(
         if is_merge:
             args += ["-m", "1"]
         args += [sha]
-    # The action moves HEAD / the index of the main tree; every other
-    # main-tree mutation (auto-commit, the worktree merge transaction,
-    # spare-worktree creation) is serialised by the same per-repo lock.
-    with repo_lock(Path(repo)):
+    # The action moves HEAD / the index of a checkout; every other
+    # mutation of the repository (auto-commit, the worktree merge
+    # transaction, spare-worktree creation) is serialised by the lock
+    # of its MAIN worktree, also when *repo* is a linked worktree (a
+    # tab rooted at a task's ``.kiss-worktrees/…`` directory, whose
+    # merge transaction runs git in that very worktree).
+    with repo_lock(Path(git_worktrees(repo)[0]["path"])):
         result = _git(*args, cwd=repo)
     # A hook can print anything; bound what goes on the wire.
-    output, _ = _truncate((result.stdout + result.stderr).strip())
+    output = _truncate((result.stdout + result.stderr).strip())
     if result.returncode != 0:
         return {"error": output or f"git {args[0]} failed"}
     return {

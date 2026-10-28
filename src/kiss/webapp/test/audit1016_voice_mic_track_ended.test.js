@@ -15,128 +15,30 @@
 // come down like a failed start does: the mic turns off, the error
 // explains why, and the next click asks for the microphone again.
 //
-// Same harness as voiceBrowserPipelineLifecycle.test.js: jsdom has no
-// speech engine, audio graph or microphone, so the page's embedder
-// surface (window.Vosk / AudioContext / mediaDevices) is supplied here;
-// the real voice.js, main.js and DOM run.
+// Harness: voice_page_helpers supplies the page's embedder surface
+// (window.Vosk / AudioContext / mediaDevices with tracks the test can
+// end); the real voice.js, main.js and DOM run.
 
 const assert = require('assert');
-const {makePage: makeChatPage, sleep, stubRaf} = require('./simplify2_harness');
-const {micBtn} = require('./voice_page_helpers');
-
-const recognizers = [];
-
-class FakeRecognizer {
-  constructor() {
-    this._handlers = {};
-    recognizers.push(this);
-  }
-  setWords() {}
-  on(event, cb) {
-    this._handlers[event] = cb;
-  }
-  acceptWaveform() {}
-  retrieveFinalResult() {}
-  remove() {}
-}
-
-function makeAudioContextClass(log) {
-  return class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-      log.push('ctx-open');
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      log.push('ctx-closed');
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      return {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
-    }
-  };
-}
-
-/** An audio track whose `ended` event the test can fire. */
-function makeTrack(win, log) {
-  const track = new win.EventTarget();
-  track.kind = 'audio';
-  track.label = 'Test mic';
-  track.readyState = 'live';
-  track.onended = null;
-  track.getSettings = () => ({});
-  track.stop = () => {
-    track.readyState = 'ended';
-    log.push('track-stopped');
-  };
-  track.end = () => {
-    track.readyState = 'ended';
-    const ev = new win.Event('ended');
-    track.dispatchEvent(ev);
-    if (typeof track.onended === 'function') track.onended(ev);
-  };
-  return track;
-}
-
-function makePage() {
-  const log = [];
-  const tracks = [];
-  function stubVoiceSurface(win) {
-    stubRaf(win);
-    win.Audio = function (src) {
-      return {src, play: () => Promise.resolve()};
-    };
-    Object.defineProperty(win.navigator, 'mediaDevices', {
-      configurable: true,
-      value: {
-        getUserMedia: () => {
-          const track = makeTrack(win, log);
-          tracks.push(track);
-          return Promise.resolve({
-            getTracks: () => [track],
-            getAudioTracks: () => [track],
-          });
-        },
-        enumerateDevices: () => Promise.resolve([]),
-      },
-    });
-    win.Vosk = {
-      createModel: () => Promise.resolve({KaldiRecognizer: FakeRecognizer}),
-    };
-    win.AudioContext = makeAudioContextClass(log);
-    win.__VOICE__ = {
-      voskSrc: '/media/vosk.js',
-      modelUrl: 'https://models.example.com/model.tar.gz',
-      ackAudioUrl: '/media/working-on-it.mp3',
-    };
-    win.localStorage.setItem('kissVoiceEnabled', '0');
-  }
-  const {win, posted} = makeChatPage({
-    beforeScripts: stubVoiceSurface,
-    extraScripts: ['voice.js'],
-  });
-  return {win, log, tracks, posted};
-}
+const {
+  makeVoicePage,
+  micBtn,
+  settle,
+  startPipeline,
+  fireWake,
+} = require('./voice_page_helpers');
 
 async function main() {
-  const {win, log, tracks} = makePage();
+  const page = makeVoicePage({autoGrant: true});
+  const {win, log, state} = page;
   const btn = micBtn(win);
-  btn.click();
-  await sleep(20);
-  assert.ok(btn.classList.contains('voice-listening'), 'pipeline is live');
-  assert.strictEqual(tracks.length, 1);
+  await startPipeline(page);
+  assert.strictEqual(state.tracks.length, 1);
   assert.deepStrictEqual(log, ['ctx-open']);
 
   // The microphone goes away under the live pipeline.
-  tracks[0].end();
-  await sleep(20);
+  state.tracks[0].end();
+  await settle();
   assert.ok(
     !btn.classList.contains('voice-listening'),
     'a pipeline whose microphone ended must not claim to listen',
@@ -162,10 +64,8 @@ async function main() {
   );
 
   // The next click asks for the microphone again and comes back live.
-  btn.click();
-  await sleep(20);
-  assert.strictEqual(tracks.length, 2, 'a fresh microphone request');
-  assert.ok(btn.classList.contains('voice-listening'), 'listening again');
+  await startPipeline(page);
+  assert.strictEqual(state.tracks.length, 2, 'a fresh microphone request');
   assert.deepStrictEqual(log, [
     'ctx-open',
     'track-stopped',
@@ -178,13 +78,11 @@ async function main() {
   // red flash the wake turned on (for 45 s) must come down with the
   // pipeline, as they do when the user turns the mic off.
   const wrap = win.document.getElementById('input-text-wrap');
-  recognizers[recognizers.length - 1]._handlers.result({
-    result: {text: 'abracadabra'},
-  });
+  fireWake(page);
   assert.ok(wrap.classList.contains('listening'), 'overlay on after wake');
   assert.ok(btn.classList.contains('voice-triggered'), 'flash on after wake');
-  tracks[1].end();
-  await sleep(20);
+  state.tracks[1].end();
+  await settle();
   assert.ok(btn.classList.contains('voice-error'), 'error state shown');
   assert.ok(
     !wrap.classList.contains('listening'),
@@ -194,19 +92,17 @@ async function main() {
     !btn.classList.contains('voice-triggered'),
     'the wake flash is gone with the microphone: ' + btn.className,
   );
-  btn.click();
-  await sleep(20);
-  assert.strictEqual(tracks.length, 3, 'a fresh microphone request');
-  assert.ok(btn.classList.contains('voice-listening'), 'listening again');
+  await startPipeline(page);
+  assert.strictEqual(state.tracks.length, 3, 'a fresh microphone request');
 
   // An `ended` from the track of a pipeline that was already torn down
   // (the user turned the mic off first) changes nothing.
   btn.click();
-  await sleep(20);
+  await settle();
   assert.ok(btn.classList.contains('voice-off'));
   const after = log.slice();
-  tracks[2].end();
-  await sleep(20);
+  state.tracks[2].end();
+  await settle();
   assert.ok(btn.classList.contains('voice-off'), 'still off');
   assert.deepStrictEqual(log, after, 'nothing torn down twice');
 

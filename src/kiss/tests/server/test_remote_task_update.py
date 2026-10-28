@@ -55,8 +55,7 @@ class TestRemoteTaskUpdate(RemoteTabsHarness):
             self.assertEqual(reply["token"], "t1")
             self.assertEqual(reply["error"], "")
             self.assertTrue(reply["exists"], reply)
-            self.assertNotIn("dueAt", reply)
-            self.assertIn("task-update-digest", reply["content"])
+            self.assertGreater(reply["dueAt"], 0)
             self.assertTrue(reply["taskId"])
             self.assertTrue(reply["sig"])
 

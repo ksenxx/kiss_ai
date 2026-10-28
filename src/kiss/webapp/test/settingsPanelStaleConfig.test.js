@@ -17,7 +17,7 @@
 //   A) a key pasted before the reply arrived was silently replaced by
 //      the stored value, and the stale value was then saved on close;
 //   B) closing the panel before the reply arrived dropped the edit
-//      entirely, because configFormPopulated was still false.
+//      entirely, because the form did not count as populated yet.
 //
 // Every other async reply in main.js is checked against what the user is
 // doing (files vs. the typed prefix, ghost/completions vs. the input
@@ -27,10 +27,9 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
-// Typing for real: set the value and fire the event the browser fires.
 const STORED = {
   max_budget: 100,
   remote_password: 'pw-from-install',
@@ -103,15 +102,20 @@ function testLateConfigDataDoesNotClobberTypedKey() {
     'https://new.example/v1',
     'the saved endpoint must be the one the user typed',
   );
-  assert.strictEqual(
-    save.config.custom_headers,
-    'X-Old: 1',
-    'untouched fields must be saved with their loaded values',
+  // The daemon merges the payload: an untouched field is left out, so
+  // its loaded value cannot paint over what another window saved
+  // while this sheet was open.
+  assert.ok(
+    !('custom_headers' in save.config),
+    'untouched fields must not be re-sent with their loaded values',
   );
-  assert.strictEqual(
-    save.config.remote_password,
-    'pw-from-install',
-    'the untouched remote password is saved with its loaded value',
+  assert.ok(
+    !('remote_password' in save.config),
+    'the untouched remote password is not re-sent',
+  );
+  assert.ok(
+    !('OPENAI_API_KEY' in save.apiKeys),
+    'an untouched key is not re-sent',
   );
   win.close();
   console.log('  ok - a late configData does not clobber a typed field');

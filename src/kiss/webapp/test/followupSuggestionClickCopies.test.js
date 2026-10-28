@@ -49,8 +49,14 @@ function testLiveFollowupClickCopies() {
   const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   send(win, {type: 'followup_suggestion', text: 'live next step', tabId});
-  const bar = win.document.querySelector('#output .followup-bar');
-  assertClickCopies(win, bar, 'live next step', 'live stream');
+  const bars = win.document.querySelectorAll('#output .followup-bar');
+  assert.strictEqual(
+    bars.length,
+    1,
+    'live stream: exactly one bar on the active tab (not parked and ' +
+      'painted both)',
+  );
+  assertClickCopies(win, bars[0], 'live next step', 'live stream');
   win.close();
   console.log('PASS live followup bar click copies to input');
 }

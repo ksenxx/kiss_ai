@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.server.tricks import MY_INJECTION_DEFAULT_BODY, read_tricks
+from kiss.server.tricks import MY_INJECTION_DEFAULT_BODY, read_tricks_data
 from kiss.tests.server.conftest import kiss_home  # noqa: F401
 
 
@@ -35,7 +35,7 @@ def test_no_injections_path_falls_back_to_bundled_package_file(
     seeded and listed first.
     """
     monkeypatch.delenv("KISS_INJECTIONS_PATH", raising=False)
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert tricks[0] == MY_INJECTION_DEFAULT_BODY
     assert len(tricks) >= 2
 
@@ -45,5 +45,5 @@ def test_default_trick_renders_at_least_once_on_fresh_install(
 ) -> None:
     """A fresh install (no MY_INJECTION.md, no env overrides for INJECTIONS)
     still shows the default test-first trick in the inject panel."""
-    tricks = read_tricks()
+    tricks = read_tricks_data()["tricks"]
     assert MY_INJECTION_DEFAULT_BODY in tricks

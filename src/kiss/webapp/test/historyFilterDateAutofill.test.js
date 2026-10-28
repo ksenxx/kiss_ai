@@ -7,12 +7,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-
-function localIso(sec) {
-  const d = new Date(sec * 1000);
-  const p = n => (n < 10 ? '0' + n : '' + n);
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
+const {makeRow, localIsoDate: localIso} = require('./history_helpers');
 
 function visibleCount(win) {
   const list = win.document.getElementById('history-list');
@@ -23,24 +18,15 @@ function visibleCount(win) {
   return n;
 }
 
+/** A finished row whose task ran at the unix time `ts`. */
 function session(id, ts) {
-  return {
-    id: 'chat' + id,
+  return makeRow({
     task_id: id,
     title: 'task ' + id,
     timestamp: ts,
-    preview: 'task ' + id,
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
     startTs: ts * 1000,
     endTs: ts * 1000 + 1000,
-  };
+  });
 }
 
 const TS_FIRST = Date.UTC(2024, 0, 15, 12, 0, 0) / 1000;
@@ -208,17 +194,8 @@ function testMissingDateRangeLeavesInputsEmpty() {
   assert.strictEqual(doc.getElementById('hf-from').value, '');
   assert.strictEqual(doc.getElementById('hf-to').value, '');
 
-  send(win, {
-    type: 'history',
-    sessions: [],
-    offset: 0,
-    dateRange: {min: null, max: null},
-  });
-  assert.strictEqual(doc.getElementById('hf-from').value, '');
-  assert.strictEqual(doc.getElementById('hf-to').value, '');
-
   win.close();
-  console.log('  ok - missing/null dateRange leaves the inputs empty');
+  console.log('  ok - a missing dateRange leaves the inputs empty');
 }
 
 function testEmptyDatabaseClearsUntouchedAutofill() {

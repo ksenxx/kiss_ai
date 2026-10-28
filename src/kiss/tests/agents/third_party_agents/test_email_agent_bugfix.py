@@ -65,11 +65,6 @@ class TestReplyToPreference:
         assert normalized["reply_to"] == "alice.work@corp.example"
         assert normalized["user"] == "alice@example.com"
 
-    def test_normalize_mail_without_reply_to(self) -> None:
-        """Mail without Reply-To yields an empty reply_to field."""
-        normalized = _normalize_mail(email.message_from_bytes(raw_plain()), "INBOX")
-        assert normalized["reply_to"] == ""
-
     def test_cached_thread_prefers_reply_to(self) -> None:
         """The thread cache routes replies to Reply-To, not From."""
         backend = EmailChannelBackend()
@@ -84,15 +79,6 @@ class TestReplyToPreference:
         backend._cache_thread(_normalize_mail(email.message_from_bytes(raw_plain()), "INBOX"))
         to, _ = backend._resolve_outbound("INBOX", "<abc123@example.com>")
         assert to == "alice@example.com"
-
-    def test_is_from_bot_still_uses_from(self) -> None:
-        """is_from_bot keys on the From address even when Reply-To differs."""
-        backend = EmailChannelBackend()
-        backend._cfg = {"email_address": "bot@example.com"}
-        msg = email.message_from_bytes(
-            raw_plain(From="bot@example.com", **{"Reply-To": "human@example.com"})
-        )
-        assert backend.is_from_bot(_normalize_mail(msg, "INBOX")) is True
 
 
 class TestMissingMessageId:

@@ -13,10 +13,10 @@ Covers:
 - F5: ``_flush_bash`` / the inline ``bash_stream`` flush broadcast
   while holding the printer-global ``_bash_lock``, so one task's slow
   transport send blocked every other task's bash streaming.
-- F6: the task-cleanup ``printer.reset()`` ran after the worker's
-  thread-local ``task_id`` was already cleared to ``""``, so it
-  mutated (generation-bumped and drained) the SHARED ``""`` fallback
-  bash state belonging to task-less broadcasters.
+- F6: the task cleanup ran after the worker's thread-local
+  ``task_id`` was already cleared to ``""``, so it mutated
+  (generation-bumped and drained) the SHARED ``""`` fallback bash
+  state belonging to task-less broadcasters.
 - F9: ``_ask_user_question`` resolves the answer queue once and hands
   that SAME queue object to ``_await_user_response``, so the agent
   can never block on a different queue than the one it drained (e.g.
@@ -288,27 +288,6 @@ def test_f5_slow_broadcast_does_not_block_other_tasks() -> None:
         e.get("type") == "system_output" and "AAA" in e.get("text", "")
         for e in printer.events
     )
-
-
-def test_f5_reset_during_inflight_flush_still_discards_stale_text() -> None:
-    """Regression guard: the reset-vs-flush TOCTOU stays closed.
-
-    A ``reset()`` that starts BEFORE the flush drains the buffer must
-    win (text discarded); one that starts while the flush is already
-    broadcasting must block until the broadcast finishes (text was
-    still part of the old turn).  Here we exercise the first ordering
-    deterministically: reset, then flush — nothing may be emitted.
-    """
-    printer = _CapturePrinter()
-    printer._thread_local.task_id = "w2f5-reset"
-    with printer._bash_lock:
-        bs = printer._bash_state
-        bs.buffer.append("stale text")
-        bs.last_flush = time.monotonic()
-    printer.reset()
-    printer._flush_bash()
-    assert all(e.get("type") != "system_output" for e in printer.events)
-
 
 
 class _AskUserGatePrinter(_CapturePrinter):

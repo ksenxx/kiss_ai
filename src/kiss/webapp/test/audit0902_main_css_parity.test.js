@@ -17,21 +17,14 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
-const {newDom, MEDIA} = require('./simplify2_harness');
+const {newDom} = require('./simplify2_harness');
+const {installTokenisedCss} = require('./designTokens');
 
 // No page script runs: only main.css (its design tokens inlined, as
 // jsdom resolves no var()) is applied to the real chat.html markup.
 function makeDom() {
   const win = newDom('outside-only');
-  const css = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = css;
-  win.document.head.appendChild(styleEl);
+  installTokenisedCss(win, 'main.css');
   return win;
 }
 

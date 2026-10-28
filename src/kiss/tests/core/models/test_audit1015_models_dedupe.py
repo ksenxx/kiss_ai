@@ -79,7 +79,7 @@ def test_part_final_text_handles_every_part_shape() -> None:
 
 
 def test_function_call_item_keeps_item_id_only_when_present() -> None:
-    f = OpenAICompatibleModel2._function_call_item
+    f = OpenAICompatibleModel2._streamed_call_item
     assert f({"id": "call_1", "name": "fn", "arguments": '{"a":1}'}) == {
         "type": "function_call",
         "call_id": "call_1",

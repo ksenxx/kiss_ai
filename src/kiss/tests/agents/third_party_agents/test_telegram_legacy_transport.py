@@ -18,6 +18,10 @@ is unreachable in this environment without a test double.  On Linux it
 is covered end to end by the ``muse_env`` tests in
 ``test_muse_auth_tokenx.py`` (a real daemon plus the same kind of Bot
 API emulator).
+
+Legacy auth (``KISS_MUSE_AUTH=0``) is pinned for every test process by
+``tests/conftest.py``; ``isolated_kiss_home`` puts the config under a
+temp ``KISS_HOME``.
 """
 
 from __future__ import annotations
@@ -36,73 +40,23 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
     _TelegramBot,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
-from kiss.tests.agents.third_party_agents.recording_http import (
-    RecordingHandler,
-    RecordingServer,
-    serve_recording,
-)
+from kiss.tests.agents.third_party_agents.telegram_bot_api import BotApiServer, serve_bot_api
 from kiss.tests.conftest import IS_WINDOWS
 
 VALID_TOKEN = "123456:VALID-TOKEN"
 
 
-class _BotApiHandler(RecordingHandler):
-    """Minimal Telegram Bot API emulator recording every request."""
-
-    server: RecordingServer  # type: ignore[assignment]
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Answer ``/bot<token>/<method>`` like api.telegram.org would."""
-        body = self._read_raw()
-        _, _, rest = self.path.partition("/bot")
-        token, _, method = rest.partition("/")
-        self.server.requests.append(
-            {
-                "token": token,
-                "method": method,
-                "headers": {k.lower(): v for k, v in self.headers.items()},
-                "body": body,
-            }
-        )
-        if token != VALID_TOKEN:
-            self._json(401, {"ok": False, "description": "Unauthorized"})
-        elif method == "getMe":
-            self._json(
-                200,
-                {
-                    "ok": True,
-                    "result": {"id": 123456, "username": "emu_bot", "first_name": "Emu"},
-                },
-            )
-        elif method in ("sendMessage", "sendPhoto"):
-            self._json(200, {"ok": True, "result": {"message_id": 77}})
-        elif method == "badJson":
-            self._reply(200, "<html>not json</html>")
-        elif method == "errorObject":
-            self._json(500, {"error": {"message": "boom"}})
-        elif method == "listBody":
-            self._reply(200, "[]")
-        else:
-            self._json(404, {"ok": False, "description": "Not Found"})
-
-
 @pytest.fixture
-def api() -> Iterator[RecordingServer]:
-    """Run the Bot API emulator for one test."""
-    yield from serve_recording(_BotApiHandler)
+def api() -> Iterator[BotApiServer]:
+    """Run the Bot API emulator for one test, accepting only ``VALID_TOKEN``."""
+    for server in serve_bot_api():
+        server.expected_token = VALID_TOKEN
+        yield server
 
 
-@pytest.fixture
-def legacy_env(isolated_kiss_home: Path) -> Path:
-    """Isolate config under a temp ``KISS_HOME``.
-
-    Legacy auth (``KISS_MUSE_AUTH=0``) is pinned for every test process by
-    ``tests/conftest.py``.
-    """
-    return isolated_kiss_home
-
-
-def test_authenticate_then_check_and_persist(legacy_env: Path, api: RecordingServer) -> None:
+def test_authenticate_then_check_and_persist(
+    isolated_kiss_home: Path, api: BotApiServer
+) -> None:
     """A valid token is validated over HTTP, saved with mode 0600 and reusable."""
     agent = TelegramAgent()
     agent._backend._api_base = api.base_url
@@ -123,7 +77,7 @@ def test_authenticate_then_check_and_persist(legacy_env: Path, api: RecordingSer
         "id": 123456,
     }
 
-    config_path = legacy_env / "third_party_agents" / "telegram" / "config.json"
+    config_path = isolated_kiss_home / "third_party_agents" / "telegram" / "config.json"
     assert _config.path == config_path
     assert json.loads(config_path.read_text()) == {"bot_token": VALID_TOKEN}
     # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
@@ -153,7 +107,9 @@ def test_authenticate_then_check_and_persist(legacy_env: Path, api: RecordingSer
     assert not TelegramAgent()._is_authenticated()
 
 
-def test_authenticate_rejects_bad_or_empty_token(legacy_env: Path, api: RecordingServer) -> None:
+def test_authenticate_rejects_bad_or_empty_token(
+    isolated_kiss_home: Path, api: BotApiServer
+) -> None:
     """A rejected token is reported as an error and nothing is written."""
     agent = TelegramAgent()
     agent._backend._api_base = api.base_url
@@ -167,7 +123,9 @@ def test_authenticate_rejects_bad_or_empty_token(legacy_env: Path, api: Recordin
     assert not agent._is_authenticated()
 
 
-def test_connect_reports_failure_and_missing_config(legacy_env: Path, api: RecordingServer) -> None:
+def test_connect_reports_failure_and_missing_config(
+    isolated_kiss_home: Path, api: BotApiServer
+) -> None:
     """``connect`` fails closed for a bad stored token and for no config."""
     backend = TelegramChannelBackend()
     backend._api_base = api.base_url
@@ -179,14 +137,18 @@ def test_connect_reports_failure_and_missing_config(legacy_env: Path, api: Recor
     assert backend._connection_info.startswith("Telegram auth failed: Telegram API getMe failed")
 
 
-def test_make_backend_exits_without_config(legacy_env: Path, capsys: pytest.CaptureFixture) -> None:
+def test_make_backend_exits_without_config(
+    isolated_kiss_home: Path, capsys: pytest.CaptureFixture
+) -> None:
     """Poll-mode startup exits with instructions when no token is stored."""
     with pytest.raises(SystemExit):
         _make_backend()
     assert "Not authenticated. Run: kiss-telegram -t 'authenticate'" in capsys.readouterr().out
 
 
-def test_bot_adapter_multipart_and_error_envelopes(legacy_env: Path, api: RecordingServer) -> None:
+def test_bot_adapter_multipart_and_error_envelopes(
+    isolated_kiss_home: Path, api: BotApiServer
+) -> None:
     """Uploads go multipart; malformed and error envelopes raise RuntimeError."""
     import io
 

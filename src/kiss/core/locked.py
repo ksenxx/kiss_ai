@@ -22,7 +22,7 @@ from __future__ import annotations
 import functools
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 
 def locked_call[T](
@@ -51,11 +51,12 @@ def locked_call[T](
     lock free or another thread's: ``RLock.release`` refuses it with
     ``RuntimeError``, which is swallowed.  This needs a reentrant lock
     (or a ``Condition`` over one, the default) for that owner check.
-    A re-entrant hold (the printer's ``delivery_lock`` is held by the
+    A re-entrant take (the printer's ``delivery_lock`` is held by the
     runner's setup-failure broadcast while ``broadcast`` takes it
-    again) is safe: the ``finally`` runs only once the ``acquire``
-    call returned, so its ``release`` undoes this call's own
-    acquisition and never the outer one.
+    again) runs ``fn`` without acquiring: the outer frame owns the
+    release, and an interrupt landing between the ``try`` and the
+    inner ``acquire`` would otherwise make the ``finally`` release
+    the outer hold.
 
     Args:
         lock: The shared reentrant lock, or a condition over one.
@@ -66,6 +67,8 @@ def locked_call[T](
     Returns:
         ``fn``'s return value.
     """
+    if cast(Any, lock)._is_owned():
+        return fn(*args, **kwargs)
     try:
         lock.acquire()
         return fn(*args, **kwargs)

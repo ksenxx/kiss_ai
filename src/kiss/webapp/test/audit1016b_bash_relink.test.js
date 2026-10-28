@@ -21,29 +21,16 @@ const {
   makePage: makeChatPage,
   send,
   fakeMatchMedia,
+  queueRaf,
 } = require('./simplify2_harness');
-
-// A queued requestAnimationFrame the test flushes by hand (win.flushRaf).
-function queueRaf(win) {
-  const rafs = [];
-  win.requestAnimationFrame = function (cb) {
-    rafs.push(cb);
-    return rafs.length;
-  };
-  win.cancelAnimationFrame = function (id) {
-    rafs[id - 1] = null;
-  };
-  win.flushRaf = () => {
-    rafs.splice(0).forEach(cb => cb && cb());
-  };
-}
 
 function makePage() {
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
     beforeScripts(win) {
-      queueRaf(win);
+      // Frames are queued and flushed by hand (win.flushRaf).
+      win.flushRaf = queueRaf(win).run;
       fakeMatchMedia(win, true);
     },
   });

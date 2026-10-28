@@ -75,6 +75,11 @@ def _branches(repo: Path) -> set[str]:
     return set(out.split())
 
 
+def _checked_out(repo: Path) -> set[str]:
+    """The branches checked out in any worktree of *repo* (the sweep's in-use set)."""
+    return {branch for _wt_dir, branch in GitWorktreeOps.registered_worktrees(repo)}
+
+
 def _config_sections(repo: Path) -> set[str]:
     """Return branch names owning a ``branch.kiss/wt-*.*`` config section."""
     proc = subprocess.run(
@@ -209,7 +214,7 @@ class TestSweepRemovesDeadState:
 
         Deleting ``.kiss-worktrees/<slug>`` with ``rm -rf`` (or losing
         it to a crash) leaves git still listing the worktree.  Without
-        the prune, ``checked_out_branches`` would report the branch as
+        the prune, ``registered_worktrees`` would report the branch as
         in use and the sweep would skip it forever.
         """
         repo = _make_repo(tmp_path)
@@ -218,13 +223,13 @@ class TestSweepRemovesDeadState:
         _git("worktree", "add", "-b", branch, str(worktree), cwd=repo)
         # Simulate a crash: the directory is gone, the registration is not.
         shutil.rmtree(worktree)
-        assert branch in GitWorktreeOps.checked_out_branches(repo)
+        assert branch in _checked_out(repo)
 
         deleted = GitWorktreeOps.sweep_orphaned_state(repo)
 
         assert deleted == 1, "the branch of a vanished worktree was not reaped"
         assert _branches(repo) == {"main"}
-        assert GitWorktreeOps.checked_out_branches(repo) == {"main"}
+        assert _checked_out(repo) == {"main"}
 
 
 class TestSweepPreservesLiveState:
@@ -363,9 +368,9 @@ class TestSweepHelpers:
         worktree = repo / ".kiss-worktrees" / branch.replace("/", "_")
         _git("worktree", "add", "-b", branch, str(worktree), cwd=repo)
 
-        assert GitWorktreeOps.checked_out_branches(repo) == {"main", branch}
+        assert _checked_out(repo) == {"main", branch}
 
-    def test_checked_out_branches_ignores_detached_worktrees(
+    def test_registered_worktrees_ignores_detached_worktrees(
         self, tmp_path: Path
     ) -> None:
         """A detached worktree contributes no branch name.
@@ -379,7 +384,7 @@ class TestSweepHelpers:
         detached = repo / ".kiss-worktrees" / "kiss_wt-detached"
         _git("worktree", "add", "--detach", str(detached), head, cwd=repo)
 
-        assert GitWorktreeOps.checked_out_branches(repo) == {"main"}
+        assert _checked_out(repo) == {"main"}
 
     def test_branch_is_expendable_matches_reachability(
         self, tmp_path: Path

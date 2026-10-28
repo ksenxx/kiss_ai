@@ -29,7 +29,9 @@ const {makePage: makeChatPage, sleep} = require('./simplify2_harness');
 
 function makePage() {
   // Capture the Monaco loader's 10-second timeout so the test can fire it
-  // deterministically; every other timer runs for real.
+  // deterministically.  ensureMonaco() appends the loader script and
+  // arms the timer synchronously; the only asynchrony between the steps
+  // below is promise settlement, so `sleep(0)` is the exact wait.
   const monacoTimeouts = [];
   const {win} = makeChatPage({
     beforeScripts(win) {
@@ -73,17 +75,17 @@ async function main() {
 
   // 1. First code file: flight P1 appends loader script S1.
   openCodeFile(win, 'a.py');
-  await sleep(30);
+  await sleep(0);
   assert.strictEqual(loaderScripts(win).length, 1, 'P1 appended S1');
   assert.strictEqual(monacoTimeouts.length, 1, 'P1 armed its 10s timeout');
 
   // 2. P1 times out: the single-flight slot empties (a retry is allowed).
   monacoTimeouts[0]();
-  await sleep(30);
+  await sleep(0);
 
   // 3. Second code file: flight P2 appends S2.
   openCodeFile(win, 'b.py');
-  await sleep(30);
+  await sleep(0);
   assert.strictEqual(loaderScripts(win).length, 2, 'P2 appended S2');
   assert.strictEqual(monacoTimeouts.length, 2, 'P2 armed its own timeout');
 
@@ -91,12 +93,12 @@ async function main() {
   //    callback must not clear the slot that P2 currently owns.
   const s1 = loaderScripts(win)[0];
   s1.onerror();
-  await sleep(30);
+  await sleep(0);
 
   // 5. Third code file while P2 is still in flight: it must REUSE P2, not
   //    start a third concurrent loader.
   openCodeFile(win, 'c.py');
-  await sleep(30);
+  await sleep(0);
   assert.strictEqual(
     loaderScripts(win).length,
     2,
@@ -112,7 +114,7 @@ async function main() {
   };
   win.require.config = function () {};
   s1.onload();
-  await sleep(30);
+  await sleep(0);
   assert.strictEqual(
     amdCalls,
     0,
@@ -140,12 +142,12 @@ async function main() {
   win.require.config = function () {};
   const s2 = loaderScripts(win)[1];
   s2.onload();
-  await sleep(30);
+  await sleep(0);
   assert.ok(created.length >= 1, 'P2 still resolved and created the editor');
 
   // 8. The resolved flight stays cached: a fourth file adds no script.
   openCodeFile(win, 'd.py');
-  await sleep(30);
+  await sleep(0);
   assert.strictEqual(
     loaderScripts(win).length,
     2,

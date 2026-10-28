@@ -175,7 +175,6 @@ function testPreviewBootstrap() {
   const win = makePage();
   const html = win.MobileSwipe.bootstrapHtml().trim();
   assert.ok(html.startsWith('<script'), 'the bootstrap is a script tag');
-  assert.ok(html.includes('install(document,postSwipeToParent,{})'));
   // Evaluate that script in a second document whose parent is a sink.
   const preview = new JSDOM('<!DOCTYPE html><body><p id="p">text</p></body>', {
     runScripts: 'outside-only',

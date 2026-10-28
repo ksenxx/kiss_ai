@@ -27,17 +27,14 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.recommendations import recommendations_sea as sea
 from kiss.agents.seas.recommendations.recommendations_sea import RecommendationsSea
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.core.config import kiss_home
 from kiss.server import sidebar_panels
 from kiss.tests.agents.seas.conftest import persist_task, run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -121,21 +118,12 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
         "save_recommendations",
     ]
     assert _tool_names(agent.tools([print])) == ["print", *_tool_names(agent.tools([]))]
-    assert isinstance(agent, WorkerSea)
-    assert agent.settings({}) == {
-        "tool_profile": "none",
-        "max_budget": 2.0,
-        "timeout": 900,
-        "locked": ["tool_profile"],
-    }
-    # The WorkerSea layer (no classifier, browser or memory) is laid
-    # under the SEA's own keys by the loader.
-    assert sea_commands.base_settings([agent]) == resolve_settings(
-        {**WORKER_DEFAULTS, **agent.settings({})}
+    assert_worker_contract(
+        sea,
+        agent,
+        {"tool_profile": "none", "max_budget": 2.0, "timeout": 900, "locked": ["tool_profile"]},
     )
-    assert sea_commands.base_settings([agent])["auto_classify"] is False
     assert "RECOMMENDATIONS" in agent.description() and "ten" in agent.description()
-    assert_no_removed_getters(sea)
 
 
 def test_recent_tasks_lists_the_last_day_and_twenty_completed_tasks(
@@ -283,21 +271,13 @@ def test_age_text_and_result_clipping() -> None:
     assert len(clipped) == sea.MAX_RESULT_CHARS and clipped.endswith("…")
 
 
-def test_connected_apps_names_the_signed_in_channels() -> None:
+def test_connected_apps_names_the_signed_in_channels(no_connected_apps: Path) -> None:
     """The real probe subprocess decides: no credential, no app; a Brave key, Brave Search."""
-    brave = kiss_home() / "third_party_agents" / "brave_search" / "config.json"
-    saved = brave.read_text() if brave.exists() else None
-    brave.unlink(missing_ok=True)
-    try:
-        assert sea.connected_apps() == "No third-party app is connected."
-        brave.parent.mkdir(parents=True, exist_ok=True)
-        brave.write_text(json.dumps({"api_key": "test-key"}))
-        assert sea.connected_apps() == "Connected apps: Brave Search."
-    finally:
-        if saved is None:
-            brave.unlink(missing_ok=True)
-        else:
-            brave.write_text(saved)
+    assert sea.connected_apps() == "No third-party app is connected."
+    brave = no_connected_apps
+    brave.parent.mkdir(parents=True, exist_ok=True)
+    brave.write_text(json.dumps({"api_key": "test-key"}))
+    assert sea.connected_apps() == "Connected apps: Brave Search."
 
 
 def test_memory_read_tools_follow_the_memory_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -364,6 +344,7 @@ def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
     tmp_path: Path,
     empty_history: None,
     recommendations_path: Path,
+    no_connected_apps: Path,
 ) -> None:
     """With the SEA's configuration the model gets its six tools and finish.
 

@@ -9,7 +9,7 @@
 // and the rendered width of a docked panel.
 'use strict';
 
-const {makePage, fakeMatchMedia} = require('./simplify2_harness');
+const {makePage, stubDesktop} = require('./simplify2_harness');
 
 /**
  * Build a remote chat page for a resize test.
@@ -22,21 +22,15 @@ const {makePage, fakeMatchMedia} = require('./simplify2_harness');
  */
 function makeResizePage(opts) {
   const {desktopMatches = true, stored = {}} = opts || {};
-  const captured = [];
-  const released = [];
+  let captured;
+  let released;
   const {win} = makePage({
     bodyClass: 'remote-chat',
     beforeScripts: w => {
-      w.Element.prototype.setPointerCapture = function (id) {
-        captured.push(id);
-      };
-      w.Element.prototype.releasePointerCapture = function (id) {
-        released.push(id);
-      };
       for (const [key, value] of Object.entries(stored)) {
         w.localStorage.setItem(key, value);
       }
-      fakeMatchMedia(w, desktopMatches === true);
+      ({captured, released} = stubDesktop(w, desktopMatches === true));
     },
   });
   return {win, captured, released};

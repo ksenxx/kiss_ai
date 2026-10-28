@@ -222,7 +222,11 @@ def lint_all(
         scripts = [_script_of(Path(p)) for p in paths]
     if fix:
         for script in scripts:
-            for line in fix_sea(script):
+            try:
+                fixed = fix_sea(script)
+            except (OSError, SyntaxError):
+                continue  # lint_sea reports it below as ``broken: cannot parse``
+            for line in fixed:
                 print(f"fixed {line}")
     findings: list[Finding] = []
     for script in scripts:

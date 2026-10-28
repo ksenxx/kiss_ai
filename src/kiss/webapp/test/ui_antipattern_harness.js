@@ -132,8 +132,9 @@ function toastInput(el) {
   return el.querySelector('.kiss-notification-input');
 }
 
-function pinWorkspace(win) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
+/** Deliver the config reply that pins the workspace (*wd*, default WD). */
+function pinWorkspace(win, wd) {
+  send(win, {type: 'configData', config: {work_dir: wd || WD}});
 }
 
 /** Open the Explorer on WD and answer its root listing with *entries*. */
@@ -325,4 +326,5 @@ module.exports = {
   openDirtyContentTab,
   contentTabStrips,
   makeRunner,
+  pinWorkspace,
 };

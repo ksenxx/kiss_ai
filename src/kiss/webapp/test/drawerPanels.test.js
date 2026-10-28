@@ -15,33 +15,39 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeSharedPage,
   send,
-  MEDIA,
   readyTabId,
+  byId,
+  click: clickEl,
+  captureTimers,
+  fireCapturedTimers,
+  loadRemoteCss,
 } = require('./simplify2_harness');
-const {inlineDesignTokens} = require('./designTokens');
 
-let persistedState;
-
+/**
+ * A remote-chat page with the drawer CSS; `initialState` is the state a
+ * previous page persisted (a reopen) and `getState()` reads the state
+ * this one persists last.  With `timeouts` the page's setTimeout calls
+ * are recorded (simplify2_harness.captureTimers) and returned as `timers`.
+ */
 function makePage(opts) {
   const {
     stripDrawerButtons = false,
     userAgent,
     userAgentData,
     maxTouchPoints,
-    timeouts,
+    timeouts = false,
+    initialState,
   } = opts || {};
-  const {win, posted} = makeSharedPage({
+  let timers;
+  const page = makeSharedPage({
     bodyClass: 'remote-chat',
-    initialState: persistedState,
+    initialState,
     userAgent,
     sourceUrl: 'drawer-main.js',
     beforeScripts: win => {
-      mirrorPersistedState(win);
       if (stripDrawerButtons) {
         win.document.getElementById('input-drawer-btn').remove();
       }
@@ -57,62 +63,15 @@ function makePage(opts) {
           configurable: true,
         });
       }
-      for (const css of ['main.css', 'remote-codex.css']) {
-        const style = win.document.createElement('style');
-        style.textContent = inlineDesignTokens(
-          fs.readFileSync(path.join(MEDIA, css), 'utf8'),
-        );
-        win.document.head.appendChild(style);
-      }
-      if (timeouts) captureTimeouts(win, timeouts);
+      loadRemoteCss(win, true);
+      if (timeouts) timers = captureTimers(win);
     },
   });
-  return {win, posted};
-}
-
-/**
- * Mirror every state the page persists into the module-level
- * `persistedState`, which the next `makePage()` seeds its transport from
- * (a reopen of the page).
- */
-function mirrorPersistedState(win) {
-  const acquire = win.acquireTransport;
-  win.acquireTransport = function () {
-    const transport = acquire();
-    const setState = transport.setState;
-    transport.setState = s => {
-      persistedState = s;
-      setState(s);
-    };
-    return transport;
-  };
-}
-
-/**
- * Record every `setTimeout` the page arms in *timeouts* as `{fn, ms, id}`
- * (the timer still runs) so a test can fire or cancel one on demand.
- */
-function captureTimeouts(win, timeouts) {
-  const realSetTimeout = win.setTimeout.bind(win);
-  win.setTimeout = function (fn, ms, ...args) {
-    const id = realSetTimeout(fn, ms, ...args);
-    timeouts.push({fn, ms, id});
-    return id;
-  };
-}
-
-/** Run every timer armed since *from* now, instead of at its due time. */
-function fireTimeouts(win, timeouts, from) {
-  for (const t of timeouts.splice(from)) {
-    win.clearTimeout(t.id);
-    t.fn();
-  }
+  return Object.assign(page, {timers});
 }
 
 function click(win, id) {
-  const target = win.document.getElementById(id);
-  assert.ok(target, `element #${id} must exist`);
-  target.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickEl(win, byId(win, id));
 }
 
 function cs(win, id) {
@@ -197,7 +156,6 @@ function assertInputDrawer(win, collapsed, why) {
 // The shipped defaults: task panel folded into its slim header, composer
 // reachable.
 function testDefaults() {
-  persistedState = undefined;
   const {win, posted} = makePage();
   showTaskPanel(win, posted);
   const d = win.document;
@@ -229,7 +187,6 @@ function testDefaults() {
 }
 
 function testInputDrawerToggle() {
-  persistedState = undefined;
   const {win} = makePage();
   const d = win.document;
   const area = d.getElementById('input-area');
@@ -276,14 +233,13 @@ function testInputDrawerToggle() {
 }
 
 function testPersistenceAcrossReopen() {
-  persistedState = undefined;
   const wv1 = makePage();
   showTaskPanel(wv1.win, wv1.posted);
   click(wv1.win, 'input-drawer-btn');
-  assert.ok(persistedState, 'toggling the drawer must persist state');
+  assert.ok(wv1.getState(), 'toggling the drawer must persist state');
   wv1.win.close();
 
-  const wv2 = makePage();
+  const wv2 = makePage({initialState: wv1.getState()});
   showTaskPanel(wv2.win, wv2.posted);
   assertInputDrawer(
     wv2.win,
@@ -294,7 +250,7 @@ function testPersistenceAcrossReopen() {
   click(wv2.win, 'input-drawer-btn');
   wv2.win.close();
 
-  const wv3 = makePage();
+  const wv3 = makePage({initialState: wv2.getState()});
   assertInputDrawer(
     wv3.win,
     false,
@@ -304,7 +260,6 @@ function testPersistenceAcrossReopen() {
 }
 
 function testDrawerStateSurvivesTaskChurn() {
-  persistedState = undefined;
   const {win, posted} = makePage();
   showTaskPanel(win, posted);
 
@@ -328,7 +283,6 @@ function testDrawerStateSurvivesTaskChurn() {
 }
 
 function testDrawerButtonsBigEnough() {
-  persistedState = undefined;
   const {win} = makePage();
   const inputBtn = cs(win, 'input-drawer-btn');
   assert.ok(
@@ -340,7 +294,6 @@ function testDrawerButtonsBigEnough() {
 }
 
 function testDrawerButtonsLoseFocusAfterClick() {
-  persistedState = undefined;
   const {win} = makePage();
   const el = win.document.getElementById('input-drawer-btn');
   el.focus();
@@ -364,7 +317,6 @@ function testDrawerButtonsLoseFocusAfterClick() {
 }
 
 function testRemoteCollapsedPadding() {
-  persistedState = undefined;
   const {win, posted} = makePage();
   showTaskPanel(win, posted);
   click(win, 'input-drawer-btn');
@@ -377,7 +329,6 @@ function testRemoteCollapsedPadding() {
 }
 
 function testMissingDrawerButtonsGracefulBoot() {
-  persistedState = undefined;
   const {win, posted} = makePage({stripDrawerButtons: true});
   assert.strictEqual(
     win.document.getElementById('input-drawer-btn'),
@@ -412,7 +363,6 @@ function testMobileRemoteIdleShowsComposer() {
     ['iPhone Safari', UA_IPHONE],
     ['Android Chrome', UA_ANDROID],
   ]) {
-    persistedState = undefined;
     const {win, posted} = makePage({userAgent: ua});
     showTaskPanel(win, posted);
     const d = win.document;
@@ -448,7 +398,6 @@ function testMobileRemoteIdleShowsComposer() {
 // While a task runs the phone gives the transcript the screen, and hands the
 // composer back the moment the task ends.
 function testMobileRemoteFollowsRunningState() {
-  persistedState = undefined;
   const {win, posted} = makePage({userAgent: UA_IPHONE});
   showTaskPanel(win, posted);
   assertInputDrawer(win, false, 'idle phone shows the composer');
@@ -464,7 +413,6 @@ function testMobileRemoteFollowsRunningState() {
 // A running task restored by the launch replay counts too: the registry
 // snapshot opens the tab and the replayed `status` reports it running.
 function testMobileRemoteRunningSnapshotFoldsComposer() {
-  persistedState = undefined;
   const {win} = makePage({userAgent: UA_ANDROID});
   assertInputDrawer(win, false, 'nothing running yet');
   send(win, {
@@ -479,7 +427,6 @@ function testMobileRemoteRunningSnapshotFoldsComposer() {
 }
 
 function testDesktopRemoteDefaults() {
-  persistedState = undefined;
   const {win, posted} = makePage({userAgent: UA_DESKTOP});
   showTaskPanel(win, posted);
   assertInputDrawer(win, false, 'desktop remote: the composer is reachable');
@@ -493,7 +440,6 @@ function testDesktopRemoteDefaults() {
 }
 
 function testUserAgentDataMobileRemote() {
-  persistedState = undefined;
   const wvMobile = makePage({
     userAgent: UA_DESKTOP,
     userAgentData: {mobile: true},
@@ -506,7 +452,6 @@ function testUserAgentDataMobileRemote() {
   );
   wvMobile.win.close();
 
-  persistedState = undefined;
   const wvDesktop = makePage({
     userAgent: UA_DESKTOP,
     userAgentData: {mobile: false},
@@ -521,7 +466,6 @@ function testUserAgentDataMobileRemote() {
 }
 
 function testIpadMasqueradeRemote() {
-  persistedState = undefined;
   const wvIpad = makePage({
     userAgent: UA_IPAD_MASQUERADE,
     maxTouchPoints: 5,
@@ -534,7 +478,6 @@ function testIpadMasqueradeRemote() {
   );
   wvIpad.win.close();
 
-  persistedState = undefined;
   const wvMac = makePage({
     userAgent: UA_IPAD_MASQUERADE,
     maxTouchPoints: 0,
@@ -549,7 +492,6 @@ function testIpadMasqueradeRemote() {
 }
 
 function testMobileUserChoicePersists() {
-  persistedState = undefined;
   const wv1 = makePage({userAgent: UA_IPHONE});
   showTaskPanel(wv1.win, wv1.posted);
   click(wv1.win, 'input-drawer-btn');
@@ -562,7 +504,7 @@ function testMobileUserChoicePersists() {
   );
   wv1.win.close();
 
-  const wv2 = makePage({userAgent: UA_IPHONE});
+  const wv2 = makePage({userAgent: UA_IPHONE, initialState: wv1.getState()});
   showTaskPanel(wv2.win, wv2.posted);
   assertInputDrawer(wv2.win, true, 'a reload restores the user-folded drawer');
   click(wv2.win, 'input-drawer-btn');
@@ -578,14 +520,14 @@ function testMobileUserChoicePersists() {
 // A blob from an older build has no `*UserSet` flags, so it cannot prove the
 // user ever clicked anything: the defaults win.
 function testLegacyStateDoesNotResurrectFoldedComposer() {
+  const folded = {
+    tabs: [{title: 'old chat', chatId: 'tab-1'}],
+    activeTabIndex: 0,
+    chatId: 'tab-1',
+    inputDrawerCollapsed: true,
+  };
   for (const ua of [UA_IPHONE, UA_DESKTOP]) {
-    persistedState = {
-      tabs: [{title: 'old chat', chatId: 'tab-1'}],
-      activeTabIndex: 0,
-      chatId: 'tab-1',
-      inputDrawerCollapsed: true,
-    };
-    const wv = makePage({userAgent: ua});
+    const wv = makePage({userAgent: ua, initialState: folded});
     assertInputDrawer(
       wv.win,
       false,
@@ -593,27 +535,18 @@ function testLegacyStateDoesNotResurrectFoldedComposer() {
     );
     wv.win.close();
 
-    persistedState = {
-      tabs: [{title: 'old chat', chatId: 'tab-1'}],
-      activeTabIndex: 0,
-      chatId: 'tab-1',
-      inputDrawerCollapsed: true,
-      drawersVersion: 2,
-    };
-    const wvV2 = makePage({userAgent: ua});
+    const wvV2 = makePage({
+      userAgent: ua,
+      initialState: {...folded, drawersVersion: 2},
+    });
     assertInputDrawer(wvV2.win, false, 'a v2 blob cannot fold the composer');
     wvV2.win.close();
   }
 
-  persistedState = {
-    tabs: [{title: 'old chat', chatId: 'tab-1'}],
-    activeTabIndex: 0,
-    chatId: 'tab-1',
-    inputDrawerCollapsed: true,
-    inputDrawerUserSet: true,
-    drawersVersion: 3,
-  };
-  const wvNew = makePage({userAgent: UA_IPHONE});
+  const wvNew = makePage({
+    userAgent: UA_IPHONE,
+    initialState: {...folded, inputDrawerUserSet: true, drawersVersion: 3},
+  });
   assertInputDrawer(
     wvNew.win,
     true,
@@ -624,8 +557,7 @@ function testLegacyStateDoesNotResurrectFoldedComposer() {
 
 function testMalformedStateGracefulBoot() {
   for (const bad of ['garbage', 42, true]) {
-    persistedState = bad;
-    const {win, posted} = makePage({userAgent: UA_IPHONE});
+    const {win, posted} = makePage({userAgent: UA_IPHONE, initialState: bad});
     assert.ok(
       posted.some(m => m.type === 'ready'),
       `main.js must boot with a ${typeof bad} persisted state`,
@@ -652,9 +584,7 @@ function testMobileRemoteNeverFocusesComposerByCode() {
     ['Android remote', UA_ANDROID, false],
     ['desktop remote', UA_DESKTOP, true],
   ]) {
-    persistedState = undefined;
-    const timeouts = [];
-    const {win, posted} = makePage({userAgent, timeouts});
+    const {win, posted, timers} = makePage({userAgent, timeouts: true});
     const d = win.document;
     const inp = d.getElementById('task-input');
     let focusCalls = 0;
@@ -724,9 +654,9 @@ function testMobileRemoteNeverFocusesComposerByCode() {
     for (const [what, act] of steps) {
       inp.blur();
       focusCalls = 0;
-      const armedBefore = timeouts.length;
+      const armedBefore = timers.length;
       act();
-      fireTimeouts(win, timeouts, armedBefore);
+      fireCapturedTimers(win, timers, armedBefore);
       if (focuses) {
         assert.ok(focusCalls > 0, `${name}: ${what} must focus the composer`);
       } else {
@@ -774,12 +704,9 @@ async function runTests() {
 }
 
 runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
+  () => console.log('\nAll tests passed'),
   err => {
-    console.error('FAIL:', err && err.message ? err.message : err);
+    console.error('FAIL:', err && err.stack ? err.stack : err);
     process.exit(1);
   },
 );

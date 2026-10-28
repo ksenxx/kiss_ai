@@ -38,6 +38,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.conftest import init_repo
 
 _TAB = "rr-startup-window-tab"
@@ -65,13 +66,13 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         agent = ChatSorcarAgent("rr startup-window agent")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=self.repo,
             branch=self.branch,
             original_branch="main",
             wt_dir=self.repo / ".kiss-worktrees" / "rr-startup",
             baseline_commit=None,
-        )
+        ))
         with self.server._state_lock:
             self.state = AgentState(
                 "rr-startup-task",

@@ -429,9 +429,7 @@ def _slack(server: RecordingServer, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url)
     _save_token(_REAL, "default")
-    agent = SlackAgent()
-    agent._backend._api_base_url = server.base_url + "/api/"
-    return agent
+    return SlackAgent()
 
 
 def _slack_request(agent: Any) -> Any:

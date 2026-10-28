@@ -7,8 +7,7 @@
 'use strict';
 
 // End-to-end (jsdom, real media/main.js + api.js) regressions for the
-// daemon-connection races found by the media JS audit
-// (tmp/audit-I-vscode-media.md, cluster 7):
+// daemon-connection races found by the media JS audit:
 //
 // F1  A cold start (daemonStatus connected:false BEFORE the daemon was
 //     ever seen up) must not re-send `ready` once the daemon comes up:
@@ -38,6 +37,7 @@ const {
   ofType: msgsOf,
 } = require('./simplify2_harness');
 const {clickClose} = require('./subagent_tab_helpers');
+const {installAudio} = require('./speech_helpers');
 
 // `desktop` adds remote-desktop to the body, as the page does on a wide
 // screen.  Intervals are recorded, not run, so a test fires a poll tick
@@ -167,27 +167,6 @@ function testSubmitStillBlockedWhileDownOnColdStart() {
 }
 
 // --- F2 ---------------------------------------------------------------------
-
-// speech_helpers.installAudio plus the `pause` main.js calls on a retired
-// player (the shared stand-in has none and would throw).
-function installAudio(win) {
-  const players = [];
-  win.Audio = function Audio(src) {
-    this.src = src;
-    this.playCalls = 0;
-    this.play = () => {
-      this.playCalls++;
-      return Promise.resolve();
-    };
-    this.pause = () => {};
-    this.fire = type => {
-      const handler = this['on' + type];
-      if (typeof handler === 'function') handler({type});
-    };
-    players.push(this);
-  };
-  return players;
-}
 
 const B64 = 'SUQzBAAAAAAAAA==';
 

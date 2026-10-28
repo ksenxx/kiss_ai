@@ -21,7 +21,6 @@ const assert = require('assert');
 const {
   makePage: makeHarnessPage,
   send,
-  sleep,
   click,
   stubRaf,
   fakeMatchMedia,
@@ -350,7 +349,7 @@ async function main() {
       modifiedMissing: false,
       truncated: false,
     });
-    await sleep(50);
+    // handleGitShow -> openGitDiffTab -> handleFileContent is synchronous.
     const diffTab = Array.from(win.document.querySelectorAll('.chat-tab')).find(
       t =>
         t.textContent.includes(
@@ -471,9 +470,7 @@ async function main() {
     const scm = byId(win, 'meta-scm');
     assert.ok(!explorer.hidden && !scm.hidden);
     assert.ok(explorer.closest('#meta-panel') && scm.closest('#meta-panel'));
-    // The activity bar is gone: the history panel holds the Chats view only.
-    assert.strictEqual(byId(win, 'activity-bar'), null);
-    assert.strictEqual(byId(win, 'activity-explorer'), null);
+    // The history panel holds the Chats view only.
     assert.ok(!byId(win, 'sidebar-tab-history-panel').hidden);
     // The Explorer section came back collapsed from the last visit.
     assert.ok(explorer.classList.contains('collapsed'));

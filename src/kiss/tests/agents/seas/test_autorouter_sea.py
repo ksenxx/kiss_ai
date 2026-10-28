@@ -26,8 +26,10 @@ import yaml
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import AutorouterSea
 from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
+from kiss.agents.seas.rsi7d.rsi7d_sea import parse_scope
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
@@ -49,6 +51,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
 )
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
 
 _SEA_PATH = Path(autorouter_sea.__file__).resolve()
 _TOOL_NAMES = {
@@ -438,9 +441,6 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     checkout's rsi7d file whose task text starts with the ``autorouter``
     scope, and the child run's caps nested inside the job's.
     """
-    from kiss.agents.seas.rsi7d.rsi7d_sea import parse_scope
-    from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
-
     home = tmp_path / "home"
     monkeypatch.setenv("KISS_HOME", str(home))
     assert load_jobs() == []
@@ -487,8 +487,6 @@ def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without a checkout: no work dir and a relay to the installed rsi7d file."""
-    from kiss.agents.sorcar.cron_agent import load_jobs
-
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     assert AutorouterSea().on_picked_as_model(str(tmp_path)).startswith("created:")
     (job,) = load_jobs()
@@ -527,10 +525,9 @@ def test_concurrent_first_picks_schedule_a_single_job(
     the SEA file afresh per call and lets the hooks overlap: the cron
     store's ``ensure`` is what keeps the job single.
     """
-    from kiss.agents.sorcar.cron_agent import load_jobs
-
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     assert sea_commands.model_sea("autorouter") == _SEA_PATH
+    before = set(threading.enumerate())
     barrier = threading.Barrier(8, timeout=30)
 
     def pick(work_dir: str) -> None:
@@ -548,6 +545,12 @@ def test_concurrent_first_picks_schedule_a_single_job(
     for thread in threads:
         thread.join(timeout=60)
     assert not any(thread.is_alive() for thread in threads), "a picked-hook thread hung"
+    # ``run_picked_hook`` abandons a hook thread still running after its
+    # cap; join the hook threads this test started before reading the store.
+    hooks = [t for t in threading.enumerate() if t not in before and t.name == "sea-picked-hook"]
+    for hook in hooks:
+        hook.join(timeout=60)
+    assert not any(hook.is_alive() for hook in hooks), "a hook thread hung"
     assert len(load_jobs()) == 1, load_jobs()
 
 
@@ -570,9 +573,6 @@ def test_hook_thread_that_cannot_start_is_logged_and_the_caller_goes_on(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """With the process out of threads, ``run_picked_hook`` logs a warning instead of raising."""
-    from kiss.agents.sorcar.cron_agent import load_jobs
-    from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
-
     if not thread_start_can_be_starved():
         pytest.skip("RLIMIT_NPROC does not starve Thread.start here (Windows or root)")
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))

@@ -140,8 +140,9 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         The container's hostname is its id prefix and its working
         directory ``/srv`` (set at ``docker run``), so the Bash output
         proves both where the command ran and which directory it ran in.
-        ``bash_job`` and the memory tools are absent (no job registry, no
-        memory in a Docker run) and the container survives the task.
+        ``bash_job`` is offered (container background jobs, ``ContainerJobs``
+        since 3f5736249f), the memory tools are absent (no memory in a
+        Docker run) and the container survives the task.
         """
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls)
@@ -161,7 +162,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert "written by the stub" in call["read"], call["read"]
         assert call["container_id"] == self.container.id
         assert "Bash" in call["tool_names"] and "run_parallel" in call["tool_names"]
-        assert "bash_job" not in call["tool_names"]
+        assert "bash_job" in call["tool_names"]
         assert not any(name.startswith("memory_") for name in call["tool_names"])
         self.container.reload()
         assert self.container.status == "running"
@@ -249,7 +250,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert calls == []
 
     def test_malformed_wire_value_runs_on_the_host(self) -> None:
-        """A non-string ``dockerImage`` wire field means "host": ``bash_job`` is offered."""
+        """A non-string ``dockerImage`` wire field means "host": no container, host Bash."""
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls)
         self._raw_daemon_run({"dockerImage": 123})

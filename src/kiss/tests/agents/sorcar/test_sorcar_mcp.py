@@ -227,6 +227,22 @@ def test_remove_from_all_scopes(isolated_homes: Path) -> None:
     assert remove_mcp_server("s", str(project)) == []
 
 
+def test_failed_config_write_leaves_no_temp_file(isolated_homes: Path) -> None:
+    """A config write that cannot complete removes its ``.mcp.json-<hex>`` staging file.
+
+    The config path is a directory, so the atomic ``os.replace`` of the
+    staging file onto it fails; the error propagates and the staging
+    file does not linger next to it.
+    """
+    project = isolated_homes / "project"
+    config_dir = isolated_homes / ".kisshome" / "mcp.json"
+    config_dir.mkdir(parents=True)
+    with pytest.raises(OSError):
+        save_mcp_server(MCPServerConfig(name="s", command="a"), "user", str(project))
+    assert config_dir.is_dir()
+    assert [p.name for p in config_dir.parent.glob(".mcp.json*") if p.is_file()] == []
+
+
 def test_to_json_roundtrip_remote(isolated_homes: Path) -> None:
     """Remote server configs round-trip through the JSON files."""
     project = isolated_homes / "project"

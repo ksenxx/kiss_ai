@@ -35,17 +35,19 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
+import weakref
+from collections import Counter, deque
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, TypeGuard
 from urllib.parse import urlparse
 
 from kiss.agents.sorcar import web_stealth
-from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import resolve_tool_path
+from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import SIGKILL, kill_process_tree, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive
@@ -57,11 +59,6 @@ _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 _ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
 
-# Headless Chromium reports "HeadlessChrome/<version>" in its user agent.
-# Many sites use that token alone to serve a bot challenge instead of the
-# page, so it is rewritten to the equivalent headed token.
-_HEADLESS_UA_TOKEN = "HeadlessChrome"
-_HEADED_UA_TOKEN = "Chrome"
 
 # Upper bound for every read of page state (title, text, aria snapshot).
 # A page whose main thread is stuck (a script spinning forever, a
@@ -95,6 +92,10 @@ _LIVE_TAB_LOOKUP_SECS = 3.0
 # event, never when the browser stops answering or exits under it).
 _CDP_CALL_TIMEOUT_SECS = 3.0
 
+# Longest numbered accessibility tree a tool result carries; longer
+# trees are cut with a ``[truncated]`` marker.
+_AX_TREE_MAX_CHARS = 50000
+
 # Deadline for raw input operations (keyboard.press/type, mouse.move/wheel)
 # that have no Playwright timeout parameter.  A page event handler that
 # wedges the renderer in response to our own input (e.g. a ``keydown``
@@ -115,19 +116,42 @@ _PROFILE_LOCK_TIMEOUT_SECS = 120.0
 # Deadline for the one-time ``playwright install chromium`` download.
 _CHROMIUM_INSTALL_SECS = 900.0
 
-# How long ``go_to_url`` waits for a bot-protection interstitial (Cloudflare
-# "Just a moment...", Anubis) to clear on its own before reporting it.
-# Cloudflare's managed challenge takes 3-8 s in a browser it rates human.
-_CHALLENGE_WAIT_SECS = 12.0
-
 # How many times ``go_to_url`` issues a navigation that Chromium aborted with
 # ``net::ERR_NETWORK_CHANGED`` (a host interface came or went mid-request).
 _NETWORK_CHANGE_ATTEMPTS = 3
 
-# How long the Turnstile "Verify you are human" box must have been showing
-# before it is pressed: a person's reading/reaction time, during which the
-# pointer keeps drifting.
-_TURNSTILE_REACTION_SECS = 1.2
+# How long a challenge widget (Turnstile's "Verify you are human" box,
+# HUMAN's "Press & Hold" bar) must have been showing before it is pressed:
+# a person's reading/reaction time, during which the pointer keeps drifting.
+_WIDGET_REACTION_SECS = 1.2
+
+# How long the press-and-hold bar must stay showing after a hold before it
+# is held again (HUMAN's two-step variant).  A cleared bar says
+# "completed, please wait" and reloads the page about 2 s after release;
+# a second hold inside that window threw away a fiverr pass.  A person
+# watches what happens first.
+_WIDGET_RETRY_SECS = 5.0
+
+# DevTools-grade observation (evaluate_script, list_console_messages,
+# list_network_requests, wait_for): per-page ring buffers so a chatty page
+# (an analytics beacon loop, a logging SPA) cannot grow memory without
+# bound, and per-entry caps so one huge message or URL cannot blow up a
+# tool result.
+_CONSOLE_LOG_LIMIT = 200
+_NETWORK_LOG_LIMIT = 300
+_MESSAGE_TEXT_MAX = 500
+_URL_TEXT_MAX = 300
+
+# Caps for the results of evaluate_script and for wait_for's timeout: an
+# agent must not be able to turn one tool call into an unbounded read or
+# an unbounded block of the task thread.
+_EVAL_RESULT_MAX_CHARS = 20000
+_WAIT_FOR_MAX_SECS = 120.0
+
+# How long use_my_chrome waits for the extension when the bridge has no
+# connection yet: the extension's service worker retries every 3 s while
+# awake, so a bridge this call just started is usually found within this.
+_BRIDGE_CONNECT_WAIT_SECS = 5.0
 
 
 def _abort_route(route: Any) -> None:
@@ -371,7 +395,9 @@ def _cdp_call(sync_obj: Any, coro: Any, timeout_secs: float = _CDP_CALL_TIMEOUT_
         sync_obj: Any sync API object of the Playwright instance (all of
             them share one loop and dispatcher).
         coro: The ``_impl_obj`` coroutine to run.
-        timeout_secs: Seconds before the call is abandoned.
+        timeout_secs: The deadline in seconds; :data:`_CDP_CALL_TIMEOUT_SECS`
+            (a plain round trip) unless the call legitimately runs longer,
+            as ``Runtime.evaluate`` of a page script does.
 
     Returns:
         *coro*'s result (an ``_impl`` object or plain data, not a sync
@@ -418,6 +444,42 @@ _RESTORE_STORAGE_JS = """([origin, items, removed]) => {
 def _cookie_key(cookie: dict[str, Any]) -> tuple[str, str, str]:
     """The identity of a cookie: name, domain and path."""
     return (cookie["name"], cookie["domain"], cookie["path"])
+
+
+def _format_bridge_result(action: str, result: Any) -> str:
+    """Render a use_my_chrome action result for the agent.
+
+    Args:
+        action: The bridge action that produced *result*.
+        result: The extension's decoded JSON result.
+
+    Returns:
+        Human/agent-readable one-block text: one line per tab for
+        list_tabs, a confirmation for tab actions, the JSON for evaluate.
+    """
+    if action == "list_tabs":
+        tabs = result if isinstance(result, list) else []
+        if not tabs:
+            return "The user's Chrome reports no open tabs."
+        lines = [
+            f"id={t.get('id')} {'[active] ' if t.get('active') else ''}"
+            f"{t.get('title', '')} — {t.get('url', '')}"
+            for t in tabs[:50]
+        ]
+        if len(tabs) > 50:
+            lines.append(f"… and {len(tabs) - 50} more tabs")
+        return "\n".join(lines)
+    if action in ("open_tab", "navigate", "activate_tab") and isinstance(result, dict):
+        return (
+            f"Done: tab id={result.get('id')} — {result.get('title', '')} — {result.get('url', '')}"
+        )
+    if action == "close_tab":
+        return "Tab closed."
+    if result is None:
+        return "undefined"
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, indent=1)
+    return str(result)
 
 
 def _rmtree_logged(path: str) -> None:
@@ -477,11 +539,7 @@ def _install_chromium(
         raise RuntimeError(f"{' '.join(command)} exited with status {installer.returncode}")
 
 
-def _read_lock_pid(
-    profile_dir: str,
-    *,
-    propagate_permission_error: bool = False,
-) -> int | None:
+def _read_lock_pid(profile_dir: str) -> int | None:
     """Return the PID recorded in a profile's ``SingletonLock`` symlink.
 
     Chromium's lock symlink targets ``hostname-pid``.  Returns ``None``
@@ -489,13 +547,14 @@ def _read_lock_pid(
 
     Args:
         profile_dir: Path to the Chromium user-data directory.
-        propagate_permission_error: Re-raise a permission failure while
-            reading the symlink.  The profile-in-use check enables this
-            conservative mode because an inaccessible lock may belong
-            to a live foreign-owned Chromium and must not look free.
 
     Returns:
         The recorded PID, or ``None``.
+
+    Raises:
+        PermissionError: The symlink cannot be read.  An inaccessible
+            lock may belong to a live foreign-owned Chromium, so the
+            callers must not treat it as free.
     """
     lock_path = Path(profile_dir) / "SingletonLock"
     if not lock_path.is_symlink():
@@ -505,22 +564,51 @@ def _read_lock_pid(
         pid = int(target.rsplit("-", 1)[-1])
         return pid if pid > 0 else None
     except PermissionError:
-        if propagate_permission_error:
-            raise
-        return None
+        raise
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _profile_lock_state(profile_dir: str) -> tuple[int | None, bool]:
+    """Return ``(pid, in_use)`` for a Chromium profile directory's lock.
+
+    On POSIX Chromium creates a ``SingletonLock`` symlink whose target is
+    ``hostname-pid`` when a profile is opened; *pid* is that PID (``None``
+    when the lock is absent, unparsable or unreadable) and the profile
+    is in use while the PID is alive, or while the lock cannot be read.
+    On Windows Chromium instead holds ``lockfile`` open without write
+    sharing (delete-on-close, so a crash leaves nothing behind); the
+    profile is in use while that file cannot be opened for writing, and
+    *pid* is always ``None``.
+
+    Args:
+        profile_dir: Path to the Chromium user-data directory.
+
+    Returns:
+        The lock's PID (``None`` if unknown) and whether the profile is
+        currently locked by a live process.
+    """
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        try:
+            # ``r+`` never creates the file, so a probe that races the
+            # browser's delete-on-close cannot leave a stale lockfile.
+            with open(Path(profile_dir) / "lockfile", "r+"):
+                return None, False
+        except FileNotFoundError:
+            return None, False
+        except PermissionError:
+            return None, True
+    try:
+        pid = _read_lock_pid(profile_dir)
+    except PermissionError:
+        return None, True
+    return pid, pid is not None and _pid_alive(pid)
 
 
 def _is_profile_in_use(profile_dir: str) -> bool:
     """Check whether a Chromium profile directory is locked by a running process.
 
-    On POSIX Chromium creates a ``SingletonLock`` symlink whose target is
-    ``hostname-pid`` when a profile is opened.  If the symlink exists and
-    the referenced PID is alive, the profile is considered in use.  On
-    Windows Chromium instead holds ``lockfile`` open without write
-    sharing (delete-on-close, so a crash leaves nothing behind); the
-    profile is in use while that file cannot be opened for writing.
+    See :func:`_profile_lock_state`.
 
     Args:
         profile_dir: Path to the Chromium user-data directory.
@@ -528,21 +616,7 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
-    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
-        try:
-            # ``r+`` never creates the file, so a probe that races the
-            # browser's delete-on-close cannot leave a stale lockfile.
-            with open(Path(profile_dir) / "lockfile", "r+"):
-                return False
-        except FileNotFoundError:
-            return False
-        except PermissionError:
-            return True
-    try:
-        pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
-    except PermissionError:
-        return True
-    return pid is not None and _pid_alive(pid)
+    return _profile_lock_state(profile_dir)[1]
 
 
 def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
@@ -657,7 +731,7 @@ class WebUseTool:
         if ephemeral:
             user_data_dir = None
         elif user_data_dir == self._DEFAULT_USER_DATA_DIR:
-            user_data_dir = str(_default_kiss_dir() / "browser_profile")
+            user_data_dir = str(kiss_home() / "browser_profile")
         self.user_data_dir = user_data_dir
         self._headless = headless
         self.work_dir = work_dir
@@ -666,14 +740,36 @@ class WebUseTool:
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
+        # Pages whose renderer-crash handler is armed (:meth:`_adopt_page`).
+        self._crash_wired: weakref.WeakSet[Any] = weakref.WeakSet()
         self._browser_pid: int | None = None
         self._browser_identity: str | None = None
         # Chromium's ``--headless`` switch for the current launch: False
         # when the "no window" default runs headed on a virtual display.
         self._chromium_headless = headless
+        # Whether this launch already discarded a remembered user agent
+        # that named another Chromium build (at most once per launch).
+        self._user_agent_relearned = False
         # Last pointer position the tool moved to; curved mouse paths
         # start here.  ``None`` until the first move after a launch.
         self._mouse_xy: tuple[float, float] | None = None
+        # Per-page DevTools observation, attached once per page by
+        # ``_observe_page`` and keyed by page so background tabs keep
+        # their own buffers.  Bounded deques: a page logging in a loop
+        # or beaconing every second must not grow memory forever.
+        self._console_logs: dict[Any, deque[dict[str, str]]] = {}
+        self._network_logs: dict[Any, deque[dict[str, Any]]] = {}
+        # Request object -> its entry in _network_logs, until the
+        # response or failure arrives to complete it.
+        self._network_pending: dict[Any, dict[Any, dict[str, Any]]] = {}
+        # Raw CDP session per page carrying the Runtime-domain console
+        # capture (see _observe_page).  Distinct from _cdp_sessions,
+        # which tracks the live Browser-tab sessions.
+        self._console_sessions: dict[Any, Any] = {}
+        # The CDP endpoint of a browser the user launched and this tool
+        # attached to (``attach_to_chrome``); ``None`` while driving the
+        # tool's own stealth Chromium.
+        self._attached_url: str | None = None
         atexit.register(self.close)
 
     def _context_args(self) -> dict[str, Any]:
@@ -778,12 +874,188 @@ class WebUseTool:
         self._mouse_xy = None
         self._live_tab = None
         self._live_target = None
-        page.on("crash", self._on_page_crash)
+        # A page re-adopted after a tab switch already carries the handler;
+        # registering it again would stack one listener per adoption.
+        if page not in self._crash_wired:
+            self._crash_wired.add(page)
+            page.on("crash", self._on_page_crash)
         if self._live:
             try:
                 self._live_target = self._target_id(page)
             except Exception:  # noqa: BLE001 - the page closed under us
                 logger.debug("Exception caught", exc_info=True)
+        self._observe_page(page)
+
+    def _observe_page(self, page: Any) -> None:
+        """Attach console/network capture to *page* once, for the DevTools tools.
+
+        Every adopted page (including background tabs followed later)
+        gets bounded ring buffers for its console messages, uncaught
+        errors and network traffic, so ``list_console_messages`` and
+        ``list_network_requests`` can answer what a bare accessibility
+        tree never shows: why a click did nothing (a TypeError, a 500).
+        Buffers of pages that closed since the last adoption are pruned
+        here.  Handlers are bound with :func:`functools.partial` so a
+        page's events land in its own deque; they must never raise into
+        the driver loop.
+
+        Console capture goes through a raw CDP session, not Playwright's
+        ``console``/``pageerror`` events: the stealth driver (patchright)
+        does not surface those (it tracks execution contexts in its own
+        utility world), but it does enable the Runtime domain on its own
+        session, so enabling it on one more session of the same target
+        adds no page-observable signal.  Both session creation and the
+        ``Runtime.enable`` round trip go through :func:`_cdp_call`:
+        neither has a timeout of its own, and a page whose renderer is
+        wedged must not pin the adoption of a tab (see :meth:`_target_id`
+        for why the sessions are never explicitly detached).
+        """
+        self._console_logs = {p: log for p, log in self._console_logs.items() if not p.is_closed()}
+        self._network_logs = {p: log for p, log in self._network_logs.items() if not p.is_closed()}
+        self._network_pending = {
+            p: pend for p, pend in self._network_pending.items() if not p.is_closed()
+        }
+        self._console_sessions = {
+            p: s for p, s in self._console_sessions.items() if not p.is_closed()
+        }
+        if page not in self._console_logs:
+            self._console_logs[page] = deque(maxlen=_CONSOLE_LOG_LIMIT)
+            self._network_logs[page] = deque(maxlen=_NETWORK_LOG_LIMIT)
+            self._network_pending[page] = {}
+            page.on("request", partial(self._on_request, page))
+            page.on("response", partial(self._on_response, page))
+            page.on("requestfinished", partial(self._on_request_finished, page))
+            page.on("requestfailed", partial(self._on_request_failed, page))
+        if page in self._console_sessions:
+            return
+        # Retried on every observation until it succeeds: a session that
+        # failed at adoption (renderer still starting) would otherwise
+        # leave the page without console capture for its whole life.
+        try:
+            session = _cdp_call(page.context, page.context._impl_obj.new_cdp_session(page))
+            session.on("Runtime.consoleAPICalled", partial(self._on_console_api, page))
+            session.on("Runtime.exceptionThrown", partial(self._on_exception_thrown, page))
+            _cdp_call(page, session.send("Runtime.enable"))
+            self._console_sessions[page] = session
+        except Exception:  # noqa: BLE001 - capture is best-effort, browsing still works
+            logger.debug("Could not start console capture for a page", exc_info=True)
+
+    def _console_session(self) -> Any:
+        """Return the current page's CDP console session, creating it if missing.
+
+        :meth:`_adopt_page` returns at once for the page that is already
+        current, so a session that could not be created at adoption (a
+        renderer still starting) is retried here, from the tools that
+        need it, rather than only when the agent switches tabs.
+
+        Returns:
+            The session, or ``None`` when it still cannot be created.
+        """
+        session = self._console_sessions.get(self._page)
+        if session is None:
+            self._observe_page(self._page)
+            session = self._console_sessions.get(self._page)
+        return session
+
+    def _on_console_api(self, page: Any, event: dict[str, Any]) -> None:
+        """Record one Runtime.consoleAPICalled event of *page* in its buffer."""
+        try:
+            parts = []
+            for arg in event.get("args", []):
+                if "value" in arg:
+                    parts.append(str(arg["value"]))
+                elif "description" in arg:
+                    parts.append(str(arg["description"]))
+                else:
+                    parts.append(str(arg.get("type", "?")))
+            where = ""
+            frames = (event.get("stackTrace") or {}).get("callFrames") or []
+            if frames and frames[0].get("url"):
+                where = f"{frames[0]['url']}:{frames[0].get('lineNumber', 0)}"
+            self._console_logs[page].append(
+                {
+                    "level": str(event.get("type", "log")),
+                    "text": " ".join(parts)[:_MESSAGE_TEXT_MAX],
+                    "where": where[:_URL_TEXT_MAX],
+                }
+            )
+        except KeyError:  # the page's buffer was pruned after the event was queued
+            pass
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not record a console message", exc_info=True)
+
+    def _on_exception_thrown(self, page: Any, event: dict[str, Any]) -> None:
+        """Record one Runtime.exceptionThrown event of *page* as a pageerror entry."""
+        try:
+            details = event.get("exceptionDetails", {})
+            exception = details.get("exception") or {}
+            # The description starts with the error's own line and then
+            # holds the stack; the first line is the message.
+            text = str(exception.get("description") or details.get("text", "Uncaught"))
+            text = text.splitlines()[0] if text else "Uncaught"
+            where = ""
+            if details.get("url"):
+                where = f"{details['url']}:{details.get('lineNumber', 0)}"
+            self._console_logs[page].append(
+                {
+                    "level": "pageerror",
+                    "text": text[:_MESSAGE_TEXT_MAX],
+                    "where": where[:_URL_TEXT_MAX],
+                }
+            )
+        except KeyError:  # the page's buffer was pruned after the event was queued
+            pass
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not record a page error", exc_info=True)
+
+    def _on_request(self, page: Any, request: Any) -> None:
+        """Record an outgoing request of *page*; completed by finished/failed events."""
+        try:
+            entry: dict[str, Any] = {
+                "method": str(request.method),
+                "url": str(request.url)[:_URL_TEXT_MAX],
+                "type": str(request.resource_type),
+                "status": None,
+                "error": "",
+            }
+            self._network_logs[page].append(entry)
+            pending = self._network_pending[page]
+            pending[request] = entry
+            # The ring buffer drops old entries; the pending index must
+            # not keep them (and their request objects) alive forever.
+            while len(pending) > _NETWORK_LOG_LIMIT:
+                pending.pop(next(iter(pending)))
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not record a network request", exc_info=True)
+
+    def _on_response(self, page: Any, response: Any) -> None:
+        """Record the response's status; the request may still fail mid-body."""
+        try:
+            entry = self._network_pending.get(page, {}).get(response.request)
+            if entry is not None:
+                entry["status"] = response.status
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not record a network response", exc_info=True)
+
+    def _on_request_finished(self, page: Any, request: Any) -> None:
+        """Retire the request entry of *page*: it completed, body included."""
+        try:
+            self._network_pending.get(page, {}).pop(request, None)
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not retire a network request", exc_info=True)
+
+    def _on_request_failed(self, page: Any, request: Any) -> None:
+        """Complete the request entry of *page* with its failure reason."""
+        try:
+            entry = self._network_pending.get(page, {}).pop(request, None)
+            if entry is not None:
+                failure = request.failure
+                if isinstance(failure, str):  # patchright's Python API: plain error text
+                    entry["error"] = failure
+                else:  # upstream playwright's API: {"errorText": ...}
+                    entry["error"] = str((failure or {}).get("errorText", "failed"))
+        except Exception:  # a driver event must never break the driver loop
+            logger.debug("Could not record a network failure", exc_info=True)
 
     def _on_page_crash(self, _page: Any = None) -> None:
         """Handle a renderer (page) crash without dropping the browser reference.
@@ -826,6 +1098,12 @@ class WebUseTool:
         self._context = None
         self._browser = None
         self._elements = []
+        # The pages these buffers belonged to are gone with the browser
+        # (its console-capture sessions die with it; no detach needed).
+        self._console_logs = {}
+        self._network_logs = {}
+        self._network_pending = {}
+        self._console_sessions = {}
 
     def _attach_live(self) -> None:
         """Open a tab in the Browser tab's browser and adopt its page over CDP.
@@ -989,6 +1267,30 @@ class WebUseTool:
         that has itself exited, is never attempted: a dead driver is
         discarded whole (:meth:`_discard_dead_driver`).
         """
+        if self._attached_url is not None:
+            # A browser this tool attached to over CDP is the user's:
+            # closing a connected-over-CDP browser only drops this
+            # client, and no PID was ever captured, so nothing here can
+            # kill it.  Its context must not be closed either (that is
+            # the user's real default profile, tabs included).  This
+            # branch comes FIRST: a stale _live flag must never route the
+            # user's tab into _detach_live's page.close().  A driver that
+            # died is discarded whole like in the launched case: a death
+            # while idle is first noticed by the disconnect itself, which
+            # fails (a second call into it would never return), so the
+            # check is repeated after it.
+            browser, self._browser = self._browser, None
+            self._attached_url = None
+            if browser is not None and not _driver_is_dead(self._playwright):
+                try:
+                    browser.close()
+                except Exception:  # noqa: BLE001 - the browser may already be gone
+                    logger.debug("Could not disconnect from the attached Chrome", exc_info=True)
+            if self._playwright is not None and _driver_is_dead(self._playwright):
+                self._discard_dead_driver(close_live_tab=False)
+                return
+            self._on_browser_lost()
+            return
         if self._playwright is not None and _driver_is_dead(self._playwright):
             self._discard_dead_driver(close_live_tab=not keep_live_tab)
             return
@@ -1161,6 +1463,16 @@ class WebUseTool:
             if pages:
                 self._adopt_page(pages[-1])
                 return
+        if self._attached_url is not None:
+            # The user's own browser exited (or the connection dropped):
+            # relaunching the stealth Chromium instead would silently
+            # swap the logged-in session the agent was driving for a
+            # synthetic profile, so fail with the way back.
+            raise RuntimeError(
+                f"The Chrome at {self._attached_url} disconnected. "
+                f'Reconnect with attach_to_chrome("{self._attached_url}"), or call '
+                "close_browser() to return to the built-in Chromium."
+            )
         atexit.unregister(self.close)
         atexit.register(self.close)
         self._close_browser_only()
@@ -1179,6 +1491,8 @@ class WebUseTool:
             # is the fallback (macOS, Windows, Linux without Xvfb).
             display = web_stealth.virtual_display() if self._headless else None
             self._chromium_headless = self._headless and display is None
+            self._user_agent_relearned = False
+            channel = web_stealth.chrome_channel()
             kwargs: dict[str, Any] = {
                 "headless": self._chromium_headless,
                 # Google Chrome when installed; otherwise the "chromium"
@@ -1186,7 +1500,7 @@ class WebUseTool:
                 # runs in Chrome's new headless mode (the same renderer as
                 # a headed window) instead of the stripped-down
                 # chrome-headless-shell.
-                "channel": web_stealth.chrome_channel(),
+                "channel": channel,
                 "args": [
                     web_stealth.disabled_blink_features(unattended=self._headless),
                     "--no-first-run",
@@ -1205,6 +1519,12 @@ class WebUseTool:
             }
             if display is not None:
                 kwargs["env"] = {**os.environ, "DISPLAY": display}
+            # Real headless mode reports ``HeadlessChrome``; the headed
+            # string of this build, once known, is set with Chrome's own
+            # switch (``_launch_browser`` learns it on the first launch).
+            switch = web_stealth.user_agent_switch(channel) if self._chromium_headless else None
+            if switch is not None:
+                kwargs["args"].append(switch)
 
             try:
                 self._launch_browser(launcher, kwargs)
@@ -1275,10 +1595,10 @@ class WebUseTool:
         chosen = None if _is_profile_in_use(self.user_data_dir) else self.user_data_dir
         for i in range(1, 100):
             candidate = f"{self.user_data_dir}_{i}"
-            pid = _read_lock_pid(candidate)
-            if pid is not None and not _pid_alive(pid):
+            pid, in_use = _profile_lock_state(candidate)
+            if pid is not None and not in_use:
                 _rmtree_logged(candidate)
-            if chosen is None and not _is_profile_in_use(candidate):
+            if chosen is None and not in_use:
                 chosen = candidate
         return chosen
 
@@ -1341,33 +1661,102 @@ class WebUseTool:
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
-        self._mask_headless_user_agent()
+        self._settle_fresh_window()
+        if self._chromium_headless:
+            self._reconcile_headless_user_agent(launcher, kwargs)
 
-    def _mask_headless_user_agent(self) -> None:
-        """Rewrite the ``HeadlessChrome`` user-agent token to ``Chrome``.
+    def _settle_fresh_window(self) -> None:
+        """Make the fresh window show its blank page before the agent's first page.
 
-        Headless Chromium advertises ``HeadlessChrome/<version>``, and many
-        sites treat that token alone as a bot signal and answer with a
-        challenge page instead of content.  It is rewritten in both places
-        a site can read it: the ``User-Agent`` request header (context
-        wide) and ``navigator.userAgent`` (an init script that runs in
-        every page and frame of the context).  A headed browser reports no
-        such token, so this is a no-op there.
+        Observed: after a watchdog kill and relaunch on Xvfb, a first
+        page whose ``mousemove`` handler spins forever
+        (``test_webuse_unresponsive_page_timeout``'s ``/wheelwedge``)
+        wedged the renderer before any tool-issued input, so every later
+        read timed out — unless the fresh window's ``about:blank`` was
+        read first.  Any renderer round trip on the blank page (an
+        evaluation, ``title()``, a screenshot) prevents it; a sleep or a
+        ``goto("about:blank")`` does not.  The suspected mechanism is one
+        stray ``mousemove`` from the window system (the Xvfb pointer sits
+        at the screen centre, over the window) delivered to the first
+        document the window renders; this bounded ``_read_page`` makes
+        that document the blank page rather than the agent's first page.
+        Until the native user-agent switch, the launch-time
+        ``navigator.userAgent`` read did this by accident in every mode.
         """
+        try:
+            self._read_page(self._page, "() => [document.readyState]")
+        except Exception:  # pragma: no cover — a fresh blank page rarely fails to answer
+            logger.debug("Could not settle the fresh browser window", exc_info=True)
+
+    def _reconcile_headless_user_agent(self, launcher: Any, kwargs: dict[str, Any]) -> None:
+        """Relaunch a real-headless browser so it reports its headed user agent.
+
+        Headless Chromium advertises ``HeadlessChrome/<version>``, which
+        sites treat as a bot signal.  Rewriting it from inside the page
+        is a tell of its own (``navigator.appVersion`` keeps the raw
+        token, the redefined property is detectable), and Cloudflare's
+        managed challenge rejected every such browser; Chrome's own
+        ``--user-agent`` switch sets the header, ``navigator.userAgent``
+        and ``navigator.appVersion`` consistently (see
+        :func:`web_stealth.headed_user_agent`).  The headed string is only
+        known once a browser of this build has reported its own, so the
+        first headless launch in the process is asked and relaunched;
+        later launches get the switch up front
+        (:func:`web_stealth.user_agent_switch`).  A launch whose switch
+        names another major version than the browser (Chrome updated
+        under the running daemon) forgets the string and relaunches
+        without the switch, which learns the new one — once per launch,
+        so a build whose own string never matches its version is kept
+        rather than relaunched forever.
+
+        Args:
+            launcher: The Playwright browser type that launched the browser.
+            kwargs: The launch arguments, extended with (or stripped of)
+                the switch for the relaunch.
+        """
+        channel = str(kwargs["channel"])
+        switch = next((arg for arg in kwargs["args"] if arg.startswith("--user-agent=")), None)
+        if switch is not None:
+            version = self._browser_version()
+            if (
+                self._user_agent_relearned
+                or version is None
+                or web_stealth.user_agent_matches_version(switch, version)
+            ):
+                return
+            logger.info("remembered user agent is for another Chromium build; relearning")
+            self._user_agent_relearned = True
+            web_stealth.forget_user_agent(channel)
+            self._close_browser_only()
+            kwargs["args"] = [arg for arg in kwargs["args"] if arg != switch]
+            self._launch_browser(launcher, kwargs)
+            return
         try:
             # Bounded like every other page read (``_read_page``), not a
             # bare ``evaluate`` with no timeout.
             user_agent = str(self._read_page(self._page, "() => [navigator.userAgent]")[0])
-            if _HEADLESS_UA_TOKEN not in user_agent:
-                return
-            headed = user_agent.replace(_HEADLESS_UA_TOKEN, _HEADED_UA_TOKEN)
-            self._context.set_extra_http_headers({"User-Agent": headed})
-            self._context.add_init_script(
-                "Object.defineProperty(navigator, 'userAgent', "
-                f"{{get: () => {json.dumps(headed)}}});",
-            )
         except Exception:  # pragma: no cover — evaluate on a fresh page rarely fails
-            logger.debug("Could not mask the headless user agent", exc_info=True)
+            logger.debug("Could not read the headless user agent", exc_info=True)
+            return
+        headed = web_stealth.headed_user_agent(user_agent)
+        if headed is None:
+            return
+        web_stealth.remember_user_agent(channel, headed)
+        logger.info("relaunching headless Chromium with its headed user agent")
+        self._close_browser_only()
+        kwargs["args"] = [*kwargs["args"], f"--user-agent={headed}"]
+        self._launch_browser(launcher, kwargs)
+
+    def _browser_version(self) -> str | None:
+        """Return the running browser's version string, or ``None`` if unknown."""
+        try:
+            browser = self._browser
+            if browser is None and self._context is not None:
+                browser = self._context.browser
+            return None if browser is None else str(browser.version)
+        except Exception:  # pragma: no cover — driver-side failure only
+            logger.debug("Could not read the browser version", exc_info=True)
+            return None
 
     @staticmethod
     def _page_title(page: Any) -> str:
@@ -1542,6 +1931,10 @@ class WebUseTool:
         """
         press_ms = random.randint(45, 140)
         api = web_stealth.playwright_api()
+        # Probe before the glide, outside the fallback below: a wedged
+        # renderer must surface as a 10 s error, not as a glide failure
+        # followed by a 30 s plain click on the same page.
+        self._require_responsive_renderer()
         try:
             position = self._glide_onto(locator)
         except api.Error:
@@ -1583,7 +1976,6 @@ class WebUseTool:
             return None
         ox = box["width"] * random.uniform(0.35, 0.65)
         oy = box["height"] * random.uniform(0.35, 0.65)
-        self._require_responsive_renderer()
         with self._input_hang_watchdog():
             self._move_mouse_to(box["x"] + ox, box["y"] + oy)
         self._page.wait_for_timeout(random.randint(40, 160))
@@ -1612,9 +2004,7 @@ class WebUseTool:
         Cloudflare's managed challenge first runs silent checks; when they
         do not rate the browser human enough it shows a single checkbox
         (no puzzle) for the visitor to tick.  The box lives in a
-        cross-origin ``challenges.cloudflare.com`` iframe.  Nothing else is
-        ever solved on the user's behalf: CAPTCHA puzzles, press-and-hold
-        widgets and hard blocks are reported for :meth:`show_browser`.
+        cross-origin ``challenges.cloudflare.com`` iframe.
 
         Returns:
             The checkbox's bounding box in main-frame viewport pixels, or
@@ -1632,27 +2022,63 @@ class WebUseTool:
         # ``None`` when rendered but hidden: the widget is still spinning.
         return box or None
 
-    def _press_at(self, box: dict[str, float]) -> None:
-        """Press the left-hand square of the accessible element *box* like a person.
+    def _challenge_widget(self, vendor: str) -> dict[str, float] | None:
+        """Return the box of the element a person would press on *vendor*'s page.
 
-        The Turnstile element spans the square and its "Verify you are
-        human" label; people press the square.  A curved approach, a short
-        pause and a held button, all by pointer coordinates because the
+        Two widgets are pressed on the user's behalf: Cloudflare Turnstile's
+        checkbox (:meth:`_turnstile_checkbox`; its accessible element spans
+        the square and the "Verify you are human" label, people press the
+        square) and HUMAN / PerimeterX's "Press & Hold" bar
+        (:data:`web_stealth.PRESS_AND_HOLD_BOX_JS`), pressed anywhere along
+        it.  CAPTCHA puzzles and hard blocks have no such element and are
+        reported for :meth:`show_browser`.
+
+        Args:
+            vendor: The label :meth:`_challenge_vendor` returned.
+
+        Returns:
+            The box to press, in main-frame viewport pixels, or ``None``
+            when the page shows nothing to press.
+        """
+        if vendor == web_stealth.CLOUDFLARE_CHALLENGE:
+            box = self._turnstile_checkbox()
+            if box is None:
+                return None
+            side = min(box["width"], box["height"])
+            return {"x": box["x"], "y": box["y"], "width": side, "height": box["height"]}
+        if vendor == web_stealth.PERIMETERX_CHECK:
+            boxes = self._read_page(self._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
+            return boxes[0] if boxes else None
+        return None
+
+    def _press_at(self, box: dict[str, float], hold_secs: float) -> None:
+        """Press the element *box* like a person and keep it down for *hold_secs*.
+
+        A curved approach to the middle of the box, a short pause, then
+        the button goes down and, while held, the pointer drifts as a
+        resting hand does — all by pointer coordinates because the
         element is in a cross-origin frame.
 
         Args:
-            box: Bounding box in main-frame viewport pixels.
+            box: Box to press, in main-frame viewport pixels
+                (:meth:`_challenge_widget`).
+            hold_secs: How long the button stays down
+                (:func:`web_stealth.press_hold_secs`).
         """
-        side = min(box["width"], box["height"])
-        x = box["x"] + side * random.uniform(0.35, 0.65)
+        x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
         y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
-        with self._input_hang_watchdog():
+        with self._input_hang_watchdog(_INPUT_WATCHDOG_SECS + hold_secs):
             self._move_mouse_to(x, y)
             self._page.wait_for_timeout(random.randint(200, 600))
             self._page.mouse.down()
-            self._page.wait_for_timeout(random.randint(60, 140))
+            release_at = time.monotonic() + hold_secs
+            while True:
+                self._page.wait_for_timeout(random.randint(60, 140))
+                if time.monotonic() >= release_at:
+                    break
+                self._page.mouse.move(*web_stealth.hold_tremor(x, y), steps=2)
             self._page.mouse.up()
-        logger.info("ticked the Cloudflare Turnstile checkbox on %s", self._page.url)
+        logger.info("pressed the challenge widget for %.1fs on %s", hold_secs, self._page.url)
 
     def _settle_challenge(self) -> str:
         """Wait out a bot-protection interstitial; describe it when it stays.
@@ -1661,8 +2087,10 @@ class WebUseTool:
         run their checks in the browser and then reload the real page on
         their own — for a browser they rate as human.  Returning the
         interstitial's accessibility tree would make the agent retry or
-        give up, so the tool waits up to :data:`_CHALLENGE_WAIT_SECS`
-        with small pointer movements for the page to clear.  A Google
+        give up, so the tool waits up to
+        :func:`web_stealth.challenge_wait_secs` with small pointer
+        movements for the page to clear, and presses the widget a person
+        would press (:meth:`_challenge_widget`) when one shows.  A Google
         "unusual traffic" page is not waited on: it rates the network's
         IP, not the browser, so the same query is opened on Bing.  The
         interstitial is recognised by what the page shows
@@ -1676,29 +2104,35 @@ class WebUseTool:
         vendor = self._challenge_vendor()
         if vendor is None:
             return ""
-        deadline = time.monotonic() + _CHALLENGE_WAIT_SECS
+        wait_secs = web_stealth.challenge_wait_secs(vendor)
+        started = time.monotonic()
+        deadline = started + wait_secs
         box_seen_at: float | None = None
-        ticked = False
+        presses = 0
         while (
             vendor is not None and not vendor.startswith("Google") and time.monotonic() < deadline
         ):
             box = None
-            if vendor == "Cloudflare challenge" and not ticked:
-                box = self._turnstile_checkbox()
-            if box is not None and box_seen_at is None:
+            if presses < web_stealth.widget_presses(vendor):
+                box = self._challenge_widget(vendor)
+            if box is None:
+                box_seen_at = None
+            elif box_seen_at is None:
                 box_seen_at = time.monotonic()
+            reaction = _WIDGET_RETRY_SECS if presses else _WIDGET_REACTION_SECS
             if (
                 box is not None
                 and box_seen_at is not None
-                and time.monotonic() - box_seen_at >= _TURNSTILE_REACTION_SECS
+                and time.monotonic() - box_seen_at >= reaction
             ):
-                # A person reads the box before pressing it, moving the
+                # A person reads the widget before pressing it, moving the
                 # pointer meanwhile; a press the instant it appears, with
-                # no pointer history, is what Turnstile ignores.  The
+                # no pointer history, is what the vendors ignore.  The
                 # verdict then takes a few seconds.
-                self._press_at(box)
-                ticked = True
-                deadline = max(deadline, time.monotonic() + _CHALLENGE_WAIT_SECS)
+                self._press_at(box, web_stealth.press_hold_secs(vendor))
+                presses += 1
+                box_seen_at = None
+                deadline = max(deadline, time.monotonic() + wait_secs)
             else:
                 self._idle_mouse()
             self._page.wait_for_timeout(random.randint(500, 900))
@@ -1718,11 +2152,11 @@ class WebUseTool:
         host = urlparse(self._page.url).netloc
         return (
             f"Note: {host} answered with a bot-protection page ({vendor}) that did not "
-            f"clear within {_CHALLENGE_WAIT_SECS:.0f}s. Call show_browser() so the user "
+            f"clear within {time.monotonic() - started:.0f}s. Call show_browser() so the user "
             "can complete the check, or use another source for the same information."
         )
 
-    def _get_ax_tree(self, max_chars: int = 50000) -> str:
+    def _get_ax_tree(self) -> str:
         """The numbered accessibility tree of the current page.
 
         Reads the page the caller just acted on and nothing else: every
@@ -1739,8 +2173,8 @@ class WebUseTool:
             self._elements = []
             return header + "(empty page)"
         numbered, self._elements = _number_interactive_elements(snapshot)
-        if len(numbered) > max_chars:
-            numbered = numbered[:max_chars] + "\n... [truncated]"
+        if len(numbered) > _AX_TREE_MAX_CHARS:
+            numbered = numbered[:_AX_TREE_MAX_CHARS] + "\n... [truncated]"
         return header + numbered
 
     def _wait_for_stable(self) -> None:
@@ -1910,8 +2344,9 @@ class WebUseTool:
             self._human_click(locator)
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
-            if len(self._context.pages) > pages_before:
-                self._check_for_new_tab()
+            pages = self._context.pages
+            if len(pages) > pages_before:
+                self._adopt_page(pages[-1])
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
@@ -2070,6 +2505,538 @@ class WebUseTool:
             logger.debug("Exception caught", exc_info=True)
             return f"Error getting page content: {e}"
 
+    def evaluate_script(self, script: str) -> str:
+        """Evaluate JavaScript in the current page and return the result as JSON.
+
+        The single most powerful browser tool: read state the accessibility
+        tree does not show (computed styles, element attributes, JS variables),
+        extract structured data, or act on the page directly (click hidden
+        elements, set form values, call the page's own functions). Prefer it
+        over guessing when a click did nothing — pair it with
+        list_console_messages() and list_network_requests() to see why.
+
+        Args:
+            script: A JavaScript function, e.g. "() => document.title" or
+                "async () => (await fetch('/api')).status". A function is
+                invoked and awaited if it returns a promise. A bare
+                expression ("document.title", "(1 + 2)") is returned as is.
+
+        Returns:
+            The result: a string as is, anything else as JSON (truncated at
+            20000 chars); or "Error evaluating script: <message>" when the
+            script throws or the page fails."""
+        err = self._try_ensure_browser("evaluating script")
+        if err is not None:
+            return err
+        src = script.strip()
+        if not src:
+            return "Error evaluating script: empty script."
+        session = self._console_session()
+        if session is None:
+            return "Error evaluating script: no CDP session for the current page."
+        # One-shot evaluation over the page's CDP session: unlike
+        # wait_for_function it is never re-armed in a new document, so a
+        # script that navigates the page cannot run its side effects
+        # twice (the evaluation is cancelled instead and reported as an
+        # error).  The typeof check is what lets functions and bare
+        # expressions both through.  awaitPromise + returnByValue move
+        # promise-waiting and JSON serialization into the browser, and
+        # the page-side timeout ends scripts that run long; the
+        # _cdp_call deadline covers a renderer that never answers at
+        # all.
+        expression = (
+            f"(async () => {{ const f = ({src}); try {{"
+            " return [true, await (typeof f === 'function' ? f() : f)];"
+            " } catch (e) { return [false, String((e && e.stack) || e)]; } })()"
+        )
+        try:
+            reply = _cdp_call(
+                self._page,
+                session.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": expression,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                        "timeout": _PAGE_READ_TIMEOUT_MS,
+                    },
+                ),
+                timeout_secs=_PAGE_READ_TIMEOUT_MS / 1000 + _CDP_CALL_TIMEOUT_SECS,
+            )
+        except Exception as e:  # protocol errors (cyclic results), timeouts, dead pages
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error evaluating script: {e}"
+        details = reply.get("exceptionDetails")
+        if details is not None:
+            exception = details.get("exception") or {}
+            message = exception.get("description") or details.get("text") or "unknown error"
+            return f"Error evaluating script: {str(message).splitlines()[0]}"
+        result = reply.get("result", {})
+        if "value" not in result:  # unserializable (an uncloned DOM node, undefined)
+            return str(result.get("description", "undefined"))
+        ok, value = result["value"]
+        if not ok:
+            return f"Error evaluating script: {value}"
+        text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
+        if len(text) > _EVAL_RESULT_MAX_CHARS:
+            text = text[:_EVAL_RESULT_MAX_CHARS] + "\n... [truncated]"
+        return text
+
+    def list_console_messages(self, clear: bool = False) -> str:
+        """List console messages and uncaught errors of the current page.
+
+        The accessibility tree never shows a TypeError or a failed
+        console.assert; when a click or a page load did not do what it
+        should, look here first.  Messages are recorded per page from the
+        moment it is opened (the last 200 are kept).
+
+        Args:
+            clear: If True, empty the recorded messages after listing them,
+                so the next call shows only what the next action caused.
+
+        Returns:
+            One "[level] text (url:line)" line per message, "No console
+            messages recorded for the current page." when there are none,
+            or "Error listing console messages: <message>" on failure."""
+        err = self._try_ensure_browser("listing console messages")
+        if err is not None:
+            return err
+        try:
+            self._console_session()  # capture resumes if adoption could not start it
+            # The sync driver only delivers page events while a call is in
+            # flight, so the round trip comes FIRST: it pumps events queued
+            # since the last tool call into the buffers.  The snapshot and
+            # the clear then happen with no driver yield between them.
+            title = self._page_title(self._page)
+            url = self._page.url
+            log = self._console_logs.get(self._page)
+            if not log:
+                return "No console messages recorded for the current page."
+            entries = list(log)
+            if clear:
+                log.clear()
+            header = f"Console messages for {title} ({url}) — {len(entries)}:"
+            lines = [header]
+            for entry in entries:
+                where = f" ({entry['where']})" if entry["where"] else ""
+                lines.append(f"[{entry['level']}] {entry['text']}{where}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error listing console messages: {e}"
+
+    def list_network_requests(self, url_filter: str = "", clear: bool = False) -> str:
+        """List recent network requests of the current page with their status.
+
+        Shows what the page actually loaded and what every action triggered:
+        method, URL, resource type, HTTP status, and failure reason.  When a
+        click silently does nothing, the answer is often here (a 4xx/5xx or
+        a failed fetch).  The last 300 requests per page are kept.
+
+        Args:
+            url_filter: Only show requests whose URL contains this substring
+                (e.g. "/api/"). Empty shows everything.
+            clear: If True, empty the recorded requests after listing them,
+                so the next call shows only what the next action caused.
+
+        Returns:
+            One "METHOD status URL (type)" line per request ("..." while
+            pending, "FAILED: <reason>" for failed ones), "No network
+            requests recorded for the current page." when there are none,
+            or "Error listing network requests: <message>" on failure."""
+        err = self._try_ensure_browser("listing network requests")
+        if err is not None:
+            return err
+        try:
+            # The sync driver only delivers page events while a call is in
+            # flight, so the round trip comes FIRST: it pumps events queued
+            # since the last tool call into the buffers.  The snapshot and
+            # the clear then happen with no driver yield between them.
+            title = self._page_title(self._page)
+            url = self._page.url
+            log = self._network_logs.get(self._page)
+            if not log:
+                return "No network requests recorded for the current page."
+            entries = list(log)
+            if clear:
+                log.clear()
+                # Retired entries must not linger in the pending index.
+                self._network_pending[self._page] = {}
+            entries = [e for e in entries if url_filter in e["url"]] if url_filter else entries
+            if not entries:
+                return f"No network requests matching {url_filter!r}."
+            header = f"Network requests for {title} ({url}) — {len(entries)}:"
+            lines = [header]
+            for entry in entries:
+                if entry["error"]:
+                    status = f"FAILED: {entry['error']}"
+                elif entry["status"] is None:
+                    status = "..."
+                else:
+                    status = str(entry["status"])
+                lines.append(f"{entry['method']} {status} {entry['url']} ({entry['type']})")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error listing network requests: {e}"
+
+    def wait_for(self, text: str, timeout: float = 15.0, disappear: bool = False) -> str:
+        """Wait until text appears on (or disappears from) the current page.
+
+        Turns "click and hope" into "click and verify": after submitting a
+        form or triggering a load, wait for the success/error message
+        instead of polling screenshots.  Faster and more reliable than
+        re-reading the page in a loop.
+
+        Args:
+            text: Text (substring match on the visible text, any run of
+                white space reading as one space) to wait for, e.g.
+                "Saved" or "Something went wrong".
+            timeout: Seconds to wait at most (default 15, capped at 120).
+            disappear: If True, wait until the text is gone instead (e.g.
+                a "Loading..." spinner).
+
+        Returns:
+            The updated accessibility tree once the condition holds, "Timed
+            out after Ns waiting for text ..." when it does not, or
+            "Error waiting for text ...: <message>" on failure."""
+        err = self._try_ensure_browser(f"waiting for text {text!r}")
+        if err is not None:
+            return err
+        timeout = min(max(float(timeout), 0.5), _WAIT_FOR_MAX_SECS)
+        # What a viewer can actually read: copies of *text* hidden by
+        # display:none, visibility:hidden or content-visibility:hidden
+        # count for neither appearing nor disappearing, ALL visible
+        # copies must go for a disappearance, and open shadow roots
+        # (including text nodes directly under the root) and
+        # input/textarea values (e.g. <input type="submit" value="...">)
+        # count too.  The page's rendered text is rebuilt from its text
+        # nodes in rendered order (shadow trees in place, a <slot>
+        # expanded to the light DOM assigned to it, whose visibility and
+        # line box then follow the slot, not the host): a text node counts
+        # when it has layout boxes of its own (a Range over it has
+        # client rects: this leaves out display:none, undistributed
+        # light DOM under a shadow host, the options of a collapsed
+        # <select>, a textarea's stale default text, and keeps
+        # display:contents text) and its element is not visibility- or
+        # content-visibility-hidden; text inside one line box is joined
+        # (<b>Sa</b>ved, a highlighted search hit, reads "Saved") while
+        # a block boundary or a rendered <br> separates (two table cells
+        # never read as one word); a collapsed <select> contributes its
+        # selected option's label and inputs their value.  White space
+        # is NOT reproduced the way CSS renders it: every run of white
+        # space (source line breaks, &nbsp;, white-space:pre runs) reads
+        # as one space on both sides, so "Changes saved" matches
+        # "Changes\nsaved" in the source and "Changes&nbsp;saved" alike.
+        # Chromium's innerText is not used: it lists every option of a
+        # collapsed <select>, skips SVG and does not cross shadow roots.
+        # The rebuild reads the layout of every text node, so a cheap
+        # gate runs first: the rendered letters are a subsequence of the
+        # raw letters in rendered order (hidden parts deleted), so a
+        # needle whose letters are not such a subsequence cannot be on
+        # screen.  Letters are compared as code points (an emoji is one
+        # letter on both sides).  Polled every 100 ms rather than per
+        # frame.
+        predicate = (
+            "([text, disappear]) => {"
+            " const parentOf = (n) =>"  # flat-tree parent: the <slot> a slotted node renders in
+            "   n.assignedSlot || n.parentElement"
+            "   || (n.getRootNode && n.getRootNode().host) || null;"
+            " const isField = (el) => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';"
+            " const isMenu = (el) => el.tagName === 'SELECT' && !el.multiple && el.size <= 1;"
+            " const skipped = new Map();"  # inside a content-visibility:hidden subtree
+            " const isSkipped = (el) => {"
+            "   if (!el) return false;"
+            "   if (!skipped.has(el))"
+            "     skipped.set(el, getComputedStyle(el).contentVisibility === 'hidden'"
+            "       || isSkipped(parentOf(el)));"
+            "   return skipped.get(el); };"
+            " const styles = new Map();"
+            " const styleOf = (el) => {"
+            "   if (!styles.has(el)) styles.set(el, getComputedStyle(el));"
+            "   return styles.get(el); };"
+            " const visible = (el) =>"  # visibility is inherited: the element's own value decides
+            "   !!el && styleOf(el).visibility !== 'hidden' && !isSkipped(el);"
+            " const boxed = (el) => visible(el) && el.getClientRects().length > 0;"
+            " const blocks = new Map();"
+            " const blockOf = (el) => {"  # the nearest element that starts its own line
+            "   if (!el) return null;"
+            "   if (!blocks.has(el))"
+            "     blocks.set(el, /^(inline|contents|ruby)/.test(styleOf(el).display)"
+            "       ? blockOf(parentOf(el)) || el : el);"
+            "   return blocks.get(el); };"
+            " const nodes = [];"  # text nodes, <br>s, fields and menus in rendered order
+            " const visit = (n) => {"
+            "   if (n.nodeType === 3) { nodes.push(n); return; }"
+            "   if (n.nodeType !== 1) return;"
+            "   if (n.tagName === 'BR' || isField(n) || isMenu(n)) nodes.push(n);"
+            "   if (n.shadowRoot) walk(n.shadowRoot);"  # its light DOM shows through <slot>s only
+            "   else if (n.tagName === 'SLOT') n.assignedNodes({flatten: true}).forEach(visit);"
+            "   else walk(n); };"
+            " const walk = (root) => { for (const c of root.childNodes) visit(c); };"
+            " const labelOf = (n) => n.nodeType === 3 ? n.data"
+            "   : isField(n) ? n.value || ''"
+            "   : isMenu(n) && n.selectedIndex >= 0 ? n.options[n.selectedIndex].label : '';"
+            " const squash = (s) => s.replace(/\\s+/g, ' ').trim();"
+            " const letters = (s) => Array.from(s.replace(/\\s+/g, ''));"
+            " const subsequence = (needle, hay) => {"
+            "   let i = 0;"
+            "   for (const ch of hay) if (ch === needle[i] && ++i === needle.length) return true;"
+            "   return needle.length === 0; };"
+            " const range = document.createRange();"
+            " const rendered = (n) => { range.selectNodeContents(n);"
+            "   return range.getClientRects().length > 0; };"
+            " const needle = squash(text);"
+            " let found = false;"
+            " if (document.body) {"
+            "   walk(document.body);"
+            "   if (subsequence(letters(needle), letters(nodes.map(labelOf).join('')))) {"
+            "     let out = '', prev = null;"
+            "     for (const n of nodes) {"
+            "       let box;"
+            "       if (n.nodeType === 3) {"
+            "         const holder = parentOf(n);"
+            "         if (!visible(holder) || !rendered(n)) continue;"
+            "         box = blockOf(holder);"
+            "       } else {"
+            "         if (!boxed(n)) continue;"
+            "         box = n;"
+            "       }"
+            "       if (prev !== null && box !== prev) out += ' ';"
+            "       out += labelOf(n);"
+            "       prev = box;"
+            "     }"
+            "     found = squash(out).includes(needle);"
+            "   }"
+            " }"
+            " return disappear ? !found : found; }"
+        )
+        try:
+            self._page.wait_for_function(
+                predicate, arg=[text, disappear], timeout=timeout * 1000, polling=100
+            )
+            return self._get_ax_tree()
+        except web_stealth.playwright_api().TimeoutError:
+            verb = "disappear" if disappear else "appear"
+            return f"Timed out after {timeout:g}s waiting for text {text!r} to {verb}."
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error waiting for text {text!r}: {e}"
+
+    def attach_to_chrome(self, cdp_url: str = "http://localhost:9222") -> str:
+        """Attach to a real Chrome/Chromium the user started, and drive its tabs.
+
+        Some tasks need the user's own logged-in browser sessions (SSO,
+        corporate apps, accounts with passkeys).  The user starts Chrome
+        with remote debugging enabled — e.g.
+        ``chrome --remote-debugging-port=9222`` — and this tool connects
+        to it over the Chrome DevTools Protocol and adopts its newest
+        tab.  From then on every browser tool (click, type_text,
+        evaluate_script, list_console_messages, list_network_requests,
+        screenshot, ...) operates on the user's real browser, with its
+        real cookies and logins.  close_browser() detaches again WITHOUT
+        closing the user's Chrome; the built-in stealth Chromium takes
+        over on the next call.
+
+        WARNING: this acts with the full authority of the user's logged-in
+        sessions.  Only attach when the user asked for it, and prefer
+        reading over acting.
+
+        Args:
+            cdp_url: The DevTools endpoint of the user's browser
+                (default "http://localhost:9222").
+
+        Returns:
+            The accessibility tree of the adopted tab, or
+            "Error attaching to Chrome at <url>: <message>" on failure."""
+        if self._live:
+            # Live mode and an attached user browser are mutually
+            # exclusive: leave the Browser tab first (its tab belongs to
+            # the daemon's browser; closing it here would be wrong, and
+            # a leftover _live flag would route the NEXT teardown into
+            # _detach_live's page.close() on the user's tab).
+            self._detach_live(close_tab=False)
+            self._live = False
+        self._close_browser_only()
+        if self._playwright is None:
+            self._playwright = web_stealth.playwright_api().sync_playwright().start()
+        try:
+            browser = self._playwright.chromium.connect_over_cdp(cdp_url, timeout=15000)
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error attaching to Chrome at {cdp_url}: {e}"
+        try:
+            pages = [
+                p
+                for context in browser.contexts
+                for p in context.pages
+                if not p.is_closed()
+                and not p.url.startswith(("chrome://", "devtools://", "chrome-extension://"))
+            ]
+            if not pages:
+                raise RuntimeError("no open tabs found")
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001 - already gone
+                logger.debug("Exception caught", exc_info=True)
+            return f"Error attaching to Chrome at {cdp_url}: {e}"
+        browser.on("disconnected", self._on_browser_lost)
+        self._browser = browser
+        # The newest regular tab wins; its own context becomes this
+        # tool's context (tab listing, popup detection) so a browser
+        # with several contexts still behaves.
+        self._context = pages[-1].context
+        self._attached_url = cdp_url
+        try:
+            self._adopt_page(pages[-1])
+            return self._get_ax_tree()
+        except Exception as e:  # a tab that cannot be adopted or read (wedged, no <body>)
+            logger.debug("Exception caught", exc_info=True)
+            self._close_browser_only()
+            return f"Error attaching to Chrome at {cdp_url}: {e}"
+
+    def use_my_chrome(
+        self,
+        action: str,
+        tab_id: int = 0,
+        url: str = "",
+        script: str = "",
+        uid: int = 0,
+        text: str = "",
+        timeout: int = 30,
+    ) -> str:
+        """Drive the user's everyday Chrome through the KISS Sorcar Bridge extension.
+
+        This is the way into the browser the user is actually logged into
+        (their default-profile Chrome with Gmail, SSO, passkeys): Chrome
+        since v136 ignores --remote-debugging-port on the default profile,
+        so attach_to_chrome cannot reach it, but the KISS Sorcar Bridge
+        Chrome extension can.  The user loads the extension once
+        (chrome://extensions → Developer mode → Load unpacked →
+        ~/.kiss/chrome_extension); this tool then talks to it over a
+        token-gated loopback WebSocket.  The daemon serves that socket
+        from start-up when the "Drive my Chrome" setting is on;
+        otherwise the first call starts it and may wait a few seconds
+        for the extension to find it.
+
+        Actions:
+            "list_tabs": every tab as "id=<id> [active] <title> — <url>".
+            "open_tab": open url in a new tab, wait for load, return its id.
+            "navigate": point tab_id at url, wait for load.
+            "activate_tab": bring tab_id to the front.
+            "close_tab": close tab_id.
+            "evaluate": run script in tab_id's page and return the result
+                (must be JSON-serializable; return a string when in doubt).
+                Uses the page's main world where the site's CSP allows it,
+                so page variables and fetch() with the site's session work.
+            "screenshot": capture tab_id's viewport; returns the path of
+                the saved PNG (under the work dir's tmp/).
+            "snapshot": list the visible interactive elements of tab_id's
+                page as a compact numbered list, e.g.
+                '[3] <button> "Save"'. The numbers (uids) are the handles
+                for click and type_text; every snapshot re-assigns them,
+                so re-snapshot after the page changes.
+            "click": click element uid in tab_id (from a snapshot).
+                Scrolls it into view and dispatches the full pointer/mouse
+                event sequence so React and other frameworks see a real
+                click.
+            "type_text": replace the value of the input/textarea/
+                contenteditable element uid in tab_id with text,
+                dispatching the input/change events frameworks listen for.
+
+        The normal rhythm is: snapshot, click/type_text by uid, snapshot
+        again. Use evaluate for anything the snapshot cannot express.
+
+        Args:
+            action: One of the actions listed above.
+            tab_id: Target tab id from list_tabs/open_tab (not needed for
+                list_tabs/open_tab).
+            url: Target URL for open_tab/navigate.
+            script: JavaScript for evaluate.
+            uid: Element number from snapshot, for click/type_text.
+            text: Replacement value for type_text.
+            timeout: Seconds to wait for the extension's answer.
+
+        Returns:
+            The action result, or "Error ..." explaining what to do (e.g.
+            how to install the extension when none is connected).
+
+        WARNING: this acts with the full authority of the user's logged-in
+        sessions.  Only use it when the user asked for it, and prefer
+        reading over acting."""
+        from kiss.agents.sorcar import chrome_bridge  # deferred: websockets import cost
+
+        args: dict[str, Any] = {}
+        if action in (
+            "navigate", "activate_tab", "close_tab", "evaluate", "screenshot",
+            "snapshot", "click", "type_text",
+        ):
+            if not tab_id:
+                return f"Error: action '{action}' needs tab_id (from list_tabs or open_tab)."
+            args["tabId"] = tab_id
+        if action in ("open_tab", "navigate"):
+            if not url:
+                return f"Error: action '{action}' needs a url."
+            args["url"] = url
+        if action == "evaluate":
+            if not script:
+                return "Error: action 'evaluate' needs a script."
+            args["script"] = script
+        if action in ("click", "type_text"):
+            if not uid:
+                return f"Error: action '{action}' needs a uid (from a snapshot)."
+            args["uid"] = uid
+        if action == "type_text":
+            if not text:
+                return "Error: action 'type_text' needs text."
+            args["text"] = text
+        if action not in (
+            "list_tabs", "open_tab", "navigate", "activate_tab", "close_tab",
+            "evaluate", "screenshot", "snapshot", "click", "type_text",
+        ):
+            return (
+                f"Error: unknown action '{action}'. Use one of: list_tabs, open_tab, "
+                "navigate, activate_tab, close_tab, evaluate, screenshot, "
+                "snapshot, click, type_text."
+            )
+        try:
+            bridge = chrome_bridge.ChromeBridge.instance()
+        except chrome_bridge.ChromeBridgeError as e:
+            return f"Error starting the Chrome bridge: {e}"
+        if not bridge.extension_connected:
+            # Started by this very call (daemon setting off, or a CLI run):
+            # the extension finds the new config on its next retry.
+            bridge.wait_for_extension(_BRIDGE_CONNECT_WAIT_SECS)
+        try:
+            result = bridge.call(action, args, timeout=float(timeout))
+        except chrome_bridge.ChromeBridgeError as e:
+            return f"Error using my Chrome: {e}"
+        if action == "screenshot":
+            return self._save_bridge_shot(result)
+        return _format_bridge_result(action, result)
+
+    def _save_bridge_shot(self, data_url: Any) -> str:
+        """Decode a screenshot data URL from the bridge into ./tmp/ and return its path."""
+        import base64
+
+        if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+            return (
+                "Error: the extension returned an unexpected screenshot payload: "
+                f"{str(data_url)[:120]}"
+            )
+        try:
+            png = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+        except Exception as e:  # noqa: BLE001 - a buggy/compromised extension must not crash the tool
+            return f"Error: the extension returned an undecodable screenshot payload: {e}"
+        # ns: no same-second collisions.  Under the task's work dir like
+        # screenshot(), not the daemon's CWD.
+        out = resolve_tool_path(f"tmp/chrome-shot-{time.time_ns()}.png", self.work_dir)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(png)
+        return f"Screenshot saved to {out} ({out.stat().st_size} bytes)."
+
     def close(self) -> str:
         """Close the browser and release resources. Call when done with the session or before exit.
 
@@ -2176,6 +3143,10 @@ class WebUseTool:
         if url.startswith("about:"):
             url = ""
         session = _Session(url, [])
+        if self._attached_url is not None:
+            # The cookie jar and localStorage are the user's own Chrome
+            # profile (attach_to_chrome): only the URL may leave it.
+            return session
         try:
             session.cookies = self._context.cookies()
         except Exception:  # pragma: no cover — reading cookies rarely fails
@@ -2259,7 +3230,9 @@ class WebUseTool:
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content, show_browser, close_browser. Does not include close."""
+            get_page_content, evaluate_script, list_console_messages,
+            list_network_requests, wait_for, attach_to_chrome, use_my_chrome,
+            show_browser, close_browser. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -2268,6 +3241,12 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
+            self.evaluate_script,
+            self.list_console_messages,
+            self.list_network_requests,
+            self.wait_for,
+            self.attach_to_chrome,
+            self.use_my_chrome,
             self.show_browser,
             self.close_browser,
         ]

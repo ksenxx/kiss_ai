@@ -124,9 +124,20 @@ function taskEvents(name) {
   return [{type: 'system_output', text: name + ' line one\n'}];
 }
 
+// The usage event a metered neighbour's transcript carries, and the
+// status row main.js renders from it (fmtTokens / fmtCost).
+const LAST_USAGE = {
+  type: 'usage_info',
+  total_tokens: 777,
+  cost: '7.00',
+  total_steps: 7,
+};
+const LAST_METRICS = {tokens: 'Tokens: 777', budget: 'Cost: $7.00', steps: 'Steps: 7'};
+
 // Builds a tab holding one main task, then splices in the neighbouring
 // tasks named by `prev` / `next` (each an array of task names, nearest
-// neighbour first) the way the backend replies to an overscroll.
+// neighbour first) the way the backend replies to an overscroll.  An
+// entry may also be `{name, events}` to replay a transcript of its own.
 function setup(opts) {
   const options = opts || {};
   const {win, posted} = makePage();
@@ -145,27 +156,49 @@ function setup(opts) {
       {type: 'system_output', text: 'main line one\n'},
     ],
   });
-  (options.prev || []).forEach((name, i) => {
+  (options.prev || []).forEach((entry, i) => {
+    const t = neighbour(entry);
     send(win, {
       type: 'adjacent_task_events',
       tabId,
       direction: 'prev',
-      task: name,
+      task: t.name,
       task_id: String(49 - i),
-      events: taskEvents(name),
+      events: t.events,
     });
   });
-  (options.next || []).forEach((name, i) => {
+  (options.next || []).forEach((entry, i) => {
+    const t = neighbour(entry);
     send(win, {
       type: 'adjacent_task_events',
       tabId,
       direction: 'next',
-      task: name,
+      task: t.name,
       task_id: String(51 + i),
-      events: taskEvents(name),
+      events: t.events,
     });
   });
   return {win, posted, tabId, O};
+}
+
+function neighbour(entry) {
+  return typeof entry === 'string'
+    ? {name: entry, events: taskEvents(entry)}
+    : entry;
+}
+
+// A page whose one neighbour, 'Last task', replayed its own usage event
+// (LAST_USAGE) and stands `height` px tall; returns the page and the
+// neighbour's element.
+function setupMeteredLast(height) {
+  const page = setup({
+    next: [
+      {name: 'Last task', events: [LAST_USAGE, ...taskEvents('Last task')]},
+    ],
+  });
+  const last = taskEl(page.O, 'Last task');
+  setHeight(last, height);
+  return Object.assign(page, {last});
 }
 
 /**
@@ -316,20 +349,11 @@ function testFirstTaskNamedWhenScrolledToTop() {
 // Metrics belong to the task on screen, and must snap back to the live
 // task's own numbers when the reader returns to it.
 function testMetricsFollowTheVisibleTask() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Budget: $7';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 300);
+  const {win, O} = setupMeteredLast(300);
 
   scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task');
-  assert.deepStrictEqual(metrics(win), {
-    tokens: 'Tokens: 777',
-    budget: 'Budget: $7',
-    steps: 'Steps: 7',
-  });
+  assert.deepStrictEqual(metrics(win), LAST_METRICS);
 
   scrollTo(win, O, 0);
   assert.strictEqual(shownTask(win), 'Main task');
@@ -740,79 +764,23 @@ function testSplicedInTaskRenamesThePanelWithoutAScroll() {
 }
 
 // Reading a neighbour is a viewing position, not a change of identity.
-// Leaving the tab and coming back must not rename the tab's own task.
-function testTabRoundTripKeepsTheTabsOwnTask() {
-  const {win, O} = setup({next: ['Last task']});
-  setHeight(taskEl(O, 'Last task'), 600);
+// Coming back to a finished tab lands the transcript on the tab's own
+// task panel (landOpenedTranscript), however deep into a neighbour the
+// reader had scrolled before leaving, and the panel names what is on
+// screen then: the own task, with its own numbers, never the neighbour
+// the reader left off in nor the metrics of the tab visited meanwhile.
+function testTabRoundTripNamesTheTabsOwnTaskAndMetrics() {
+  const {win, O, last} = setupMeteredLast(600);
   const first = win._testApi.getActiveTabId();
 
   scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
+  assert.deepStrictEqual(metrics(win), LAST_METRICS);
 
   win._testApi.createNewTab();
-  clickTab(win, first);
-  installLayout(win, win.document.getElementById('output'));
-  const back = win.document.getElementById('output');
-  setHeight(taskEl(back, 'Last task'), 600);
-
-  scrollTo(win, back, 0);
-  assert.strictEqual(
-    shownTask(win),
-    'Main task',
-    'back on its own events, the tab must name its own task',
-  );
-  assert.deepStrictEqual(metrics(win), {
-    tokens: 'Tokens: 999',
-    budget: 'Cost: $0.50',
-    steps: 'Steps: 3',
-  });
-  win.close();
-  console.log("PASS a tab round trip keeps the tab's own task");
-}
-
-// Coming back to a tab restores the transcript where the reader left it.
-// The panel must name what is on screen then, not what the tab is called.
-function testReturningToATabNamesWhatIsOnScreen() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
-  const first = win._testApi.getActiveTabId();
-
-  scrollToBottom(win, O);
-  assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
-
-  win._testApi.createNewTab();
-  clickTab(win, first);
-
-  assert.strictEqual(
-    shownTask(win),
-    'Last task',
-    'the reader came back to the neighbour, so the panel must name it',
-  );
-  assert.deepStrictEqual(metrics(win), {
-    tokens: 'Tokens: 777',
-    budget: 'Cost: 7.00',
-    steps: 'Steps: 7',
-  });
-  win.close();
-  console.log('PASS returning to a tab names what is on screen');
-}
-
-// The status metrics are part of the same story: they must describe the
-// task on screen, and they must never be inherited from another tab.
-function testMetricsDoNotLeakBetweenTabs() {
-  const {win, O, posted} = setup({next: ['Last task']});
-  const first = win._testApi.getActiveTabId();
-  setHeight(taskEl(O, 'Last task'), 600);
-
-  win._testApi.createNewTab();
-  const second = posted[posted.length - 1] && win._testApi.getActiveTabId();
   send(win, {
     type: 'task_events',
-    tabId: second,
+    tabId: win._testApi.getActiveTabId(),
     chat_id: 'chat-two',
     task_id: '90',
     task: 'Other task',
@@ -821,30 +789,33 @@ function testMetricsDoNotLeakBetweenTabs() {
     ],
   });
   clickTab(win, first);
-  const back = win.document.getElementById('output');
-  installLayout(win, back);
-  setHeight(taskEl(back, 'Last task'), 600);
 
-  scrollTo(win, back, 0);
-  assert.strictEqual(shownTask(win), 'Main task');
+  assert.ok(
+    taskPanelOf(O, 'Main task').getBoundingClientRect().top === 0,
+    'the tab came back with its own task panel at the top of the viewport',
+  );
+  assert.ok(
+    last.getBoundingClientRect().top >= VIEWPORT,
+    'the neighbour the reader left off in is below the viewport',
+  );
+  assert.strictEqual(
+    shownTask(win),
+    'Main task',
+    'the reader came back to the own task, so the panel must name it',
+  );
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
-    "the tab must show its own metrics, not the other tab's",
+    "the tab shows its own metrics, not the neighbour's nor the other tab's",
   );
   win.close();
-  console.log('PASS metrics do not leak between tabs');
+  console.log("PASS a tab round trip names the tab's own task and metrics");
 }
 
 // The live task keeps streaming while the reader studies a neighbour.
 // Its numbers belong to its own events, not to the ones on screen.
 function testLiveMetricsDoNotOverrideTheVisibleTask() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
+  const {win, O} = setupMeteredLast(600);
 
   scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task');
@@ -858,7 +829,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
   assert.strictEqual(shownTask(win), 'Last task', 'the panel must not flip');
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
+    LAST_METRICS,
     'the status row must keep describing the task on screen',
   );
 
@@ -876,12 +847,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
 // A live event that carries only some of the numbers must not adopt the
 // missing ones from the neighbour that happens to be on screen.
 function testPartialLiveMetricsKeepTheLiveTasksOwnNumbers() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
+  const {win, O} = setupMeteredLast(600);
 
   scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task');
@@ -904,12 +870,7 @@ function testPartialLiveMetricsKeepTheLiveTasksOwnNumbers() {
 // Step counting happens on ordinary streaming events, which carry no
 // metrics of their own. They must not repaint the neighbour's row either.
 function testLiveStepCountDoesNotRepaintTheNeighboursRow() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 1200);
+  const {win, O, last} = setupMeteredLast(1200);
 
   // The reader is well above the bottom, so the live panel the step
   // appends below the neighbour does not pull the viewport along.
@@ -917,7 +878,7 @@ function testLiveStepCountDoesNotRepaintTheNeighboursRow() {
   win._testApi.processEvent({type: 'thinking_start'});
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
+    LAST_METRICS,
     'a live step must not show up in the neighbour’s status row',
   );
 
@@ -968,20 +929,13 @@ function testAdjacentReplayLeavesTheLiveStepCountAlone() {
 // Another tab streaming in the background renders through the very same
 // machinery. It must not touch what the reader is looking at.
 function testHiddenTabStreamLeavesTheVisibleRowAlone() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
+  const {win, O} = setupMeteredLast(600);
   const first = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const hidden = win._testApi.getActiveTabId();
   clickTab(win, first);
-  installLayout(win, win.document.getElementById('output'));
-  const back = win.document.getElementById('output');
-  setHeight(taskEl(back, 'Last task'), 600);
-  scrollToBottom(win, back);
+  setHeight(taskEl(O, 'Last task'), 600);
+  scrollToBottom(win, O);
   assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
 
   send(win, {
@@ -998,11 +952,11 @@ function testHiddenTabStreamLeavesTheVisibleRowAlone() {
   });
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
+    LAST_METRICS,
     'a hidden tab must not write on the visible status row',
   );
 
-  scrollTo(win, back, 0);
+  scrollTo(win, O, 0);
   assert.strictEqual(shownTask(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
@@ -1016,20 +970,13 @@ function testHiddenTabStreamLeavesTheVisibleRowAlone() {
 // A whole transcript replayed into a hidden tab is the same story at a
 // larger scale.
 function testHiddenTabReplayLeavesTheVisibleRowAlone() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  last.dataset.metricTokens = 'Tokens: 777';
-  last.dataset.metricBudget = 'Cost: 7.00';
-  last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
+  const {win, O} = setupMeteredLast(600);
   const first = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const hidden = win._testApi.getActiveTabId();
   clickTab(win, first);
-  installLayout(win, win.document.getElementById('output'));
-  const back = win.document.getElementById('output');
-  setHeight(taskEl(back, 'Last task'), 600);
-  scrollToBottom(win, back);
+  setHeight(taskEl(O, 'Last task'), 600);
+  scrollToBottom(win, O);
 
   send(win, {
     type: 'task_events',
@@ -1045,11 +992,11 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
   assert.strictEqual(shownTask(win), 'Last task', 'the panel must not move');
   assert.deepStrictEqual(
     metrics(win),
-    {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
+    LAST_METRICS,
     "a hidden tab's replay must not write on the visible status row",
   );
 
-  scrollTo(win, back, 0);
+  scrollTo(win, O, 0);
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
@@ -1170,9 +1117,7 @@ async function main() {
     testPanelAlwaysNamesAnOnScreenTask,
     testLoaderIsNotTranscript,
     testSplicedInTaskRenamesThePanelWithoutAScroll,
-    testTabRoundTripKeepsTheTabsOwnTask,
-    testReturningToATabNamesWhatIsOnScreen,
-    testMetricsDoNotLeakBetweenTabs,
+    testTabRoundTripNamesTheTabsOwnTaskAndMetrics,
     testLiveMetricsDoNotOverrideTheVisibleTask,
     testPartialLiveMetricsKeepTheLiveTasksOwnNumbers,
     testLiveStepCountDoesNotRepaintTheNeighboursRow,

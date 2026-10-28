@@ -19,7 +19,10 @@
 //  6. a previewed .html file's pictures resolve against its own
 //     directory and the frame renders once they are all in;
 //  7. a Markdown preview and a report do the same; a picture that
-//     fails keeps its src; the safety timer renders a stalled preview.
+//     fails keeps its src; the safety timer renders a stalled preview;
+//  8. a src that is only a query or fragment (`?v=1`) resolves to no
+//     file: it is settled at once (the daemon never answers an empty
+//     path), so a preview holding one renders without the safety timer.
 
 'use strict';
 
@@ -32,6 +35,7 @@ const {
   captureTimers,
   fakeMatchMedia,
 } = require('./simplify2_harness.js');
+const {contentTabs} = require('./subagent_tab_helpers');
 
 const PNG = 'iVBORw0KGgo=';
 
@@ -55,10 +59,6 @@ function page(beforeScripts) {
 /** The openFile commands posted so far that carry an image token. */
 function imageRequests(posted) {
   return ofType(posted, 'openFile').filter(m => /^img-\d+$/.test(m.token));
-}
-
-function contentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
 }
 
 function imgs(win, sel) {
@@ -525,9 +525,56 @@ function testEdgeCases() {
   win.close();
 }
 
+function testQueryOnlySrc() {
+  const {win, posted, tab} = page();
+  send(win, {
+    type: 'result',
+    tabId: tab,
+    text: 'done',
+    success: true,
+    summary: '<p><img src="?v=1" alt="q"><img src="tmp/ok.png"></p>',
+  });
+  const reqs = imageRequests(posted);
+  assert.deepStrictEqual(
+    reqs.map(r => r.path),
+    ['tmp/ok.png'],
+    'no openFile is sent for an empty resolved path',
+  );
+  const q = imgs(win, '.rc-body')[0];
+  assert.ok(
+    q.classList.contains('inline-img-missing'),
+    'a query-only src is marked missing at once',
+  );
+  assert.strictEqual(q.title, 'Cannot show ?v=1');
+
+  // A preview whose only picture is such a src renders at once instead
+  // of waiting for the safety timer.
+  const timers = captureTimers(win);
+  send(win, {
+    type: 'fileContent',
+    path: '/ws/proj/reports/q.html',
+    name: 'q.html',
+    tabId: tab,
+    content: '<html><body><img src="?v=1"></body></html>',
+  });
+  const frame = frameOf(win);
+  assert.ok(
+    frame.srcdoc.includes('src="?v=1"'),
+    'the preview rendered without a daemon round trip',
+  );
+  assert.strictEqual(imageRequests(posted).length, reqs.length);
+  assert.ok(
+    timers.every(t => t.ms !== 10000 || t.cleared),
+    'the safety timer is not left waiting',
+  );
+  console.log('  ok - a query-only src settles at once');
+  win.close();
+}
+
 testResultPanel();
 testOtherPanels();
 testHtmlPreview();
 testMarkdownPreviewAndReport();
 testEdgeCases();
+testQueryOnlySrc();
 console.log('inlineImages.test.js passed');

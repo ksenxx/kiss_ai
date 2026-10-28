@@ -329,15 +329,22 @@ def _expiring(cert: x509.Certificate) -> bool:
     return cert.not_valid_after_utc - _now() <= datetime.timedelta(days=RENEWAL_THRESHOLD_DAYS)
 
 
-def _usable_ca(
-    ca_cert_path: Path, ca_key_path: Path,
+def _current_pair(
+    cert_path: Path, key_path: Path, issuer: x509.Certificate | None = None,
 ) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None:
-    """Return the CA pair when its files exist, parse, match and are not expiring."""
-    if not ca_cert_path.is_file() or not ca_key_path.is_file():
+    """Return the certificate and key at the paths when they need no re-issue, else ``None``.
+
+    Current means: both files exist, parse and match, the certificate is
+    not expiring within :data:`RENEWAL_THRESHOLD_DAYS` and, when
+    *issuer* is given, *issuer* signed it.
+    """
+    if not cert_path.is_file() or not key_path.is_file():
         return None
     try:
-        cert = _load_certificate(ca_cert_path)
-        key = _load_private_key(ca_key_path)
+        cert = _load_certificate(cert_path)
+        key = _load_private_key(key_path)
+        if issuer is not None:
+            cert.verify_directly_issued_by(issuer)
     except Exception:
         return None
     if _expiring(cert) or cert.public_key() != key.public_key():
@@ -366,37 +373,16 @@ def server_cert_is_current(
         dns_names: DNS names that must be in the SAN.
         ips: IP addresses that must be in the SAN.
     """
-    cert = _current_leaf(cert_path, key_path, ca_cert)
-    if cert is None:
+    pair = _current_pair(cert_path, key_path, ca_cert)
+    if pair is None:
         return False
     try:
-        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        san = pair[0].extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     except x509.ExtensionNotFound:
         return False
     have_dns = set(san.get_values_for_type(x509.DNSName))
     have_ips = set(san.get_values_for_type(x509.IPAddress))
     return set(dns_names) <= have_dns and set(ips) <= have_ips
-
-
-def _current_leaf(
-    cert_path: Path, key_path: Path, ca_cert: x509.Certificate,
-) -> x509.Certificate | None:
-    """Return the certificate at *cert_path* when it needs no re-issue, else ``None``.
-
-    Current means: it and its key exist and match, it is not expiring
-    within :data:`RENEWAL_THRESHOLD_DAYS` and *ca_cert* signed it.
-    """
-    if not cert_path.is_file() or not key_path.is_file():
-        return None
-    try:
-        cert = _load_certificate(cert_path)
-        key = _load_private_key(key_path)
-        cert.verify_directly_issued_by(ca_cert)
-    except Exception:
-        return None
-    if _expiring(cert) or cert.public_key() != key.public_key():
-        return None
-    return cert
 
 
 def ensure_local_ca(tls_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
@@ -414,7 +400,7 @@ def ensure_local_ca(tls_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePr
         The CA certificate and its private key, in that order.
     """
     ca_cert_path, ca_key_path = tls_dir / CA_CERT_FILE, tls_dir / CA_KEY_FILE
-    pair = _usable_ca(ca_cert_path, ca_key_path)
+    pair = _current_pair(ca_cert_path, ca_key_path)
     if pair is not None:
         return pair
     if ca_cert_path.exists():
@@ -444,7 +430,7 @@ def ensure_local_client_pair(tls_dir: Path) -> tuple[Path, Path]:
     """
     ca_cert, ca_key = ensure_local_ca(tls_dir)
     cert_path, key_path = tls_dir / CLIENT_CERT_FILE, tls_dir / CLIENT_KEY_FILE
-    if _current_leaf(cert_path, key_path, ca_cert) is None:
+    if _current_pair(cert_path, key_path, ca_cert) is None:
         logger.info("Issuing the machine-link client certificate in %s", tls_dir)
         # Same shape as the server certificate, with the clientAuth
         # extended key usage and no SAN; its Common Name names this host.
@@ -515,8 +501,7 @@ def ca_label(ca_cert_path: Path) -> str:
     unique per CA so a regenerated CA enrols as a new file.
     """
     host = _host_label() or "localhost"
-    digest = _load_certificate(ca_cert_path).fingerprint(hashes.SHA256())
-    return f"{host}-{digest[:4].hex()}"
+    return f"{host}-{_ca_digest(ca_cert_path)[:4].hex()}"
 
 
 def ensure_local_tls_pair(
@@ -551,14 +536,18 @@ def ensure_local_tls_pair(
     return cert_path, key_path
 
 
+def _ca_digest(ca_cert_path: Path) -> bytes:
+    """Return the SHA-256 fingerprint bytes of the certificate at *ca_cert_path*."""
+    return _load_certificate(ca_cert_path).fingerprint(hashes.SHA256())
+
+
 def ca_fingerprint(ca_cert_path: Path) -> str:
     """Return the SHA-256 fingerprint of the CA certificate as ``AA:BB:...``.
 
     Shown next to the download link so a user can compare it with what the
     phone displays before trusting the certificate.
     """
-    digest = _load_certificate(ca_cert_path).fingerprint(hashes.SHA256())
-    return ":".join(f"{b:02X}" for b in digest)
+    return ":".join(f"{b:02X}" for b in _ca_digest(ca_cert_path))
 
 
 def ca_common_name(ca_cert_path: Path) -> str:

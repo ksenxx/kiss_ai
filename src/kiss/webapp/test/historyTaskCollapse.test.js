@@ -14,12 +14,8 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness.js');
+const {makePage, send, loadRemoteCss} = require('./simplify2_harness.js');
 const {makeSession, loadHistory} = require('./history_helpers');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function historyRow(win) {
   return win.document.querySelector('#history-list .sidebar-item');
@@ -92,22 +88,15 @@ function testCollapsedByDefaultAndToggles() {
     !posted.some(m => m.type === 'resumeSession'),
     'toggle clicks must not bubble into the row click handler',
   );
-  win.close();
-  console.log('PASS collapsed by default; toggle expands and collapses');
-}
 
-function testRowClickStillOpensChat() {
-  const {win, posted} = makePage();
-  loadHistory(win, [makeSession()]);
-  const row = historyRow(win);
-  row.querySelector('.sidebar-item-collapse').click();
+  toggle.click();
   row.click();
   assert.ok(
     posted.some(m => m.type === 'resumeSession'),
     'clicking the row body still opens the chat after uncollapsing',
   );
   win.close();
-  console.log('PASS row click still opens the chat');
+  console.log('PASS collapsed by default; toggle expands and collapses');
 }
 
 function testExpandedStateSurvivesRerender() {
@@ -192,18 +181,9 @@ function testRowWithoutTaskIdStillCollapsible() {
   console.log('PASS rows without task_id are collapsible too');
 }
 
-/** Append a media/ stylesheet to *win*'s document. */
-function loadCss(win, name) {
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = fs.readFileSync(path.join(MEDIA, name), 'utf8');
-  win.document.head.appendChild(styleEl);
-}
-
 function testCssHidesMetadataWhenCollapsed() {
   const {win} = makePage();
-  loadCss(win, 'main.css');
-  loadCss(win, 'remote-codex.css');
-  win.document.body.classList.add('remote-chat');
+  loadRemoteCss(win);
   loadHistory(win, [makeSession()]);
   const row = historyRow(win);
   const info = row.querySelector('.running-item-info');
@@ -257,7 +237,6 @@ function testCssHidesMetadataWhenCollapsed() {
 
 function main() {
   testCollapsedByDefaultAndToggles();
-  testRowClickStillOpensChat();
   testExpandedStateSurvivesRerender();
   testCollapseStateIsPerTask();
   testRowWithoutTaskIdStillCollapsible();

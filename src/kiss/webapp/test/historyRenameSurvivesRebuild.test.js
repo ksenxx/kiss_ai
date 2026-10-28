@@ -17,7 +17,7 @@ const {
   makePage: buildPage,
   send,
   ofType,
-  sleep,
+  settle: tick,
 } = require('./simplify2_harness');
 const {sendHistory, makeRow} = require('./history_helpers');
 
@@ -44,11 +44,6 @@ function title(win, chatId) {
 
 function key(win, el, k) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
-}
-
-/** Let main.js's end-of-tick history rebuild coalescing settle. */
-function tick() {
-  return sleep(5);
 }
 
 async function testRenameBoxSurvivesChangedRows() {

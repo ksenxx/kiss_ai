@@ -17,7 +17,6 @@ import fnmatch
 import logging
 import os
 import re
-import selectors
 import shlex
 import shutil
 import subprocess
@@ -39,11 +38,11 @@ from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked_call
 from kiss.core.processes import (
-    IS_WINDOWS,
     kill_process_tree,
     pid_alive,
     popen_process_group,
     process_identity,
+    run_capped,
     terminate_process_group,
 )
 
@@ -437,9 +436,15 @@ def repo_lock(repo: Path) -> threading.RLock:
     Returns:
         A :class:`threading.RLock` specific to the resolved repo path.
     """
-    return locked_call(
-        _repo_locks_guard, _repo_locks.setdefault, str(repo.resolve()), threading.RLock(),
-    )
+    return locked_call(_repo_locks_guard, _repo_lock_for, str(repo.resolve()))
+
+
+def _repo_lock_for(key: str) -> threading.RLock:
+    """:func:`repo_lock`'s body under ``_repo_locks_guard``: allocate only on first use."""
+    lock = _repo_locks.get(key)
+    if lock is None:
+        lock = _repo_locks[key] = threading.RLock()
+    return lock
 
 
 _GIT_TIMEOUT_SECONDS: float = 300.0
@@ -569,20 +574,12 @@ def _git(
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
     except BaseException:
-        terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
+        # ``communicate`` may already have reaped the child (an interrupt
+        # delivered after it returned): signalling its pgid then could
+        # hit a recycled process group, so only a live child is stopped.
+        if proc.poll() is None:
+            terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
         raise
-
-
-def _kill_git_on_timeout(
-    proc: subprocess.Popen[Any],
-    args: tuple[str, ...],
-    timed_out: threading.Event,
-    timeout: float,
-) -> None:
-    """Watchdog callback of :func:`_git_stdout_head`: record and kill."""
-    timed_out.set()
-    logger.warning("git %s timed out after %ss", args, timeout)
-    kill_process_tree(proc)
 
 
 def _git_stdout_head(
@@ -620,92 +617,13 @@ def _git_stdout_head(
     """
     cmd, env = _git_command(args, cwd)
     try:
-        proc = popen_process_group(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-        )
+        out = run_capped(cmd, limit=max_bytes, timeout=timeout, env=env, last_full_line=True)
     except (OSError, ValueError) as exc:
         logger.warning("git %s could not start: %s", args[:1], exc)
         return "", False
-    timed_out = threading.Event()
-    give_up = time.monotonic() + timeout + _PIPE_GIVE_UP_SECONDS
-    timer = threading.Timer(
-        timeout, _kill_git_on_timeout, args=(proc, args, timed_out, timeout),
-    )
-    timer.daemon = True
-    timer.start()
-    stdout = proc.stdout
-    assert stdout is not None
-    chunks: list[bytes] = []
-    size = 0
-    truncated = False
-    try:
-        while size < max_bytes:
-            chunk = _read_some(stdout, min(65536, max_bytes - size), give_up)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-        else:
-            truncated = bool(_read_some(stdout, 1, give_up))
-    finally:
-        timer.cancel()
-        kill_process_tree(proc)
-        stdout.close()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
-    truncated = truncated or timed_out.is_set()
-    text = b"".join(chunks).decode("utf-8", "replace")
-    if truncated and "\n" in text:
-        text = text[: text.rfind("\n")]
-    return text, truncated
-
-
-#: How long :func:`_read_some` keeps reading git's stdout after the
-#: timeout watchdog killed git's process group.
-_PIPE_GIVE_UP_SECONDS = 5.0
-
-
-def _read_some(stdout: IO[bytes], limit: int, give_up: float) -> bytes:
-    """Read up to *limit* bytes of git's *stdout*; ``b""`` at EOF or past *give_up*.
-
-    A plain ``read`` would stay blocked for as long as ANY process
-    holds the pipe's write end: a hook git ran that started a daemon
-    in its own session (``setsid``) survives the watchdog's
-    process-group kill with the pipe inherited, and the merge thread,
-    which holds the tab's ``is_merging`` claim, would sit in ``read``
-    until that daemon exits — or, if that daemon keeps writing, keep
-    reading its output for as long as it runs.  The read therefore
-    waits for the pipe only until *give_up*, one deadline shared by
-    every read of the command, and returns nothing once it has
-    passed even when output is ready.  The wait uses the platform's
-    readiness API (``epoll``/``kqueue``), not ``select``, whose
-    ``FD_SETSIZE`` limit rejects a pipe numbered 1024 or higher in a
-    daemon with that many sockets and files open.  On Windows the
-    watchdog's Job Object kills every descendant, so a plain read
-    cannot be held open there (and readiness APIs do not work on pipes).
-
-    Args:
-        stdout: Git's stdout pipe.
-        limit: The most bytes to return.
-        give_up: ``time.monotonic()`` deadline, :data:`_PIPE_GIVE_UP_SECONDS`
-            past the watchdog's timeout.
-
-    Returns:
-        The bytes read, possibly fewer than *limit*; ``b""`` at EOF or
-        once *give_up* has passed.
-    """
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return stdout.read(limit)
-    remaining = give_up - time.monotonic()
-    if remaining > 0:
-        with selectors.DefaultSelector() as ready:
-            ready.register(stdout, selectors.EVENT_READ)
-            if ready.select(remaining):
-                return os.read(stdout.fileno(), limit)
-    logger.warning(
-        "git stdout still open %ss after the kill; giving up", _PIPE_GIVE_UP_SECONDS,
-    )
-    return b""
+    if out.timed_out:
+        logger.warning("git %s timed out after %ss", args, timeout)
+    return out.stdout.decode("utf-8", "replace"), out.truncated or out.timed_out
 
 
 COMMIT_MESSAGE_DIFF_LIMIT_BYTES: int = 200_000
@@ -819,7 +737,8 @@ def _rescue_skipped(rel: str) -> bool:
 # and no sibling of ``.env`` can match the exact-name ``.env`` rule),
 # so this pattern is the actual keep-it-ignored guarantee (see
 # :meth:`GitWorktreeOps.rescue_ignored_files`).
-_RESCUE_EXCLUDE_PATTERN = "*.kiss-rescued-*"
+_RESCUE_SIBLING_MARKER = ".kiss-rescued-"
+_RESCUE_EXCLUDE_PATTERN = f"*{_RESCUE_SIBLING_MARKER}*"
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -1337,6 +1256,11 @@ class GitWorktreeOps:
         """
         if not GitWorktreeOps.has_staged_changes(wt_dir):
             return False
+        return GitWorktreeOps._git_commit(wt_dir, message, no_verify=no_verify)
+
+    @staticmethod
+    def _git_commit(wt_dir: Path, message: str, *, no_verify: bool = False) -> bool:
+        """:meth:`commit_staged` without the index check, for callers that just did it."""
         # The message goes on stdin: an argv string is capped at the
         # kernel's single-argument limit (128 KiB on Linux).
         cmd = ["commit", "-F", "-"]
@@ -1646,10 +1570,28 @@ class GitWorktreeOps:
         """
         if not GitWorktreeOps.has_staged_changes(repo):
             return MergeResult.SUCCESS
+        return GitWorktreeOps._commit_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
+
+    @staticmethod
+    def _commit_merge(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
+        """Commit a staged merge whose index the caller has verified is non-empty.
+
+        The tail of :meth:`_commit_staged_merge`, also used directly by
+        :meth:`finish_conflicted_merge`, which has already checked the
+        index: one ``git diff --cached --quiet`` per merge commit instead
+        of three.
+        """
         msg = GitWorktreeOps._merge_commit_message(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
         )
-        if not GitWorktreeOps.commit_staged(repo, msg):
+        if not GitWorktreeOps._git_commit(repo, msg):
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.MERGE_FAILED
         return MergeResult.SUCCESS
@@ -1750,14 +1692,7 @@ class GitWorktreeOps:
             first switching away.
         """
         result = _git("branch", "-D", branch, cwd=repo)
-        if result.returncode == 0:
-            GitWorktreeOps._remove_branch_config_section(repo, branch)
-            marker = GitWorktreeOps._preserve_marker_path(repo, branch)
-            if marker is not None:
-                with contextlib.suppress(OSError):
-                    marker.unlink()
-            return True
-        if GitWorktreeOps.branch_exists(repo, branch):
+        if result.returncode != 0 and GitWorktreeOps.branch_exists(repo, branch):
             logger.warning(
                 "Failed to delete branch '%s': %s",
                 branch,
@@ -1765,6 +1700,11 @@ class GitWorktreeOps:
             )
             return False
         GitWorktreeOps._remove_branch_config_section(repo, branch)
+        marker = GitWorktreeOps._preserve_marker_path(repo, branch)
+        if marker is not None:
+            with contextlib.suppress(OSError):
+                marker.unlink()
+        _volatile_preserve_claims.discard((str(repo.resolve()), branch))
         return True
 
     @staticmethod
@@ -2008,13 +1948,20 @@ class GitWorktreeOps:
             GitWorktreeOps._append_info_line(
                 repo, "attributes", f"{scratch_path} merge=kiss-scratch"
             )
+        # Called on every worktree setup (just before the orphan reclaim
+        # that may merge) and merge; the values never change, so read
+        # before rewriting ``.git/config``.
+        driver = "cp -f %B %A"
+        current = _git("config", "--get", "merge.kiss-scratch.driver", cwd=repo)
+        if current.returncode == 0 and current.stdout.strip() == driver:
+            return
         _git(
             "config",
             "merge.kiss-scratch.name",
             "KISS scratch file: keep the incoming task branch version",
             cwd=repo,
         )
-        _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
+        _git("config", "merge.kiss-scratch.driver", driver, cwd=repo)
 
     @staticmethod
     def _save_branch_config(
@@ -2221,10 +2168,44 @@ class GitWorktreeOps:
             repo: Git repo root path.
             branch: The worktree branch name.
         """
+        marker_dir = GitWorktreeOps._preserve_marker_dir(repo)
+        if marker_dir is None:  # pragma: no cover — not a git repo
+            return None
+        return marker_dir / urllib.parse.quote(branch, safe="")
+
+    @staticmethod
+    def _preserve_marker_dir(repo: Path) -> Path | None:
+        """Return ``<git common dir>/kiss-preserve``, or ``None`` outside a git repo."""
         git_common = _git_common_dir(repo)
         if git_common is None:  # pragma: no cover — not a git repo
             return None
-        return git_common / "kiss-preserve" / urllib.parse.quote(branch, safe="")
+        return git_common / "kiss-preserve"
+
+    @staticmethod
+    def _sweep_preserve_markers(repo: Path, existing: set[str]) -> None:
+        """Unlink preserve markers whose ``kiss/wt-*`` branch no longer exists.
+
+        ``git branch -D`` by hand drops the branch (and, in current git,
+        its config section) but not the marker file, which would
+        otherwise stay under ``kiss-preserve/`` forever.  *existing*
+        comes from the caller's SUCCESSFUL ref enumeration: a marker is
+        only retired because that listing lacks its branch, never because
+        a per-branch lookup failed (a git error or timeout must not erase
+        the user's preserve-for-review decision, or the next reclaim
+        would merge the unaccepted work).
+
+        Args:
+            repo: Git repo root path.
+            existing: Every ``kiss/wt-*`` branch of *repo*.
+        """
+        marker_dir = GitWorktreeOps._preserve_marker_dir(repo)
+        if marker_dir is None or not marker_dir.is_dir():
+            return
+        for marker in marker_dir.iterdir():
+            branch = urllib.parse.unquote(marker.name)
+            if branch.startswith(_WORKTREE_BRANCH_PREFIX) and branch not in existing:
+                with contextlib.suppress(OSError):
+                    marker.unlink()
 
     @staticmethod
     def save_owner_pid(repo: Path, branch: str) -> bool:
@@ -2553,11 +2534,12 @@ class GitWorktreeOps:
         )
         rescued = 0
         ok = True
+        repo_resolved = repo.resolve()
         for rel in candidates:
             src = wt_dir / rel
             dst = repo / rel
             try:
-                if not GitWorktreeOps._rescue_dst_contained(dst, repo):
+                if not GitWorktreeOps._rescue_dst_contained(dst, repo_resolved):
                     logger.warning(
                         "Refusing to rescue %s: destination %s "
                         "escapes the repository through a symlinked "
@@ -2568,7 +2550,7 @@ class GitWorktreeOps:
                 landed = GitWorktreeOps._land_rescued_file(src, dst)
                 if landed is not None:
                     rescued += 1
-                    if not exclude_ok and ".kiss-rescued-" in landed.name:
+                    if not exclude_ok and _RESCUE_SIBLING_MARKER in landed.name:
                         GitWorktreeOps._warn_unignored_sibling(repo, landed)
             except OSError:
                 logger.warning(
@@ -2650,23 +2632,23 @@ class GitWorktreeOps:
         )
 
     @staticmethod
-    def _rescue_dst_contained(dst: Path, repo: Path) -> bool:
-        """Whether writing *dst* stays inside *repo*.
+    def _rescue_dst_contained(dst: Path, repo_resolved: Path) -> bool:
+        """Whether writing *dst* stays inside the repository *repo_resolved*.
 
         The nearest EXISTING ancestor of *dst* must resolve (symlinks
-        followed) to *repo* or a directory under it; otherwise a
-        symlinked directory in the main tree (``data -> /elsewhere``)
+        followed) to *repo_resolved* or a directory under it; otherwise
+        a symlinked directory in the main tree (``data -> /elsewhere``)
         would carry the rescue outside the repository.
 
         Args:
             dst: The (possibly not yet existing) destination path.
-            repo: The repository root that must contain the write.
+            repo_resolved: The already resolved repository root that
+                must contain the write.
 
         Returns:
-            True when the write cannot escape *repo*.
+            True when the write cannot escape the repository.
         """
         try:
-            repo_resolved = repo.resolve()
             probe = dst.parent
             while not probe.exists():
                 if probe == probe.parent:  # pragma: no cover — fs root
@@ -2776,7 +2758,7 @@ class GitWorktreeOps:
         """
         return dst.with_name(
             f"{dst.name.removesuffix(dst.suffix)}"
-            f".kiss-rescued-{time.time_ns()}{dst.suffix}"
+            f"{_RESCUE_SIBLING_MARKER}{time.time_ns()}{dst.suffix}"
         )
 
     @staticmethod
@@ -3281,7 +3263,7 @@ class GitWorktreeOps:
         # ran ``git cherry-pick --continue`` half-way may have; either
         # way ``--quit`` is harmless and keeps the index.
         _git("cherry-pick", "--quit", cwd=repo)
-        return GitWorktreeOps._commit_staged_merge(
+        return GitWorktreeOps._commit_merge(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
         )
 
@@ -3325,22 +3307,6 @@ class GitWorktreeOps:
         """
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
-
-    @staticmethod
-    def checked_out_branches(repo: Path) -> set[str]:
-        """Return the branches currently checked out in any worktree.
-
-        A branch listed here is in use by a live worktree (including
-        the main working tree) and must never be deleted.
-
-        Args:
-            repo: Git repo root path.
-
-        Returns:
-            Set of branch names, empty if the listing fails.
-        """
-        return {branch for _wt_dir, branch in
-                GitWorktreeOps.registered_worktrees(repo)}
 
     @staticmethod
     def _config_branch_sections(repo: Path) -> set[str]:
@@ -3394,8 +3360,9 @@ class GitWorktreeOps:
         expendable and ``take_spare`` / ``discard_all`` / the reclaim
         pass destroyed that commit (``reset --hard``, ``branch -D``).
         Only the current working tree's HEAD is a genuinely *other*
-        ref; the caller's ``checked_out_branches`` / ``_same_path``
-        guards already keep that one out of the question.
+        ref; the callers' in-use set (built from
+        :meth:`registered_worktrees`) and ``_same_path`` guards already
+        keep that one out of the question.
 
         Args:
             repo: Git repo root path.
@@ -3457,17 +3424,22 @@ class GitWorktreeOps:
         """:meth:`sweep_orphaned_state`'s body, run under ``repo_lock``."""
         with _reclaim_process_lock(repo):
             GitWorktreeOps.prune(repo)
-            in_use = GitWorktreeOps.checked_out_branches(repo)
+            registered = GitWorktreeOps.registered_worktrees(repo)
+            in_use = {branch for _wt_dir, branch in registered}
             result = _git(
                 "for-each-ref",
                 "--format=%(refname:short)",
                 f"refs/heads/{_WORKTREE_BRANCH_PREFIX}*",
                 cwd=repo,
             )
-            if result.returncode != 0:  # pragma: no cover — git failure
+            if result.returncode != 0:
+                # A failed enumeration (error, timeout) says nothing about
+                # which branches are gone: leave every marker and config
+                # section for a pass that can see the refs.
                 return 0
+            existing = set(result.stdout.split())
             deleted = 0
-            for branch in result.stdout.split():
+            for branch in sorted(existing):
                 if branch in in_use:
                     continue
                 if not GitWorktreeOps._branch_is_expendable(repo, branch):
@@ -3475,15 +3447,17 @@ class GitWorktreeOps:
                 # git refuses to delete a branch some worktree has
                 # checked out; the in_use guard skips those first so
                 # the sweep never logs a warning for a running task.
+                # delete_branch removes the branch's config section and
+                # marker itself, so a deleted branch stays in ``existing``.
                 deleted += int(GitWorktreeOps.delete_branch(repo, branch))
-            for name in GitWorktreeOps._config_branch_sections(repo):
-                if not GitWorktreeOps.branch_exists(repo, name):
-                    GitWorktreeOps._remove_branch_config_section(repo, name)
-            GitWorktreeOps._remove_husk_dirs(repo)
+            for name in GitWorktreeOps._config_branch_sections(repo) - existing:
+                GitWorktreeOps._remove_branch_config_section(repo, name)
+            GitWorktreeOps._sweep_preserve_markers(repo, existing)
+            GitWorktreeOps._remove_husk_dirs(repo, registered)
             return deleted
 
     @staticmethod
-    def _remove_husk_dirs(repo: Path) -> None:
+    def _remove_husk_dirs(repo: Path, registered_worktrees: list[tuple[Path, str]]) -> None:
         """Delete unregistered ``kiss_wt-*`` directories under ``.kiss-worktrees/``.
 
         A directory is a husk when git lists no worktree at its path
@@ -3500,14 +3474,13 @@ class GitWorktreeOps:
 
         Args:
             repo: Git repo root path.
+            registered_worktrees: :meth:`registered_worktrees` of *repo*,
+                listed by the caller under the same locks.
         """
         root = repo / _WORKTREE_SUBDIR
         if not root.is_dir():
             return
-        registered = {
-            wt_dir.resolve()
-            for wt_dir, _branch in GitWorktreeOps.registered_worktrees(repo)
-        }
+        registered = {wt_dir.resolve() for wt_dir, _branch in registered_worktrees}
         for entry in root.iterdir():
             if not entry.name.startswith(_WORKTREE_SLUG_PREFIX):
                 continue
@@ -3531,11 +3504,13 @@ class GitWorktreeOps:
         branch name to reclaim by.
 
         Worktree paths are emitted verbatim by git, so the output is
-        split on ``"\\n"`` only and the path tail is never stripped:
-        ``splitlines()`` would also break on ``\\v``/``\\f``/``\\x85``/
-        ``\\u2028``, and ``strip()`` would silently rewrite a directory
-        whose name ends in a space into a DIFFERENT existing path —
-        which :meth:`remove`'s ``rmtree`` fallback would then delete.
+        split on ``"\\n"`` only (``_git`` runs in text mode, which
+        already turns a ``\\r\\n`` line ending into ``\\n``) and the
+        path tail is never stripped: ``splitlines()`` would also break
+        on ``\\v``/``\\f``/``\\x85``/``\\u2028``, and ``strip()`` would
+        silently rewrite a directory whose name ends in a space into a
+        DIFFERENT existing path — which :meth:`remove`'s ``rmtree``
+        fallback would then delete.
 
         Args:
             repo: Git repo root path.
@@ -3551,14 +3526,13 @@ class GitWorktreeOps:
         cur_dir: Path | None = None
         cur_branch: str | None = None
         for line in result.stdout.split("\n"):
-            raw = line[:-1] if line.endswith("\r") else line
-            if raw.startswith("worktree "):
+            if line.startswith("worktree "):
                 if cur_dir is not None and cur_branch is not None:
                     pairs.append((cur_dir, cur_branch))
-                cur_dir = Path(raw[len("worktree "):])
+                cur_dir = Path(line[len("worktree "):])
                 cur_branch = None
-            elif raw.startswith("branch refs/heads/"):
-                cur_branch = raw[len("branch refs/heads/"):]
+            elif line.startswith("branch refs/heads/"):
+                cur_branch = line[len("branch refs/heads/"):]
         if cur_dir is not None and cur_branch is not None:
             pairs.append((cur_dir, cur_branch))
         return pairs
@@ -3790,13 +3764,6 @@ class GitWorktreeOps:
                         )
                         continue
                 baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
-                try:
-                    GitWorktreeOps.ensure_scratch_merge_driver(repo)
-                except Exception:  # pragma: no cover — filesystem
-                    logger.warning(
-                        "Failed to install scratch merge driver",
-                        exc_info=True,
-                    )
                 result = GitWorktreeOps.squash_merge(
                     repo, branch, baseline,
                     task_result="Auto-merged by orphan-worktree reclaim",

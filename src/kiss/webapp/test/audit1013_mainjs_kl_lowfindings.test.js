@@ -43,7 +43,10 @@ const {
   click,
   byId,
   stubRaf,
+  stubMonaco,
   fakeMatchMedia,
+  fakeIntervals,
+  stubClipboard,
   captureTimers,
   ofType,
 } = require('./simplify2_harness');
@@ -54,41 +57,13 @@ const {test, report} = makeRunner();
 /**
  * Build the page; `opts.noMonaco` leaves window.monaco unset (the
  * CDN loader path runs) and the returned `monaco` can be installed
- * later by the test.
+ * later by the test.  `created` records every editor built with the
+ * lines it was asked to reveal (simplify2_harness.stubMonaco).
  */
 function makePage(opts) {
   opts = opts || {};
-  const copied = [];
-  // A fake Monaco rich enough for an editable content tab; every
-  // created editor is recorded with the lines it was asked to reveal.
-  const created = [];
-  const monaco = {
-    editor: {
-      defineTheme: () => {},
-      setTheme: () => {},
-      create: (holder, opts) => {
-        const value = String(opts.value === undefined ? '' : opts.value);
-        const model = {
-          getAlternativeVersionId: () => 1,
-          getValue: () => value,
-          getLineCount: () => value.split('\n').length,
-        };
-        const revealed = [];
-        const editor = {
-          getModel: () => model,
-          onDidChangeModelContent: () => {},
-          setPosition: pos => revealed.push(pos.lineNumber),
-          revealLineInCenter: () => {},
-          getDomNode: () => holder,
-          dispose: () => {},
-          layout: () => {},
-          focus: () => {},
-        };
-        created.push({holder, editor, value, revealed});
-        return editor;
-      },
-    },
-  };
+  let copied;
+  let created;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     extraScripts: [
@@ -100,24 +75,13 @@ function makePage(opts) {
     beforeScripts(win) {
       stubRaf(win);
       // The sidebar poll is recorded, never run.
-      win.setInterval = function () {
-        return 1;
-      };
-      win.clearInterval = function () {};
+      fakeIntervals(win);
       fakeMatchMedia(win, true);
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {
-          writeText: text => {
-            copied.push(text);
-            return Promise.resolve();
-          },
-        },
-        configurable: true,
-      });
-      if (!opts.noMonaco) win.monaco = monaco;
+      copied = stubClipboard(win).writes;
+      created = stubMonaco(win, !opts.noMonaco);
     },
   });
-  return {win, posted, copied, created, monaco};
+  return {win, posted, copied, created, monaco: created.monaco};
 }
 
 /** The content tab views on screen or hidden (one per open file). */
@@ -447,12 +411,14 @@ async function main() {
     });
     const open = (content, version, line) =>
       openText(win, '/ws/repo/notes.txt', content, version, line);
+    // window.monaco is preinstalled (rAF stubbed), so the editor lands
+    // on the next microtask: `sleep(0)` is the exact wait everywhere here.
     open('one\ntwo\nthree', '1:13');
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 1, 'the first reply creates the editor');
     // A double-click's second reply: the same bytes on disk.
     open('one\ntwo\nthree', '1:13', 2);
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 1, 'the second reply keeps the editor');
     assert.ok(
       created[0].revealed.includes(2),
@@ -464,7 +430,7 @@ async function main() {
     );
     // The file changed on disk since: a fresh copy replaces the view.
     open('one\ntwo\nthree\nfour', '2:18');
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 2, 'changed bytes re-render');
     assert.strictEqual(created[1].value, 'one\ntwo\nthree\nfour');
     win.close();
@@ -476,10 +442,10 @@ async function main() {
     // The stamp is mtime + size: a same-sized rewrite whose mtime was
     // restored (cp -p, a tool preserving metadata) keeps it.
     openText(win, '/ws/a.txt', 'before', '7:6');
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 1);
     openText(win, '/ws/a.txt', 'after!', '7:6', 1);
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 2, 'different bytes re-render');
     assert.strictEqual(created[1].value, 'after!');
     assert.strictEqual(contentViews(win).length, 1, 'still one tab');
@@ -487,7 +453,7 @@ async function main() {
     // editor stays and the tab adopts the stamp, so a save is not
     // refused as a conflict with the touch.
     openText(win, '/ws/a.txt', 'after!', '8:6', 1);
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 2, 'same bytes keep the editor');
     assert.ok(created[1].revealed.includes(1));
     win.close();
@@ -502,7 +468,7 @@ async function main() {
     );
     assert.ok(loader, 'the CDN loader is requested');
     loader.dispatchEvent(new win.Event('error'));
-    await sleep(20);
+    await sleep(0);
     const view = contentViews(win)[0];
     assert.ok(
       view.querySelector('.content-code-fallback'),
@@ -513,7 +479,7 @@ async function main() {
     // unchanged file must build the editor this time.
     win.monaco = monaco;
     openText(win, '/ws/b.py', 'print(1)\n', '100:8');
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(created.length, 1, 'the reopen creates the editor');
     assert.strictEqual(contentViews(win).length, 1);
     assert.ok(!contentViews(win)[0].querySelector('.content-code-fallback'));
@@ -536,10 +502,10 @@ async function main() {
     // The file is opened (editable: it carries a stamp) before the task
     // finishes; task_done then renders it as a report in the same tab.
     openText(win, file, text, '5:13');
-    await sleep(20);
+    await sleep(0);
     assert.ok(contentViews(win)[0].querySelector('.content-mode-btn'));
     send(win, {type: 'task_done', success: true});
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(
       contentViews(win).length,
       1,
@@ -552,7 +518,7 @@ async function main() {
     assert.ok(!contentViews(win)[0].querySelector('.content-mode-btn'));
     // Opening the unchanged file again brings the editable preview back.
     openText(win, file, text, '5:13');
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(contentViews(win).length, 1);
     assert.ok(
       contentViews(win)[0].querySelector('.content-mode-btn'),

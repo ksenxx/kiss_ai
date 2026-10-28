@@ -161,6 +161,7 @@ class TestMailNormalization:
         assert normalized["channel_id"] == "INBOX"
         assert normalized["thread_ts"] == "<abc123@example.com>"
         assert normalized["ts"] == "1704110400.0"
+        assert normalized["reply_to"] == ""
 
     def test_multipart_prefers_plain_and_decodes_subject(self) -> None:
         """Multipart mail yields the text/plain body and RFC 2047 subjects decode."""
@@ -264,12 +265,15 @@ class TestBackendBehavior:
     """Backend logic that needs no network."""
 
     def test_is_from_bot(self) -> None:
-        """is_from_bot matches the configured address case-insensitively."""
+        """is_from_bot matches the configured address against From, case-insensitively."""
         backend = EmailChannelBackend()
         assert backend.is_from_bot({"user": "bot@example.com"}) is False
         backend._cfg = {"email_address": "Bot@Example.com"}
         assert backend.is_from_bot({"user": "bot@example.com"}) is True
         assert backend.is_from_bot({"user": "alice@example.com"}) is False
+        # Reply-To routes replies; it never decides who sent the mail.
+        assert backend.is_from_bot({"user": "bot@example.com", "reply_to": "h@x.com"}) is True
+        assert backend.is_from_bot({"user": "h@x.com", "reply_to": "bot@example.com"}) is False
 
     def test_connect_without_config(self) -> None:
         """connect() fails cleanly when no config is stored."""

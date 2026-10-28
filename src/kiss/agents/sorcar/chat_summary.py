@@ -44,9 +44,14 @@ _URL = re.compile(r"^<?https?://([^/\s<>|]+)")
 _GREETINGS = frozenset({"hi", "hello", "hey", "thanks", "ok", "okay"})
 _MAX_WORD_CHARS = 40
 
+#: ``task_history`` rows that are not sub-agent runs.  The column is
+#: ``TEXT DEFAULT ''`` without ``NOT NULL``, so a row written by another
+#: tool may hold NULL; both spellings mean "no parent".
+NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
+
 #: ``task_history`` rows the history panel lists: the chat's own tasks,
 #: not the sub-agent runs they dispatched.
-LISTABLE = "chat_id = ? AND (parent_task_id IS NULL OR parent_task_id = '')"
+LISTABLE = f"chat_id = ? AND {NOT_SUBAGENT}"
 
 
 def _summary_word(token: str) -> str:
@@ -111,16 +116,43 @@ def launch_ms(start_ts: int | str | None, timestamp: float | str | None) -> int:
 
     ``start_ts`` (already ms) when the daemon recorded one, else the
     row's insertion ``timestamp`` (epoch seconds) -- the fallback the
-    history panel applies too.
+    history panel applies too.  A column SQLite's dynamic typing let a
+    foreign tool fill with text or a non-finite number counts as unset,
+    so one corrupt row never takes a whole history read down.
 
     Args:
         start_ts: The row's ``start_ts`` column.
         timestamp: The row's ``timestamp`` column.
+
+    Returns:
+        The launch instant in epoch milliseconds; 0 when the row has
+        neither value.
     """
-    start = int(start_ts or 0)
+    try:
+        start = int(start_ts or 0)
+    except (TypeError, ValueError, OverflowError):
+        start = 0
     if start > 0:
         return start
-    return int(float(timestamp or 0.0) * 1000)
+    try:
+        return int(float(timestamp or 0.0) * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def end_ms(end_ts: int | float | str | None) -> int:
+    """Return a ``task_history`` row's completion instant in epoch milliseconds.
+
+    0 while the task runs, and, with the same guard as :func:`launch_ms`,
+    for a column a foreign tool filled with text or a non-finite number.
+
+    Args:
+        end_ts: The row's ``end_ts`` column.
+    """
+    try:
+        return int(end_ts or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
@@ -160,6 +192,6 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
             chat_id,
             summarize_chat([r[0] or "" for r in first]),
             launch_ms(start_ts, timestamp),
-            int(end_ts or 0),
+            end_ms(end_ts),
         ),
     )

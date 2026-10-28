@@ -55,11 +55,7 @@ class TestLiveStepCountInHistory:
 
             from kiss.agents.sorcar.persistence import _add_task, _save_task_result
             task_id, _chat_id = _add_task("test live history", "chat-hist")
-            _save_task_result(
-                result="",
-                task_id=task_id,
-                task="test live history",
-            )
+            _save_task_result(result="", task_id=task_id)
 
             tab_id = "hist-tab"
             agent = ChatSorcarAgent("History Agent")

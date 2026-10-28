@@ -41,6 +41,15 @@ def _returned_literal(source: str, function: str) -> Any:
     raise AssertionError(f"no def {function} in source")
 
 
+def _run_row(started_ms: int, ok: bool, cost: float = 1.0) -> dict[str, Any]:
+    """A mined run row started at *started_ms*: a success, or a limit-stop (``did not finish``)."""
+    return {
+        "status": "success" if ok else "failed",
+        "result": "" if ok else "the agent task did not finish within 100s",
+        "cost": cost, "duration_s": 10, "started_ms": started_ms,
+    }
+
+
 DEMO_SEA = '''"""Demo SEA: a worker with a tool."""
 
 from kiss.agents.seas.base.base_sea import WorkerSea
@@ -571,22 +580,15 @@ def test_change_log_pending_and_compare() -> None:
     other = {**changes[0], "key": "max_budget", "at_ms": 3000}
     assert sea_tuning.pending_change([changes[0], reverted, other]) == other
 
-    def run(started_ms: int, ok: bool, cost: float) -> dict[str, Any]:
-        return {
-            "status": "success" if ok else "failed",
-            "result": "" if ok else "the agent task did not finish within 100s",
-            "cost": cost, "duration_s": 10, "started_ms": started_ms,
-        }
-
-    before = [run(100, True, 1.0), run(200, True, 1.0), run(300, False, 1.0)]
-    after_bad = [run(1100, False, 1.0), run(1200, False, 1.0), run(1300, True, 1.0)]
+    before = [_run_row(100, True), _run_row(200, True), _run_row(300, False)]
+    after_bad = [_run_row(1100, False), _run_row(1200, False), _run_row(1300, True)]
     compared = sea_tuning.compare_change(before + after_bad, settled)
     assert compared["before"] == 3 and compared["after"] == 3 and compared["worse"]
     assert compared["basis"].startswith("3 runs before / 3 after the change of t1: limit-stop "
                                         "rate 33% -> 67%")
-    after_costly = [run(1100, True, 2.0), run(1200, True, 2.0), run(1300, True, 2.0)]
+    after_costly = [_run_row(1100, True, 2.0), _run_row(1200, True, 2.0), _run_row(1300, True, 2.0)]
     assert sea_tuning.compare_change(before + after_costly, settled)["worse"]  # p95 cost x2
-    after_good = [run(1100, True, 1.0), run(1200, True, 1.0), run(1300, True, 1.0)]
+    after_good = [_run_row(1100, True), _run_row(1200, True), _run_row(1300, True)]
     assert not sea_tuning.compare_change(before + after_good, settled)["worse"]
     assert not sea_tuning.compare_change(before + after_bad[:2], settled)["worse"]  # < MIN_RUNS
     assert sea_tuning.compare_change([], settled)["basis"].endswith("p95 cost 0.00 -> 0.00")
@@ -865,16 +867,9 @@ def test_revert_removes_a_key_that_was_absent_even_when_the_base_gave_it_a_value
 
 
 def test_only_the_change_still_in_effect_can_be_proposed_for_revert() -> None:
-    def run(started_ms: int, ok: bool) -> dict[str, Any]:
-        return {
-            "status": "success" if ok else "failed",
-            "result": "" if ok else "did not finish within 60s",
-            "cost": 1.0, "duration_s": 10, "started_ms": started_ms,
-        }
-
-    runs = [run(100, True), run(200, True), run(300, True)]  # before the first change
-    runs += [run(1100, False), run(1200, False), run(1300, False)]  # the 60 -> 120 change hurt
-    runs += [run(2100, True), run(2200, True), run(2300, True)]  # 120 -> 240 fixed it
+    runs = [_run_row(100, True), _run_row(200, True), _run_row(300, True)]  # before the change
+    runs += [_run_row(1100, False), _run_row(1200, False), _run_row(1300, False)]  # 60 -> 120 hurt
+    runs += [_run_row(2100, True), _run_row(2200, True), _run_row(2300, True)]  # 120 -> 240 fixed
     first = {"key": "timeout", "old": 60, "new": 120, "at_ms": 1000, "at": "t1",
              "replay_task_id": "r1", "reverted": False}
     second = {**first, "old": 120, "new": 240, "at_ms": 2000, "at": "t2", "replay_task_id": "r2"}

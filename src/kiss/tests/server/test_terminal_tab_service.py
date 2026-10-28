@@ -46,6 +46,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def session_count(svc: TerminalService) -> int:
+    """Return how many shells *svc* is running."""
+    with svc._lock:
+        return len(svc._sessions)
+
+
 def hermetic_shell(directory: Path) -> Path:
     """Write and return a ``$SHELL`` for the tests: bash without any dotfile.
 
@@ -179,7 +185,7 @@ def test_shell_runs_in_the_work_dir_and_streams_to_its_connection_only(
     assert printer.of_type("terminalExit")[0] == {
         "type": "terminalExit", "tab_id": "tab-a", "code": 3, "connId": "conn-1",
     }
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     # Commands for a gone tab are no-ops.
     svc.input("tab-a", "conn-1", "echo late\n")
     svc.resize("tab-a", "conn-1", 80, 24)
@@ -211,14 +217,14 @@ def test_close_hangs_up_and_kills_a_shell_that_ignores_sighup(
     printer.wait_for(lambda: "trapped" in printer.output("tab-d"))
     # A stranger cannot close it; the owner can.
     svc.close("tab-d", "conn-2")
-    assert svc.session_count() == 1
+    assert session_count(svc) == 1
     started = time.monotonic()
     svc.close("tab-d", "conn-1")
     svc.close("tab-d", "conn-1")  # idempotent
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
     assert time.monotonic() - started < 10
     assert printer.of_type("terminalExit")[0]["code"] != 0
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
 
 
 def test_close_lets_a_cooperative_shell_exit_at_once(service: Any, tmp_path: Path) -> None:
@@ -254,7 +260,7 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     printer.wait_for(lambda: "MARK" in printer.output("tab-g"))
     svc.viewer_gone("conn-1")
     svc.viewer_gone("conn-never")  # no shells: nothing happens
-    assert svc.session_count() == 1
+    assert session_count(svc) == 1
     # The reconnecting page re-opens with the same tab id from a new
     # connection and gets the SAME shell back (its variables intact).
     svc.open("tab-g", "conn-2", str(tmp_path), 90, 25)
@@ -274,7 +280,7 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     monkeypatch.setattr(terminal_tab, "GRACE_SECONDS", 0.3)
     svc.viewer_gone("conn-2")
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
 
 
 def test_resize_right_after_open_wins_over_the_opening_size(
@@ -304,7 +310,7 @@ def test_reattach_before_grace_expiry_cancels_the_hangup(
     svc.viewer_gone("conn-1")
     svc.open("tab-h", "conn-2", str(tmp_path), 80, 24)
     time.sleep(0.8)
-    assert svc.session_count() == 1
+    assert session_count(svc) == 1
     assert not printer.of_type("terminalExit")
 
 
@@ -325,7 +331,7 @@ def test_a_shell_that_exits_at_once_still_reports_opened_before_exit(
         kinds = [e["type"] for e in printer.events if e["tab_id"] == f"tab-{i}"]
         assert kinds[0] == "terminalOpened"
         assert kinds[-1] == "terminalExit"
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
 
 
 def test_streaming_background_child_does_not_hide_the_shell_exit(
@@ -341,7 +347,7 @@ def test_streaming_background_child_does_not_hide_the_shell_exit(
     )
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
     assert printer.of_type("terminalExit")[0]["code"] == 5
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     # Stop the stray printer loop this test left behind.
     os.system("pkill -f 'sleep 0.05' >/dev/null 2>&1")
 
@@ -358,7 +364,7 @@ def test_an_earlier_disconnect_timer_cannot_expire_a_later_grace_period(
     time.sleep(0.1)
     svc.viewer_gone("conn-2")          # t = 0.7: second grace period
     time.sleep(0.6)                    # t = 1.3: the FIRST timer has fired
-    assert svc.session_count() == 1
+    assert session_count(svc) == 1
     assert not printer.of_type("terminalExit")
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=5)
 
@@ -385,6 +391,6 @@ def test_shutdown_reaps_every_shell(tmp_path: Path) -> None:
     printer.wait_for(lambda: len(printer.of_type("terminalOpened")) == 2)
     time.sleep(0.3)
     svc.shutdown()
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     assert len(printer.of_type("terminalExit")) == 2
     svc.shutdown()  # nothing left: returns at once

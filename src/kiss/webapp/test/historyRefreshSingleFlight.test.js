@@ -21,27 +21,13 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {finishedSession} = require('./history_helpers');
 
+/** A finished row, of the registered `machine` when one is given. */
 function session(id, title, machine) {
-  const ts = 1_700_000_000 + id * 100;
-  return Object.assign(
-    {
-      id: 'chat-' + id,
-      task_id: 'task-' + id,
-      title,
-      timestamp: ts,
-      preview: title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: '',
-      startTs: ts * 1000,
-      endTs: ts * 1000 + 10_000,
-    },
+  return finishedSession(
+    id,
+    title,
     machine ? {machine, machine_url: 'https://' + machine + ':8787'} : {},
   );
 }

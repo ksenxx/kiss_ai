@@ -15,11 +15,16 @@ function stubVoiceConfig(win) {
   win.__VOICE__ = {};
 }
 
+// Every page built; closed after the run so node exits on its own.
+const windows = [];
+
 function makePage() {
-  return makeChatPage({
+  const page = makeChatPage({
     beforeScripts: stubVoiceConfig,
     extraScripts: ['voice.js'],
   });
+  windows.push(page.win);
+  return page;
 }
 
 function input(win) {
@@ -113,5 +118,5 @@ test('two speakers submit two distinct prefixed tasks', () => {
   ]);
 });
 
+windows.forEach(win => win.close());
 report('voiceSubmitToAgent');
-process.exit(0);

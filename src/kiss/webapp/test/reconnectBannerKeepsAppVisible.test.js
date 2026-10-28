@@ -32,12 +32,13 @@ const {
   makePage: makeChatPage,
   send,
   click,
-  sleep,
   waitFor,
   fakeMatchMedia,
   stubMonaco,
   clickTab: activateTab,
+  persistedDrafts,
 } = require('./simplify2_harness');
+const {paste, typeAndEnter, settle} = require('./attachment_helpers');
 
 function makePage(initialState) {
   let created;
@@ -66,15 +67,20 @@ function clickSend(win) {
   click(win, win.document.getElementById('send-btn'));
 }
 
-// Objects persisted by the page live in the jsdom realm: compare by value.
-function draftsOf(getState) {
-  const d = getState().inputDrafts || {};
+// The drafts the page persists on `pagehide`, as sorted [id, text]
+// pairs.  (Objects persisted by the page live in the jsdom realm:
+// compare by value.)
+function draftsOf(win, getState) {
+  const d = persistedDrafts(win, getState);
   return Object.keys(d)
     .sort()
     .map(id => [id, d[id]]);
 }
 
-function askDraftsOf(getState) {
+// The ask-user answers the page persists on `pagehide`, as sorted
+// [id, question, answer] triples.
+function askDraftsOf(win, getState) {
+  win.dispatchEvent(new win.Event('pagehide'));
   const d = getState().askDrafts || {};
   return Object.keys(d)
     .sort()
@@ -181,20 +187,15 @@ async function testSendReChecksConnectionAfterAttachmentWait() {
   win._testApi.endLaunch();
   send(win, {type: 'daemonStatus', connected: true});
   const inp = win.document.getElementById('task-input');
-  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
-    type: 'image/heic',
-  });
-  const paste = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(paste, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => heic}]},
-  });
-  inp.dispatchEvent(paste);
-  await sleep(50);
-  inp.value = 'prompt with a photo';
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+  paste(
+    win,
+    new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
+      type: 'image/heic',
+    }),
   );
-  await sleep(50);
+  await settle(() => win.document.querySelector('.file-chip .fc-rm'));
+  typeAndEnter(win, 'prompt with a photo');
+  await settle();
   assert.ok(
     !posted.some(m => m.type === 'submit'),
     'the send waits for the photo',
@@ -203,7 +204,7 @@ async function testSendReChecksConnectionAfterAttachmentWait() {
   // Removing the stuck chip releases the parked send while the daemon
   // is down.
   click(win, win.document.querySelector('.file-chip .fc-rm'));
-  await sleep(50);
+  await settle();
   assert.ok(
     !posted.some(m => m.type === 'submit' || m.type === 'appendUserMessage'),
     'a send released while the daemon is down must not be posted: ' +
@@ -329,12 +330,11 @@ function testComposerDraftSurvivesReload() {
   first.win.document.getElementById('task-input').value = 'half-written prompt';
   send(first.win, {type: 'daemonStatus', connected: false, reconnecting: true});
   // The page goes down while the socket is out.
-  first.win.dispatchEvent(new first.win.Event('pagehide'));
-  const persisted = first.getState();
-  assert.deepStrictEqual(draftsOf(first.getState), [
+  assert.deepStrictEqual(draftsOf(first.win, first.getState), [
     ['t1', 'left in t1'],
     ['t2', 'half-written prompt'],
   ]);
+  const persisted = first.getState();
   assert.strictEqual(persisted.chatId, 't2');
   first.win.close();
 
@@ -441,18 +441,16 @@ function testUnacknowledgedPromptComesBackAsDraft() {
     'the prompt was posted',
   );
   assert.strictEqual(inp.value, '', 'the composer is cleared on send');
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    draftsOf(getState),
+    draftsOf(win, getState),
     [[tabId, 'sent into a dead socket']],
     'an unacknowledged prompt is persisted as the draft',
   );
 
   // The daemon echoes the prompt (setTaskText): it arrived.
   send(win, {type: 'setTaskText', text: 'sent into a dead socket', tabId});
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    draftsOf(getState),
+    draftsOf(win, getState),
     [],
     'an acknowledged prompt is not',
   );
@@ -472,15 +470,13 @@ function testUnacknowledgedPromptComesBackAsDraft() {
     ),
     'the follow-up was posted',
   );
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    draftsOf(getState),
+    draftsOf(win, getState),
     [[tabId, 'follow-up into a dead socket']],
     'an unacknowledged follow-up is persisted',
   );
   send(win, {type: 'prompt', text: 'follow-up into a dead socket', tabId});
-  win.dispatchEvent(new win.Event('pagehide'));
-  assert.deepStrictEqual(draftsOf(getState), [], 'the echo acknowledges it');
+  assert.deepStrictEqual(draftsOf(win, getState), [], 'the echo acknowledges it');
 
   // The next task after this one ended: the tab keeps its old task id,
   // so this is the common second-prompt case.
@@ -492,9 +488,8 @@ function testUnacknowledgedPromptComesBackAsDraft() {
       m => m.type === 'submit' && m.prompt === 'next task into a dead socket',
     ),
   );
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    draftsOf(getState),
+    draftsOf(win, getState),
     [[tabId, 'next task into a dead socket']],
     'an unacknowledged second task is persisted',
   );
@@ -504,9 +499,8 @@ function testUnacknowledgedPromptComesBackAsDraft() {
   inp.value = 'unaddressed echo';
   clickSend(win);
   send(win, {type: 'setTaskText', text: 'unaddressed echo'});
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    draftsOf(getState),
+    draftsOf(win, getState),
     [],
     'an unaddressed echo acknowledges',
   );
@@ -515,8 +509,7 @@ function testUnacknowledgedPromptComesBackAsDraft() {
   inp.value = 'a second prompt';
   clickSend(win);
   inp.value = 'typed after sending';
-  win.dispatchEvent(new win.Event('pagehide'));
-  assert.deepStrictEqual(draftsOf(getState), [[tabId, 'typed after sending']]);
+  assert.deepStrictEqual(draftsOf(win, getState), [[tabId, 'typed after sending']]);
   win.close();
   console.log('PASS an unacknowledged prompt comes back as the draft');
 }
@@ -542,9 +535,8 @@ function testBackgroundTabUnackedValuesArePersisted() {
   win.document.getElementById('task-input').value = 'answer from t1';
   clickSend(win);
   activateTab(win, 't2');
-  win.dispatchEvent(new win.Event('pagehide'));
-  assert.deepStrictEqual(draftsOf(getState), [['t1', 'prompt from t1']]);
-  assert.deepStrictEqual(askDraftsOf(getState), [
+  assert.deepStrictEqual(draftsOf(win, getState), [['t1', 'prompt from t1']]);
+  assert.deepStrictEqual(askDraftsOf(win, getState), [
     ['t1', 'Sure?', 'answer from t1'],
   ]);
   win.close();
@@ -567,9 +559,8 @@ function testUnacknowledgedAnswerComesBackInTheComposer() {
   first.win.document.getElementById('task-input').value = 'yes, to staging';
   // Typed but not yet sent: persisted with its question, not as a
   // prompt draft (the composer is the answer box right now).
-  first.win.dispatchEvent(new first.win.Event('pagehide'));
-  assert.deepStrictEqual(draftsOf(first.getState), []);
-  assert.deepStrictEqual(askDraftsOf(first.getState), [
+  assert.deepStrictEqual(draftsOf(first.win, first.getState), []);
+  assert.deepStrictEqual(askDraftsOf(first.win, first.getState), [
     ['t1', 'Deploy?', 'yes, to staging'],
   ]);
   clickSend(first.win);
@@ -582,19 +573,17 @@ function testUnacknowledgedAnswerComesBackInTheComposer() {
     !first.win.document.body.classList.contains('ask-answering'),
     'answer mode ends on send as before',
   );
-  first.win.dispatchEvent(new first.win.Event('pagehide'));
+  assert.deepStrictEqual(draftsOf(first.win, first.getState), []);
   const persisted = first.getState();
-  assert.deepStrictEqual(draftsOf(first.getState), []);
   assert.deepStrictEqual(
-    askDraftsOf(first.getState),
+    askDraftsOf(first.win, first.getState),
     [['t1', 'Deploy?', 'yes, to staging']],
     'an unconfirmed answer is persisted',
   );
 
   // Confirmed: nothing to carry over.
   send(first.win, {type: 'askUserDone', tabId: 't1'});
-  first.win.dispatchEvent(new first.win.Event('pagehide'));
-  assert.deepStrictEqual(askDraftsOf(first.getState), []);
+  assert.deepStrictEqual(askDraftsOf(first.win, first.getState), []);
   first.win.close();
 
   // Reloaded page: the daemon still has the question -> the answer is

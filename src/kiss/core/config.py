@@ -87,10 +87,9 @@ _artifact_dir: str | None = None
 _artifact_dir_lock = threading.RLock()
 
 
-def _artifact_root(base_dir: str | Path | None = None) -> Path:
+def _artifact_root() -> Path:
     """Return the root directory for generated KISS artifacts."""
-    root = Path(base_dir) if base_dir is not None else _PROJECT_DIR
-    return root.resolve() / _ARTIFACTS_DIR_NAME
+    return _PROJECT_DIR.resolve() / _ARTIFACTS_DIR_NAME
 
 
 def _generate_artifact_dir() -> str:
@@ -105,22 +104,18 @@ def _generate_artifact_dir() -> str:
     return str(artifact_path)
 
 
-def get_jobs_root(base_dir: str | Path | None = None) -> Path:
+def get_jobs_root() -> Path:
     """Return the directory that contains all per-job artifact subdirectories.
 
     Job artifacts (including saved trajectories) live under
-    ``<base>/.kiss.artifacts/jobs/job_*``.  This returns the parent
+    ``<project root>/.kiss.artifacts/jobs/job_*``.  This returns the parent
     ``jobs`` directory, which is what the trajectory visualizer treats as
     its artifact directory.
-
-    Args:
-        base_dir: Optional base directory for the ``.kiss.artifacts`` root.
-            Defaults to the project root when ``None``.
 
     Returns:
         The absolute path to the ``jobs`` directory.
     """
-    return _artifact_root(base_dir) / "jobs"
+    return _artifact_root() / "jobs"
 
 
 def kiss_home() -> Path:

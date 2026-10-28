@@ -26,6 +26,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -154,12 +155,12 @@ class TestBug3StashPopWarning:
                 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
                 agent = ChatSorcarAgent("test")
-                agent._wt = GitWorktree(
+                seed_worktree(agent, GitWorktree(
                     repo_root=repo,
                     branch=branch,
                     original_branch="main",
                     wt_dir=wt_dir,
-                )
+                ))
 
                 result = agent.merge()
                 if "stash pop" in result.lower() or "stash" in result.lower():
@@ -202,12 +203,12 @@ class TestBug3StashPopWarning:
                 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
                 agent = ChatSorcarAgent("test")
-                agent._wt = GitWorktree(
+                seed_worktree(agent, GitWorktree(
                     repo_root=repo,
                     branch=branch,
                     original_branch="main",
                     wt_dir=wt_dir,
-                )
+                ))
 
                 result = agent.merge()
                 assert "Successfully merged" in result

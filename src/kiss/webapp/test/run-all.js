@@ -33,7 +33,9 @@ const TEST_DIR = __dirname;
 // in ~700 runs hung this way after printing its final "passed" line.  The
 // flags must be passed on the command line: NODE_OPTIONS rejects V8 flags,
 // and `v8.setFlagsFromString` inside the suite leaves code compiled before
-// the call eligible for the background compilers.
+// the call eligible for the background compilers.  Spelled out here rather
+// than required from coverage_gate.js: conc1018_m_runall_grandchild copies
+// this file alone into a scratch directory and runs it there.
 const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 
 // Upper bound on one suite's wall-clock time, so that a hang (in a suite,

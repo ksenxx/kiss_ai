@@ -43,15 +43,13 @@ import pytest
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.seas.ask.ask_sea import AskSea
-from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.sorcar import agent_dispatch, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.tool_verdict import ALLOW
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, assert_worker_contract
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 # The placeholder the daemon substitutes with the calling task's id.
@@ -69,18 +67,6 @@ _EXPECTED_SUFFIX_START = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
     "at any point. You must answer quickly because the user is waiting.**"
 )
-_EXPECTED_SETTINGS = {
-    "auto_classify": False,
-    "use_web_tools": False,
-    "use_memory": False,
-    "tool_profile": "none",
-    "locked": ["tool_profile"],
-}
-"""``base_settings`` output: ``WorkerSea``'s defaults under ``settings()``.
-
-``system_prompt()`` is a hook the daemon stages as ``systemPromptHook``
-(``apply_sea``), so its text is not a settings key.
-"""
 _ASK_PATH = str(Path(ask_sea.__file__).resolve())
 _EMPTY_SEA = "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass Sea(BaseSea):\n    pass\n"
 """A SEA that defines nothing: the run is a plain session on the task text."""
@@ -145,10 +131,7 @@ def test_settings_follow_the_contract() -> None:
     defaults and nothing else: the other methods are applied by the daemon.
     """
     sea = AskSea()
-    assert isinstance(sea, WorkerSea)
-    assert sea.settings({}) == {"tool_profile": "none", "locked": ["tool_profile"]}
-    assert resolve_settings(sea.settings({})) == sea.settings({})
-    assert sea_commands.base_settings([sea]) == _EXPECTED_SETTINGS
+    assert_worker_contract(ask_sea, sea, {"tool_profile": "none", "locked": ["tool_profile"]})
     assert sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
     assert _PLACEHOLDER in sea.prompt("why?")
     assert sea_commands.base_prompt([sea], "why?", "t-9") == (
@@ -236,27 +219,6 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
 
-def test_apply_sea_substitutes_task_id_with_the_parent_task_id() -> None:
-    """``{task_id}`` in ``prompt()``'s result MUST become the command's ``parentTaskId``.
-
-    Both ``/ask`` paths dispatch the answering run as a sub-agent of
-    the task the question is about, so ``parentTaskId`` IS the id the
-    answerer must pass to ``task_context``.
-    """
-    cmd: dict[str, Any] = {
-        "seaPath": _ASK_PATH,
-        "prompt": "why did the last step fail?",
-        "parentTaskId": "task-abc-123",
-    }
-    apply_sea(cmd)
-    assert _PLACEHOLDER not in cmd["prompt"]
-    assert cmd["prompt"] == (
-        "why did the last step fail?\n\n"
-        + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-abc-123")
-    )
-    assert cmd["parentTaskId"] == "task-abc-123"
-
-
 def test_apply_sea_substitutes_empty_when_no_parent_task_id() -> None:
     """A missing or non-string ``parentTaskId`` MUST still strip the placeholder.
 
@@ -282,10 +244,13 @@ def test_apply_sea_substitutes_empty_when_no_parent_task_id() -> None:
 def test_apply_sea_keeps_the_callers_suffixes_and_stages_the_hook() -> None:
     """The caller's ``appendToPrompt`` / ``appendToSystemPrompt`` are not the SEA's to touch.
 
-    ``prompt()`` shapes the prompt body; both caller suffixes stay as
-    sent on the wire.  ``system_prompt`` is staged as the hook the run
-    applies to its assembled prompt (default + caller suffix): for
-    ``/ask`` the hook replaces that text with SYSTEM_LITE + playbook.
+    ``prompt()`` shapes the prompt body, with ``{task_id}`` replaced by
+    the command's ``parentTaskId`` (both ``/ask`` paths dispatch the
+    answerer as a sub-agent of the task the question is about, so that
+    IS the id it must pass to ``task_context``); both caller suffixes
+    stay as sent on the wire.  ``system_prompt`` is staged as the hook
+    the run applies to its assembled prompt (default + caller suffix):
+    for ``/ask`` the hook replaces that text with SYSTEM_LITE + playbook.
     """
     cmd: dict[str, Any] = {
         "seaPath": _ASK_PATH,
@@ -297,6 +262,8 @@ def test_apply_sea_keeps_the_callers_suffixes_and_stages_the_hook() -> None:
     apply_sea(cmd)
     assert cmd["appendToPrompt"] == "stale caller suffix"
     assert cmd["prompt"] == "q\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
+    assert _PLACEHOLDER not in cmd["prompt"]
+    assert cmd["parentTaskId"] == "task-xyz"
     assert cmd["appendToSystemPrompt"] == "caller system text"
     assert cmd["systemPromptHook"]("DEFAULT\n\ncaller system text") == _EXPECTED_SYSTEM_PROMPT
 
@@ -354,23 +321,6 @@ class Sea(BaseSea):
         cmd: dict[str, Any] = {"seaPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
         assert apply_sea(cmd) == {"prompt"}
         assert cmd["prompt"] == "q Report on task t-1."
-
-
-def test_add_to_prompt_is_not_a_setting(tmp_path: Path) -> None:
-    """A script declaring ``add_to_prompt`` in ``settings()`` MUST be refused (it is an option)."""
-    script = tmp_path / "old_sea.py"
-    script.write_text(
-        """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'add_to_prompt': 'Report on task {task_id}.'}
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(sea_commands.SeaError, match=r"key 'add_to_prompt' was removed: .*prompt"):
-        sea_commands.sea_settings(script)
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +433,4 @@ def test_ask_sea_is_not_advertised_as_a_channel() -> None:
     "every channel module is dispatchable" invariant checked in
     ``test_every_channel_module_is_dispatchable``.
     """
-    from kiss.agents.sorcar.agent_dispatch import available_channels
-
-    assert "ask" not in available_channels()
+    assert "ask" not in agent_dispatch.available_channels()

@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from kiss.agents.sorcar.chat_summary import launch_ms
+from kiss.agents.sorcar.chat_summary import end_ms, launch_ms
 
 # Per-kind clip limits (characters) applied when an entry is rendered.
 _CLIP: dict[str, int] = {
@@ -275,15 +275,20 @@ def load_task(task_id: str) -> dict[str, Any] | None:
     from kiss.agents.sorcar import persistence
 
     persistence._flush_chat_events(task_id)
+    # The connection is taken before the lock (a first call on this
+    # thread may wait out a migration or a sidecar recovery) and the
+    # transcript is decoded after it: the lock is writer-preferring,
+    # so anything slow under it stalls every write in the process.
+    db = persistence._get_db()
     with persistence._rw_lock.read_lock():
-        db = persistence._get_db()
         row = db.execute(
             persistence._HISTORY_SELECT + "WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
             return None
-        task = persistence._history_row_to_dict(row)
-        task["events"] = persistence._fetch_events_for_task_id(db, task_id)
+        event_rows = persistence._select_event_rows(db, task_id)
+    task = persistence._history_row_to_dict(row)
+    task["events"] = persistence._decode_event_rows(event_rows)
     return task
 
 
@@ -291,8 +296,9 @@ def child_tasks(task_id: str) -> list[dict[str, Any]]:
     """Return the history rows of the sub-agent tasks *task_id* dispatched, oldest first."""
     from kiss.agents.sorcar import persistence
 
+    db = persistence._get_db()
     with persistence._rw_lock.read_lock():
-        rows = persistence._get_db().execute(
+        rows = db.execute(
             persistence._HISTORY_SELECT
             + "WHERE parent_task_id = ? ORDER BY timestamp ASC, rowid ASC",
             (task_id,),
@@ -300,10 +306,9 @@ def child_tasks(task_id: str) -> list[dict[str, Any]]:
     return [persistence._history_row_to_dict(r) for r in rows]
 
 
-def _status(task: dict[str, Any]) -> str:
-    """Return ``running`` / ``finished`` and, for a finished task, the clipped result."""
-    end_ms = int(task.get("end_ts") or 0)
-    if not end_ms:
+def _status(task: dict[str, Any], end: int) -> str:
+    """Return ``running`` / ``finished`` and, for a task that ended at *end* ms, its result."""
+    if not end:
         return "running"
     return f"finished ({clip(task.get('result'), 200)})"
 
@@ -311,21 +316,21 @@ def _status(task: dict[str, Any]) -> str:
 def header_lines(task: dict[str, Any], spend: str, total: int) -> list[str]:
     """Return the digest header lines (task metadata, timing and spend)."""
     start_ms = _start_ms(task)
-    end_ms = int(task.get("end_ts") or 0)
+    end = end_ms(task.get("end_ts"))
     now_ms = int(time.time() * 1000)
-    elapsed_s = ((end_ms or now_ms) - start_ms) // 1000 if start_ms else 0
+    elapsed_s = ((end or now_ms) - start_ms) // 1000 if start_ms else 0
     lines = [
         f"Task id: {task.get('id')}",
         f"Task prompt: {clip(task.get('task'), _PROMPT_CHARS)}",
-        f"Status: {_status(task)}",
+        f"Status: {_status(task, end)}",
         f"Chat id: {task.get('chat_id') or ''}",
         f"Model: {task.get('model') or ''}",
         f"Work dir: {task.get('work_dir') or ''}",
         f"Started: {_fmt_ts(start_ms)}",
         f"Elapsed: {_fmt_duration(elapsed_s)}",
     ]
-    if end_ms:
-        lines.append(f"Ended: {_fmt_ts(end_ms)}")
+    if end:
+        lines.append(f"Ended: {_fmt_ts(end)}")
     lines.append(f"Spend: {spend or 'not recorded yet'}")
     lines.append(f"Transcript entries: {total}")
     if task.get("parent_task_id"):
@@ -343,7 +348,7 @@ def _timed_header(task: dict[str, Any], entries: list[Entry], spend: str) -> lis
         ago = _fmt_duration(int(now - last_ms / 1000))
         lines.append(f"Last event: {_fmt_ts(last_ms)} ({ago} ago)")
     lines.append(
-        f"Now: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))} "
+        f"Now: {_fmt_ts(int(now * 1000))} "
         f"(local: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(now))})"
     )
     return lines
@@ -437,21 +442,45 @@ def _child_line(child: dict[str, Any]) -> str:
     )
 
 
+def _summary_line(index: int, entry: Entry) -> str:
+    """Return one overview line of a progress summary entry."""
+    return f"[{index}] {entry.render(_OVERVIEW_SUMMARY_CHARS)}"
+
+
 def _summary_section(indexed: list[tuple[int, Entry]]) -> list[str]:
-    """Return the overview lines for the task's own progress summaries."""
+    """Return the overview lines for the task's own progress summaries.
+
+    The first :data:`_OVERVIEW_SUMMARIES_HEAD` and the last
+    :data:`_OVERVIEW_SUMMARIES_TAIL`, with a line counting the omitted
+    ones between them when there are more.
+    """
     head, tail = _OVERVIEW_SUMMARIES_HEAD, _OVERVIEW_SUMMARIES_TAIL
-    if len(indexed) > head + tail:
-        omitted = len(indexed) - head - tail
-        shown = indexed[:head] + [(-1, Entry("", ""))] + indexed[-tail:]
-    else:
-        omitted, shown = 0, indexed
-    lines = []
-    for i, entry in shown:
-        if i < 0:
-            lines.append(f"... {omitted} earlier summaries omitted (see task_transcript) ...")
-        else:
-            lines.append(f"[{i}] {entry.render(_OVERVIEW_SUMMARY_CHARS)}")
-    return lines
+    omitted = len(indexed) - head - tail
+    if omitted <= 0:
+        return [_summary_line(i, e) for i, e in indexed]
+    return [
+        *(_summary_line(i, e) for i, e in indexed[:head]),
+        f"... {omitted} earlier summaries omitted (see task_transcript) ...",
+        *(_summary_line(i, e) for i, e in indexed[-tail:]),
+    ]
+
+
+def _children_section(task: dict[str, Any], with_side_channel_count: bool) -> list[str]:
+    """Return the ``== Sub-agent tasks ==`` section: one :func:`_child_line` per worker child.
+
+    Side-channel children (earlier /ask and task-update runs) are not
+    the task's own work; their answers already appear as ASK ANSWER
+    entries, so at most their count is shown (*with_side_channel_count*).
+    """
+    children = child_tasks(str(task["id"]))
+    workers = [c for c in children if not c.get("is_side_channel")]
+    title = f"== Sub-agent tasks ({len(workers)}"
+    if with_side_channel_count:
+        title += (
+            f"; plus {len(children) - len(workers)} side-channel /ask or task-update "
+            "runs not listed"
+        )
+    return ["", title + ") ==", *([_child_line(c) for c in workers] or ["(none)"])]
 
 
 def overview(task_id: str) -> str:
@@ -473,17 +502,7 @@ def overview(task_id: str) -> str:
         return loaded
     task, entries, spend = loaded
     lines = _timed_header(task, entries, spend)
-    # Side-channel children (earlier /ask and task-update runs) are not
-    # the task's own work; their answers already appear as ASK ANSWER
-    # entries, so only the count is shown.
-    children = child_tasks(str(task["id"]))
-    workers = [c for c in children if not c.get("is_side_channel")]
-    lines += [
-        "",
-        f"== Sub-agent tasks ({len(workers)}; plus {len(children) - len(workers)} "
-        "side-channel /ask or task-update runs not listed) ==",
-    ]
-    lines += [_child_line(c) for c in workers] or ["(none)"]
+    lines += _children_section(task, with_side_channel_count=True)
     indexed = list(enumerate(entries))
     users = [(i, e) for i, e in indexed if e.kind == "USER"]
     lines += ["", f"== User messages after the initial prompt ({len(users)}) =="]
@@ -577,9 +596,7 @@ def context(task_id: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
         return loaded
     task, entries, spend = loaded
     lines = _timed_header(task, entries, spend)
-    workers = [c for c in child_tasks(str(task["id"])) if not c.get("is_side_channel")]
-    lines += ["", f"== Sub-agent tasks ({len(workers)}) =="]
-    lines += [_child_line(c) for c in workers] or ["(none)"]
+    lines += _children_section(task, with_side_channel_count=False)
     log = progress_log_tail(str(task.get("work_dir") or ""))
     if log:
         lines += ["", "== Progress log written by the task (newest entries) ==", log.rstrip()]

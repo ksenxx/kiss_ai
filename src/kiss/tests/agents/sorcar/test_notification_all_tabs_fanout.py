@@ -39,6 +39,7 @@ from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -111,13 +112,13 @@ def _setup_worktree_agent(
         check=True,
     )
     agent = ChatSorcarAgent("test")
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch=branch,
         original_branch="main",
         wt_dir=wt_dir,
         baseline_commit=None,
-    )
+    ))
     return agent, wt_dir
 
 

@@ -11,6 +11,8 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const harness = require('./simplify2_harness');
 
 /**
@@ -73,10 +75,53 @@ function existsOnRealFs(p) {
   }
 }
 
+/**
+ * A `checkPaths` answerer (for `answerCheckPaths`) that resolves `~/`
+ * and relative paths (against the message's workDir, else `defaultDir`)
+ * and consults the real file system, exactly like the web server does.
+ */
+function checkPathsOnRealFs(defaultDir) {
+  return function (msg) {
+    const results = {};
+    for (const p of msg.paths) {
+      let abs = p;
+      if (p.startsWith('~/')) {
+        abs = path.join(os.homedir(), p.slice(2));
+      } else if (!path.isAbsolute(p)) {
+        abs = path.resolve(msg.workDir || defaultDir, p);
+      }
+      results[p] = existsOnRealFs(abs);
+    }
+    return results;
+  };
+}
+
+/**
+ * The `checkPaths` commands the page posted, oldest first, each copied
+ * into this realm as `{tabId, workDir, paths}` plus `machine` when the
+ * command carries one (the page builds them in the JSDOM realm, whose
+ * Arrays deepStrictEqual rejects).  `paths` keeps the page's order.
+ */
+function checkPathCommands(posted) {
+  return posted
+    .filter(m => m && m.type === 'checkPaths')
+    .map(m => {
+      const cmd = {
+        tabId: m.tabId,
+        workDir: m.workDir,
+        paths: Array.from(m.paths || []),
+      };
+      if (m.machine !== undefined) cmd.machine = m.machine;
+      return cmd;
+    });
+}
+
 module.exports = {
   findLinks,
   findMissing,
   makeWorkDirPage,
   pendingCounts,
   existsOnRealFs,
+  checkPathsOnRealFs,
+  checkPathCommands,
 };

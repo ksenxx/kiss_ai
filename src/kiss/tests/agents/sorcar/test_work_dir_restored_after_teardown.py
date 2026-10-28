@@ -28,6 +28,8 @@ import pytest
 from kiss.agents.sorcar import sorcar_agent as wta_mod
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.agents.sorcar.sorcar_agent import _WorktreeCleanupOutcome
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -69,10 +71,10 @@ def _agent_in_worktree(
     """An agent whose last run lived in ``wt_dir/<offset>``."""
     agent = ChatSorcarAgent("test")
     wt_work_dir = wt_dir / offset if offset else wt_dir
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo, branch=branch, original_branch="main",
         wt_dir=wt_dir, baseline_commit=None, work_dir=wt_work_dir,
-    )
+    ))
     agent.work_dir = str(wt_work_dir)
     return agent
 
@@ -95,7 +97,7 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
 
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert not wt_dir.exists()
         assert agent.work_dir == str(repo / "pkg")
@@ -107,7 +109,7 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
         agent = _agent_in_worktree(repo, wt_dir, branch, offset="")
 
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(repo)
 
@@ -163,7 +165,7 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         agent = _agent_in_worktree(repo, wt_dir, branch)
         shutil.rmtree(wt_dir)
 
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(repo / "pkg")
         assert "kiss_wt-" not in _git(repo, "worktree", "list")
@@ -183,7 +185,7 @@ class TestWorkDirUntouchedWhenWorktreeKept:
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
 
-        assert agent._finalize_worktree() is False
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
 
         assert wt_dir.exists()
         assert agent.work_dir == str(wt_dir / "pkg")
@@ -198,13 +200,13 @@ class TestWorkDirUntouchedWhenWorktreeKept:
         elsewhere.mkdir()
         agent.work_dir = str(elsewhere)
 
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(elsewhere)
 
         agent2 = _agent_in_worktree(repo, wt_dir, branch)
         agent2.work_dir = ""
-        assert agent2._finalize_worktree() is True
+        assert agent2._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert agent2.work_dir == ""
 
 

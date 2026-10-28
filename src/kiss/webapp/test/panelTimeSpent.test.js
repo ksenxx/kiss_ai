@@ -6,15 +6,19 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage,
-  send,
-  sleep,
-  parsePanelTimeMs,
-} = require('./simplify2_harness');
+const {makePage, send, parsePanelTimeMs} = require('./simplify2_harness');
+
+// The page measures a panel's time with Date.now(), so it runs on a
+// clock the test advances by hand: the labels are exact and no
+// wall-clock time is waited out.
+const clock = {now: 1_700_000_000_000};
+
+function seedClock(win) {
+  win.Date.now = () => clock.now;
+}
 
 async function runTests() {
-  const wv = makePage();
+  const wv = makePage({beforeScripts: seedClock});
   const win = wv.win;
   const ready = wv.posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
@@ -25,12 +29,12 @@ async function runTests() {
     type: 'status',
     running: true,
     tabId: TAB,
-    startTs: Date.now(),
+    startTs: clock.now,
   });
 
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'Plan: list files.', tabId: TAB});
-  await sleep(60);
+  clock.now += 60;
   send(win, {type: 'thinking_end', tabId: TAB});
 
   send(win, {
@@ -40,7 +44,7 @@ async function runTests() {
     description: 'list files',
     tabId: TAB,
   });
-  await sleep(80);
+  clock.now += 80;
   send(win, {
     type: 'tool_result',
     content: 'README.md\nmain.js\n',
@@ -50,7 +54,7 @@ async function runTests() {
 
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'Done.', tabId: TAB});
-  await sleep(40);
+  clock.now += 40;
   send(win, {type: 'thinking_end', tabId: TAB});
 
   send(win, {
@@ -111,23 +115,29 @@ async function runTests() {
     'tool-call panel-time text must parse as a duration, got: ' +
       JSON.stringify(tcFooters[0].textContent),
   );
-  assert.ok(
-    tcMs >= 50,
-    'tool-call panel-time must reflect the ~80ms gap between tool_call ' +
-      'and tool_result (got ' + tcMs + 'ms). The page is stamping ' +
-      'time but not measuring it correctly.',
+  assert.strictEqual(
+    tcMs,
+    80,
+    'tool-call panel-time must be the 80ms between tool_call and ' +
+      'tool_result (got ' + tcMs + 'ms). The page is stamping time but ' +
+      'not measuring it correctly.',
   );
 
-  const firstThoughts = llmPanels[0];
+  // The first Thoughts panel is sealed when the tool call that follows
+  // it starts, 60 ms after it opened.  (The trailing one is only
+  // refreshed by the 1 s active-panel tick, which is never due here.)
   const firstMs = parsePanelTimeMs(
-    firstThoughts.querySelector(':scope > .panel-time').textContent,
+    llmPanels[0].querySelector(':scope > .panel-time').textContent,
   );
-  assert.ok(
-    firstMs >= 30,
-    'first .llm-panel time must reflect the ~60ms wall-clock gap (got ' +
-      firstMs + 'ms)',
+  assert.strictEqual(
+    firstMs,
+    60,
+    'first .llm-panel time must be the 60ms between its thinking_start ' +
+      'and the next panel (got ' + firstMs + 'ms)',
   );
 
+  // The footer re-anchors itself below streamed text in a microtask.
+  await new Promise(resolve => setImmediate(resolve));
   for (const p of [llmPanels[0], llmPanels[1], tc]) {
     const last = p.lastElementChild;
     assert.ok(

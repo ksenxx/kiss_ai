@@ -62,6 +62,10 @@ const MACHINES = [
     error: 'ssh exited',
   },
 ];
+// MACHINES after a ping round that found gpu-box unreachable.
+const GPU_BOX_DOWN = MACHINES.map(m =>
+  m.name === 'gpu-box' ? Object.assign({}, m, {status: 'unreachable'}) : m,
+);
 
 function select(win) {
   return win.document.getElementById('chat-machine');
@@ -297,13 +301,21 @@ function testTheDaemonsBindingIsTheChatsMachine() {
   win.close();
   console.log("  ok - the daemon's binding is the machine the chat shows");
 }
-function testADownMachineKeepsThePickListed() {
+
+// A remote pick is painted like the Machines subpanel's dot: `remote`
+// alone (green) while its machine answers the daemon's pings, `down`
+// too (red) once a `machines` reply has shown it unreachable, and
+// never `down` before any reply (the global pick restored from the
+// daemon's config at load is not presumed dead).  The pick itself stays
+// listed and selected while its machine is down.
+function testARemotePickIsGreenUntilTheDaemonReportsItDown() {
   const {win} = readyPage();
   pick(win, 'gpu-box');
-  const down = MACHINES.map(m =>
-    m.name === 'gpu-box' ? Object.assign({}, m, {status: 'unreachable'}) : m,
-  );
-  send(win, {type: 'machines', machines: down, checkedAt: 2});
+  assert.ok(select(win).classList.contains('remote'));
+  assert.ok(!select(win).classList.contains('down'), 'reachable: not down');
+  send(win, {type: 'machines', machines: GPU_BOX_DOWN, checkedAt: 2});
+  assert.ok(select(win).classList.contains('remote'));
+  assert.ok(select(win).classList.contains('down'), 'reported down');
   assert.deepStrictEqual(options(win), [
     ['', 'laptop'],
     ['gpu-box', 'gpu-box'],
@@ -313,26 +325,6 @@ function testADownMachineKeepsThePickListed() {
     'gpu-box',
     'the pick is kept while the machine is down',
   );
-  win.close();
-  console.log('  ok - a pick whose machine is down stays listed');
-}
-
-// A remote pick is painted like the Machines subpanel's dot: `remote`
-// alone (green) while its machine answers the daemon's pings, `down`
-// too (red) once a `machines` reply has shown it unreachable, and
-// never `down` before any reply (the global pick restored from the
-// daemon's config at load is not presumed dead).
-function testARemotePickIsGreenUntilTheDaemonReportsItDown() {
-  const {win} = readyPage();
-  pick(win, 'gpu-box');
-  assert.ok(select(win).classList.contains('remote'));
-  assert.ok(!select(win).classList.contains('down'), 'reachable: not down');
-  const down = MACHINES.map(m =>
-    m.name === 'gpu-box' ? Object.assign({}, m, {status: 'unreachable'}) : m,
-  );
-  send(win, {type: 'machines', machines: down, checkedAt: 2});
-  assert.ok(select(win).classList.contains('remote'));
-  assert.ok(select(win).classList.contains('down'), 'reported down');
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 3});
   assert.ok(!select(win).classList.contains('down'), 'back up');
   pick(win, '');
@@ -352,7 +344,7 @@ function testARemotePickIsGreenUntilTheDaemonReportsItDown() {
     !select(again.win).classList.contains('down'),
     'no machines reply yet: the restored pick is not presumed down',
   );
-  send(again.win, {type: 'machines', machines: down, checkedAt: 4});
+  send(again.win, {type: 'machines', machines: GPU_BOX_DOWN, checkedAt: 4});
   assert.ok(select(again.win).classList.contains('down'));
   again.win.close();
   console.log('  ok - a remote pick is green until the daemon reports it down');
@@ -768,7 +760,6 @@ try {
   testAPickIsTheGlobalSettingOfEveryNewChat();
   testAPickOnAChatShowingATaskGoesToItsNextTask();
   testTheDaemonsBindingIsTheChatsMachine();
-  testADownMachineKeepsThePickListed();
   testARemotePickIsGreenUntilTheDaemonReportsItDown();
   testAnAddressNamedMachineIsListedByItsHostName();
   testAClosedTabForgetsAndAReloadRestores();

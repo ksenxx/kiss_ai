@@ -42,7 +42,9 @@ from __future__ import annotations
 import contextlib
 import gzip
 import json
+import os
 import socket
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -529,6 +531,7 @@ def test_slack_stale_surrogate_and_make_backend(muse_env: Path, api_server: _Api
         _make_backend("default")
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="the rogue emulator binds 127.0.0.2")
 def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServer) -> None:
     """files_upload_v2 content egress is authorized by Sentinel per hop."""
     from slack_sdk.errors import SlackRequestError
@@ -956,13 +959,11 @@ def test_cli_import_slack_and_token_services(muse_env: Path, capsys: pytest.Capt
         assert service in status_out
 
 
-def test_legacy_mode_untouched(
-    isolated_kiss_home: Path, api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer) -> None:
     """With KISS_MUSE_AUTH=0 the connectors use plaintext directly."""
     from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent, _make_backend
 
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     api_base_url = f"{api_server.base_url}/api/"
     empty = SlackChannelBackend()
     assert not empty.connect()

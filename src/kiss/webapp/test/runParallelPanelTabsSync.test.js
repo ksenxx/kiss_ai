@@ -17,7 +17,7 @@ const {
   announceFinished,
 } = require('./subagent_tab_helpers');
 
-function testCollapseClosesSubagentTabs() {
+function testCollapseKeepsRunningSubTabsUntilTheyFinish() {
   const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
   assert.ok(
     !panel.classList.contains('collapsed'),
@@ -117,49 +117,24 @@ function testExpandReopensSubagentTabs() {
   console.log('  ok - expanding the run_parallel panel reopens finished tabs');
 }
 
-function testManualSubTabCloseClosesOnlyThatTab() {
-  const {win, posted, panel, subTabIds} = bootParallelRun(2, makePage());
-
-  // A running sub-agent's tab stays open unless the USER closes it: the
-  // hand close removes that tab alone and is echoed to the daemon, which
-  // mirrors it to every other surface.
-  clickClose(win, subTabIds[0]);
-  assert.ok(
-    posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
-    'the backend must be told about the hand close of the running tab',
-  );
-  const collapsed = panel.classList.contains('collapsed');
-  const openIds = subagentTabEls(win).map(el => el.dataset.tabId);
-  assert.ok(
-    !collapsed && openIds.length === 1 && openIds[0] === subTabIds[1],
-    'the hand close must close only its tab and leave the sibling ' +
-      'open and the panel uncollapsed (collapsed=' +
-      collapsed +
-      ', open sub tabs=' +
-      JSON.stringify(openIds) +
-      ')',
-  );
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-  assert.deepStrictEqual(
-    subagentTabEls(win).map(el => el.dataset.tabId),
-    [subTabIds[1]],
-    'the closed sub-agent finishing changes nothing',
-  );
-  win.close();
-  console.log('  ok - hand-close of a running sub tab closes only that tab');
-}
-
 function testManualSubTabCloseKeepsSiblingsOpen() {
   const {win, posted, panel, parentId, subTabIds} = bootParallelRun(
     3,
     makePage(),
   );
 
+  // A running sub-agent's tab stays open unless the USER closes it: the
+  // hand close removes that tab alone and is echoed to the daemon, which
+  // mirrors it to every other surface.
   clickClose(win, subTabIds[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
     2,
     'a hand close of a running sub-agent tab closes that tab',
+  );
+  assert.ok(
+    posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
+    'the backend must be told about the hand close of the running tab',
   );
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
@@ -431,7 +406,7 @@ function testOpenSubagentTabOnlyPathIsAssociated() {
   console.log('  ok - openSubagentTab-only path is associated with panel');
 }
 
-function testSpawnWhileCollapsedDefersTabs() {
+function testSpawnWhileCollapsedOpensTabAtOnce() {
   const {win, posted, panel, parentId} = bootParallelRun(2, makePage());
 
   togglePanel(win, panel);
@@ -710,15 +685,14 @@ function testParentReplayKeepsRunningFanOutOpen() {
 
 function main() {
   const tests = [
-    testCollapseClosesSubagentTabs,
+    testCollapseKeepsRunningSubTabsUntilTheyFinish,
     testExpandReopensSubagentTabs,
-    testManualSubTabCloseClosesOnlyThatTab,
     testManualSubTabCloseKeepsSiblingsOpen,
     testManualCloseOfAllSubTabsThenExpandReopensAll,
     testAutoCollapseKeepsInvariant,
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
-    testSpawnWhileCollapsedDefersTabs,
+    testSpawnWhileCollapsedOpensTabAtOnce,
     testTaskEndFoldsUserOpenedFanOutIntoTrajectory,
     testRunParallelFinishAutoCollapseClosesSubTabs,
     testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,

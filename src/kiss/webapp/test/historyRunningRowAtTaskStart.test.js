@@ -7,18 +7,12 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {rowByTitle, lastGetHistory, makeRow} = require('./history_helpers');
-
-function openSidebar(win) {
-  const btn = win.document.getElementById('menu-btn');
-  assert.ok(btn, 'burger menu button (#menu-btn) must exist');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const sidebar = win.document.getElementById('sidebar');
-  assert.ok(
-    sidebar.classList.contains('open'),
-    'burger click must open the sidebar',
-  );
-}
+const {
+  rowByTitle,
+  lastGetHistory,
+  makeRow,
+  openChatsPanel: openSidebar,
+} = require('./history_helpers');
 
 // The visible row titles in list order (history_helpers.visibleTitles
 // sorts them; the order matters here).
@@ -163,11 +157,5 @@ function runTests() {
   testUncheckingRunningStillHidesRunningRow();
 }
 
-try {
-  runTests();
-  console.log('\n2 passed, 0 failed');
-  process.exit(0);
-} catch (err) {
-  console.error('FAIL:', err && err.stack ? err.stack : err);
-  process.exit(1);
-}
+runTests();
+console.log('\nhistoryRunningRowAtTaskStart: all tests passed');

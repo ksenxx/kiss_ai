@@ -163,6 +163,7 @@ import sys
 import tempfile
 import time
 import types
+from collections.abc import Callable
 from typing import Any, BinaryIO
 
 TASK_TABLE = "task_history"
@@ -1003,9 +1004,16 @@ def _apply_deletions(conn: sqlite3.Connection) -> tuple[int, list[str]]:
     chat = 't."chat_id"' if "chat_id" in columns else "''"
     tasks = quote_name(TASK_TABLE)
     conn.execute('DROP TABLE IF EXISTS temp."_sync_doomed"')
+    # Driven by the tombstones, not by the task table: the planner would
+    # otherwise test "still running here" -- a walk over the task's
+    # events -- for every task in the target (tens of seconds on a
+    # database of millions of events) before looking at the handful of
+    # deletions, which is the selective side of the question.
+    started = 'COALESCE(t."timestamp", 0)' if "timestamp" in columns else "0"
     conn.execute(
         f'CREATE TEMP TABLE "_sync_doomed" AS SELECT t."id" AS id, {chat} AS chat_id'
-        f" FROM main.{tasks} t WHERE {_deleted_task_filter('t', columns)}"
+        f" FROM main.{quote_name(DELETED_TABLE)} d"
+        f' JOIN main.{tasks} t ON t."id" = d."id" WHERE d."deleted_ts" > {started}'
         + ("".join(f" AND NOT {condition}" for condition in spared))
     )
     chats = [
@@ -1471,7 +1479,8 @@ def synchronize(
     runner: Runner,
     full: bool = False,
     dry_run: bool = False,
-    delta_edits: list[str] | None = None,
+    delta_edits: list[str | Callable[[str], None]] | None = None,
+    target_manifest: str | None = None,
 ) -> dict[str, Any]:
     """Copy task and event rows from a source database into a target and refresh its chat summaries.
 
@@ -1483,9 +1492,15 @@ def synchronize(
         dry_run: Roll the merge back instead of committing it, so the
             target is left untouched but the reported counts are the ones
             a real run would apply.
-        delta_edits: Shell commands run on this machine, in order,
-            against the uncompressed delta before it is merged, ``{}``
-            standing for the delta's path (see :func:`edit_delta`).
+        delta_edits: Edits run on this machine, in order, against the
+            uncompressed delta before it is merged: shell commands with
+            ``{}`` standing for the delta's path, or Python callables
+            given the path (see :func:`edit_delta`).
+        target_manifest: Path of a manifest of *target* taken earlier
+            (the output of its manifest phase), used in place of taking
+            one now (ignored with *full*).  A stale manifest only makes
+            the delta carry rows the target has since gained, which the
+            merge skips.
 
     Returns:
         Statistics with the compressed delta size, the rows inserted and
@@ -1500,14 +1515,17 @@ def synchronize(
     started = time.monotonic()
     temporary: list[str] = []
     try:
-        manifest_path = _track(temporary, ".json.gz")
         delta_path = _track(temporary, ".db.gz")
         stats_path = _track(temporary, ".json")
-        if full:
-            with open(manifest_path, "wb") as handle:
-                write_json_gz({}, handle)
+        if target_manifest and not full:
+            manifest_path = target_manifest
         else:
-            runner.run(target, PHASE_MANIFEST, [], None, manifest_path)
+            manifest_path = _track(temporary, ".json.gz")
+            if full:
+                with open(manifest_path, "wb") as handle:
+                    write_json_gz({}, handle)
+            else:
+                runner.run(target, PHASE_MANIFEST, [], None, manifest_path)
         runner.run(source, PHASE_EXTRACT, [], manifest_path, delta_path)
         if delta_edits:
             edit_delta(delta_path, delta_edits)
@@ -1549,18 +1567,19 @@ def local_shell_quote(arg: str) -> str:
     return f'"{arg}"'
 
 
-def edit_delta(delta_gz: str, commands: list[str]) -> None:
-    """Run shell commands against the delta between the extract and the merge.
+def edit_delta(delta_gz: str, commands: list[str | Callable[[str], None]]) -> None:
+    """Run edits against the delta between the extract and the merge.
 
-    The delta is unpacked to a temporary file, every command is run in
-    order with ``{}`` replaced by that file's (shell-quoted) path, and the
+    The delta is unpacked to a temporary file, every edit is run in
+    order -- a shell command with ``{}`` replaced by that file's
+    (shell-quoted) path, or a Python callable given the path -- and the
     result is packed again in place of the original.  The commands
     inherit this process's standard streams.  A command that exits
     non-zero stops the sync before anything is merged.
 
     Args:
         delta_gz: Path of the gzipped delta database; rewritten.
-        commands: Shell commands to run, each naming the delta as ``{}``.
+        commands: Shell commands naming the delta as ``{}``, or callables.
 
     Raises:
         SyncError: If a command exits non-zero.
@@ -1570,6 +1589,9 @@ def edit_delta(delta_gz: str, commands: list[str]) -> None:
         with open(delta_gz, "rb") as inp:
             read_file_gz(inp, plain)
         for command in commands:
+            if callable(command):
+                command(plain)
+                continue
             shell_command = command.replace("{}", local_shell_quote(plain))
             done = subprocess.run(shell_command, shell=True, check=False)
             if done.returncode != 0:

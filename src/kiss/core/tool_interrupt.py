@@ -311,9 +311,7 @@ def raise_if_interrupted() -> None:
         return
     # Closing first: the raise below unwinds through the agent's
     # handler, and the watchdog must not inject into that.
-    unregister_tool_call(token)
-    if token.injected:
-        drain_pending_interrupt()
+    end_tool_call(token)
     raise ToolCallInterrupted(USER_INTERRUPTED_MESSAGE)
 
 

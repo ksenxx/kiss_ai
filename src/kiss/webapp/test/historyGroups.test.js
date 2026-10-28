@@ -22,10 +22,17 @@ const {
   stubRaf,
   fakeMatchMedia,
   ofType,
+  stubClipboard,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 const {all} = require('./ui_antipattern_harness');
+const {
+  todayNoonSec,
+  groupedSession: session,
+  sendHistoryPage: sendHistory,
+  listShape,
+} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({
@@ -33,10 +40,7 @@ function makePage() {
     beforeScripts: win => {
       stubRaf(win);
       fakeMatchMedia(win, true);
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {writeText: () => Promise.resolve()},
-        configurable: true,
-      });
+      stubClipboard(win);
       // Native dialogs are gone from main.js; any call is a regression.
       win.prompt = () => {
         throw new Error('window.prompt must not be called');
@@ -53,34 +57,55 @@ function makePage() {
   });
 }
 
+/**
+ * Intercept the page's setTimeout calls whose delay lies in [min, max]
+ * ms: they are recorded in `timers` (`{fn, ms, id}`) instead of being
+ * scheduled, under fake ids (>= 1e9, truthy: main.js keeps the armed
+ * timer's id and 0 would read as "no timer armed").  A clearTimeout of
+ * a fake id lands in `cleared`.  Other delays run as usual.  `fire()`
+ * runs every recorded timer not cleared, in order, and forgets them;
+ * `restore()` puts the real functions back.
+ */
+function interceptTimers(win, min, max) {
+  const origSetTimeout = win.setTimeout;
+  const origClearTimeout = win.clearTimeout;
+  const timers = [];
+  const cleared = [];
+  win.setTimeout = (fn, ms) => {
+    if (ms >= min && ms <= max) {
+      const id = 1e9 + timers.length + 1;
+      timers.push({fn, ms, id});
+      return id;
+    }
+    return origSetTimeout(fn, ms);
+  };
+  win.clearTimeout = id => {
+    if (id >= 1e9) {
+      cleared.push(id);
+      return undefined;
+    }
+    return origClearTimeout(id);
+  };
+  return {
+    timers,
+    cleared,
+    fire() {
+      for (const t of timers.splice(0)) {
+        if (!cleared.includes(t.id)) t.fn();
+      }
+    },
+    restore() {
+      win.setTimeout = origSetTimeout;
+      win.clearTimeout = origClearTimeout;
+    },
+  };
+}
+
 async function main() {
   // ---- History grouping ----
 
   const DAY = 86400;
-  // Noon today, so "yesterday" and "three days ago" stay on their days
-  // whatever the local time zone offset does to the test's clock.
-  const todayNoon = (() => {
-    const d = new Date();
-    d.setHours(12, 0, 0, 0);
-    return Math.floor(d.getTime() / 1000);
-  })();
-
-  function session(chat, task, ts, extra) {
-    return Object.assign(
-      {
-        id: chat,
-        task_id: task,
-        title: 'task ' + task,
-        preview: 'task ' + task,
-        has_events: true,
-        timestamp: ts,
-        tokens: 1,
-        cost: 0.1,
-        steps: 1,
-      },
-      extra || {},
-    );
-  }
+  const todayNoon = todayNoonSec();
 
   function groups(win) {
     return all(win, '#history-list > .history-chat-group');
@@ -118,36 +143,6 @@ async function main() {
     );
     assert.strictEqual(resumes[resumes.length - 1].taskId, taskId);
     assert.strictEqual(resumes[resumes.length - 1].tabId, active);
-  }
-
-  /** Deliver a history page stamped with the generation the panel last asked for. */
-  function sendHistory(win, posted, offset, sessions) {
-    const asked = ofType(posted, 'getHistory');
-    send(win, {
-      type: 'history',
-      offset,
-      generation: asked.length ? asked[asked.length - 1].generation : 0,
-      sessions,
-    });
-  }
-
-  function listShape(win) {
-    return Array.from(byId(win, 'history-list').children)
-      .filter(el => el.style.display !== 'none')
-      .map(el =>
-        el.classList.contains('history-day-sep')
-          ? 'sep:' + el.textContent
-          : el.classList.contains('history-chat-group')
-            ? 'chat:' +
-              el.dataset.chatId +
-              '[' +
-              Array.from(el.querySelectorAll('.sidebar-item'))
-                .filter(r => r.style.display !== 'none')
-                .map(r => r.querySelector('.sidebar-item-text').textContent)
-                .join(',') +
-              ']'
-            : el.className,
-      );
   }
 
   await test('History: tasks grouped by chat, chats by latest task, day separators', async () => {
@@ -333,16 +328,32 @@ async function main() {
     assert.strictEqual(title(gC), 'first task of C');
     // Only the first line of a multi-line summary is shown, and a row
     // that arrives without the chat-level fields (mixed daemon
-    // payloads) never overwrites a name the daemon already gave.
+    // payloads) never overwrites a name the daemon already gave.  A
+    // chat whose summary and first task are both blank is "Untitled".
     sendHistory(win, posted, 0, [
       Object.assign(session('A', 'a2', todayNoon), {
         chat_first_task: 'first task of A',
         chat_summary: '  Fix login\nand add tests',
       }),
+      Object.assign(session('B', 'b1', todayNoon - 600), {
+        chat_first_task: '\n\n   \n',
+        chat_summary: '  \n',
+      }),
       session('A', 'a1', todayNoon - 1800),
     ]);
-    [gA] = groups(win);
+    [gA, gB] = groups(win);
     assert.strictEqual(title(gA), 'Fix login');
+    assert.strictEqual(title(gB), 'Untitled');
+    // The header carries no tooltip (the full summary is not repeated
+    // on hover), also after its Show details chevron repaints it.
+    const header = gA.querySelector('.history-chat-header');
+    const chevron = gA.querySelector('.history-chat-collapse');
+    for (const state of ['true', 'false']) {
+      chevron.click();
+      assert.strictEqual(chevron.getAttribute('aria-expanded'), state);
+      assert.ok(!header.hasAttribute('data-tooltip'), 'no data-tooltip');
+      assert.ok(!header.hasAttribute('title'), 'no title attribute');
+    }
     win.close();
   });
 
@@ -443,13 +454,10 @@ async function main() {
     return win.document.querySelector('#history-list .sidebar-item');
   }
 
-  // The touch grace timer (300 ms) and the macrotask hop behind it fire
-  // late on a loaded machine, so wait for the rebuild instead of sleeping
-  // a fixed margin past it.
-  async function firstRowReplaced(win, row) {
-    const deadline = Date.now() + 3000;
-    while (firstRow(win) === row && Date.now() < deadline) await sleep(20);
-    return firstRow(win) !== row;
+  // The 300 ms touch release-grace timer, intercepted so a test fires
+  // it by hand (the zero-delay apply hop behind it still runs for real).
+  function interceptTouchGrace(win) {
+    return interceptTimers(win, 300, 300);
   }
 
   await test('History: an identical refresh keeps the same DOM rows (no lost click, no lost focus)', async () => {
@@ -673,6 +681,7 @@ async function main() {
       session('B', 'b1', todayNoon - 600),
     ]);
     const rowBefore = firstRow(win);
+    const grace = interceptTouchGrace(win);
     // Touch: only pointer events fire while the finger is down; the
     // compatibility mouse events arrive after the finger lifts.
     rowBefore.dispatchEvent(
@@ -699,7 +708,8 @@ async function main() {
     });
     Object.defineProperty(upEvent, 'pointerType', {value: 'touch'});
     rowBefore.dispatchEvent(upEvent);
-    await sleep(50);
+    assert.strictEqual(grace.timers.length, 1, 'the lift arms the grace timer');
+    await sleep(0);
     assert.strictEqual(
       firstRow(win),
       rowBefore,
@@ -709,8 +719,11 @@ async function main() {
     const resumesBefore = ofType(posted, 'resumeSession').length;
     click(win, rowBefore);
     assertRowOpenedTask(win, posted, activeBefore, resumesBefore, 'a1');
-    assert.ok(
-      await firstRowReplaced(win, rowBefore),
+    grace.fire();
+    await sleep(0);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
       'the deferred rebuild lands after the grace period',
     );
     win.close();
@@ -723,6 +736,7 @@ async function main() {
       session('B', 'b1', todayNoon - 600),
     ]);
     const rowBefore = firstRow(win);
+    const grace = interceptTouchGrace(win);
     const pev = (type, id) => {
       const e = new win.MouseEvent(type, {bubbles: true, cancelable: true});
       Object.defineProperty(e, 'pointerId', {value: id});
@@ -743,7 +757,8 @@ async function main() {
     // reusing pointer ID 7 for the new contact.  Touch 1's grace timer
     // must not release touch 2's press.
     rowBefore.dispatchEvent(pev('pointerdown', 7));
-    await sleep(400);
+    grace.fire();
+    await sleep(0);
     assert.strictEqual(
       firstRow(win),
       rowBefore,
@@ -751,8 +766,11 @@ async function main() {
     );
     // Touch 2 lifts; its own grace period ends; the parked page lands.
     rowBefore.dispatchEvent(pev('pointerup', 7));
-    assert.ok(
-      await firstRowReplaced(win, rowBefore),
+    grace.fire();
+    await sleep(0);
+    assert.notStrictEqual(
+      firstRow(win),
+      rowBefore,
       'the parked page lands after the second touch releases',
     );
     win.close();
@@ -901,17 +919,9 @@ async function main() {
     // Fold the Source Control section: its own task-news debounce
     // timer is not the one under test.
     click(win, byId(win, 'meta-scm').querySelector('.meta-section-toggle'));
-    const timers = [];
-    const origSetTimeout = win.setTimeout;
+    const {timers, restore} = interceptTimers(win, 250, 5500);
     const realNow = win.Date.now;
     const T = realNow();
-    win.setTimeout = (fn, ms) => {
-      if (ms >= 250 && ms <= 5500) {
-        timers.push({fn, ms});
-        return 1e9 + timers.length;
-      }
-      return origSetTimeout(fn, ms);
-    };
     try {
       win.Date.now = () => T;
       // A press with no matching release (the release event was eaten:
@@ -966,7 +976,7 @@ async function main() {
         'the safety timer drops the stale latches and lands the page',
       );
     } finally {
-      win.setTimeout = origSetTimeout;
+      restore();
       win.Date.now = realNow;
     }
     win.close();
@@ -978,16 +988,8 @@ async function main() {
       session('A', 'a1', todayNoon),
       session('B', 'b1', todayNoon - 600),
     ]);
-    const timers = [];
-    const origSetTimeout = win.setTimeout;
+    const {timers, restore} = interceptTimers(win, 9500, 10500);
     const realNow = win.Date.now;
-    win.setTimeout = (fn, ms) => {
-      if (ms >= 9500 && ms <= 10500) {
-        timers.push(fn);
-        return 1e9 + timers.length;
-      }
-      return origSetTimeout(fn, ms);
-    };
     try {
       // The write has no acknowledgement and may FAIL: with no other
       // refresh ever arriving, the click itself must plan the refetch
@@ -1000,7 +1002,7 @@ async function main() {
       );
       win.Date.now = () => realNow() + 10200;
       const asked = ofType(posted, 'getHistory').length;
-      timers[0]();
+      timers[0].fn();
       assert.ok(
         ofType(posted, 'getHistory').length > asked,
         'the refetch was posted with no page ever delivered in between',
@@ -1018,7 +1020,7 @@ async function main() {
         'the daemon value shows once the overlay expired',
       );
     } finally {
-      win.setTimeout = origSetTimeout;
+      restore();
       win.Date.now = realNow;
     }
     win.close();
@@ -1184,15 +1186,11 @@ async function main() {
     ]);
     // Capture the expiry timer main.js arms at the toggle (and keeps
     // serving while a page still disagrees inside the bound).
-    const longTimers = [];
-    const origSetTimeout = win.setTimeout;
-    win.setTimeout = (fn, ms) => {
-      if (ms > 5000) {
-        longTimers.push(fn);
-        return 1e9 + longTimers.length;
-      }
-      return origSetTimeout(fn, ms);
-    };
+    const {timers: longTimers, fire, restore} = interceptTimers(
+      win,
+      5001,
+      Infinity,
+    );
     const realNow = win.Date.now;
     try {
       click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
@@ -1210,9 +1208,9 @@ async function main() {
       // The tasks_updated above was this tick's refresh; a second one
       // in the same tick folds into the end-of-tick refetch, so let the
       // tick end before the timer fires.
-      await new Promise(resolve => origSetTimeout(resolve, 0));
+      await sleep(0);
       const asked = ofType(posted, 'getHistory').length;
-      longTimers.forEach(fn => fn());
+      fire();
       assert.ok(
         ofType(posted, 'getHistory').length > asked,
         'the expiry timer refetches the history',
@@ -1229,7 +1227,7 @@ async function main() {
       );
     } finally {
       win.Date.now = realNow;
-      win.setTimeout = origSetTimeout;
+      restore();
     }
     win.close();
   });
@@ -1241,19 +1239,9 @@ async function main() {
       session('B', 'b1', todayNoon - 600),
     ]);
     const realNow = win.Date.now;
-    const origSetTimeout = win.setTimeout;
+    const {timers, restore} = interceptTimers(win, 3001, 19999);
     try {
       const T = realNow();
-      const timers = [];
-      win.setTimeout = (fn, ms) => {
-        if (ms > 3000 && ms < 20000) {
-          timers.push({fn, ms});
-          // A truthy fake id: main.js keeps the armed timer's id, and 0
-          // would read as "no timer armed".
-          return 1e9 + timers.length;
-        }
-        return origSetTimeout(fn, ms);
-      };
       const rows = all(win, '#history-list .sidebar-item');
       // A is starred at T, B five seconds later: A's overlay expires at
       // T+10s, B's at T+15s.  The first click arms the timer; the
@@ -1288,7 +1276,7 @@ async function main() {
       win.Date.now = () => T + 10200;
       // Same tick as timers[0]'s refresh: let it end so this one is not
       // folded into its end-of-tick refetch.
-      await new Promise(resolve => origSetTimeout(resolve, 0));
+      await sleep(0);
       const asked = ofType(posted, 'getHistory').length;
       timers[2].fn();
       assert.ok(
@@ -1314,7 +1302,7 @@ async function main() {
       );
     } finally {
       win.Date.now = realNow;
-      win.setTimeout = origSetTimeout;
+      restore();
     }
     win.close();
   });
@@ -1325,24 +1313,11 @@ async function main() {
       session('A', 'a1', todayNoon),
       session('B', 'b1', todayNoon - 600),
     ]);
-    const origSetTimeout = win.setTimeout;
-    const origClearTimeout = win.clearTimeout;
-    const armed = [];
-    const cleared = [];
-    win.setTimeout = (fn, ms) => {
-      if (ms >= 9500 && ms <= 10500) {
-        armed.push(fn);
-        return 1e9 + armed.length;
-      }
-      return origSetTimeout(fn, ms);
-    };
-    win.clearTimeout = id => {
-      if (id >= 1e9) {
-        cleared.push(id);
-        return undefined;
-      }
-      return origClearTimeout(id);
-    };
+    const {timers: armed, cleared, restore} = interceptTimers(
+      win,
+      9500,
+      10500,
+    );
     try {
       click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
       assert.strictEqual(armed.length, 1, 'the click armed the refetch');
@@ -1355,12 +1330,11 @@ async function main() {
       ]);
       assert.deepStrictEqual(
         cleared,
-        [1e9 + 1],
+        [armed[0].id],
         'the agreeing page cancelled the armed refetch',
       );
     } finally {
-      win.setTimeout = origSetTimeout;
-      win.clearTimeout = origClearTimeout;
+      restore();
     }
     win.close();
   });
@@ -1371,25 +1345,12 @@ async function main() {
       session('A', 'a1', todayNoon),
       session('B', 'b1', todayNoon - 600),
     ]);
-    const origSetTimeout = win.setTimeout;
-    const origClearTimeout = win.clearTimeout;
     const realNow = win.Date.now;
-    const armed = [];
-    const cleared = [];
-    win.setTimeout = (fn, ms) => {
-      if (ms >= 9500 && ms <= 10500) {
-        armed.push(fn);
-        return 1e9 + armed.length;
-      }
-      return origSetTimeout(fn, ms);
-    };
-    win.clearTimeout = id => {
-      if (id >= 1e9) {
-        cleared.push(id);
-        return undefined;
-      }
-      return origClearTimeout(id);
-    };
+    const {timers: armed, cleared, restore} = interceptTimers(
+      win,
+      9500,
+      10500,
+    );
     try {
       click(win, firstRow(win).querySelector('.sidebar-item-favorite'));
       assert.strictEqual(armed.length, 1, 'the click armed the refetch');
@@ -1426,7 +1387,7 @@ async function main() {
       // daemon's contrary value rule again.
       win.Date.now = () => realNow() + 10200;
       const asked = ofType(posted, 'getHistory').length;
-      armed[0]();
+      armed[0].fn();
       assert.ok(
         ofType(posted, 'getHistory').length > asked,
         'the reconciliation refetch still fires at the bound',
@@ -1442,8 +1403,7 @@ async function main() {
         'the daemon value rules once the overlay expired',
       );
     } finally {
-      win.setTimeout = origSetTimeout;
-      win.clearTimeout = origClearTimeout;
+      restore();
       win.Date.now = realNow;
     }
     win.close();
@@ -1725,6 +1685,7 @@ async function main() {
       session('B', 'b1', 0),
       missing,
       session('D', 'd1', 'not a number'),
+      session('E', 'e1', 1e300),
     ]);
     const seps = all(win, '.history-day-sep').map(el => el.textContent);
     const fmt = d =>
@@ -1734,8 +1695,9 @@ async function main() {
         day: 'numeric',
         year: 'numeric',
       });
-    // Epoch zero is 1970 (the date filter treats it the same way);
-    // the missing and the unparsable timestamps share one "Undated".
+    // Epoch zero is 1970 (the date filter treats it the same way); the
+    // missing, the unparsable and the beyond-Date timestamps share one
+    // "Undated".
     assert.deepStrictEqual(seps, [fmt(lastYear), fmt(new Date(0)), 'Undated']);
     win.close();
   });
@@ -1789,20 +1751,10 @@ async function main() {
       if (savedTz === undefined) delete process.env.TZ;
       else process.env.TZ = savedTz;
     }
-    // A timestamp beyond what Date can represent is "Undated" once,
-    // together with a missing one (no duplicate Undated separators).
-    const missing = session('E', 'e1', 0);
-    delete missing.timestamp;
-    sendHistory(win, posted, 0, [session('D', 'd1', 1e300), missing]);
-    assert.deepStrictEqual(
-      all(win, '.history-day-sep').map(el => el.textContent),
-      ['Undated'],
-    );
     win.close();
   });
 
   report('historyGroups');
-  process.exit(0);
 }
 
 main().catch(e => {

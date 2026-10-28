@@ -28,7 +28,7 @@ import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
@@ -40,6 +40,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.test_worktree_audit18 import _make_repo, _server
 
 
@@ -72,10 +73,10 @@ class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
         self.wt_dir = self.repo / ".kiss-worktrees" / "kiss_wt-f3-claim"
         self.assertTrue(GitWorktreeOps.create(self.repo, branch, self.wt_dir))
         GitWorktreeOps.save_original_branch(self.repo, branch, "main")
-        cast(ChatSorcarAgent, self.state.agent)._wt = GitWorktree(
+        seed_worktree(self.state.agent, GitWorktree(
             repo_root=self.repo, branch=branch, original_branch="main",
             wt_dir=self.wt_dir,
-        )
+        ))
 
     def _assert_shutdown_waits_for(self, mutate: Callable[[], Any]) -> Any:
         """Run *mutate* behind a held ``repo_lock``; the shutdown wait must block.

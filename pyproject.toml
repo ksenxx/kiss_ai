@@ -70,7 +70,7 @@ dependencies = [
     # codec installed, Python exposes that directory as a namespace package;
     # urllib3 mistakes it for Brotli support and crashes while importing.
     "brotli>=1.2.0",
-    "harbor>=0.3.0",
+    "harbor>=0.24.0",
     "websockets>=15.0",
     # 50.0.0 closes PYSEC-2026-35/36/3552/3553/3554 and GHSA-537c-gmf6-5ccf.
     # 49.0+ publishes arm64-only macOS wheels, so Intel Macs stay on the

@@ -39,6 +39,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
 )
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -225,16 +226,17 @@ class TestBug60DoMergeTypeGuard:
         GitWorktreeOps.prune(repo)
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=None,
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         wt = agent._wt
-        result, warning, _cleanup = agent._do_merge(wt)
+        assert wt is not None
+        result, _resolved, warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.CHECKOUT_FAILED, (
             "BUG-60: _do_merge should return CHECKOUT_FAILED when "
@@ -264,16 +266,17 @@ class TestBug60DoMergeTypeGuard:
         GitWorktreeOps.prune(repo)
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         wt = agent._wt
-        result, warning, _cleanup = agent._do_merge(wt)
+        assert wt is not None
+        result, _resolved, warning, _cleanup = agent._do_merge(wt)
         assert result == MergeResult.SUCCESS, (
             "Regression: valid original_branch should merge successfully"
         )

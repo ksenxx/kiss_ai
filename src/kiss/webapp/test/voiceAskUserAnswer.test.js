@@ -21,11 +21,16 @@ function stubVoiceConfig(win) {
   win.localStorage.setItem('kissVoiceEnabled', '1');
 }
 
+// Every page built; closed after the run so node exits on its own.
+const windows = [];
+
 function makePage() {
-  return makeChatPage({
+  const page = makeChatPage({
     beforeScripts: stubVoiceConfig,
     extraScripts: ['voice.js'],
   });
+  windows.push(page.win);
+  return page;
 }
 
 function taskInput(win) {
@@ -69,15 +74,10 @@ test('speech while a question is pending is sent as the userAnswer', () => {
   assert.ok(!answering(win), 'answer mode must end');
 });
 
-test('speech without a pending question still submits a task (regression)', () => {
-  const {win, posted} = makePage();
-  posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'Run tests', speaker: 1});
-  const submits = posted.filter(m => m.type === 'submit');
-  assert.strictEqual(submits.length, 1, JSON.stringify(posted));
-  assert.strictEqual(submits[0].prompt, 'Speaker #1 says that: Run tests');
-  assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
-});
+// Speech with no question pending submitting a task is pinned by
+// voiceSubmitToAgent ('spoken task is submitted to the idle highlighted
+// tab') and, after a question closed, by 'after askUserDone later speech
+// goes back to the task input path' below.
 
 test('an empty translation never answers and keeps the question open', () => {
   const {win, posted} = makePage();
@@ -157,5 +157,5 @@ test('answering by voice clears the pending question for the tab', () => {
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 1);
 });
 
+windows.forEach(win => win.close());
 report('voiceAskUserAnswer');
-process.exit(0);

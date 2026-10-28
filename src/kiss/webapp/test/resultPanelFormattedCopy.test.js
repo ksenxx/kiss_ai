@@ -18,25 +18,18 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {send, sleep, click} = harness;
+const {send, settle: flushMicrotasks, click, stubClipboard} = harness;
 
 // The harness page plus a navigator.clipboard stub that records the
 // last text written; getClipboard() reads it back.
 function makePage() {
-  let clipboardText = null;
-  function stubClipboard(win) {
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        writeText: text => {
-          clipboardText = String(text);
-          return Promise.resolve();
-        },
-      },
-    });
-  }
-  const {win} = harness.makePage({beforeScripts: stubClipboard});
-  return {win, getClipboard: () => clipboardText};
+  let clipboard = null;
+  const {win} = harness.makePage({
+    beforeScripts: w => {
+      clipboard = stubClipboard(w);
+    },
+  });
+  return {win, getClipboard: () => clipboard.last()};
 }
 
 function clickCopy(win) {
@@ -45,11 +38,6 @@ function clickCopy(win) {
   const btn = rc.querySelector('.panel-copy-btn');
   assert.ok(btn, 'Result panel must have a copy button');
   click(win, btn);
-}
-
-// The copy handler awaits the clipboard promise before it is done.
-function flushMicrotasks() {
-  return sleep(0);
 }
 
 async function testHtmlSummaryCopiesFormattedText() {

@@ -21,31 +21,30 @@
 // cancellation.
 //
 // The production deadline is 60s.  Waiting a real minute per run is not
-// acceptable in the suite, so the test loads main.js with that ONE
-// constant lowered (and asserts the substitution matched, so a rename
-// fails loudly).  Everything else -- DOM, events, FileReader, the
-// attachment fixpoint, the latch -- is the real code under real timers.
+// acceptable in the suite, and racing a shortened real timer against the
+// host's scheduling is not deterministic, so the test loads main.js with
+// that ONE constant held (asserting the substitution matched, so a
+// rename fails loudly) and fires the deadline timer by hand.  Everything
+// else -- DOM, events, FileReader, the attachment fixpoint, the latch --
+// is the real code.
 
 'use strict';
 
 const assert = require('assert');
-const {sleep} = require('./simplify2_harness');
 const {
-  makeWedgedDecoderPage,
+  makeHeldDeadlinePage,
   paste,
   typeAndEnter,
   submits,
+  settle,
 } = require('./attachment_helpers');
-
-const SHORT_DEADLINE_MS = 300;
 
 function chipText(win) {
   return win.document.getElementById('file-chips').textContent;
 }
 
 async function main() {
-  const {win, posted, decodeCount} = makeWedgedDecoderPage(
-    SHORT_DEADLINE_MS,
+  const {win, posted, decodeCount, fireDeadline} = makeHeldDeadlinePage(
     'concaudit-f4-attach-deadline-main.js',
   );
   win._testApi.endLaunch();
@@ -55,14 +54,14 @@ async function main() {
     type: 'image/heic',
   });
   paste(win, heic);
-  await sleep(30);
+  await settle(() => decodeCount() === 1);
   assert.strictEqual(decodeCount(), 1, 'the HEIC reached the decoder');
   typeAndEnter(win, 'prompt with a photo that never decodes');
   assert.strictEqual(submits(posted).length, 0, 'the send is waiting');
 
-  // 2. Well before the deadline nothing has changed: the chip is still
+  // 2. Before the deadline nothing has changed: the chip is still
   //    pending and a second Enter is swallowed by the tab's latch.
-  await sleep(SHORT_DEADLINE_MS / 3);
+  await settle();
   typeAndEnter(win, 'prompt with a photo that never decodes');
   assert.strictEqual(submits(posted).length, 0, 'latched while pending');
   assert.match(chipText(win), /IMG_0001\.HEIC/, 'the pending chip shows');
@@ -71,7 +70,8 @@ async function main() {
   // 3. Past the deadline the stuck preparation is reported like a failed
   //    conversion.  The parked send is released but does NOT ship: a
   //    failed attachment still blocks the submit (policy unchanged).
-  await sleep(SHORT_DEADLINE_MS);
+  fireDeadline();
+  await settle(() => /could not be read/.test(chipText(win)));
   assert.match(
     chipText(win),
     /IMG_0001\.HEIC: it could not be read within \d+s/,
@@ -88,7 +88,7 @@ async function main() {
   //    the latch swallowed this Enter too (recoverable only by removing
   //    the chip by hand).
   typeAndEnter(win, 'plain prompt after the timeout');
-  await sleep(30);
+  await settle(() => submits(posted).length === 1);
   const sent = submits(posted);
   assert.strictEqual(sent.length, 1, 'the tab sends again after the timeout');
   assert.strictEqual(sent[0].prompt, 'plain prompt after the timeout');

@@ -100,7 +100,7 @@ class SlackSea(ChannelSea):
         return system_prompt + "\n\n" + SlackAgent.channel_system_prompt
 
 
-def _call_with_retry(fn: Any, what: str) -> Any:
+def _call_with_retry(fn: Any, what: str, *, backoff: float = 1.0) -> Any:
     """Call a Slack API function, retrying transient network errors.
 
     Retries up to 3 times on ``OSError`` (e.g. SSL handshake timeouts,
@@ -114,6 +114,8 @@ def _call_with_retry(fn: Any, what: str) -> Any:
         fn: Zero-argument callable performing the API request.
         what: Human-readable label for the warning log (e.g.
             ``"messages"`` or ``"thread replies"``).
+        backoff: Base of the sleep between attempts, in seconds; attempt
+            ``n`` sleeps ``backoff * 2**n``.
 
     Returns:
         The API response.
@@ -132,7 +134,7 @@ def _call_with_retry(fn: Any, what: str) -> Any:
                 logger.warning(
                     "Network error polling %s (attempt %d/3): %s", what, attempt + 1, e
                 )
-                time.sleep(2**attempt)
+                time.sleep(backoff * 2**attempt)
     raise last_err  # type: ignore[misc]
 
 
@@ -1136,12 +1138,12 @@ class SlackChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def upload_file(
-        self, third_party_agents: str, content: str, filename: str, title: str = "",
+        self, channels: str, content: str, filename: str, title: str = "",
     ) -> str:
         """Upload text content as a file to Slack channels.
 
         Args:
-            third_party_agents: Comma-separated channel IDs to share the file in.
+            channels: Comma-separated channel IDs to share the file in.
             content: Text content of the file.
             filename: Name for the file (e.g. "report.txt").
             title: Optional title for the file.
@@ -1151,7 +1153,7 @@ class SlackChannelBackend(ToolMethodBackend):
         """
         assert self._client is not None
         try:
-            channel_list = [c.strip() for c in third_party_agents.split(",") if c.strip()]
+            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
             resp = self._client.files_upload_v2(
                 channels=channel_list,
                 content=content,

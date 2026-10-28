@@ -78,7 +78,9 @@ async function testReloadSwallowedByOutageKeepsEdits() {
     content: 'v2 on disk',
     version: 'ver-2',
   });
-  await sleep(30);
+  // window.monaco is preinstalled, so the editor decision for the dirty
+  // tab lands on the next microtask: one turn is the exact wait.
+  await sleep(0);
   assert.strictEqual(
     created.length,
     1,

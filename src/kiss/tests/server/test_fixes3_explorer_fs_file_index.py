@@ -8,7 +8,7 @@
   must queue behind :func:`kiss.agents.sorcar.git_worktree.repo_lock`
   like every other main-tree mutation (auto-commit, the worktree merge
   transaction) instead of interleaving with them.
-* ``fs_actions._run_capped`` must enforce its timeout even when a
+* ``processes.run_capped`` (behind ``fs_actions``) must enforce its timeout even when a
   grandchild of the command inherited the stdout pipe: the whole
   process group is killed, and ``compare_files`` disables
   ``diff.external`` / ``GIT_EXTERNAL_DIFF`` so no such grandchild is
@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import repo_lock
+from kiss.core.processes import run_capped
 from kiss.server import fs_actions
 from kiss.server.explorer import git_action
 from kiss.server.file_index import FileIndexRegistry, _save_listings
@@ -131,12 +132,12 @@ class TestRunCappedKillsProcessGroup:
             f"sh -c 'sleep 2; touch \"{marker}\"' & sleep 30",
         ]
         start = time.monotonic()
-        out = fs_actions._run_capped(cmd, None, 1 << 20, 0.5)
+        out = run_capped(cmd, limit=1 << 20, timeout=0.5, keep_stderr=65536)
         elapsed = time.monotonic() - start
         time.sleep(3)
         assert out.timed_out is True
         assert elapsed < 2.0, (
-            f"_run_capped blocked for {elapsed:.1f}s past a 0.5s cap: the grandchild "
+            f"run_capped blocked for {elapsed:.1f}s past a 0.5s cap: the grandchild "
             "kept the stdout pipe open"
         )
         assert not marker.exists(), "the grandchild outlived the timeout"
@@ -147,11 +148,11 @@ class TestRunCappedKillsProcessGroup:
         marker = tmp_path / "orphan-survived"
         cmd = ["sh", "-c", f"sh -c 'sleep 2; touch \"{marker}\"' & exit 0"]
         start = time.monotonic()
-        out = fs_actions._run_capped(cmd, None, 1 << 20, 0.3)
+        out = run_capped(cmd, limit=1 << 20, timeout=0.3, keep_stderr=65536)
         elapsed = time.monotonic() - start
         time.sleep(3)
         assert out.timed_out is True
-        assert elapsed < 1.5, f"_run_capped waited {elapsed:.1f}s for an orphan to exit"
+        assert elapsed < 1.5, f"run_capped waited {elapsed:.1f}s for an orphan to exit"
         assert not marker.exists(), "the orphan outlived the timeout"
 
     @posix_only("the grandchild-spawning command is a /bin/sh script")
@@ -163,18 +164,18 @@ class TestRunCappedKillsProcessGroup:
             f"sh -c 'sleep 4; touch \"{marker}\"' >/dev/null & echo hi; exit 0",
         ]
         start = time.monotonic()
-        out = fs_actions._run_capped(cmd, None, 1 << 20, 30)
+        out = run_capped(cmd, limit=1 << 20, timeout=30, keep_stderr=65536)
         elapsed = time.monotonic() - start
         time.sleep(5)
         assert out.timed_out is False
         assert out.returncode == 0
         assert out.stdout == b"hi\n"
-        assert elapsed < 3.5, f"_run_capped waited {elapsed:.1f}s on a stray stderr holder"
+        assert elapsed < 3.5, f"run_capped waited {elapsed:.1f}s on a stray stderr holder"
         assert not marker.exists(), "the stray stderr holder was not reaped"
 
     def test_fast_command_is_not_stamped_timed_out(self) -> None:
         """A command that finishes within the cap reports ``timed_out=False``."""
-        out = fs_actions._run_capped(["git", "--version"], None, 1 << 20, 5.0)
+        out = run_capped(["git", "--version"], limit=1 << 20, timeout=5.0, keep_stderr=65536)
         assert out.timed_out is False
         assert out.returncode == 0
         assert out.stdout.startswith(b"git version")
@@ -188,11 +189,11 @@ class TestRunCappedKillsProcessGroup:
         """
         cmd = [sys.executable, "-c", "import os, time; os.close(1); time.sleep(10)"]
         start = time.monotonic()
-        out = fs_actions._run_capped(cmd, None, 1024, 0.3)
+        out = run_capped(cmd, limit=1024, timeout=0.3, keep_stderr=65536)
         elapsed = time.monotonic() - start
         assert out.timed_out is True
         assert out.returncode != 0
-        assert elapsed < 2.0, f"_run_capped returned after {elapsed:.1f}s on a 0.3s cap"
+        assert elapsed < 2.0, f"run_capped returned after {elapsed:.1f}s on a 0.3s cap"
 
     def test_exit_before_deadline_after_stdout_eof_is_not_a_timeout(self) -> None:
         """A process that closes stdout, then exits within the cap, is complete.
@@ -202,11 +203,11 @@ class TestRunCappedKillsProcessGroup:
         """
         cmd = [sys.executable, "-c", "import os, time; os.close(1); time.sleep(0.5)"]
         start = time.monotonic()
-        out = fs_actions._run_capped(cmd, None, 1024, 10.0)
+        out = run_capped(cmd, limit=1024, timeout=10.0, keep_stderr=65536)
         elapsed = time.monotonic() - start
         assert out.timed_out is False
         assert out.returncode == 0
-        assert 0.4 < elapsed < 5.0, f"_run_capped took {elapsed:.1f}s"
+        assert 0.4 < elapsed < 5.0, f"run_capped took {elapsed:.1f}s"
 
     @posix_only("the external diff stub is a /bin/sh script")
     def test_compare_files_ignores_a_slow_external_diff(

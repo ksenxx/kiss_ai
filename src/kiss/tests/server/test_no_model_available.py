@@ -60,28 +60,31 @@ class TestNoModelAvailableResultEvent(TestCase):
         broadcast a result event with the no-model error message."""
         from kiss.core import config as config_module
 
+        # Every credential ``_configured_providers`` consults, the Bedrock
+        # key pair and bearer token included: the autouse conftest fixture
+        # hides the ambient AWS chain, but the config object captured the
+        # exported variables at import time.
         keys = config_module.DEFAULT_CONFIG
-        saved = {
-            "ANTHROPIC_API_KEY": keys.ANTHROPIC_API_KEY,
-            "OPENAI_API_KEY": keys.OPENAI_API_KEY,
-            "GEMINI_API_KEY": keys.GEMINI_API_KEY,
-            "TOGETHER_API_KEY": keys.TOGETHER_API_KEY,
-            "OPENROUTER_API_KEY": keys.OPENROUTER_API_KEY,
-            "ZAI_API_KEY": getattr(keys, "ZAI_API_KEY", ""),
-            "MOONSHOT_API_KEY": getattr(keys, "MOONSHOT_API_KEY", ""),
-        }
+        credential_names = (
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "TOGETHER_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ZAI_API_KEY",
+            "MOONSHOT_API_KEY",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        )
+        saved = {name: getattr(keys, name) for name in credential_names}
         from kiss.core.models import codex_model as codex_module
 
         saved_path = os.environ.get("PATH", "")
         saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
         try:
-            keys.ANTHROPIC_API_KEY = ""
-            keys.OPENAI_API_KEY = ""
-            keys.GEMINI_API_KEY = ""
-            keys.TOGETHER_API_KEY = ""
-            keys.OPENROUTER_API_KEY = ""
-            keys.ZAI_API_KEY = ""
-            keys.MOONSHOT_API_KEY = ""
+            for name in credential_names:
+                setattr(keys, name, "")
             os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
 

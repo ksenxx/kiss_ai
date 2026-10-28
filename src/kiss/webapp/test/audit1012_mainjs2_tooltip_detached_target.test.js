@@ -19,13 +19,16 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-function makePage() {
-  return harness.makePage().win;
+// The 400 ms hover timer is recorded and fired by hand, never waited for.
+function prepare(win) {
+  win.hoverTimers = harness.recordTimers(win, 400);
 }
 
-const wait = harness.sleep;
+function makePage() {
+  return harness.makePage({beforeScripts: prepare}).win;
+}
 
-async function testRemovedTargetShowsNoTooltip() {
+function testRemovedTargetShowsNoTooltip() {
   const win = makePage();
   const row = win.document.createElement('div');
   row.className = 'sidebar-item';
@@ -34,7 +37,7 @@ async function testRemovedTargetShowsNoTooltip() {
   row.dispatchEvent(new win.MouseEvent('mouseover', {bubbles: true}));
   // The history re-render replaces the row before the 400 ms timer.
   row.remove();
-  await wait(500);
+  harness.fireTimers(win.hoverTimers);
   const tip = win.document.getElementById('custom-tooltip');
   assert.ok(
     !tip.classList.contains('visible'),
@@ -45,11 +48,11 @@ async function testRemovedTargetShowsNoTooltip() {
   console.log('  ok - a removed hover target shows no tooltip');
 }
 
-async function testConnectedTargetStillShowsItsTooltip() {
+function testConnectedTargetStillShowsItsTooltip() {
   const win = makePage();
   const btn = win.document.getElementById('new-chat-btn');
   btn.dispatchEvent(new win.MouseEvent('mouseover', {bubbles: true}));
-  await wait(500);
+  harness.fireTimers(win.hoverTimers);
   const tip = win.document.getElementById('custom-tooltip');
   assert.ok(tip.classList.contains('visible'), 'tooltip shown');
   assert.strictEqual(tip.textContent, btn.dataset.tooltip);
@@ -88,7 +91,8 @@ async function testOpenTooltipClosesWhenItsAnchorIsReRendered() {
   // The panel poll answers; renderCronJobs rebuilds every row.
   harness.send(win, {type: 'cronJobs', jobs: [cronJob]});
   assert.ok(!row.isConnected, 'the focused row was replaced');
-  await wait(0);
+  // The anchor watch is a MutationObserver: one turn for it to deliver.
+  await harness.sleep(0);
   assert.ok(
     !tip.classList.contains('visible'),
     'the tooltip closes with the row it described',
@@ -101,8 +105,8 @@ async function testOpenTooltipClosesWhenItsAnchorIsReRendered() {
 }
 
 async function runTests() {
-  await testRemovedTargetShowsNoTooltip();
-  await testConnectedTargetStillShowsItsTooltip();
+  testRemovedTargetShowsNoTooltip();
+  testConnectedTargetStillShowsItsTooltip();
   await testOpenTooltipClosesWhenItsAnchorIsReRendered();
 }
 

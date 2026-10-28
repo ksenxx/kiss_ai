@@ -12,11 +12,7 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {makePage, send} = require('./simplify2_harness');
-
-const MEDIA = path.join(__dirname, '..', 'media');
+const {makePage, send, loadMainCss} = require('./simplify2_harness');
 
 function testMachineNameLandsInTheStatusBar() {
   const {win} = makePage();
@@ -55,10 +51,7 @@ function testMachineNameSitsMidBarWithoutOverlapRisk() {
   // (huge flex-shrink, min-width 0) and ellipsizes.  A real-browser
   // geometry check lives in
   // src/kiss/tests/webapp/test_status_machine_layout.py.
-  const {win} = makePage();
-  const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  win.document.head.appendChild(style);
+  const {win} = makePage({beforeScripts: loadMainCss});
   const el = win.document.getElementById('status-machine');
   const cs = win.getComputedStyle(el);
   assert.strictEqual(cs.position, 'static', 'a flex item, not an overlay');

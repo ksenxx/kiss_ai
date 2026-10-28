@@ -89,9 +89,6 @@ class TestReadTricksData(_TricksHome):
                 "userCount": 3,
             },
         )
-        self.assertEqual(
-            tricks.read_tricks(), tricks.read_tricks_data()["tricks"]
-        )
 
     def test_seeded_file_counts_one(self) -> None:
         data = tricks.read_tricks_data()
@@ -170,7 +167,7 @@ class TestDeleteMyInjectionTrick(_TricksHome):
         # the panel lists (and sends back) the unescaped text.
         self.assertIsNone(tricks.append_my_injection_trick(r"Use C:\*.txt globs"))
         self.assertIn(r"Use C:\\*.txt globs", self.user_text())
-        self.assertIn(r"Use C:\*.txt globs", tricks.read_tricks())
+        self.assertIn(r"Use C:\*.txt globs", tricks.read_tricks_data()["tricks"])
         self.assertIsNone(tricks.delete_my_injection_trick(r"Use C:\*.txt globs"))
         self.assertEqual(self.user_text(), tricks.DEFAULT_MY_INJECTION)
 
@@ -182,7 +179,7 @@ class TestDeleteMyInjectionTrick(_TricksHome):
             b"## Trick\r\n\r\nFirst line\r\nSecond line\r\n\r\n## Trick\r\n\r\nKeep.\r\n"
         )
         self.assertEqual(
-            tricks.read_tricks()[:2], ["First line\nSecond line", "Keep."]
+            tricks.read_tricks_data()["tricks"][:2], ["First line\nSecond line", "Keep."]
         )
         self.assertIsNone(
             tricks.delete_my_injection_trick("First line\r\nSecond line\r\n")

@@ -86,7 +86,6 @@ def load_brand(path: Path = BRAND_FILE) -> dict[str, str]:
 
 BRAND = load_brand()
 PRODUCT_NAME = BRAND["product_name"]
-SHORT_NAME = BRAND["short_name"]
 HOME_DIR = BRAND["home_dir"]
 """Name of the state directory under ``$HOME`` (``~/.kiss`` for stock KISS)."""
 

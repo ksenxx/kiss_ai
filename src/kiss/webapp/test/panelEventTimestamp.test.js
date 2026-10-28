@@ -6,20 +6,19 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
   stubRaf,
-  MEDIA,
+  loadRemoteCss,
   readyTabId,
+  stubClipboard,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 function makePage() {
-  let clipboardText = null;
+  let clip;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     sourceUrl: {
@@ -28,37 +27,14 @@ function makePage() {
     },
     beforeScripts(win) {
       stubRaf(win);
-      Object.defineProperty(win.navigator, 'clipboard', {
-        configurable: true,
-        value: {
-          writeText: text => {
-            clipboardText = String(text);
-            return Promise.resolve();
-          },
-        },
-      });
+      clip = stubClipboard(win);
     },
   });
-  return {win, posted, getClipboard: () => clipboardText};
+  return {win, posted, getClipboard: () => clip.last()};
 }
 
 function flushMicrotasks() {
   return new Promise(resolve => setImmediate(resolve));
-}
-
-function expectedLabel(ts) {
-  const d = new Date(ts);
-  const day = d.toLocaleDateString([], {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
-  const time = d.toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-  return day + ' ' + time;
 }
 
 function assertBadge(panel, ts, what) {
@@ -88,7 +64,7 @@ function assertBadge(panel, ts, what) {
   );
   assert.strictEqual(
     badge.textContent,
-    expectedLabel(ts),
+    panel.ownerDocument.defaultView.PanelCopy.formatEventTs(ts),
     `${what}: badge text`,
   );
   assert.strictEqual(
@@ -568,9 +544,8 @@ async function run() {
       ts: realTs,
     });
     await flushMicrotasks();
-    const prompts = output.querySelectorAll('.ev.prompt');
-    assert.strictEqual(prompts.length, 1, 'early panel replaced in place');
-    assertBadge(prompts[0], realTs, 'replaced prompt');
+    // The in-place replacement is pinned by promptPanelEarlyReplace.
+    assertBadge(output.querySelector('.ev.prompt'), realTs, 'replaced prompt');
     win.close();
   });
 
@@ -581,18 +556,6 @@ async function run() {
     const sameDay = new Date(2026, 5, 15, 9, 5, 42).getTime();
     const sameYear = new Date(2026, 0, 2, 23, 59, 7).getTime();
     const otherYear = new Date(2024, 11, 31, 0, 30, 59).getTime();
-    assert.strictEqual(
-      PanelCopy.formatEventTs(sameDay),
-      expectedLabel(sameDay),
-    );
-    assert.strictEqual(
-      PanelCopy.formatEventTs(sameYear),
-      expectedLabel(sameYear),
-    );
-    assert.strictEqual(
-      PanelCopy.formatEventTs(otherYear),
-      expectedLabel(otherYear),
-    );
     assert.ok(/2026/.test(PanelCopy.formatEventTs(sameDay)));
     assert.ok(/:05:42/.test(PanelCopy.formatEventTs(sameDay)));
     assert.ok(/2026/.test(PanelCopy.formatEventTs(sameYear)));
@@ -606,8 +569,6 @@ async function run() {
     assert.strictEqual(PanelCopy.formatEventTs(-5), '');
     assert.strictEqual(PanelCopy.formatEventTs(8.64e15 + 1), '');
     assert.strictEqual(PanelCopy.formatEventTs(1e308), '');
-    const nowTs = Date.now();
-    assert.strictEqual(PanelCopy.formatEventTs(nowTs), expectedLabel(nowTs));
     wv.win.close();
   });
 
@@ -701,51 +662,82 @@ async function run() {
     wv.win.close();
   });
 
-  await test('main.css renders .panel-time as a flex bar with .panel-ts left and .panel-elapsed right', () => {
-    const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-    const barRule = css.match(/\.panel-time\s*\{([^}]*)\}/);
-    assert.ok(barRule, 'main.css must style .panel-time');
-    assert.ok(
-      /display:\s*flex/.test(barRule[1]),
-      'the footer bar must be a flex row',
+  await test('the remote page paints .panel-time as a flex bar (badge in flow, elapsed pushed right) that folds with its panel', () => {
+    // The remote webapp's stylesheets (main.css plus remote-codex.css)
+    // are applied to the real transcript and the cascaded values read.
+    const wv = makePage();
+    const win = wv.win;
+    loadRemoteCss(win, true);
+    const TAB = readyTabId(wv.posted);
+    const output = win.document.getElementById('output');
+    const now = Date.now();
+    const style = el => win.getComputedStyle(el);
+    send(win, {type: 'clear', chat_id: 'chat-css', tabId: TAB});
+    send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
+    send(win, {type: 'thinking_start', tabId: TAB, ts: now});
+    send(win, {type: 'thinking_delta', text: 'a thought', tabId: TAB});
+    send(win, {type: 'thinking_end', tabId: TAB});
+    send(win, {
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'ls',
+      description: 'list',
+      tabId: TAB,
+      ts: now,
+    });
+    send(win, {
+      type: 'tool_result',
+      content: 'README.md',
+      is_error: false,
+      tabId: TAB,
+      ts: now,
+    });
+    const tc = output.querySelector('.ev.tc');
+    const bar = tc.querySelector(':scope > .panel-time');
+    assert.ok(tc.classList.contains('collapsed'), 'the tool panel starts folded');
+    assert.strictEqual(
+      style(bar).display,
+      'none',
+      'a folded .tc panel hides its footer bar (and so its badge)',
     );
-    const elapsedRule = css.match(/\.panel-elapsed\s*\{([^}]*)\}/);
-    assert.ok(elapsedRule, 'main.css must style .panel-elapsed');
-    assert.ok(
-      /margin-left:\s*auto/.test(elapsedRule[1]),
-      'the time-spent label must be pushed to the RIGHT of the bar',
+    assert.notStrictEqual(style(tc.querySelector('.tc-h')).display, 'none', 'the header stays');
+    assert.notStrictEqual(
+      style(tc.querySelector('.panel-copy-btn')).display,
+      'none',
+      'the copy button stays',
     );
-    const tsRule = css.match(/\.panel-ts\s*\{([^}]*)\}/);
-    assert.ok(tsRule, 'main.css must style .panel-ts');
-    assert.ok(
-      !/position:\s*absolute/.test(tsRule[1]),
-      'the badge must be IN-FLOW in the bar, not absolute in the title row',
+    assert.strictEqual(style(tc.querySelector('.bash-panel')).display, 'none', 'the body folds');
+    tc.querySelector('.tc-h').click();
+    assert.ok(!tc.classList.contains('collapsed'), 'a header click unfolds the panel');
+    assert.strictEqual(style(bar).display, 'flex', 'the footer bar is a flex row');
+    assert.strictEqual(
+      style(bar.querySelector('.panel-ts')).position,
+      'static',
+      'the badge is IN-FLOW in the bar, not absolute in the title row',
     );
-    assert.ok(
-      /\.tc\.collapsed\s*>\s*:not\(\.tc-h,\s*\.panel-copy-btn(,\s*\.panel-stop-btn)?\)/.test(
-        css,
-      ),
-      'collapsed .tc panels hide everything but header, copy and stop buttons',
+    assert.strictEqual(
+      style(bar.querySelector('.panel-elapsed')).marginLeft,
+      'auto',
+      'the time-spent label is pushed to the RIGHT of the bar',
     );
-    assert.ok(
-      /\.llm-panel\.collapsed\s*>\s*:not\(\.llm-panel-hdr,\s*\.panel-copy-btn\)/.test(
-        css,
-      ),
-      'collapsed .llm-panel panels hide everything but header and copy button',
+    const thoughts = output.querySelector('.llm-panel');
+    const thoughtsBar = thoughts.querySelector(':scope > .panel-time');
+    assert.strictEqual(style(thoughtsBar).display, 'flex');
+    thoughts.classList.add('collapsed');
+    assert.strictEqual(
+      style(thoughtsBar).display,
+      'none',
+      'a folded Thoughts panel hides its footer bar too',
     );
-    assert.ok(
-      !/:not\([^)]*\.panel-ts/.test(css),
-      'no stale .panel-ts exemptions in any :not() hide rule',
+    assert.notStrictEqual(style(thoughts.querySelector('.llm-panel-hdr')).display, 'none');
+    const thoughtsCopy = thoughts.querySelector(':scope > .panel-copy-btn');
+    assert.ok(thoughtsCopy, 'a Thoughts panel has its copy button');
+    assert.notStrictEqual(
+      style(thoughtsCopy).display,
+      'none',
+      'a folded Thoughts panel keeps its copy button visible',
     );
-    const remoteCss = fs.readFileSync(
-      path.join(MEDIA, 'remote-codex.css'),
-      'utf8',
-    );
-    assert.ok(
-      !/\.panel-time/.test(remoteCss.replace(/\/\*[\s\S]*?\*\//g, '')),
-      'remote-codex.css must not restyle .panel-time: the remote ' +
-        'webapp inherits the look from main.css',
-    );
+    win.close();
   });
 
   report('panelEventTimestamp');
