@@ -35,21 +35,29 @@ const {
   stubRaf,
   fakeMatchMedia,
   loadMainCss,
+  stubClipboard,
+  fakeIntervals,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
+const {freezeClock} = require('./history_helpers');
+
+// The page's clock, frozen so "in 5m" / "23m ago" labels and the day
+// keys of the spend grid do not depend on when the suite runs.
+const NOW = Date.UTC(2026, 0, 15, 20, 0, 0);
 
 const {test, report} = makeRunner();
 
 /**
- * Boot a chat page with the given body attributes.  setInterval is
- * recorded (not run) so a test can fire the poll by hand.  `desktop`
+ * Boot a chat page with the given body attributes, its clock frozen at
+ * NOW.  setInterval is recorded (not run; `intervals` lists the live
+ * ones as {cb, ms}) so a test can fire the poll by hand.  `desktop`
  * (default true) is the (min-width: 900px) media query: false boots
  * the phone layout, where the task-info panel is a drawer.
  */
 function makePage(opts) {
   const {desktop = true} = opts || {};
-  const intervals = [];
+  let intervals;
   // jsdom has no ResizeObserver: record the observers so a test can
   // fire a resize by hand.
   const observers = [];
@@ -59,11 +67,8 @@ function makePage(opts) {
     sourceUrl: 'sidebarpanels-main.js',
     beforeScripts(win) {
       stubRaf(win);
-      win.setInterval = function (fn, ms) {
-        intervals.push({fn, ms});
-        return intervals.length;
-      };
-      win.clearInterval = function () {};
+      freezeClock(win, NOW);
+      intervals = fakeIntervals(win).intervals;
       win.ResizeObserver = class {
         constructor(fn) {
           this.fn = fn;
@@ -92,9 +97,9 @@ function types(posted) {
   return posted.map(m => m.type);
 }
 
-/** Epoch ms *offsetMinutes* from now, like the daemon's rows. */
+/** Epoch ms *offsetMinutes* from the page's NOW, like the daemon's rows. */
 function iso(offsetMinutes) {
-  return Date.now() + offsetMinutes * 60000;
+  return NOW + offsetMinutes * 60000;
 }
 
 // The Schedule subpanel's Pacific-time rendering of a run time.
@@ -196,9 +201,9 @@ const FIVE_TASKS = [
   'Document the sidebar panels in README.md',
 ];
 
-/** "YYYY-MM-DD" of the local day *daysAgo* days before today. */
+/** "YYYY-MM-DD" of the local day *daysAgo* days before the page's today. */
 function dayKey(daysAgo) {
-  const now = new Date();
+  const now = new Date(NOW);
   const d = new Date(
     now.getFullYear(),
     now.getMonth(),
@@ -311,14 +316,14 @@ async function main() {
     send(win, {type: 'cronJobs', jobs: []});
     assert.strictEqual(polls().length, 1, 'one poll timer, started once');
     posted.length = 0;
-    polls()[0].fn();
+    polls()[0].cb();
     eq(types(posted), PANEL_COMMANDS);
     Object.defineProperty(win.document, 'hidden', {
       value: true,
       configurable: true,
     });
     posted.length = 0;
-    polls()[0].fn();
+    polls()[0].cb();
     eq(posted, [], 'a hidden page does not poll');
   });
 
@@ -727,6 +732,29 @@ async function main() {
     assert.strictEqual(list.querySelectorAll('form').length, 0);
   });
 
+  await test('Schedule rows: an editor whose job is gone closes instead of reopening on a later job of the same id', () => {
+    const {win} = makePage();
+    const jobs = [
+      job({id: 'a', name: 'Digest', schedule: '0 9 * * *', what: 'summarize'}),
+      job({id: 'b', name: 'Backup', kind: 'command', what: 'rsync'}),
+    ];
+    send(win, {type: 'cronJobs', jobs});
+    const list = el(win, 'meta-schedule-list');
+    list.children[0].querySelector('[aria-label="Edit the job"]').click();
+    assert.ok(list.children[0].querySelector('form'), 'the editor is open');
+    // An errored reply lists nothing and says nothing about the job:
+    // the editor survives it and is back with the next poll.
+    send(win, {type: 'cronJobs', jobs: [], action: 'delete', error: 'refused'});
+    send(win, {type: 'cronJobs', jobs});
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    // The job was deleted elsewhere: the next list drops the editor,
+    // and a job scheduled later under the same id does not reopen it.
+    send(win, {type: 'cronJobs', jobs: [jobs[1]]});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    send(win, {type: 'cronJobs', jobs});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+  });
+
   await test('Schedule: the header + opens an in-place form that schedules a job', () => {
     const {win, posted} = makePage();
     const jobs = [
@@ -925,16 +953,7 @@ async function main() {
 
   await test('each Schedule row copies its exact task and shows it in the tooltip', async () => {
     const {win} = makePage();
-    const writes = [];
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        writeText(text) {
-          writes.push(String(text));
-          return Promise.resolve();
-        },
-      },
-    });
+    const {writes} = stubClipboard(win);
     // A prompt with newlines, quotes and a shell-looking line: the
     // clipboard and the tooltip get it verbatim, never a summary.
     const prompt =
@@ -1090,11 +1109,7 @@ async function main() {
 
   await test('Machines: rows show the status, the name, a local badge, the tooltip and the buttons', async () => {
     const {win, posted} = makePage();
-    const copied = [];
-    Object.defineProperty(win.navigator, 'clipboard', {
-      value: {writeText: t => (copied.push(t), Promise.resolve())},
-      configurable: true,
-    });
+    const {writes: copied} = stubClipboard(win);
     send(win, {type: 'machines', machines: 'bogus', checkedAt: 0});
     assert.strictEqual(
       el(win, 'meta-machines-status').textContent,
@@ -1587,14 +1602,6 @@ async function main() {
     );
   });
 
-  await test('a daemon (re)connect requests the five subpanels again', () => {
-    const {win, posted} = makePage();
-    posted.length = 0;
-    send(win, {type: 'daemonStatus', connected: true});
-    for (const cmd of PANEL_COMMANDS)
-      assert.ok(types(posted).includes(cmd), cmd);
-  });
-
   await test('the subpanels are requested once per connection: a repeated connected status asks nothing more', () => {
     // Review 2026-10-18: a password-protected transport announces
     // `daemonStatus connected` on `auth_required` (to reveal the page)
@@ -1973,7 +1980,7 @@ async function main() {
     send(win, {type: 'cronJobs', jobs: []});
     const poll = intervals.find(i => i.ms === 30000);
     posted.length = 0;
-    poll.fn();
+    poll.cb();
     eq(
       posted.filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus', refresh: true}],
@@ -1983,7 +1990,7 @@ async function main() {
     );
     send(win, {type: 'appsStatus', apps: connected, checkedAt: 1});
     posted.length = 0;
-    poll.fn();
+    poll.cb();
     eq(
       posted.filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus'}],
@@ -1995,7 +2002,7 @@ async function main() {
     const realNow = win.Date.now;
     win.Date.now = () => realNow() + 31 * 60000;
     posted.length = 0;
-    poll.fn();
+    poll.cb();
     win.Date.now = realNow;
     eq(
       posted.filter(m => m.type === 'getAppsStatus'),
@@ -2019,7 +2026,7 @@ async function main() {
     });
     assert.match(status(), /^No recommendations yet/);
 
-    const generatedAt = Date.now() - 23 * 60000;
+    const generatedAt = iso(-23);
     send(win, {
       type: 'recommendations',
       generatedAt,
@@ -2057,7 +2064,7 @@ async function main() {
     el(win, 'meta-panel').classList.add('open');
     send(win, {
       type: 'recommendations',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
     const chatTabs = () =>
@@ -2116,11 +2123,20 @@ async function main() {
     send(win, {
       type: 'tabs_state',
       tabs: [
-        {tabId: 'gpu1', chatId: 'chat-gpu1', title: 'gpu', workDir: '/gpu/ws'},
+        {tabId: 'gpu1', chatId: 'chat-gpu1', title: 'gpu', workDir: '/local/gpu'},
         {tabId: 'home1', chatId: 'chat-home1', title: 'home', workDir: '/ws'},
       ],
     });
     send(win, {type: 'tabMachine', tabId: 'gpu1', machine: 'gpu-box'});
+    // The check is forwarded to the machine, so it names the MACHINE's
+    // working directory, never the tab's directory on this daemon.
+    send(win, {
+      type: 'machineWorkDirs',
+      machine: 'gpu-box',
+      workDir: '/gpu/ws',
+      recentWorkDirs: [],
+      error: '',
+    });
     posted.length = 0;
     send(win, {type: 'prompt', text: 'see src/train.py please', tabId: 'gpu1'});
     send(win, {type: 'text_end', tabId: 'gpu1'});
@@ -2178,7 +2194,7 @@ async function main() {
     send(win, {type: 'spendReport', ...spendReport()});
     send(win, {
       type: 'recommendations',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
     const pick = value => {
@@ -2284,7 +2300,7 @@ async function main() {
     assert.strictEqual(appRows(win).length, 2);
     send(win, {
       type: 'recommendations',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
     assert.strictEqual(recommendationRows(win).length, 0);
@@ -2292,7 +2308,7 @@ async function main() {
       type: 'recommendations',
       forwarded: true,
       machine: 'gpu-box',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS.slice(0, 1),
     });
     assert.strictEqual(recommendationRows(win).length, 1);
@@ -2350,7 +2366,7 @@ async function main() {
       {type: 'getRecommendations', machine: 'gpu-box'},
     ]);
     from = posted.length;
-    intervals[0].fn();
+    intervals[0].cb();
     assert.ok(
       panelRequests(posted, from).every(
         m => m.type === 'getMachines' || m.machine === 'gpu-box',
@@ -2452,7 +2468,7 @@ async function main() {
       type: 'recommendations',
       forwarded: true,
       machine: 'gpu-box',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
     assert.ok(
@@ -2475,7 +2491,7 @@ async function main() {
       type: 'recommendations',
       forwarded: true,
       machine: 'gpu-box',
-      generatedAt: Date.now(),
+      generatedAt: NOW,
       tasks: FIVE_TASKS,
     });
     const firstTab = win._testApi.getActiveTabId();
@@ -2776,7 +2792,7 @@ async function main() {
     // The connect chat (on gpu-box) is shown: its polls re-probe gpu-box.
     const connectTab = win._testApi.getActiveTabId();
     let from = posted.length;
-    poll.fn();
+    poll.cb();
     eq(
       posted.slice(from).filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus', refresh: true, machine: 'gpu-box'}],
@@ -2791,14 +2807,14 @@ async function main() {
     );
     send(win, {type: 'appsStatus', apps: connected, checkedAt: 3});
     from = posted.length;
-    poll.fn();
+    poll.cb();
     eq(
       posted.slice(from).filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus'}],
     );
     win._testApi.switchToTab(connectTab);
     from = posted.length;
-    poll.fn();
+    poll.cb();
     eq(
       posted.slice(from).filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus', refresh: true, machine: 'gpu-box'}],
@@ -2812,7 +2828,7 @@ async function main() {
       checkedAt: 4,
     });
     from = posted.length;
-    poll.fn();
+    poll.cb();
     eq(
       posted.slice(from).filter(m => m.type === 'getAppsStatus'),
       [{type: 'getAppsStatus', machine: 'gpu-box'}],
@@ -2878,7 +2894,7 @@ async function main() {
       'the report survives',
     );
     const from = posted.length;
-    poll.fn();
+    poll.cb();
     const asked = panelRequests(posted, from).find(
       m => m.type === 'getCronJobs',
     );

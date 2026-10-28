@@ -40,6 +40,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -168,13 +169,13 @@ def _setup_worktree_agent(tmp: Path, branch_slug: str) -> tuple[
     _git_config_user(wt_dir)
 
     agent = ChatSorcarAgent("test")
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch=branch,
         original_branch="main",
         wt_dir=wt_dir,
         baseline_commit=None,
-    )
+    ))
     agent._tab_id = "tab-xyz"
     return agent, repo, wt_dir
 

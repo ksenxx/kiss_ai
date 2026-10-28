@@ -22,7 +22,12 @@ const {
   sendEmptyWorkDir,
   lastMsg,
 } = require('./simplify2_harness');
-const {gatewaySession, historyRows} = require('./history_helpers');
+const {
+  gatewaySession,
+  historyRows,
+  openChatsPanel: openSidebar,
+  answerHistory: sendHistory,
+} = require('./history_helpers');
 
 function makePage() {
   // The app docks the sidebar permanently on wide screens, where
@@ -65,27 +70,6 @@ function sidebarOpen(win) {
 
 function countMessages(posted, type) {
   return posted.filter(msg => msg && msg.type === type).length;
-}
-
-function openSidebar(win) {
-  const btn = win.document.getElementById('menu-btn');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(sidebarOpen(win), 'burger click must open the history sidebar');
-}
-
-// renderHistory drops replies whose generation is stale, and opening the
-// sidebar bumps it, so always answer the generation the page last asked
-// for.  (history_helpers.sendHistory sends `generation: undefined` when
-// nothing was requested, which main.js drops silently; this one fails.)
-function sendHistory(win, posted, sessions) {
-  const req = lastMsg(posted, 'getHistory');
-  assert.ok(req, 'the open sidebar must have requested history');
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req.generation,
-    sessions,
-  });
 }
 
 function clickOnlyRow(win) {

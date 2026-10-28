@@ -19,15 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.machine import machine_sea as sea
 from kiss.agents.seas.machine.machine_sea import MachineSea
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -36,12 +34,8 @@ from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_b
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 
-
-@pytest.fixture(autouse=True)
-def _empty_registry() -> Iterator[None]:
-    mach.save_machines([])
-    yield
-    mach.save_machines([])
+# Every test starts with no registered machine (conftest ``empty_machines``).
+pytestmark = pytest.mark.usefixtures("empty_machines")
 
 
 @pytest.fixture(scope="module")
@@ -70,26 +64,14 @@ def sshd(remote: RemoteDaemon, tmp_path_factory: pytest.TempPathFactory) -> Iter
 def test_sea_methods_follow_the_contract() -> None:
     """A worker with no built-in tools, the three registry tools, a $1 budget."""
     agent = MachineSea()
-    assert isinstance(agent, WorkerSea)
+    assert_worker_contract(
+        sea, agent, {"tool_profile": "none", "locked": ["tool_profile"], "max_budget": 1.0}
+    )
     assert agent.system_prompt("ASSEMBLED") == sea.SYSTEM_PROMPT
     assert agent.tools([]) == [sea.machine_add, sea.machine_remove, sea.machine_list]
     assert agent.tools([print]) == [print, sea.machine_add, sea.machine_remove, sea.machine_list]
-    assert agent.settings({}) == {
-        "tool_profile": "none", "locked": ["tool_profile"], "max_budget": 1.0,
-    }
-    assert sea_commands.base_settings([agent]) == resolve_settings(
-        {**WORKER_DEFAULTS, **agent.settings({})}
-    ) == {
-        "tool_profile": "none",
-        "locked": ["tool_profile"],
-        "max_budget": 1.0,
-        "use_web_tools": False,
-        "use_memory": False,
-        "auto_classify": False,
-    }
     assert "/machine add user@host" in agent.description()
     assert "/machine add <name> <https://host:port> <password>" in agent.description()
-    assert_no_removed_getters(sea)
 
 
 def test_tools_add_list_and_remove_against_a_real_daemon(remote: RemoteDaemon) -> None:
@@ -108,7 +90,6 @@ def test_tools_add_list_and_remove_against_a_real_daemon(remote: RemoteDaemon) -
     assert mach.load_machines() == []
 
 
-@pytest.mark.skipif(not SSHD, reason="no sshd on this host")
 def test_tools_add_an_ssh_machine_without_a_password(
     remote: RemoteDaemon, sshd: SshServer,
 ) -> None:
@@ -156,7 +137,6 @@ def test_agent_lists_the_machines_and_finishes_with_the_text(
     assert results[0].startswith(f"box  {remote.url}  reachable\n")
 
 
-@pytest.mark.skipif(not SSHD, reason="no sshd on this host")
 def test_agent_adds_an_ssh_machine_from_the_short_request(
     remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
 ) -> None:

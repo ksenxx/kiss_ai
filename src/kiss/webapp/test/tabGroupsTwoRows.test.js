@@ -20,18 +20,15 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
   click,
   clickTab,
-  MEDIA,
 } = require('./simplify2_harness');
 
-function makePage() {
-  return makeChatPage({bodyClass: 'remote-chat'});
+function makePage(extraScripts) {
+  return makeChatPage({bodyClass: 'remote-chat', extraScripts});
 }
 
 function entry(tabId, title) {
@@ -62,13 +59,6 @@ function stripShown(win) {
 function stripEl(win, tabId) {
   return win.document.querySelector(
     `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
-  );
-}
-
-function pressKey(win, el, key) {
-  el.focus();
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key, bubbles: true, cancelable: true}),
   );
 }
 
@@ -354,49 +344,11 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
   );
 }
 
-function testArrowKeysMoveAlongTheStrip() {
-  const {win} = makePage();
-  send(win, {type: 'tabs_state', tabs: [entry('a'), entry('b'), entry('c')]});
-  spawnSubagent(win, 'a', 'a-sub-1');
-  spawnSubagent(win, 'a', 'a-sub-2');
-  // a -> a-sub-1 -> a-sub-2 -> a, End/Home; the other chats are not on
-  // the strip, so the keys never reach them.
-  pressKey(win, stripEl(win, 'a'), 'ArrowRight');
-  assert.strictEqual(
-    win.document.activeElement,
-    stripEl(win, 'a-sub-1'),
-    'ArrowRight along the strip',
-  );
-  pressKey(win, win.document.activeElement, 'End');
-  assert.strictEqual(win.document.activeElement, stripEl(win, 'a-sub-2'));
-  pressKey(win, win.document.activeElement, 'ArrowRight');
-  assert.strictEqual(
-    win.document.activeElement,
-    stripEl(win, 'a'),
-    'the strip wraps around',
-  );
-  pressKey(win, win.document.activeElement, 'ArrowLeft');
-  assert.strictEqual(win.document.activeElement, stripEl(win, 'a-sub-2'));
-  pressKey(win, win.document.activeElement, 'Home');
-  assert.strictEqual(win.document.activeElement, stripEl(win, 'a'));
-  // Roving tabindex.
-  assert.strictEqual(stripEl(win, 'a').getAttribute('tabindex'), '0');
-  assert.strictEqual(stripEl(win, 'a-sub-1').getAttribute('tabindex'), '-1');
-  pressKey(win, stripEl(win, 'a-sub-1'), 'Enter');
-  assert.strictEqual(
-    stripActive(win),
-    'a-sub-1',
-    'Enter activates a strip entry',
-  );
-  assert.strictEqual(stripEl(win, 'a-sub-1').getAttribute('tabindex'), '0');
-  // Let queued DOM observers finish before destroying their document.
-  queueMicrotask(win.close.bind(win));
-  console.log('  ok - arrow keys move along the strip');
-}
+// Keyboard navigation along the strip (arrows, Home/End, the roving
+// tabindex, Enter) is pinned by tabBarAccessibility.test.js.
 
 function testBrowserTabIsListedButOpensInTheBackground() {
-  const {win} = makePage();
-  win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
+  const {win} = makePage(['browserTab.js']);
   send(win, {type: 'tabs_state', tabs: [entry('a')]});
   spawnSubagent(win, 'a', 'a-sub-1');
   send(win, {
@@ -431,7 +383,6 @@ function main() {
   testPendingQuestionFlagsTheSubagentEntry();
   testFinishedSubagentsFileMovesUpToTheChat();
   testClosingAChatClosesItsSubagentsAndKeepsItsFiles();
-  testArrowKeysMoveAlongTheStrip();
   testBrowserTabIsListedButOpensInTheBackground();
   console.log('tabGroupsTwoRows.test.js: all tests passed');
 }

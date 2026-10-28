@@ -118,12 +118,16 @@ function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   send(win, {type: 'status', running: false, tabId: 'bg-tab'});
 
+  // A sub-agent's own task_done is not the user's task finishing: the
+  // page stays on the parent (its tab is about to be closed by
+  // subagentDone), and the user visits the finished tab themselves.
   const activeEl = win.document.querySelector('#tab-list .chat-tab.active');
   assert.strictEqual(
     activeEl && activeEl.getAttribute('data-tab-id'),
-    'bg-tab',
-    'task_done in a local background tab must auto-focus that tab',
+    activeId,
+    'task_done in a sub-agent tab must not pull the page onto it',
   );
+  clickTab(win, 'bg-tab');
   assert.strictEqual(
     statusOf(win),
     'Done (3m 21s)',
@@ -135,13 +139,13 @@ function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   assert.strictEqual(
     statusOf(win),
     'Running 3s',
-    "the original tab's running timer must survive the auto-switch",
+    "the original tab's running timer must survive the switch",
   );
   tick(1000);
   assert.strictEqual(
     statusOf(win),
     'Running 4s',
-    "the original tab's timer must keep counting after the auto-switch",
+    "the original tab's timer must keep counting after the switch",
   );
   clickTab(win, 'bg-tab');
   assert.strictEqual(
@@ -151,7 +155,7 @@ function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   );
   win.close();
   console.log(
-    '  ok - background task_done auto-focuses its tab and shows duration',
+    '  ok - a background task_done shows its duration once the tab is visited',
   );
 }
 
@@ -219,43 +223,12 @@ function testBackgroundReplayWithExtraTimestamps() {
   console.log('  ok - background replay with extra timestamps shows Done(…)');
 }
 
-function testRunningTabKeepsAnchorAcrossSwitches() {
-  const {win, activeId, clock, tick} = makePage();
-
-  send(win, {
-    type: 'status',
-    running: true,
-    tabId: activeId,
-    startTs: clock.now - 125_000,
-  });
-  assert.strictEqual(statusOf(win), 'Running 2m 5s');
-
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: 'sub-y',
-    parent_tab_id: activeId,
-    description: 'detour',
-  });
-  clickTab(win, 'sub-y');
-  clickTab(win, activeId);
-  tick(1000);
-  assert.strictEqual(
-    statusOf(win),
-    'Running 2m 6s',
-    'a running tab must stay anchored to its own startTs across ' +
-      'tab switches and keep counting',
-  );
-  win.close();
-  console.log('  ok - running tab keeps its anchor across tab switches');
-}
-
 try {
   testForeignNewerRunDoesNotClobberActiveTimer();
   testBackgroundTaskDoneShowsDurationAfterSwitch();
   testDoneLabelSurvivesTabSwitches();
   testBackgroundReplayWithExtraTimestamps();
-  testRunningTabKeepsAnchorAcrossSwitches();
-  console.log('\n5 passed, 0 failed');
+  console.log('\n4 passed, 0 failed');
 } catch (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
   process.exit(1);

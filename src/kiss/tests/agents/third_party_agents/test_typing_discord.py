@@ -90,12 +90,8 @@ def test_send_typing_swallows_http_500(
     assert req["path"] == "/channels/ERR/typing"
 
 
-def test_send_typing_swallows_unreachable_server(
-    server: RecordingServer, refusing_port: int
-) -> None:
+def test_send_typing_swallows_unreachable_server(refusing_port: int) -> None:
     """An unreachable server (connection refused) must never raise."""
-    server.requests.clear()
     backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
     backend._token = "test-token"
     backend.send_typing("111")
-    assert server.requests == []

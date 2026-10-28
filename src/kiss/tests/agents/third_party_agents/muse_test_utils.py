@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import struct
+import sys
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from types import CodeType
+from typing import Any, cast
 
 import pytest
 
@@ -130,6 +134,34 @@ def _daemon_pid() -> int | None:
         creds = sock.getsockopt(socket.SOL_SOCKET, peercred, struct.calcsize("3i"))
     pid: int = struct.unpack("3i", creds)[0]
     return pid
+
+
+def muse_daemons_of(home: Path | str) -> set[int]:
+    """Return the pids of every ``muse_auth.daemon`` process whose ``KISS_HOME`` is *home*.
+
+    Args:
+        home: The ``KISS_HOME`` value that identifies a test's daemons.
+
+    Returns:
+        The matching pids, from ``/proc``; always empty where there is no ``/proc``.
+    """
+    wanted = f"KISS_HOME={home}".encode()
+    pids: set[int] = set()
+    if not Path("/proc").is_dir():
+        return pids
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            cmdline = Path(f"/proc/{entry}/cmdline").read_bytes()
+            if b"muse_auth.daemon" not in cmdline:
+                continue
+            environ = Path(f"/proc/{entry}/environ").read_bytes()
+        except OSError:
+            continue
+        if wanted in environ.split(b"\0"):
+            pids.add(int(entry))
+    return pids
 
 
 def _process_running(pid: int) -> bool:
@@ -276,3 +308,43 @@ def set_policy(service: str, **fields: Any) -> None:
     policy = json.loads(policy_path.read_text())
     policy["services"].setdefault(service, {}).update(fields)
     policy_path.write_text(json.dumps(policy))
+
+
+class _SleepRecorder:
+    """``sys.monitoring`` CALL callback noting the calling thread's ``time.sleep`` requests."""
+
+    def __init__(self) -> None:
+        self.thread = threading.get_ident()
+        self.requested: list[float] = []
+
+    def __call__(self, code: CodeType, offset: int, callable_: object, arg0: object) -> None:
+        """Record ``arg0`` when the recorded thread calls ``time.sleep``."""
+        if callable_ is time.sleep and threading.get_ident() == self.thread:
+            self.requested.append(float(cast(float, arg0)))
+
+
+@contextlib.contextmanager
+def recorded_sleeps() -> Iterator[list[float]]:
+    """Record every duration the calling thread asks ``time.sleep`` for.
+
+    The real ``time.sleep`` still runs: the interpreter's ``sys.monitoring``
+    CALL event reports each call and its first argument, so nothing is
+    replaced.  A test pins the delays a retry or poll loop *requests* (its
+    backoff schedule, its deadline arithmetic) instead of bounding
+    wall-clock time, which a loaded machine stretches past any ceiling.
+
+    Yields:
+        The list of requested durations, appended to as the calls happen.
+    """
+    monitoring = sys.monitoring
+    tool = next(i for i in range(6) if monitoring.get_tool(i) is None)
+    recorder = _SleepRecorder()
+    monitoring.use_tool_id(tool, "kiss-sleep-recorder")
+    monitoring.register_callback(tool, monitoring.events.CALL, recorder)
+    monitoring.set_events(tool, monitoring.events.CALL)
+    try:
+        yield recorder.requested
+    finally:
+        monitoring.set_events(tool, 0)
+        monitoring.register_callback(tool, monitoring.events.CALL, None)
+        monitoring.free_tool_id(tool)

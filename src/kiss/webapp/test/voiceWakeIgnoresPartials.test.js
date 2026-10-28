@@ -27,19 +27,26 @@
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
-  makeVoicePage,
+  makeVoicePage: makeHelperPage,
   micBtn,
   startPipeline,
   feed,
   lastProcessor,
+  lastRecognizer,
   fireWake,
-  fireTimer,
 } = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
 
-function lastRecognizer(page) {
-  return page.state.recognizers[page.state.recognizers.length - 1];
+// Every page built; closed after the run so the pipeline's armed safety
+// timers (45 s wake flash, 60 s transcribing flash) do not keep node
+// alive and a failed assertion cannot hang the suite.
+const windows = [];
+
+function makeVoicePage() {
+  const page = makeHelperPage();
+  windows.push(page.win);
+  return page;
 }
 
 function triggered(page) {
@@ -105,8 +112,6 @@ async function main() {
       1,
       'the woken round must post its audio',
     );
-    // Retire the posted round's 60 s safety timer so the suite exits.
-    fireTimer(page, 60000);
   });
 
   await test('an empty final result after the wake is harmless', async () => {
@@ -121,10 +126,9 @@ async function main() {
     fireWake(page);
     rec.handlers.result({result: {text: ''}});
     assert.ok(triggered(page), 'the capture in progress is kept');
-    // Retire the wake's 45 s green-flash timer so the suite exits.
-    fireTimer(page, 45000);
   });
 
+  windows.forEach(win => win.close());
   report('voiceWakeIgnoresPartials');
 }
 

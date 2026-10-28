@@ -66,7 +66,7 @@ print(f"Best agent: {best_variant.folder_path}")
 print(f"Metrics: {best_variant.metrics}")
 ```
 
-`evolve()` builds variants in a temporary directory that is deleted when it returns, so `best_variant.folder_path` no longer exists afterwards. A copy survives in `evolver.optimal_dir` (`<artifact_dir>/optimal_agent`, with `artifact_dir` from `kiss.core.config`): during initialization each newly evaluated initial variant is copied there as it is evaluated (whether or not the frontier accepted it), and after each later generation that successfully creates a variant the current best variant is copied there; a generation whose mutation or crossover fails copies nothing. Call `evolver.save_state(path)` if you need the frontier metadata as well.
+`evolve()` builds variants in a temporary directory that is deleted when it returns, so `best_variant.folder_path` no longer exists afterwards. A copy survives in `evolver.optimal_dir` (`<artifact_dir>/optimal_agent`, with `<artifact_dir>` the process's artifact directory returned by `kiss.core.config.get_artifact_dir()`, chosen once per process): during initialization each newly evaluated initial variant is copied there as it is evaluated (whether or not the frontier accepted it), and after each later generation that successfully creates a variant the current best variant is copied there; a generation whose mutation or crossover fails copies nothing. Call `evolver.save_state(path)` if you need the frontier metadata as well.
 
 ## Components
 

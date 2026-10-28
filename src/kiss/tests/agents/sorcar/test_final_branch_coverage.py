@@ -79,4 +79,6 @@ class TestAppendChatEventNoTask:
 
     def test_append_event_no_matching_task(self) -> None:
         """_append_chat_event returns early when task doesn't exist."""
-        th._append_chat_event({"type": "test"}, task="nonexistent-task-xyz")
+        th._append_chat_event(
+            {"type": "test"}, task_id="0123456789abcdef0123456789abcdef",
+        )

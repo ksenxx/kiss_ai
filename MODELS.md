@@ -1,33 +1,33 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **933 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **946 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 111 |
+| OpenAI | 116 |
 | Anthropic | 76 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
 | Gemini | 22 |
 | Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 430 |
+| OpenRouter | 437 |
 | Claude Code CLI (`cc/*`) | 17 |
-| Codex CLI (`codex/*`) | 10 |
+| Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **895** generation-capable models
-- **738** function-calling-capable models
+- **905** generation-capable models
+- **749** function-calling-capable models
 - **7** embedding models
-- **24** decision models
+- **27** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (111)</strong></summary>
+<summary><strong>OpenAI (116)</strong></summary>
 
 - `gpt-3.5-turbo`
 - `gpt-3.5-turbo-0125`
@@ -118,6 +118,11 @@ Full model list:
 - `gpt-6.1-sol-low`
 - `gpt-6.1-sol-medium`
 - `gpt-6.1-sol-xhigh`
+- `gpt-6.1-terra`
+- `gpt-6.1-terra-high`
+- `gpt-6.1-terra-low`
+- `gpt-6.1-terra-medium`
+- `gpt-6.1-terra-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -545,7 +550,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (430)</strong></summary>
+<summary><strong>OpenRouter (437)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -575,7 +580,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/anthropic/claude-sonnet-5.5`
-- `openrouter/arcee-ai/trinity-large-thinking`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -638,7 +642,6 @@ Full model list:
 - `openrouter/google/lyria-3-clip-preview`
 - `openrouter/google/lyria-3-pro-preview`
 - `openrouter/gryphe/mythomax-l2-13b`
-- `openrouter/ibm-granite/granite-4.0-h-micro`
 - `openrouter/ibm-granite/granite-4.2-8b`
 - `openrouter/inception/mercury-2`
 - `openrouter/inception/mercury-2.5`
@@ -652,6 +655,7 @@ Full model list:
 - `openrouter/jaredpalmer/kev-4b`
 - `openrouter/liquid/d1`
 - `openrouter/liquid/d1-ultra`
+- `openrouter/liquid/d1.1`
 - `openrouter/liquid/lfm-2.5-24b-a2b`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
@@ -787,6 +791,11 @@ Full model list:
 - `openrouter/openai/gpt-6.1-sol-low`
 - `openrouter/openai/gpt-6.1-sol-medium`
 - `openrouter/openai/gpt-6.1-sol-xhigh`
+- `openrouter/openai/gpt-6.1-terra`
+- `openrouter/openai/gpt-6.1-terra-high`
+- `openrouter/openai/gpt-6.1-terra-low`
+- `openrouter/openai/gpt-6.1-terra-medium`
+- `openrouter/openai/gpt-6.1-terra-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -820,6 +829,7 @@ Full model list:
 - `openrouter/poolside/laguna-s-2.1`
 - `openrouter/poolside/laguna-xs-2.1`
 - `openrouter/prism-ml/ternary-bonsai-2-27b`
+- `openrouter/prism-ml/ternary-bonsai-2-9b`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
 - `openrouter/qwen/qwen-2.5-7b-instruct`
 - `openrouter/qwen/qwen-2.5-coder-32b-instruct`
@@ -948,6 +958,8 @@ Full model list:
 - `openrouter/~deepseek/deepseek-v4-flash-latest`
 - `openrouter/~google/gemini-flash-latest`
 - `openrouter/~google/gemini-pro-latest`
+- `openrouter/~liquid/d1-latest`
+- `openrouter/~liquid/d1-ultra-latest`
 - `openrouter/~moonshotai/kimi-latest`
 - `openrouter/~openai/gpt-astra-latest`
 - `openrouter/~openai/gpt-astra-latest-high`
@@ -1004,7 +1016,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Codex CLI (codex/*) (10)</strong></summary>
+<summary><strong>Codex CLI (codex/*) (11)</strong></summary>
 
 - `codex/codex-auto-review`
 - `codex/default`
@@ -1016,5 +1028,6 @@ Full model list:
 - `codex/gpt-6-luna`
 - `codex/gpt-6-sol`
 - `codex/gpt-6.1-sol`
+- `codex/gpt-6.1-terra`
 
 </details>

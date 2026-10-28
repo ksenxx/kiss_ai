@@ -15,17 +15,31 @@ const assert = require('assert');
 const {
   makePage: makeChatPage,
   send,
-  waitFor,
   clickTab,
+  recordTimers,
+  fireTimers,
 } = require('./simplify2_harness');
 const {writeReport: writeReportAs} = require('./subagent_tab_helpers');
 
 const pages = [];
 
-function makePage() {
-  const page = makeChatPage({bodyClass: 'remote-chat'});
+/**
+ * A remote-chat page whose 300 ms timers are recorded (cancellation
+ * aware), so the ghost debounce can be fired by hand instead of waited
+ * for, and a debounce main.js cleared never fires.  *extraScripts* are
+ * loaded after main.js.
+ */
+function makePage(extraScripts = []) {
+  let timers = [];
+  const page = makeChatPage({
+    bodyClass: 'remote-chat',
+    extraScripts,
+    beforeScripts: win => {
+      timers = recordTimers(win, 300);
+    },
+  });
   pages.push(page.win);
-  return page;
+  return {win: page.win, posted: page.posted, timers};
 }
 
 function contentTabId(win) {
@@ -47,17 +61,26 @@ function submitPrompt(win, posted, text) {
   return sent[sent.length - 1];
 }
 
-/** Type *text* into the composer and wait for the debounced ghost request. */
-function requestGhost(win, posted, text) {
+/**
+ * Type *text* into the composer and fire the 300 ms ghost debounce the
+ * input armed (and did not clear), so the `complete` request is posted
+ * at once.
+ */
+function requestGhost({win, posted, timers}, text) {
   const before = posted.filter(m => m.type === 'complete').length;
+  const armed = timers.length;
   const inp = win.document.getElementById('task-input');
   inp.value = text;
   inp.selectionStart = text.length;
   inp.selectionEnd = text.length;
   inp.dispatchEvent(new win.Event('input', {bubbles: true}));
-  return waitFor(
-    () => posted.filter(m => m.type === 'complete').length > before,
-    'a ghost request is posted',
+  const live = timers.slice(armed).filter(t => !t.cleared);
+  assert.strictEqual(live.length, 1, 'the input armed one live ghost debounce');
+  fireTimers(live);
+  assert.strictEqual(
+    posted.filter(m => m.type === 'complete').length,
+    before + 1,
+    'one ghost request is posted',
   );
 }
 
@@ -68,13 +91,14 @@ function openChat(win) {
   });
 }
 
-async function testViewedFileTabIsTheEditorContext() {
-  const {win, posted} = makePage();
+function testViewedFileTabIsTheEditorContext() {
+  const page = makePage();
+  const {win, posted} = page;
   openChat(win);
   // No file tab yet: neither message names a file.
   assert.strictEqual(submitPrompt(win, posted, 'hello').activeFile, undefined);
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'hel');
+  requestGhost(page, 'hel');
   let completes = posted.filter(m => m.type === 'complete');
   assert.ok(completes.length >= 1, 'a ghost request is posted');
   assert.strictEqual(
@@ -100,7 +124,7 @@ async function testViewedFileTabIsTheEditorContext() {
   assert.strictEqual(sub.activeFileContent, undefined, 'a run needs no buffer');
 
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'summ');
+  requestGhost(page, 'summ');
   completes = posted.filter(m => m.type === 'complete');
   const last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, '/ws/a/notes.md');
@@ -136,7 +160,7 @@ async function testViewedFileTabIsTheEditorContext() {
   // closed file's snapshot instead of keeping it (an absent activeFile
   // means "keep" there).
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'and n');
+  requestGhost(page, 'and n');
   completes = posted.filter(m => m.type === 'complete');
   assert.strictEqual(completes[completes.length - 1].activeFile, '');
   assert.strictEqual(
@@ -145,11 +169,12 @@ async function testViewedFileTabIsTheEditorContext() {
   );
 }
 
-async function testEmptiedBufferIsSentAsEmptyContent() {
+function testEmptiedBufferIsSentAsEmptyContent() {
   // A file whose buffer is empty is "open with an empty buffer": the
   // completion carries activeFileContent "" (not nothing, which would
   // leave the daemon's previous snapshot of the file in place).
-  const {win, posted} = makePage();
+  const page = makePage();
+  const {win, posted} = page;
   openChat(win);
   send(win, {
     type: 'fileContent',
@@ -161,7 +186,7 @@ async function testEmptiedBufferIsSentAsEmptyContent() {
   });
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'emp');
+  requestGhost(page, 'emp');
   const completes = posted.filter(m => m.type === 'complete');
   const last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, '/ws/a/empty.md');
@@ -172,10 +197,11 @@ async function testEmptiedBufferIsSentAsEmptyContent() {
   );
 }
 
-async function testVirtualAndDirectoryTabsAreNoEditorContext() {
+function testVirtualAndDirectoryTabsAreNoEditorContext() {
   // A commit's patch (git-show://...) and a folder listing are content
   // tabs but not files on disk: never the active file.
-  const {win, posted} = makePage();
+  const page = makePage();
+  const {win, posted} = page;
   openChat(win);
   send(win, {
     type: 'fileContent',
@@ -193,7 +219,7 @@ async function testVirtualAndDirectoryTabsAreNoEditorContext() {
     'a virtual git tab is not a file on disk',
   );
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'expl');
+  requestGhost(page, 'expl');
   let completes = posted.filter(m => m.type === 'complete');
   assert.strictEqual(completes[completes.length - 1].activeFile, '');
 
@@ -227,7 +253,7 @@ async function testVirtualAndDirectoryTabsAreNoEditorContext() {
     '/ws/a/src/a.py',
   );
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'and a');
+  requestGhost(page, 'and a');
   completes = posted.filter(m => m.type === 'complete');
   assert.strictEqual(
     completes[completes.length - 1].activeFile,
@@ -243,12 +269,13 @@ function writeReport(win, filePath, content) {
   writeReportAs(win, filePath, content, {tabId: 'a1'});
 }
 
-async function testReportTabReportsItsMarkdownSource() {
+function testReportTabReportsItsMarkdownSource() {
   // A finished task's report opens as converted HTML; completion must
   // see the report file's own text (never the HTML), and a regenerated
   // report must replace the earlier text rather than leaving it out
   // (an omitted buffer keeps the daemon's previous snapshot).
-  const {win, posted} = makePage();
+  const page = makePage();
+  const {win, posted} = page;
   openChat(win);
   const reportPath = '/ws/a/reports/summary.md';
   writeReport(win, reportPath, '# Report\n\noldReportIdentifier\n');
@@ -256,7 +283,7 @@ async function testReportTabReportsItsMarkdownSource() {
   contentTabId(win);
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'oldRe');
+  requestGhost(page, 'oldRe');
   let completes = posted.filter(m => m.type === 'complete');
   let last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, reportPath);
@@ -270,7 +297,7 @@ async function testReportTabReportsItsMarkdownSource() {
   send(win, {type: 'task_done', success: true, tabId: 'a1'});
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
-  await requestGhost(win, posted, 'newRe');
+  requestGhost(page, 'newRe');
   completes = posted.filter(m => m.type === 'complete');
   last = completes[completes.length - 1];
   assert.strictEqual(last.activeFile, reportPath);
@@ -281,27 +308,57 @@ async function testReportTabReportsItsMarkdownSource() {
   );
 }
 
-async function testBrowserTabIsNoEditorContext() {
-  // A streamed browser tab is a content tab with a URL, not a file.
-  const {win, posted} = makePage();
+function testReadOnlyPreviewReportsNoBuffer() {
+  // A read-only preview (no version stamp: an HTML page past the
+  // editor cap, which can run to tens of MB) has nothing the user can
+  // edit, so the completion names the file with a null buffer: the
+  // daemon drops any snapshot it kept of the path and reads the head
+  // of the file from disk, instead of the page travelling back whole
+  // with every keystroke.  The pieces of a page the daemon sent in
+  // chunks are joined before the tab opens.
+  const page = makePage();
+  const {win, posted} = page;
   openChat(win);
-  // The streamed-browser view is a separate script (browserTab.js);
-  // a minimal stand-in with the members main.js touches suffices.
-  const noop = function () {};
-  win.BrowserTabView = {
-    create: function () {
-      return {
-        el: win.document.createElement('div'),
-        setBadge: noop,
-        setVisible: noop,
-        state: noop,
-        error: noop,
-        frame: noop,
-        resubscribe: noop,
-        dispose: noop,
-      };
-    },
-  };
+  const head = {type: 'fileContent', tabId: 'a1', path: '/ws/a/reports/chat-big.html'};
+  send(win, {
+    ...head,
+    name: 'chat-big.html',
+    content: '<!DOCTYPE html><html><body><p id="first">first piece</p>',
+    more: true,
+  });
+  assert.throws(() => contentTabId(win), 'no tab until the last piece is in');
+  send(win, {...head, content: '<p id="last">last piece</p></body></html>'});
+  contentTabId(win);
+  const frame = win.document.querySelector('.content-html-frame');
+  assert.ok(frame, 'the joined page renders in the preview frame');
+  assert.ok(frame.srcdoc.indexOf('first piece') >= 0, 'with its first piece');
+  assert.ok(frame.srcdoc.indexOf('last piece') >= 0, 'and its last');
+  assert.strictEqual(
+    win.document.querySelector('.content-save-bar'),
+    null,
+    'read-only: no Save bar',
+  );
+  clickTab(win, 'a1');
+  assert.strictEqual(
+    submitPrompt(win, posted, 'what does the page say?').activeFile,
+    '/ws/a/reports/chat-big.html',
+  );
+  send(win, {type: 'status', running: false, tabId: 'a1'});
+  requestGhost(page, 'what');
+  const completes = posted.filter(m => m.type === 'complete');
+  const last = completes[completes.length - 1];
+  assert.strictEqual(last.activeFile, '/ws/a/reports/chat-big.html');
+  assert.ok(
+    'activeFileContent' in last && last.activeFileContent === null,
+    'a read-only preview reports a null buffer, not an absent one',
+  );
+}
+
+function testBrowserTabIsNoEditorContext() {
+  // A streamed browser tab is a content tab with a URL, not a file.
+  // The streamed-browser view lives in its own script, browserTab.js.
+  const {win, posted} = makePage(['browserTab.js']);
+  openChat(win);
   send(win, {
     type: 'openBrowserTab',
     tab_id: 'browser-1',
@@ -322,18 +379,19 @@ async function testBrowserTabIsNoEditorContext() {
   );
 }
 
-(async () => {
+{
   const tests = [
     testViewedFileTabIsTheEditorContext,
     testEmptiedBufferIsSentAsEmptyContent,
     testVirtualAndDirectoryTabsAreNoEditorContext,
     testReportTabReportsItsMarkdownSource,
+    testReadOnlyPreviewReportsNoBuffer,
     testBrowserTabIsNoEditorContext,
   ];
   let failures = 0;
   for (const t of tests) {
     try {
-      await t();
+      t();
       console.log('PASS', t.name);
     } catch (err) {
       failures += 1;
@@ -345,9 +403,9 @@ async function testBrowserTabIsNoEditorContext() {
   if (failures > 0) {
     console.error(failures + ' test(s) failed');
     process.exitCode = 1;
-    return;
+  } else {
+    console.log(
+      'All ' + tests.length + ' editorContextFromContentTab tests passed',
+    );
   }
-  console.log(
-    'All ' + tests.length + ' editorContextFromContentTab tests passed',
-  );
-})();
+}

@@ -15,7 +15,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, readyTabId} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  readyTabId,
+} = require('./simplify2_harness');
 // Content tabs on the group strip (#tab-list).  The strip lists them on
 // the file screen only: a report opened in the background (sub-agent
 // done) is in the tab registry (registryContentTabs) but not here.
@@ -26,6 +30,7 @@ const {
   contentTabs: registryContentTabs,
   reportFrames,
   visibleSrcdoc: activeSrcdoc,
+  spawnSubagent,
 } = require('./subagent_tab_helpers');
 
 function brokenMarked(win) {
@@ -603,9 +608,9 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
   const addBtn = win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'expected the add-tab button');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const activeChat = {dataset: {tabId: win._testApi.getActiveTabId()}};
+  const secondTabId = win._testApi.getActiveTabId();
   assert.notStrictEqual(
-    activeChat.dataset.tabId,
+    secondTabId,
     firstTabId,
     'precondition: a second chat tab must now be active',
   );
@@ -614,24 +619,10 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
     'precondition: the running first chat stays open',
   );
   // The agent running in the (now background) first tab writes a report.
-  send(win, {
-    type: 'tool_call',
-    name: 'Write',
-    path: 'reports/bg.md',
-    content: '# from background',
-    tabId: firstTabId,
-  });
-  send(win, {
-    type: 'tool_result',
-    content: writeSuccess('reports/bg.md', '# from background'),
-    is_error: false,
-    tool_name: 'Write',
-    path: 'reports/bg.md',
-    tabId: firstTabId,
-  });
+  writeReport(win, 'reports/bg.md', '# from background', {tabId: firstTabId});
   assertNoReportTab(win, 'background report before its task_done');
   // A task finishing in ANOTHER tab must not open this tab's report.
-  finishTask(win, {tabId: activeChat.dataset.tabId});
+  finishTask(win, {tabId: secondTabId});
   assertNoReportTab(win, 'task_done of an unrelated tab');
   finishTask(win, {tabId: firstTabId});
   const tab = assertReportTabActive(win, 'background-tab report');
@@ -664,28 +655,16 @@ function testRetaggedSubagentKeepsItsPendingReport() {
     tabId: parentId,
     extras: {tasks: JSON.stringify(['sub 1'])},
   });
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-1',
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted.find(
-    m => m.type === 'resumeSession' && m.taskId === 'sub-task-1',
+  const subId = spawnSubagent(
+    {win, posted},
+    parentId,
+    'sub-task-1',
+    'sub 1',
+    0,
   );
-  assert.ok(resume, 'the fan-out must resume its sub-agent in its own tab');
-  const announce = {
-    type: 'openSubagentTab',
-    tab_id: resume.tabId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-  };
-  send(win, announce);
 
   writeReport(win, 'reports/sub.md', '# from retagged subagent', {
-    tabId: resume.tabId,
+    tabId: subId,
   });
   assertNoReportTab(win, 'retagged subagent report before subagentDone');
 
@@ -693,9 +672,15 @@ function testRetaggedSubagentKeepsItsPendingReport() {
   // The id must genuinely differ from the open tab's (which already is
   // the deterministic `<parent>__sub_<task>` id) or no re-addressing
   // happens and retagSubagentTab's report transfer is never exercised.
-  const replayId = 'replay-' + resume.tabId;
-  assert.notStrictEqual(replayId, resume.tabId);
-  send(win, Object.assign({}, announce, {tab_id: replayId}));
+  const replayId = 'replay-' + subId;
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: replayId,
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    taskIndex: 0,
+  });
   assert.strictEqual(
     win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab').length,
     1,

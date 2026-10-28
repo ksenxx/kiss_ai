@@ -159,20 +159,20 @@ the chat input textbox.
 
 ## AI Discovery and Auto Research
 
-All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}}:
+All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}} (the `/discover` command runs the AI discovery loop):
 
 ```
-Can you AI discover the lightest and fastest AI model that will give >95% accuracy and recall on the data at \<</path/to/data>> at the cost of $0.25 per query?  Use 'modal' CLI to train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000. Experiment with a smaller data subset and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
+/discover Can you AI discover the lightest and fastest AI model that will give >95% accuracy and recall on the data at \<</path/to/data>> at the cost of $0.25 per query?  Use 'modal' CLI to train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000. Experiment with a smaller data subset and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
 ```
 
 # Tip
 
 ## AI Optimization of Software and AI Systems
 
-All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}}:
+All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}} (the `/discover` command runs the AI discovery loop):
 
 ```
-Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> for the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You may add diagnostic code that prints metrics, such as running time, at a finer granularity.  Don't forget to remove the diagnostic code after optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
+/discover Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> for the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You may add diagnostic code that prints metrics, such as running time, at a finer granularity.  Don't forget to remove the diagnostic code after optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
 ```
 
 # Tip

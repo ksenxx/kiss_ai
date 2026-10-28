@@ -25,13 +25,8 @@ from kiss.agents.sorcar.persistence import (
     _prefix_match_tasks,
 )
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
-from kiss.server.helpers import (
-    SUGGESTION_LIMIT as _COMPLETIONS_LIMIT,
-)
-from kiss.server.helpers import (
-    clip_autocomplete_suggestion,
-    model_vendor,
-)
+from kiss.server.helpers import SUGGESTION_LIMIT as _COMPLETIONS_LIMIT
+from kiss.server.helpers import clip_autocomplete_suggestion, model_vendor
 from kiss.server.tricks import (
     current_sentence_partial,
     prefix_match_tricks,
@@ -349,14 +344,13 @@ class _AutocompleteMixin:
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
-        if len(query) < 2:
-            self._emit_ghost("", query, conn_id, tab_id)
-            self._emit_completions([], query, conn_id, tab_id)
-            return
-
-        completions = self._complete_many(
-            query, snapshot_file, snapshot_content, chat_id,
-        )
+        # A query under two characters has no completions; its empty
+        # replies are published below like any other, under the lock.
+        completions: list[dict[str, str]] = []
+        if len(query) >= 2:
+            completions = self._complete_many(
+                query, snapshot_file, snapshot_content, chat_id,
+            )
         # Re-check freshness AFTER the (potentially slow) computation:
         # a newer request on the same connection may have advanced the
         # sequence while this one was doing file/DB work, and emitting

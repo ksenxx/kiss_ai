@@ -43,6 +43,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -485,6 +486,8 @@ def test_govee_cli_loads_api_keys_env_first(
     # file) still honors the canonical opt-out via the lock-free
     # fallback import, which also refreshes the in-memory config so
     # model keys from the store are not silently blanked.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores directory modes, so the read-only home cannot be simulated")
     from kiss.core import config as core_config
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "1")  # forced on, so the file must switch it off
@@ -649,7 +652,10 @@ def test_reachable_edge_paths(muse_env: Path, api_server: RecordingServer) -> No
     assert _common.is_loopback_host("www.googleapis.com") is False
 
     # A second daemon instance detects the running one and returns.
-    MuseAuthDaemon().run()
+    second = threading.Thread(target=MuseAuthDaemon().run, daemon=True)
+    second.start()
+    second.join(timeout=30)
+    assert not second.is_alive(), "a second daemon did not detect the running one"
 
     # CLI audit before any records.
     assert muse_cli.main(["audit"]) == 0
@@ -712,8 +718,10 @@ def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: Record
     assert resp.status_code == 200
     seen = api_server.requests[-1]
     assert bearer_of(seen) == "Bearer ntn_real_secret"
-    # The custom headers reached the emulated API (recorded via the
-    # handler, which stores all headers it receives).
+    # Case-insensitive: the daemon re-serialises the header names.
+    headers = {k.lower(): v for k, v in seen["headers"].items()}
+    assert headers["notion-version"] == "2022-06-28"
+    assert headers["content-type"] == "application/json"
 
 
 class _RedirectHandler(MuseApiHandler):

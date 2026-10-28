@@ -3,15 +3,25 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
+// The task-info panel's resize handle: the shared docked-panel tests
+// (panel_resize_cases.js) plus what is specific to the right-hand
+// panel: each drag cap reserves the OTHER panel's actual width, two huge
+// persisted widths cannot crush the chat, the first keyboard step grows
+// from the default, and an untouched panel keeps following 20vw.
+
 'use strict';
 
 const assert = require('assert');
+const {makeResizePage: makePage, panelW, drag} = require('./panel_resize_helpers');
 const {
-  makeResizePage: makePage,
-  panelW,
-  pointer,
-  drag,
-} = require('./panel_resize_helpers');
+  runPanelResizeTests,
+  setWindowWidth,
+  key,
+  MIN_W,
+  WINDOW_W,
+  DEFAULT_W,
+  CHAT_MIN,
+} = require('./panel_resize_cases');
 
 function metaW(win) {
   return panelW(win, '--meta-w');
@@ -22,119 +32,26 @@ function sidebarW(win) {
 }
 
 // The task-info panel's handle rides its LEFT edge, so a pointer at
-// clientX asks for a width of (window.innerWidth - clientX).  Same
-// bounds as the history panel: a drag may collapse the panel to the
-// --sidebar-min-w sliver, the DEFAULT width is one fifth of the
-// window (the 20vw --meta-panel-w fallback), and the cap only ever
-// comes from the chat column between the two panels keeping
-// --chat-min-w.  jsdom reports window.innerWidth === 1024.
-const MIN_W = 10;
-const WINDOW_W = 1024;
-const DEFAULT_W = Math.round(WINDOW_W * 0.2);
-const CHAT_MIN = 360;
-// With the history panel at its untouched 20vw default:
+// clientX asks for a width of (window.innerWidth - clientX).  The cap
+// only ever comes from the chat column between the two panels keeping
+// --chat-min-w; with the history panel at its untouched 20vw default:
 const maxFor = w => w - CHAT_MIN - Math.round(w * 0.2);
-const MAX_W = maxFor(WINDOW_W);
 
 // clientX that asks the meta panel for width w.
 const xFor = w => WINDOW_W - w;
 
-function testResizerExistsAndIsAccessible() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  assert.ok(resizer, '#meta-resizer handle must exist in chat.html');
-  assert.strictEqual(
-    resizer.getAttribute('role'),
-    'separator',
-    'resizer must be an ARIA separator',
-  );
-  assert.strictEqual(
-    resizer.getAttribute('aria-orientation'),
-    'vertical',
-    'window splitter separators are aria-orientation=vertical',
-  );
-  assert.strictEqual(
-    resizer.getAttribute('tabindex'),
-    '0',
-    'resizer must be keyboard focusable',
-  );
-  assert.strictEqual(
-    resizer.parentElement.id,
-    'meta-panel',
-    'the handle must live inside the task-info panel (its left edge)',
-  );
-  assert.strictEqual(resizer.getAttribute('aria-valuemin'), String(MIN_W));
-  assert.strictEqual(resizer.getAttribute('aria-valuemax'), String(MAX_W));
-  assert.strictEqual(
-    resizer.getAttribute('aria-valuenow'),
-    String(DEFAULT_W),
-    'default width must be reflected in aria-valuenow',
-  );
-  win.close();
-  console.log('PASS meta resizer exists and is an accessible ARIA separator');
-}
-
-function testDragResizesMetaPanel() {
-  const {win, captured, released} = makePage({
-    desktopMatches: true,
-  });
-  const resizer = win.document.getElementById('meta-resizer');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(420));
-  assert.strictEqual(
-    metaW(win),
-    '420px',
-    'dragging the handle 420px from the right edge must set --meta-w: 420px',
-  );
-  assert.strictEqual(
-    resizer.getAttribute('aria-valuenow'),
-    '420',
-    'aria-valuenow must track the width',
-  );
-  assert.ok(
-    captured.length >= 1,
-    'the drag must capture the pointer so fast drags do not escape',
-  );
-  assert.ok(released.length >= 1, 'pointerup must release the capture');
-  assert.strictEqual(
-    win.localStorage.getItem('kiss-meta-w'),
-    '420',
-    'pointerup must persist the width to localStorage',
-  );
-  assert.strictEqual(
-    sidebarW(win),
-    '',
-    'resizing the task-info panel must not touch the history panel',
-  );
-  win.close();
-  console.log('PASS dragging the handle resizes the docked task-info panel');
-}
-
-function testDragClampsWidth() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(80));
-  assert.strictEqual(
-    metaW(win),
-    '80px',
-    'a drag may collapse the panel far below the default width',
-  );
-  drag(win, resizer, xFor(80), xFor(2));
-  assert.strictEqual(
-    metaW(win),
-    `${MIN_W}px`,
-    `drag far right clamps to the ${MIN_W}px sliver floor`,
-  );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(MIN_W));
-  drag(win, resizer, xFor(MIN_W), xFor(900));
-  assert.strictEqual(
-    metaW(win),
-    `${MAX_W}px`,
-    `drag far left clamps to ${MAX_W}px so the chat keeps ${CHAT_MIN}px`,
-  );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(MAX_W));
-  win.close();
-  console.log(`PASS meta drag width is clamped to [${MIN_W}px, ${MAX_W}px]`);
-}
+const META = {
+  label: 'meta panel',
+  resizerId: 'meta-resizer',
+  parentId: 'meta-panel',
+  cssVar: '--meta-w',
+  otherCssVar: '--sidebar-w',
+  storageKey: 'kiss-meta-w',
+  maxFor,
+  xFor,
+  growKey: 'ArrowLeft',
+  shrinkKey: 'ArrowRight',
+};
 
 function testCapsReserveTheOtherPanelsActualWidth() {
   const {win} = makePage({desktopMatches: true});
@@ -174,65 +91,6 @@ function testCapsReserveTheOtherPanelsActualWidth() {
   console.log('PASS each drag cap reserves the OTHER panel actual width');
 }
 
-function testWidthPersistsAndRestores() {
-  const first = makePage({desktopMatches: true});
-  const resizer = first.win.document.getElementById('meta-resizer');
-  drag(first.win, resizer, xFor(DEFAULT_W), xFor(430));
-  assert.strictEqual(first.win.localStorage.getItem('kiss-meta-w'), '430');
-  first.win.close();
-  const second = makePage({
-    desktopMatches: true,
-    stored: {'kiss-meta-w': '430'},
-  });
-  assert.strictEqual(
-    metaW(second.win),
-    '430px',
-    'persisted width must be restored on load',
-  );
-  assert.strictEqual(
-    second.win.document
-      .getElementById('meta-resizer')
-      .getAttribute('aria-valuenow'),
-    '430',
-  );
-  second.win.close();
-  console.log('PASS meta width persists to localStorage and restores on load');
-}
-
-function testPersistedGarbageSanitized() {
-  const garbage = makePage({
-    desktopMatches: true,
-    stored: {'kiss-meta-w': 'abc'},
-  });
-  assert.strictEqual(
-    metaW(garbage.win),
-    '',
-    'non-numeric persisted width must be ignored (CSS default applies)',
-  );
-  garbage.win.close();
-  const huge = makePage({
-    desktopMatches: true,
-    stored: {'kiss-meta-w': '9999'},
-  });
-  assert.strictEqual(
-    metaW(huge.win),
-    `${MAX_W}px`,
-    'over-wide persisted width must be clamped down',
-  );
-  huge.win.close();
-  const tiny = makePage({
-    desktopMatches: true,
-    stored: {'kiss-meta-w': '4'},
-  });
-  assert.strictEqual(
-    metaW(tiny.win),
-    `${MIN_W}px`,
-    'a persisted width below the sliver floor must be clamped up',
-  );
-  tiny.win.close();
-  console.log('PASS garbage / out-of-range persisted meta widths sanitized');
-}
-
 function testBothPersistedWidthsKeepTheChatUsable() {
   // Both panels persisted huge: the history panel loads first and is
   // clamped against the meta default; the meta panel then clamps
@@ -253,45 +111,10 @@ function testBothPersistedWidthsKeepTheChatUsable() {
   console.log('PASS two huge persisted widths cannot crush the chat');
 }
 
-function testKeyboardResize() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(400));
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
-  assert.strictEqual(
-    metaW(win),
-    '416px',
-    'ArrowLeft grows the RIGHT-hand panel by 16px',
-  );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}),
-  );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}),
-  );
-  assert.strictEqual(
-    metaW(win),
-    '384px',
-    'ArrowRight shrinks the RIGHT-hand panel by 16px',
-  );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '384');
-  assert.strictEqual(
-    win.localStorage.getItem('kiss-meta-w'),
-    '384',
-    'keyboard resize must persist too',
-  );
-  win.close();
-  console.log('PASS ArrowLeft/ArrowRight resize the meta panel by 16px');
-}
-
 function testKeyboardBaselineIsTheDefaultWidth() {
   const {win} = makePage({desktopMatches: true});
   const resizer = win.document.getElementById('meta-resizer');
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
+  key(win, resizer, 'ArrowLeft');
   assert.strictEqual(
     metaW(win),
     `${DEFAULT_W + 16}px`,
@@ -299,48 +122,6 @@ function testKeyboardBaselineIsTheDefaultWidth() {
   );
   win.close();
   console.log('PASS meta keyboard resize starts from the default width');
-}
-
-function testDoubleClickResets() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(400));
-  assert.strictEqual(metaW(win), '400px');
-  resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
-  assert.strictEqual(
-    metaW(win),
-    `${DEFAULT_W}px`,
-    'double-click must reset to the default width',
-  );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(DEFAULT_W));
-  assert.strictEqual(
-    win.localStorage.getItem('kiss-meta-w'),
-    null,
-    'double-click must clear the persisted width',
-  );
-  win.close();
-  console.log('PASS double-click resets the width and clears persistence');
-}
-
-function testShrinkingWindowNarrowsThePanel() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(900));
-  assert.strictEqual(metaW(win), `${MAX_W}px`);
-  Object.defineProperty(win, 'innerWidth', {value: 940, configurable: true});
-  win.dispatchEvent(new win.Event('resize'));
-  assert.strictEqual(
-    metaW(win),
-    `${maxFor(940)}px`,
-    'a narrower window must shrink the panel so the chat stays usable',
-  );
-  assert.strictEqual(
-    resizer.getAttribute('aria-valuemax'),
-    String(maxFor(940)),
-    'aria-valuemax must follow the narrower window',
-  );
-  win.close();
-  console.log('PASS shrinking the window narrows the docked meta panel');
 }
 
 function testUntouchedPanelStaysFluid() {
@@ -351,8 +132,7 @@ function testUntouchedPanelStaysFluid() {
     '',
     'no inline --meta-w until the user resizes (CSS 20vw rules)',
   );
-  Object.defineProperty(win, 'innerWidth', {value: 1500, configurable: true});
-  win.dispatchEvent(new win.Event('resize'));
+  setWindowWidth(win, 1500);
   assert.strictEqual(
     metaW(win),
     '',
@@ -367,96 +147,9 @@ function testUntouchedPanelStaysFluid() {
   console.log('PASS an untouched meta panel stays fluid at 20vw');
 }
 
-function testWidePreferenceSurvivesNarrowWindow() {
-  const {win} = makePage({
-    desktopMatches: true,
-    stored: {'kiss-meta-w': '600'},
-  });
-  assert.strictEqual(
-    metaW(win),
-    `${MAX_W}px`,
-    'a persisted width wider than the cap renders clamped',
-  );
-  Object.defineProperty(win, 'innerWidth', {value: 2500, configurable: true});
-  win.dispatchEvent(new win.Event('resize'));
-  assert.strictEqual(
-    metaW(win),
-    '600px',
-    'the persisted preference must spring back once the window holds it',
-  );
-  assert.strictEqual(
-    win.localStorage.getItem('kiss-meta-w'),
-    '600',
-    'no user action happened: the stored preference stays untouched',
-  );
-  win.close();
-  console.log('PASS a wide persisted meta width survives a narrow window');
-}
-
-function testPointerCancelEndsDrag() {
-  const {win} = makePage({desktopMatches: true});
-  const resizer = win.document.getElementById('meta-resizer');
-  pointer(win, resizer, 'pointerdown', {
-    clientX: xFor(DEFAULT_W),
-    pointerId: 1,
-  });
-  assert.ok(
-    win.document.body.classList.contains('sidebar-resizing'),
-    'body must carry the resizing class during a meta drag',
-  );
-  pointer(win, resizer, 'pointermove', {clientX: xFor(440), pointerId: 1});
-  assert.strictEqual(metaW(win), '440px');
-  pointer(win, resizer, 'pointercancel', {clientX: xFor(440), pointerId: 1});
-  pointer(win, resizer, 'pointermove', {clientX: xFor(200), pointerId: 1});
-  assert.strictEqual(
-    metaW(win),
-    '440px',
-    'moves after pointercancel must be ignored (drag ended)',
-  );
-  assert.ok(
-    !win.document.body.classList.contains('sidebar-resizing'),
-    'the resizing body class must be cleared on cancel',
-  );
-  win.close();
-  console.log('PASS pointercancel ends the meta drag like pointerup');
-}
-
-function testMobileDragInert() {
-  const {win} = makePage({desktopMatches: false});
-  const resizer = win.document.getElementById('meta-resizer');
-  assert.ok(resizer, 'handle exists in the shared markup');
-  drag(win, resizer, xFor(DEFAULT_W), xFor(420));
-  assert.strictEqual(
-    metaW(win),
-    '',
-    'dragging on a narrow window must not set --meta-w',
-  );
-  assert.strictEqual(
-    win.localStorage.getItem('kiss-meta-w'),
-    null,
-    'no persistence on mobile',
-  );
-  resizer.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
-  );
-  assert.strictEqual(metaW(win), '', 'keyboard resize inert on mobile');
-  win.close();
-  console.log('PASS meta resize is inert on narrow (mobile) remote windows');
-}
-
-testResizerExistsAndIsAccessible();
-testDragResizesMetaPanel();
-testDragClampsWidth();
+runPanelResizeTests(META);
 testCapsReserveTheOtherPanelsActualWidth();
-testWidthPersistsAndRestores();
-testPersistedGarbageSanitized();
 testBothPersistedWidthsKeepTheChatUsable();
-testKeyboardResize();
 testKeyboardBaselineIsTheDefaultWidth();
-testDoubleClickResets();
-testShrinkingWindowNarrowsThePanel();
 testUntouchedPanelStaysFluid();
-testWidePreferenceSurvivesNarrowWindow();
-testPointerCancelEndsDrag();
-testMobileDragInert();
 console.log('All remoteMetaResize tests passed.');

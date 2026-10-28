@@ -798,8 +798,7 @@ def test_discord_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off, Discord keeps its plaintext-config behavior."""
-
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     backend = _discord_backend(api_server)
     assert not backend.connect()
@@ -1214,7 +1213,7 @@ def test_govee_legacy_mode_unchanged(
     isolated_kiss_home: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With Muse-auth off, Govee sends the real key directly via urllib."""
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     monkeypatch.setattr(govee, "API", f"{api_server.base_url}/router/api/v1")
     monkeypatch.setenv("GOVEE_API_KEY", _REAL_GOVEE_KEY)
     devices = govee.list_devices()
@@ -1224,8 +1223,8 @@ def test_govee_legacy_mode_unchanged(
     assert not (muse_auth_dir() / "vault").exists()
 
 
-def test_fqdn_policy_and_enrollment_entries_match(muse_env: Path) -> None:
-    """Trailing-dot FQDNs match whether they come via policy or enrollment."""
+def test_fqdn_enrollment_entries_match(muse_env: Path) -> None:
+    """A trailing-dot, port-pinned FQDN enrollment host matches the request origin."""
 
     # A port-pinned FQDN enrollment host validates and canonicalizes.
     assert _invalid_hosts_reason(["localhost.:8123"]) == ""
@@ -1238,13 +1237,6 @@ def test_fqdn_policy_and_enrollment_entries_match(muse_env: Path) -> None:
     daemon = MuseAuthDaemon()
     assert daemon.sentinel.origin_allowed("homeassistant", "http://localhost.:8123/api/states")
     assert daemon.sentinel.origin_allowed("homeassistant", "http://localhost:8123/api/states")
-
-    # An FQDN-spelled policy extra_hosts entry matches a request host
-    # canonicalized the same way (was a round-2 regression).
-    policy = muse_auth_dir() / "policy.json"
-    policy.write_text(json.dumps({"services": {"govee": {"extra_hosts": ["Example.COM."]}}}))
-    assert daemon.sentinel.origin_allowed("govee", "https://example.com/x")
-    assert daemon.sentinel.origin_allowed("govee", "https://example.com./x")
 
 
 def test_govee_daemon_reply_loss_not_replayed(
@@ -1385,8 +1377,9 @@ def test_ntfy_explicit_tokenless_overrides_stale_vault(
     assert api_server.header("Authorization") == ""
 
 
-def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path) -> None:
-    """Leading-zero and FQDN port-pinned entries match the request origin."""
+@pytest.mark.parametrize("policy_host", ["Example.COM.", "Example.COM.:443"])
+def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path, policy_host: str) -> None:
+    """Leading-zero and FQDN policy entries (port-pinned or not) match the request origin."""
 
     assert _invalid_hosts_reason(["h:00080"]) == ""
     store_credentials(
@@ -1400,10 +1393,13 @@ def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path) -> None:
     # port is 80.
     assert daemon.sentinel.origin_allowed("homeassistant", "http://127.0.0.1/api/states")
 
-    # A port-pinned FQDN policy entry matches its canonical request form.
+    # An FQDN-spelled policy extra_hosts entry, with or without a pinned
+    # port, matches a request host canonicalized the same way, whatever
+    # its spelling (was a round-2 regression).
     policy = muse_auth_dir() / "policy.json"
-    policy.write_text(json.dumps({"services": {"govee": {"extra_hosts": ["Example.COM.:443"]}}}))
+    policy.write_text(json.dumps({"services": {"govee": {"extra_hosts": [policy_host]}}}))
     assert daemon.sentinel.origin_allowed("govee", "https://example.com/x")
+    assert daemon.sentinel.origin_allowed("govee", "https://example.com./x")
     assert daemon.sentinel.origin_allowed("govee", "https://example.com.:443/x")
 
 
@@ -1589,7 +1585,6 @@ def test_multiple_trailing_dot_hosts_rejected(
         assert not valid_hostname(bad)
         assert not valid_http_url(f"http://{bad}:8123")
     assert _invalid_hosts_reason(["localhost..:8123"]) != ""
-    assert _invalid_hosts_reason(["localhost.:8123"]) == ""
 
     # The CLI import refuses the malformed URL outright: nothing is
     # stored and the plaintext config is left for the user to fix.

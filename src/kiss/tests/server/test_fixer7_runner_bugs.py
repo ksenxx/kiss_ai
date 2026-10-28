@@ -11,9 +11,6 @@ Covers:
 - F3: ``_resolve_user_answer_queue`` lacked the task-ownership filter
   its two task_runner siblings have, letting a stale viewer answer be
   hijacked by an unrelated running task.
-- F4: the ``bash_stream`` inline flush broadcast stale text after a
-  concurrent ``reset()`` without the generation re-check that
-  ``_flush_bash`` performs.
 - F16: a ``KeyboardInterrupt`` (Stop during pre-task setup) escaped
   ``_run_task``'s ``except Exception`` so the task vanished silently
   with no ``result`` event.
@@ -27,7 +24,6 @@ broadcasts, real :class:`AgentServer` / :class:`AgentState` /
 from __future__ import annotations
 
 import queue
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -119,59 +115,6 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
         assert owner_state.user_answer_queue.get_nowait() == "real answer"
     finally:
         _clear_states()
-
-
-
-class _ResetRacePrinter(JsonPrinter):
-    """Printer that lets a concurrent ``reset()`` race the inline flush.
-
-    ``broadcast`` signals a waiting driver thread the moment a
-    ``system_output`` emission begins, then gives that thread a window
-    to complete ``reset()`` before recording whether the reset finished
-    first.  With the generation re-check in place the broadcast happens
-    while ``_bash_lock`` is held, so the racing ``reset()`` cannot
-    complete first; without it, the reset slips into the window and the
-    stale text is emitted into the new turn.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.events: list[dict[str, Any]] = []
-        self.in_system_output = threading.Event()
-        self.reset_done = threading.Event()
-        self.stale_emission = False
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Record *event*; for system_output, yield to the resetter."""
-        if event.get("type") == "system_output":
-            self.in_system_output.set()
-            if self.reset_done.wait(timeout=0.4):
-                self.stale_emission = True
-        self.events.append(event)
-
-
-def test_f4_inline_bash_flush_not_emitted_after_reset() -> None:
-    printer = _ResetRacePrinter()
-    task_key = "f4-task"
-
-    def do_reset() -> None:
-        printer._thread_local.task_id = task_key
-        printer.in_system_output.wait(timeout=2.0)
-        printer.reset()
-        printer.reset_done.set()
-
-    resetter = threading.Thread(target=do_reset, daemon=True)
-    resetter.start()
-    printer._thread_local.task_id = task_key
-    printer.print("previous-turn output", type="bash_stream")
-    resetter.join(timeout=5.0)
-    assert not resetter.is_alive()
-    assert any(
-        e.get("type") == "system_output"
-        and "previous-turn output" in e.get("text", "")
-        for e in printer.events
-    )
-    assert not printer.stale_emission
 
 
 

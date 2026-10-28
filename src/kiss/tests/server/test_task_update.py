@@ -121,16 +121,8 @@ def _wait_until(predicate: Any, timeout: float = 10.0) -> None:
         time.sleep(0.01)
 
 
-def _add_events(task_id: str, events: list[dict[str, Any]]) -> None:
-    """Persist *events* on the task's row in sequence order."""
-    from kiss.agents.sorcar import persistence
-
-    for ev in events:
-        persistence._append_chat_event(ev, task_id=task_id)
-
-
 class TestTaskUpdateRunner(unittest.TestCase):
-    """The digest-on-poll, agent-on-refresh behaviour behind the panel's poll.
+    """The lazy schedule behind the panel's poll.
 
     Not covered: ``poll`` marks an update ``running`` only after its
     worker thread has started, so a ``Thread.start()`` that raises
@@ -140,75 +132,72 @@ class TestTaskUpdateRunner(unittest.TestCase):
     provoke without a test double.
     """
 
-    def test_poll_renders_the_digest_and_never_runs_the_agent_by_itself(self) -> None:
-        """An unforced poll shows the task's latest summary and the calls since; no run starts."""
+    def test_first_run_waits_a_minute_after_the_task_started(self) -> None:
+        """A young task is not asked about yet; the panel learns when it will be."""
         sea = _ScriptedSea()
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
-        task_id = _started_task(120.0)
-        _add_events(task_id, [
-            {"type": "tool_call", "name": "Read", "file_path": "/repo/a.py"},
-            {"type": "tool_result", "tool_name": "Read", "content": "..."},
-            {"type": "tool_call", "name": "summary",
-             "description": "- **Read** `a.py`\n- planned the fix"},
-            {"type": "tool_result", "tool_name": "summary", "content": "ok"},
-            {"type": "tool_call", "name": "Bash", "command": "uv run pytest -q",
-             "extras": {"description": "run the <tests>"}},
-            {"type": "tool_result", "tool_name": "Bash", "content": "1 passed"},
-        ])
-        upd = runner.poll(task_id, parent)
-        self.assertFalse(upd.running)
-        self.assertEqual(upd.text, "")
-        self.assertEqual(upd.finished_at, 0.0)
-        digest = upd.digest
-        self.assertIn("<h4>Latest summary (after 1 tool calls)</h4>", digest)
-        self.assertIn("<ul><li><strong>Read</strong> <code>a.py</code></li>"
-                      "<li>planned the fix</li></ul>", digest)
-        self.assertIn("<h4>Since then (1 tool calls)</h4>", digest)
-        self.assertIn("<li><code>Bash</code> run the &lt;tests&gt;</li>", digest)
-        payload = upd.payload()
+        task_young = _started_task(10.0)
+
+        young = runner.poll(task_young, parent)
+        self.assertFalse(young.running)
+        self.assertEqual(young.text, "")
+        self.assertAlmostEqual(young.started_at, time.time() - 10.0, places=0)
+        self.assertAlmostEqual(
+            young.due_at, young.started_at + task_update.FIRST_UPDATE_DELAY_S,
+        )
+        payload = young.payload()
         self.assertIs(payload["exists"], True)
-        self.assertEqual(payload["content"], digest)
         self.assertEqual(payload["updatedAt"], 0)
-        self.assertNotIn("dueAt", payload)
-        self.assertTrue(payload["sig"].startswith("0.000:0:"))
+        self.assertEqual(payload["dueAt"], int(young.due_at * 1000))
+        self.assertEqual(payload["sig"], "0.000:0")
         time.sleep(0.05)
-        self.assertFalse(runner.poll(task_id, parent).running)
+        self.assertFalse(runner.poll(task_young, parent).running)
         self.assertEqual(sea.calls, [])
 
-        # A task without a row or without events renders an empty digest
-        # and "no summary yet" respectively.
-        self.assertEqual(runner.poll("task-without-a-row", parent).digest, "")
-        bare = runner.poll(_started_task(1.0), parent).digest
-        self.assertIn("<h4>No summary yet</h4>", bare)
-        self.assertIn("<p>No tool calls since.</p>", bare)
+        # The refresh button does not wait.
+        forced = runner.poll(task_young, parent, force=True)
+        self.assertTrue(forced.running)
+        _wait_until(lambda: len(sea.calls) == 1)
+        sea.release(("early", 0.01))
+        _wait_until(lambda: not runner.poll(task_young, parent).running)
+        done = runner.poll(task_young, parent)
+        self.assertEqual(done.text, "early")
+        # Once a run has ended the regular interval takes over.
+        self.assertAlmostEqual(
+            done.due_at, done.finished_at + task_update.UPDATE_INTERVAL_S,
+        )
 
-    def test_digest_is_reread_after_the_refresh_interval(self) -> None:
-        """New events reach the panel once DIGEST_REFRESH_S passed; the sig changes with them."""
-        runner = TaskUpdateRunner(run_sea=_ScriptedSea())
-        parent = object()
-        task_id = _started_task(120.0)
-        first = runner.poll(task_id, parent)
-        _add_events(task_id, [{"type": "tool_call", "name": "Bash", "command": "ls"}])
-        self.assertEqual(runner.poll(task_id, parent).sig, first.sig)
-        with runner._lock:
-            runner._updates[task_id].digest_at -= task_update.DIGEST_REFRESH_S
-        later = runner.poll(task_id, parent)
-        self.assertNotEqual(later.sig, first.sig)
-        self.assertIn("<li><code>Bash</code> ls</li>", later.digest)
+        # A legacy row without ``start_ts`` is dated by its insertion
+        # time; a task without a row counts from its first poll.
+        legacy = _started_task(0.0, startTs=0)
+        before = time.time()
+        for tid in (legacy, "task-without-a-row"):
+            upd = runner.poll(tid, parent)
+            self.assertFalse(upd.running)
+            self.assertGreaterEqual(upd.started_at, before - 1.0)
+            self.assertLessEqual(upd.started_at, time.time())
+        self.assertEqual(len(sea.calls), 1)
 
-    def test_refresh_runs_once_and_the_answer_sits_above_the_digest(self) -> None:
+    def test_first_poll_runs_once_and_fresh_reports_wait(self) -> None:
         sea = _ScriptedSea()
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
         task_a = _started_task(120.0)
 
-        first = runner.poll(task_a, parent, force=True)
+        first = runner.poll(task_a, parent)
         self.assertTrue(first.running)
         self.assertEqual(first.text, "")
         self.assertEqual(first.finished_at, 0.0)
-        self.assertTrue(first.sig.startswith("0.000:1:"))
-        self.assertEqual(first.payload()["content"], first.digest)
+        self.assertEqual(first.sig, "0.000:1")
+        self.assertEqual(
+            first.payload(),
+            {
+                "exists": True, "content": "", "error": "", "running": True,
+                "cost": 0.0, "updatedAt": 0,
+                "dueAt": int(first.due_at * 1000), "sig": "0.000:1",
+            },
+        )
         _wait_until(lambda: len(sea.calls) == 1)
         self.assertEqual(sea.calls[0], (parent, task_a))
 
@@ -225,15 +214,9 @@ class TestTaskUpdateRunner(unittest.TestCase):
         self.assertEqual(done.cost, 0.25)
         self.assertEqual(done.error, "")
         self.assertGreater(done.finished_at, 0.0)
-        self.assertTrue(done.sig.startswith(f"{done.finished_at:.3f}:0:"))
+        self.assertEqual(done.sig, f"{done.finished_at:.3f}:0")
         self.assertEqual(done.payload()["updatedAt"], int(done.finished_at * 1000))
-        self.assertEqual(
-            done.payload()["content"],
-            '<div class="task-update-answer"><h4>Report</h4></div>\n' + done.digest,
-        )
-        # An unforced poll serves the cached answer: no new run.
-        time.sleep(0.02)
-        runner.poll(task_a, parent)
+        # A fresh report is served from the cache: no new run.
         self.assertEqual(len(sea.calls), 1)
 
     def test_refresh_reruns_and_a_failure_keeps_the_previous_report(self) -> None:
@@ -241,7 +224,7 @@ class TestTaskUpdateRunner(unittest.TestCase):
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
         task_b = _started_task(120.0)
-        runner.poll(task_b, parent, force=True)
+        runner.poll(task_b, parent)
         sea.release(("first report", 0.1))
         _wait_until(lambda: not runner.poll(task_b, parent).running)
 
@@ -258,19 +241,33 @@ class TestTaskUpdateRunner(unittest.TestCase):
         self.assertFalse(failed.payload()["running"])
         self.assertTrue(failed.payload()["exists"])
 
-    def test_idle_reports_are_pruned(self) -> None:
+    def test_interval_elapsed_reruns_and_idle_reports_are_pruned(self) -> None:
         sea = _ScriptedSea()
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
         task_c = _started_task(120.0)
         task_other = _started_task(120.0)
-        runner.poll(task_c, parent, force=True)
+        runner.poll(task_c, parent)
         sea.release(("r1", 0.0))
         _wait_until(lambda: not runner.poll(task_c, parent).running)
+        # Shorten the interval only around the one poll that must be due:
+        # while the polling waits run, a poll landing 50 ms after a finish
+        # would otherwise start an unscripted extra run.
+        saved = task_update.UPDATE_INTERVAL_S
+        task_update.UPDATE_INTERVAL_S = 0.05
+        self.addCleanup(setattr, task_update, "UPDATE_INTERVAL_S", saved)
+        try:
+            time.sleep(0.06)
+            due = runner.poll(task_c, parent)
+        finally:
+            task_update.UPDATE_INTERVAL_S = saved
+        self.assertTrue(due.running)
+        self.assertEqual(len(sea.calls), 2)
+        sea.release(("r2", 0.0))
+        _wait_until(lambda: runner.poll(task_c, parent).text == "r2")
 
         # A report nobody polled for an hour is dropped on the next poll
-        # of any task; a later poll of the pruned task starts afresh
-        # (digest only, no run).
+        # of any task; a later poll of the pruned task starts afresh.
         with runner._lock:
             runner._updates[task_c].polled_at -= task_update._PRUNE_AFTER_S
         runner.poll(task_other, parent)
@@ -279,11 +276,27 @@ class TestTaskUpdateRunner(unittest.TestCase):
             self.assertIn(task_other, runner._updates)
         fresh = runner.poll(task_c, parent)
         self.assertEqual(fresh.text, "")
-        self.assertFalse(fresh.running)
-        self.assertEqual(len(sea.calls), 1)
+        self.assertTrue(fresh.running)
+        sea.release(("other", 0.0))
+        sea.release(("c-again", 0.0))
+        _wait_until(lambda: len(sea.calls) == 4 and not any(
+            runner.poll(t, parent).running for t in (task_other, task_c)
+        ))
 
-    def test_concurrent_refreshes_create_one_update_and_one_run(self) -> None:
-        """Simultaneous refreshes (several surfaces showing one tab) share one update."""
+        # An update whose OWN poll is the one that prunes it (the panel
+        # comes back to the tab after an hour) is recreated dated from
+        # the task's row, not from this poll: the overdue run starts now.
+        with runner._lock:
+            runner._updates[task_c].polled_at -= task_update._PRUNE_AFTER_S
+        back = runner.poll(task_c, parent)
+        self.assertEqual(back.text, "")
+        self.assertTrue(back.running)
+        self.assertAlmostEqual(back.started_at, time.time() - 120.0, places=0)
+        sea.release(("c-back", 0.0))
+        _wait_until(lambda: runner.poll(task_c, parent).text == "c-back")
+
+    def test_concurrent_first_polls_create_one_update_and_one_run(self) -> None:
+        """Simultaneous first polls (several surfaces showing one tab) share one update."""
         sea = _ScriptedSea()
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
@@ -293,7 +306,7 @@ class TestTaskUpdateRunner(unittest.TestCase):
 
         def poll_once() -> None:
             go.wait(5)
-            results.append(runner.poll(task_id, parent, force=True))
+            results.append(runner.poll(task_id, parent))
 
         threads = [threading.Thread(target=poll_once) for _ in range(8)]
         for t in threads:
@@ -640,9 +653,11 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
         self.assertEqual(reply["token"], "4")
         self.assertEqual(self.sea.calls, [])
 
-    async def test_young_task_replies_with_its_digest_and_no_run(self) -> None:
-        """A task seconds old gets its digest at once and no agent run."""
+    async def test_young_task_replies_when_its_first_update_is_due(self) -> None:
+        """A task under a minute old gets no run yet, only the time of the first one."""
+        before = time.time()
         task_id = self._register_task("t-young", age_s=5.0)
+        after = time.time()
         ws = await self._connect()
         try:
             reply = await self._poll(ws, {"tabId": "t-young", "token": "5"})
@@ -650,25 +665,31 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             await ws.close()
         self.assertIs(reply["exists"], True)
         self.assertIs(reply["running"], False)
-        self.assertIn("<h4>No summary yet</h4>", reply["content"])
+        self.assertEqual(reply["content"], "")
         self.assertEqual(reply["taskId"], task_id)
         self.assertEqual(reply["updatedAt"], 0)
-        self.assertNotIn("dueAt", reply)
-        self.assertTrue(reply["sig"].startswith("0.000:0:"))
+        self.assertEqual(reply["sig"], "0.000:0")
+        # dueAt is the row's start (5 s before registration, truncated to
+        # the millisecond) plus the first-update delay; recover that start
+        # and bound it by the registration window so a slow connect or
+        # poll under load cannot skew the check.
+        started = reply["dueAt"] / 1000.0 - task_update.FIRST_UPDATE_DELAY_S + 5.0
+        self.assertGreaterEqual(started, before - 0.001)
+        self.assertLessEqual(started, after)
         self.assertEqual(self.sea.calls, [])
 
     async def test_running_task_is_reported_polled_and_refreshed(self) -> None:
         task_id = self._register_task("t-run")
         ws = await self._connect()
         try:
-            first = await self._poll(ws, {"tabId": "t-run", "token": "7", "refresh": True})
+            first = await self._poll(ws, {"tabId": "t-run", "token": "7"})
             self.assertIs(first["exists"], True)
             self.assertIs(first["running"], True)
             self.assertEqual(first["taskId"], task_id)
-            self.assertIn("<h4>No summary yet</h4>", first["content"])
+            self.assertEqual(first["content"], "")
             self.assertEqual(first["token"], "7")
             self.assertEqual(first["tabId"], "t-run")
-            self.assertTrue(first["sig"].startswith("0.000:1:"))
+            self.assertEqual(first["sig"], "0.000:1")
             await asyncio.to_thread(_wait_until, lambda: len(self.sea.calls) == 1)
             self.assertEqual(self.sea.calls[0][1], task_id)
             self.assertIs(self.sea.calls[0][0], self._agents[task_id])
@@ -692,9 +713,7 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             )
             self.assertNotIn("unchanged", done)
             self.assertIs(done["running"], False)
-            self.assertTrue(done["content"].startswith(
-                '<div class="task-update-answer"><h4>Progress</h4><p>read 3 files</p></div>'
-            ))
+            self.assertEqual(done["content"], "<h4>Progress</h4><p>read 3 files</p>")
             self.assertEqual(done["error"], "")
             self.assertEqual(done["cost"], 0.07)
             self.assertGreater(done["updatedAt"], 0)

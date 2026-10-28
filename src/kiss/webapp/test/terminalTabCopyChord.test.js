@@ -18,6 +18,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {queueRaf} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -64,7 +65,7 @@ async function openView(selection) {
     observe() {}
     disconnect() {}
   };
-  win.requestAnimationFrame = () => 0;
+  queueRaf(win); // no frame ever runs
   // The async clipboard refuses every write, as it does when the
   // document is not focused; execCommand('copy') records the value of
   // the textarea the fallback appended and selected (jsdom's select()
@@ -96,9 +97,12 @@ async function openView(selection) {
   return {keyHandler: terminals[0].keyHandler, log};
 }
 
-/** Let the clipboard rejection and the fallback settle. */
+/**
+ * Let the clipboard rejection and the execCommand fallback settle:
+ * `PanelCopy.copyText` is promise-only, so one macrotask turn drains it.
+ */
 function settle() {
-  return new Promise(resolve => setTimeout(resolve, 30));
+  return new Promise(resolve => setImmediate(resolve));
 }
 
 async function main() {

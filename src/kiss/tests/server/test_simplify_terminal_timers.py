@@ -43,7 +43,11 @@ from pathlib import Path
 import pytest
 
 from kiss.server.terminal_tab import TerminalService
-from kiss.tests.server.test_terminal_tab_service import ConnPrinter, hermetic_shell
+from kiss.tests.server.test_terminal_tab_service import (
+    ConnPrinter,
+    hermetic_shell,
+    session_count,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -89,7 +93,7 @@ def test_reattach_cancels_the_grace_timer_instead_of_leaking_its_thread(
             svc.viewer_gone(f"conn-{i}")
             svc.open("tab-flaky", f"conn-{i + 1}", str(tmp_path), 80, 24)
         # One shell throughout: the re-attaches were all accepted.
-        assert svc.session_count() == 1
+        assert session_count(svc) == 1
         attached = [e for e in printer.of_type("terminalOpened") if e["attached"]]
         assert len(attached) == _CYCLES
 
@@ -111,11 +115,35 @@ def test_shutdown_cancels_the_grace_timer_of_a_detached_shell(tmp_path: Path) ->
     printer.wait_for(lambda: printer.of_type("terminalOpened", "conn-1"))
     svc.viewer_gone("conn-1")
     svc.shutdown()
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     printer.wait_for(lambda: printer.of_type("terminalExit"))
     # The 2 s hang-up kill timer runs out; the 60 s grace timer was
     # cancelled by the hang-up (before the fix it slept on for a minute).
     assert _settled_timers(svc) == []
+
+
+def test_a_detached_shell_that_exits_takes_its_grace_timer_along(tmp_path: Path) -> None:
+    """The pump's pop of an exited detached session cancels its grace timer (F11).
+
+    A page that typed ``exit`` and went away before the shell was gone
+    left the 60 s grace timer armed on a session nobody held any more.
+    """
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    try:
+        svc.open("tab-exit", "conn-1", str(tmp_path), 80, 24)
+        printer.wait_for(lambda: printer.of_type("terminalOpened", "conn-1"))
+        svc.input("tab-exit", "conn-1", "sleep 0.3; exit\n")
+        svc.viewer_gone("conn-1")
+        assert len(_timers_of(svc)) == 1, "the detach armed the grace timer"
+        printer.wait_for(lambda: printer.of_type("terminalExit"))
+        with svc._lock:
+            assert "tab-exit" not in svc._sessions
+        # No hang-up ran (the shell left on its own), so the grace timer
+        # was the only one; the pump's pop cancelled it.
+        assert _settled_timers(svc) == []
+    finally:
+        svc.shutdown()
 
 
 def test_stale_timer_firing_after_reattach_does_not_hang_up_a_later_disconnect(
@@ -150,7 +178,7 @@ def test_stale_timer_firing_after_reattach_does_not_hang_up_a_later_disconnect(
         stale_run = threading.Thread(target=svc._expire_detached, args=(session,))
         stale_run.start()
         stale_run.join(5)
-        assert svc.session_count() == 1
+        assert session_count(svc) == 1
         assert not session.hung_up
         # The shell is still live for the next re-attach.
         svc.open("tab-stale", "conn-3", str(tmp_path), 80, 24)

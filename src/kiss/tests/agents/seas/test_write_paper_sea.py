@@ -30,13 +30,8 @@ from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.seas.write_paper.write_paper_sea import WritePaperSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
-    system_message,
-    tool_names,
-    tool_results,
-)
+from kiss.tests.agents.seas.conftest import gate
+from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -508,25 +503,19 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
     the real gate report flowed through the tool-result message.
     """
     path = _write(tmp_path, _SLOPPY_TEX, _SLOPPY_BIB)
-    run = sea_commands.evaluate_sea([WritePaperSea()], f"Review {path} for AI slop; do not edit.")
-    script = [
-        tool_call_body("check_paper", {"tex_path": str(path)}, prompt_tokens=500),
-        finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=600),
-    ]
-    parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
-    assert parsed["success"] is True
-    assert "7 gate(s) failed" in parsed["summary"]
-
-    assert len(agentic) == 2
-    for request in agentic:
-        names = tool_names(request)
-        expected = {"check_paper", "build_paper", "Bash", "run_parallel", "go_to_url", "finish"}
-        assert expected <= names, names
-        system = system_message(request)
-        assert not system.startswith(write_paper_sea.SYSTEM_PROMPT)
-        assert "# Paper-writing agent" in system
-        assert "Em dashes: zero in prose" in system
-    results = tool_results(agentic[1])
-    assert len(results) == 1, agentic[1]["messages"]
+    results = assert_appending_sea_run(
+        WritePaperSea(),
+        f"Review {path} for AI slop; do not edit.",
+        [
+            tool_call_body("check_paper", {"tex_path": str(path)}, prompt_tokens=500),
+            finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=600),
+        ],
+        tmp_path,
+        tools={"check_paper", "build_paper", "Bash", "run_parallel", "go_to_url", "finish"},
+        system_prompt=write_paper_sea.SYSTEM_PROMPT,
+        anchors=("# Paper-writing agent", "Em dashes: zero in prose"),
+        summary="7 gate(s) failed",
+    )
+    assert len(results) == 1, results
     assert "summary: 7 gate(s) failed" in results[0]
     assert "antithesis: 6 (limit 5) FAIL" in results[0]

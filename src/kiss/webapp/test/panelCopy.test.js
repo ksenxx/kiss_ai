@@ -13,6 +13,7 @@ const {JSDOM} = require('jsdom');
 const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
+const {stubClipboard} = require('./simplify2_harness');
 
 // Every window made, closed once the run is over so node can exit.
 const openWindows = [];
@@ -24,16 +25,7 @@ function makeWindow() {
   });
   const win = dom.window;
   openWindows.push(win);
-  let clipboardText = null;
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: text => {
-        clipboardText = String(text);
-        return Promise.resolve();
-      },
-    },
-  });
+  const clip = stubClipboard(win);
   const src = fs.readFileSync(PANEL_COPY_PATH, 'utf-8');
   const scriptEl = win.document.createElement('script');
   scriptEl.textContent = src;
@@ -42,8 +34,22 @@ function makeWindow() {
   return {
     document: win.document,
     PanelCopy: win.PanelCopy,
-    getClipboard: () => clipboardText,
+    getClipboard: clip.last,
   };
+}
+
+/**
+ * Replace *document*'s `execCommand` with a recorder that reports the
+ * text the fallback textarea held when 'copy' ran, then returns *ok*.
+ */
+function recordExecCommand(document, ok) {
+  const calls = [];
+  document.execCommand = cmd => {
+    const ta = document.querySelector('textarea');
+    calls.push({cmd, text: ta ? ta.value : null});
+    return ok;
+  };
+  return calls;
 }
 
 function clickFirst(el, selector) {
@@ -232,6 +238,38 @@ async function run() {
       );
     },
   );
+
+  await test('copyText falls back to execCommand when clipboard has no writeText', async () => {
+    const {document, PanelCopy} = makeWindow();
+    Object.defineProperty(document.defaultView.navigator, 'clipboard', {
+      configurable: true,
+      value: {},
+    });
+    const calls = recordExecCommand(document, true);
+    assert.strictEqual(await PanelCopy.copyText('plain text', document), true);
+    assert.deepStrictEqual(calls, [{cmd: 'copy', text: 'plain text'}]);
+    assert.strictEqual(
+      document.querySelector('textarea'),
+      null,
+      'the helper textarea is removed after the copy',
+    );
+  });
+
+  await test('copyText falls back to execCommand when writeText throws', async () => {
+    const {document, PanelCopy} = makeWindow();
+    Object.defineProperty(document.defaultView.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: () => {
+          throw new Error('not allowed');
+        },
+      },
+    });
+    const calls = recordExecCommand(document, true);
+    assert.strictEqual(await PanelCopy.copyText('thrown', document), true);
+    assert.deepStrictEqual(calls, [{cmd: 'copy', text: 'thrown'}]);
+    assert.strictEqual(document.querySelector('textarea'), null);
+  });
 
   await test('click handler does not collapse / propagate to ancestors', () => {
     const {document, PanelCopy} = makeWindow();

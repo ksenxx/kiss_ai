@@ -27,7 +27,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  click: clickTab,
+} = require('./simplify2_harness');
 const {
   bootParallelRun,
   writeReport,
@@ -37,7 +42,6 @@ const {
   tabEl,
   visibleSrcdoc,
   activeTabId,
-  clickTab,
   swipeLeftToFileScreen,
 } = require('./subagent_tab_helpers');
 

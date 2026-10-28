@@ -19,10 +19,7 @@ const {
 } = require('./simplify2_harness');
 
 function makePage() {
-  const {win} = makeSharedPage({
-    beforeScripts: stubRaf,
-    sourceUrl: 'remoteurllan-main.js',
-  });
+  const {win} = makeSharedPage({beforeScripts: stubRaf});
   return {win};
 }
 

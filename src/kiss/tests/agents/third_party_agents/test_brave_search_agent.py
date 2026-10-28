@@ -33,7 +33,6 @@ import pytest
 from kiss.agents.third_party_agents.brave.brave_sea import (
     BraveSearchAgent,
     BraveSearchChannelBackend,
-    _clamp,
     _config,
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
@@ -280,13 +279,6 @@ def test_connect_with_config_succeeds() -> None:
     assert "configured" in b.connection_info
 
 
-def test_clamp_bounds() -> None:
-    """_clamp limits values to the inclusive range."""
-    assert _clamp(0, 1, 20) == 1
-    assert _clamp(100, 1, 20) == 20
-    assert _clamp(10, 1, 20) == 10
-
-
 def test_brave_web_search_happy_path(backend, brave_server) -> None:
     """brave_web_search hits /web/search with the token and condenses results."""
     result = json.loads(backend.brave_web_search("python language"))
@@ -450,17 +442,14 @@ def test_brave_video_search_clamps_count(backend, brave_server) -> None:
     assert brave_server.requests[-1]["query"]["count"] == ["50"]
 
 
-def test_wrong_token_returns_ok_false(brave_server) -> None:
+def test_wrong_token_returns_ok_false(backend) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url = brave_server.base_url
-    b = BraveSearchChannelBackend()
-    b._base_url = base_url
-    b._api_key = "wrong-token"
+    backend._api_key = "wrong-token"
     for call in (
-        lambda: b.brave_web_search("python"),
-        lambda: b.brave_news_search("python"),
-        lambda: b.brave_image_search("python"),
-        lambda: b.brave_video_search("python"),
+        lambda: backend.brave_web_search("python"),
+        lambda: backend.brave_news_search("python"),
+        lambda: backend.brave_image_search("python"),
+        lambda: backend.brave_video_search("python"),
     ):
         result = json.loads(call())
         assert result["ok"] is False

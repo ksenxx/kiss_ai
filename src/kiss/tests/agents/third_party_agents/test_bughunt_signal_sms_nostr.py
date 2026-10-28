@@ -37,31 +37,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     recording_server,
 )
-
-# A Python program (not a shell script) so the same stand-in runs on
-# Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
-_FAKE_SIGNAL_CLI = """#!/usr/bin/env python3
-import json
-import sys
-args = sys.argv[1:]
-if args[:1] == ["-u"]:
-    args = args[2:]
-cmd = args[0] if args else ""
-if cmd == "receive":
-    for source, ts, text in (
-        ("+1AAA", 111, "hello A1"),
-        ("+1BBB", 112, "hello B"),
-        ("+1AAA", 113, "hello A2"),
-    ):
-        print(json.dumps({"envelope": {
-            "source": source, "timestamp": ts, "dataMessage": {"message": text},
-        }}))
-    sys.exit(0)
-if cmd == "send" and args[-1] == "+FAIL":
-    print("Failed to send message: ERROR unregistered recipient", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-"""
+from kiss.tests.agents.third_party_agents.signal_cli import FAKE_SIGNAL_CLI
 
 
 @pytest.mark.usefixtures("isolated_kiss_home")
@@ -70,7 +46,7 @@ class TestSignalBackend(unittest.TestCase):
 
     def setUp(self) -> None:
         """Install a real executable signal-cli script on PATH and a test config."""
-        install_cli_on_path(self, "signal-cli", _FAKE_SIGNAL_CLI)
+        install_cli_on_path(self, "signal-cli", FAKE_SIGNAL_CLI)
         from kiss.agents.third_party_agents.signal.signal_sea import (
             SignalChannelBackend,
             _config,

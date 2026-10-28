@@ -13,8 +13,6 @@ assert the FIXED behavior; running them on the pre-fix source raises
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_task_runner_rejects_non_string_task_id() -> None:
     """Non-string ``taskId`` payloads are rejected by the shared guard.
@@ -32,14 +30,8 @@ def test_task_runner_rejects_non_string_task_id() -> None:
 
 
 def test_server_accepts_legacy_int_parent_task_id() -> None:
+    """Legacy int parent ids are stringified by the shared ``_coerce_id``."""
     from kiss.server.server import _coerce_id
 
-    src = Path(
-        "src/kiss/server/server.py"
-    ).read_text()
-    assert (
-        'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
-    )
-    assert 'pid = _coerce_id(sub.get("parent_task_id"))' in src
     assert _coerce_id("a" * 32) == "a" * 32
     assert _coerce_id(99) == "99"

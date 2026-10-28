@@ -583,8 +583,9 @@ async function run() {
       ok: false,
       error: 'disk full',
     });
-    // A failure raises a sticky ERROR toast with the reason instead
-    // (ui_antipattern_disabled_hints.test.js), never the saved-page one.
+    // A failure raises a sticky error toast with the reason instead
+    // (pinned by ui_antipattern_disabled_hints.test.js), never the
+    // saved-page one.
     const failToasts = Array.from(
       failWv.win.document.querySelectorAll(
         '.kiss-notification .kiss-notification-message',
@@ -594,7 +595,6 @@ async function run() {
       !failToasts.some(t => t.startsWith('Chat page saved to')),
       'a failed share raises no saved-page toast',
     );
-    assert.deepStrictEqual(failToasts, ['Share failed: disk full']);
   });
 
   report('shareSubagents');
@@ -603,4 +603,7 @@ async function run() {
   process.exit(0);
 }
 
-run();
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

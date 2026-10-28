@@ -38,11 +38,13 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 )
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     _process_running,
+    muse_daemons_of,
     setup_muse_env,
     teardown_muse_env,
 )
 
 _CALLERS = 8
+MUSE_POLICY = {"defaults": {"read": "allow", "write": "ask"}}
 # Upper bound on the whole race: a hung caller fails the test instead of
 # hanging the suite (pytest timeouts are disabled repo-wide).
 _DEADLINE_S = 60.0
@@ -56,33 +58,6 @@ while not os.path.exists(sys.argv[1]):
 ensure_daemon()
 print("ok", flush=True)
 """
-
-
-def _daemon_pids(kiss_home: str) -> set[int]:
-    """Return pids of Muse-auth daemon processes running with ``kiss_home``.
-
-    Args:
-        kiss_home: The ``KISS_HOME`` value that identifies this test's daemons.
-
-    Returns:
-        The pids whose command line runs the daemon module and whose
-        environment carries ``KISS_HOME=kiss_home``.
-    """
-    marker = f"KISS_HOME={kiss_home}".encode()
-    pids = set()
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            cmdline = Path(f"/proc/{entry}/cmdline").read_bytes()
-            if b"muse_auth.daemon" not in cmdline:
-                continue
-            environ = Path(f"/proc/{entry}/environ").read_bytes()
-        except OSError:
-            continue
-        if marker in environ.split(b"\0"):
-            pids.add(int(entry))
-    return pids
 
 
 def _watch_daemons(
@@ -111,9 +86,9 @@ def _watch_daemons(
     deadline = time.monotonic() + _DEADLINE_S
     while not all(_finished(worker) for worker in workers):
         assert time.monotonic() < deadline, "ensure_daemon callers hung"
-        seen |= _daemon_pids(kiss_home)
+        seen |= muse_daemons_of(kiss_home)
         time.sleep(0.002)
-    return seen | _daemon_pids(kiss_home)
+    return seen | muse_daemons_of(kiss_home)
 
 
 def _finished(worker: subprocess.Popen[str] | threading.Thread) -> bool:
@@ -142,7 +117,7 @@ def _kill_daemons(kiss_home: str) -> None:
     Args:
         kiss_home: The ``KISS_HOME`` value that identifies this test's daemons.
     """
-    pids = _daemon_pids(kiss_home)
+    pids = muse_daemons_of(kiss_home)
     for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
@@ -158,18 +133,21 @@ def test_concurrent_callers_spawn_one_daemon(
     isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Callers released together spawn a single daemon and all get served."""
-    setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
+    setup_muse_env(monkeypatch, MUSE_POLICY)
     kiss_home = os.environ["KISS_HOME"]
     barrier = tmp_path / "go"
-    callers = [
-        subprocess.Popen(
-            [sys.executable, "-c", _CALLER_SCRIPT, str(barrier)],
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        for _ in range(_CALLERS)
-    ]
+    # Spawning happens inside the try so a failure while spawning still kills
+    # the callers already started, which would otherwise wait on the barrier.
+    callers: list[subprocess.Popen[str]] = []
     try:
+        for _ in range(_CALLERS):
+            callers.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _CALLER_SCRIPT, str(barrier)],
+                    stdout=subprocess.PIPE,
+                    text=True,
+                )
+            )
         deadline = time.monotonic() + _DEADLINE_S
         for caller in callers:
             assert caller.stdout is not None
@@ -183,7 +161,9 @@ def test_concurrent_callers_spawn_one_daemon(
         for caller in callers:
             if caller.poll() is None:
                 caller.kill()
-                caller.wait()
+            caller.wait()
+            if caller.stdout is not None:
+                caller.stdout.close()
         running = _daemon_protocol() == PROTOCOL_VERSION
         teardown_muse_env()
         _kill_daemons(kiss_home)
@@ -205,7 +185,7 @@ def test_concurrent_threads_spawn_one_daemon(
     lock file itself, so threads exclude each other just like processes.
     The threads that wait take the re-check-under-the-lock return.
     """
-    setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
+    setup_muse_env(monkeypatch, MUSE_POLICY)
     kiss_home = os.environ["KISS_HOME"]
     start = threading.Barrier(_CALLERS)
     errors: list[BaseException] = []

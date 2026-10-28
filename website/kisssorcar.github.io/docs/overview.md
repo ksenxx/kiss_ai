@@ -38,7 +38,7 @@ On the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models, KISS Sor
 
 ## Unique Features
 
-- **AI discovery and auto research via prompt.** Describe a discovery or optimization goal in a paragraph; Sorcar iterates over ideas, tracks what worked, and doesn't stop until the target metrics are met.
+- **AI discovery and auto research via prompt.** Describe a discovery or optimization goal in a paragraph after the `/discover` command; Sorcar iterates over ideas, tracks what worked, and doesn't stop until the target metrics are met.
 - **GEPA prompt optimization via prompt.** Run the GEPA reflective prompt-evolution algorithm on your own data with a single task prompt.
 - **Multi-model orchestration in one task.** Ask one model to implement and another to review — expressed entirely in the prompt, e.g. "Use claude-fable-5 for development and gpt-5.6-sol for review."
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.

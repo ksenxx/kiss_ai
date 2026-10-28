@@ -56,6 +56,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.worktree_helpers import merge_conflict
 
 
@@ -120,7 +121,7 @@ def _create_wt(
         original_branch="main",
         wt_dir=wt_dir,
     )
-    agent._wt = wt
+    seed_worktree(agent, wt)
     return wt
 
 

@@ -31,14 +31,17 @@ from kiss.core.models.model import (
     TokenCallback,
     _get_attr_or_key,
     accepted_request_params,
+    checked_nonempty,
     iter_assistant_tool_calls,
     merge_system_texts,
+    normalize_content_blocks,
     parse_tool_arguments,
     pop_max_tokens_and_stop,
     responses_items_to_chat_messages,
     split_data_url,
     split_system_cache_break,
     strip_system_cache_break,
+    text_of_parts,
     transcribe_audio,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_error
@@ -87,7 +90,12 @@ Verified live on 2026-10-07 against every ``claude-*`` catalog entry
 Opus 4.6 and Sonnet 4.6 accept every level except ``xhigh``; Opus 4.5
 accepts only ``low`` / ``medium`` / ``high``; Haiku 4.5 and Sonnet 4.5
 reject the parameter.  Omitting ``effort`` is the vendor default
-(``medium`` on Opus 5.5, ``high`` elsewhere)."""
+(``medium`` on Opus 5.5 and Haiku 5.5, ``high`` on Fable 5.1 and Sonnet
+5.5 per the model table at
+https://platform.claude.com/docs/en/models/haiku-5-5/overview, checked
+2026-10-27); the adapter never omits it
+for a catalog entry that carries a ``thinking`` level (see
+:func:`_effort_level_for`)."""
 
 
 def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | None:
@@ -97,13 +105,17 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
 
     1. An explicit ``reasoning_effort`` in ``model_config`` (the
        framework-wide spelling shared with the OpenAI adapters) wins.
-    2. Otherwise the ``thinking`` level of a generated ``-{level}``
-       catalog alias (``claude-opus-5-5-medium`` → ``"medium"``): an
-       entry whose ``alias_of`` marker names its base.  A base entry's
-       own ``thinking`` field is deliberately NOT applied — the base
-       name means "vendor default effort" (``medium`` on Opus 5.5,
-       ``high`` elsewhere), so ``claude-opus-5-5`` costs exactly what
-       the bare API call costs.
+    2. Otherwise the catalog entry's ``thinking`` level, when it is one
+       of :data:`ANTHROPIC_EFFORT_LEVELS`: a generated ``-{level}`` alias
+       carries its own level (``claude-opus-5-5-medium`` → ``"medium"``)
+       and a base entry carries the level the catalog runs it at
+       (``claude-opus-5-5`` → ``"high"``, the cap ``update_models.py``
+       stores on a base; see ``_write_entry_with_thinking_split``).  The
+       base level is sent explicitly rather than left to the vendor
+       default because the two differ on Opus 5.5 and Haiku 5.5
+       (``medium`` when omitted) and the request must match the catalog.
+       Entries that reject the parameter (Haiku 4.5, Sonnet 4.5) carry no
+       ``thinking`` and get none.
 
     A native ``output_config`` already carrying ``effort`` is left to the
     caller (see :meth:`AnthropicModel._build_create_kwargs`).
@@ -121,7 +133,7 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
     if explicit is not None:
         return str(explicit)
     info = MODEL_INFO.get(model_name)
-    if info is not None and info.alias_of and info.thinking in ANTHROPIC_EFFORT_LEVELS:
+    if info is not None and info.thinking in ANTHROPIC_EFFORT_LEVELS:
         return str(info.thinking)
     return None
 
@@ -384,14 +396,12 @@ def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | No
         fmt = audio.get("format", "")
         mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
         try:
-            text = transcribe_audio(base64.b64decode(audio.get("data", "")), mime_type)
-            return {"type": "text", "text": f"[Audio transcription]\n{text}"}
-        except Exception:
-            logger.warning(
-                "Anthropic does not support input_audio content parts and "
-                "automatic transcription failed; dropping.",
-            )
+            audio_bytes = base64.b64decode(audio.get("data", ""))
+        except (ValueError, TypeError):
+            logger.warning("Dropping undecodable OpenAI input_audio part.")
             return None
+        # Transcribed (or dropped with a warning) exactly like an audio attachment.
+        return next(iter(_attachments_to_blocks([Attachment(audio_bytes, mime_type)])), None)
     logger.warning("Dropping unconvertible OpenAI %s content part.", part_type)
     return None
 
@@ -505,12 +515,13 @@ def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dic
         blocks.append({"type": "text", "text": tail})
     return blocks
 
+
 def _has_cache_breakpoint(kwargs: dict[str, Any]) -> bool:
     """Tell whether the request *kwargs* would carry a prompt-cache breakpoint.
 
     Looks at the request as it goes on the wire: the SDK merges
-    ``extra_body`` over the outer keyword arguments, so a ``system`` (or
-    any other field) supplied there replaces the outer one.  A breakpoint
+    ``extra_body`` over the outer keyword arguments, so a ``system`` or
+    ``messages`` supplied there replaces the outer one.  A breakpoint
     is a top-level ``cache_control`` (automatic caching) or a
     ``cache_control`` on a system block, a tool, or a content block of a
     message.
@@ -662,6 +673,11 @@ def _supports_inference_geo(model_name: str) -> bool:
     return major > 4 or (major == 4 and (minor or 0) >= 6)
 
 
+def _workspace_id() -> str:
+    """Return the ``ANTHROPIC_WORKSPACE_ID`` an identity-linked key must send (``""`` if unset)."""
+    return os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+
+
 def _bedrock_credentials() -> tuple[str, str, str, str]:
     """Return the configured ``(access key, secret key, session token, region)``.
 
@@ -766,9 +782,6 @@ class AnthropicModel(Model):
         )
         self.api_key = api_key
         self.bedrock = bedrock
-        # The credentials the current client was built from, so
-        # initialize() rebuilds it only on a real change.
-        self._client_inputs: tuple[str, ...] | None = None
         # ``_api_model_name`` is the id sent as ``model=`` over the wire
         # and ``_catalog_model_name`` the ``claude-*`` catalog key the
         # capability checks (thinking, effort) and pricing use.  Direct: a
@@ -791,6 +804,19 @@ class AnthropicModel(Model):
             self._api_model_name = _strip_thinking_alias(model_name)
             self._catalog_model_name = model_name
 
+    def _build_client(self) -> Anthropic | AnthropicBedrock:
+        """Return a new SDK client for the current key, workspace id and backend."""
+        timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
+        if self.bedrock:
+            return _bedrock_client(self.api_key, timeout)
+        workspace_id = _workspace_id()
+        return Anthropic(
+            api_key=self.api_key,
+            timeout=timeout,
+            max_retries=_MAX_RETRIES,
+            default_headers={"anthropic-workspace-id": workspace_id} if workspace_id else None,
+        )
+
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
 
@@ -810,36 +836,14 @@ class AnthropicModel(Model):
         # load_api_keys() imports from ~/.kiss/api_keys.env at daemon
         # startup and ./rsorcar ships to remote installs.
         #
-        # The client is built once and reused across runs (KISSAgent
-        # reuses the adapter and calls initialize() per run): rebuilding
-        # it every time abandons a whole httpx connection pool to the
-        # garbage collector for nothing.  It is rebuilt only when the
-        # inputs it was constructed from changed, and the replaced client
-        # is closed so its pool goes with it.
-        timeout = httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT)
-        workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+        # The client is built once and reused across runs; see
+        # Model._reuse_client.
         inputs = (
             (self.api_key, *_bedrock_credentials())
             if self.bedrock
-            else (self.api_key, workspace_id)
+            else (self.api_key, _workspace_id())
         )
-        if self.client is None or inputs != self._client_inputs:
-            replaced = self.client
-            if self.bedrock:
-                self.client = _bedrock_client(self.api_key, timeout)
-            else:
-                default_headers = (
-                    {"anthropic-workspace-id": workspace_id} if workspace_id else None
-                )
-                self.client = Anthropic(
-                    api_key=self.api_key,
-                    timeout=timeout,
-                    max_retries=_MAX_RETRIES,
-                    default_headers=default_headers,
-                )
-            self._client_inputs = inputs
-            if replaced is not None:
-                replaced.close()
+        self._reuse_client(inputs, self._build_client)
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks = _attachments_to_blocks(attachments)
@@ -850,9 +854,8 @@ class AnthropicModel(Model):
     def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
         """Normalize Anthropic content blocks to JSON-serializable dicts.
 
-        Drops text blocks whose text is empty or whitespace-only, because
-        the Anthropic API rejects them with ``invalid_request_error:
-        messages: text content blocks must contain non-whitespace text``.
+        See :func:`normalize_content_blocks`: OpenAI media parts left by a
+        conversation hand-off are converted, thinking blocks are kept.
 
         Args:
             content: The content blocks from an Anthropic response.
@@ -860,67 +863,12 @@ class AnthropicModel(Model):
         Returns:
             list[dict[str, Any]]: Normalized content blocks as dictionaries.
         """
-        blocks: list[dict[str, Any]] = []
-        if content is None:
-            return blocks
-        for block in content:
-            if isinstance(block, dict):
-                dict_block_type = block.get("type")
-                if dict_block_type == "text" and not block.get("text", "").strip():
-                    continue
-                if dict_block_type in ("image_url", "file", "input_audio"):
-                    converted = _openai_part_to_anthropic_block(block)
-                    if converted is not None:
-                        blocks.append(converted)
-                    continue
-                blocks.append(block)
-                continue
-            block_type = getattr(block, "type", None)
-            if block_type == "text":
-                text = getattr(block, "text", "")
-                if not text.strip():
-                    continue
-                blocks.append({"type": "text", "text": text})
-            elif block_type == "tool_use":
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": getattr(block, "id", ""),
-                        "name": getattr(block, "name", ""),
-                        "input": getattr(block, "input", {}) or {},
-                    }
-                )
-            elif block_type == "thinking":
-                thinking_block: dict[str, Any] = {
-                    "type": "thinking",
-                    "thinking": getattr(block, "thinking", ""),
-                }
-                signature = getattr(block, "signature", None)
-                if signature is not None:
-                    thinking_block["signature"] = signature
-                blocks.append(thinking_block)
-            elif hasattr(block, "model_dump"):
-                dumped = block.model_dump(exclude_none=True)
-                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
-                    continue
-                blocks.append(dumped)
-            else:
-                text = str(block)
-                if not text.strip():
-                    continue
-                blocks.append({"type": "text", "text": text})
-        return blocks
-
-    def _extract_text_from_blocks(self, blocks: list[dict[str, Any]]) -> str:
-        """Extract text content from normalized content blocks.
-
-        Args:
-            blocks: List of normalized content blocks.
-
-        Returns:
-            str: Concatenated text from all text blocks.
-        """
-        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        return normalize_content_blocks(
+            content,
+            ("image_url", "file", "input_audio"),
+            _openai_part_to_anthropic_block,
+            keep_thinking=True,
+        )
 
     def _build_anthropic_tools_schema(
         self,
@@ -1145,12 +1093,9 @@ class AnthropicModel(Model):
                     "anthropic-beta": merged_beta,
                 }
 
-        normalized_messages = self._normalize_conversation_for_api(self.conversation)
-        if not normalized_messages:
-            raise KISSError(
-                "Cannot build API request: all messages are whitespace-only. "
-                "At least one message with non-whitespace text content is required."
-            )
+        normalized_messages = checked_nonempty(
+            self._normalize_conversation_for_api(self.conversation)
+        )
         kwargs.update(
             {
                 "model": self._api_model_name,
@@ -1343,15 +1288,6 @@ class AnthropicModel(Model):
                 f"prompt or use a different model."
             )
 
-    def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
-        """Generates content from the current conversation.
-
-        Returns:
-            tuple[str, Any]: A tuple of (generated_text, raw_response).
-        """
-        _, content, response = self.generate_and_process_with_tools({})
-        return content, response
-
     def generate_and_process_with_tools(  # pragma: no cover – API call
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -1379,7 +1315,7 @@ class AnthropicModel(Model):
         if stop_reason == "max_tokens":
             blocks = [b for b in blocks if b.get("type") != "tool_use"]
 
-        content = self._extract_text_from_blocks(blocks)
+        content = text_of_parts(blocks)
 
         function_calls: list[dict[str, Any]] = []
         for b in blocks:
@@ -1421,11 +1357,9 @@ class AnthropicModel(Model):
             The raw Anthropic message of the ping, for cost accounting, or
             ``None`` when there is nothing to keep warm: prompt caching is
             disabled for this model (``model_config["enable_cache"]``
-            false), or the request carries no cache breakpoint at all (on
-            Bedrock the only breakpoint is the one on the system prefix,
-            so a run without a system prompt caches nothing).  The check
-            covers the request as sent, including a ``system`` or
-            ``cache_control`` supplied through ``model_config["extra_body"]``.
+            false) or the request as it goes on the wire carries no
+            cache breakpoint (an ``extra_body`` override replaced the
+            field that held it).
         """
         if not self.model_config.get("enable_cache", True):
             return None

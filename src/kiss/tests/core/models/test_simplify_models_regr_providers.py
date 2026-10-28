@@ -50,6 +50,7 @@ from kiss.core.models.model import (
     encode_binary_attachment,
     parse_tool_arguments,
     split_data_url,
+    text_of_parts,
 )
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
@@ -210,8 +211,7 @@ class TestAnthropicNormalization:
         assert blocks[0]["type"] == "image"
 
     def test_extract_text_from_blocks(self) -> None:
-        m = make_anthropic()
-        text = m._extract_text_from_blocks(
+        text = text_of_parts(
             [
                 {"type": "text", "text": "a"},
                 {"type": "tool_use", "id": "1", "name": "F", "input": {}},

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -92,13 +93,13 @@ class TestMergeWithStaleWorktreeRegistration:
             assert _is_registered_worktree(repo, wt_dir)
 
             agent = ChatSorcarAgent("bh3-stale")
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 branch=branch,
                 original_branch="main",
                 wt_dir=wt_dir,
                 baseline_commit=None,
-            )
+            ))
 
             msg = agent.merge()
 
@@ -130,13 +131,13 @@ class TestMergeWithStaleWorktreeRegistration:
             assert _is_registered_worktree(repo, wt_dir)
 
             agent = ChatSorcarAgent("bh3-stale-baseline")
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 branch=branch,
                 original_branch="main",
                 wt_dir=wt_dir,
                 baseline_commit=baseline,
-            )
+            ))
 
             msg = agent.merge()
 

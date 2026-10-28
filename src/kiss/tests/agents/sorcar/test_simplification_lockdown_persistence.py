@@ -164,7 +164,7 @@ class TestInterleavedQueueAndAppend(_PersistenceTestBase):
 
         with th._rw_lock.read_lock():
             db = th._get_db()
-            events = th._fetch_events_for_task_id(db, task_id)
+            events = th._decode_event_rows(th._select_event_rows(db, task_id))
         texts = [e["text"] for e in events]
         assert texts == ["queued0", "queued1", "queued2", "queued3",
                          "queued4", "sync"]

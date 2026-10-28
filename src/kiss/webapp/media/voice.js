@@ -617,7 +617,7 @@
   function finishCapture() {
     const done = capture;
     capture = null;
-    if (!done.speechStarted || !done.chunks.length) {
+    if (!done.speechStarted) {
       // This round produced no audio, so no transcript will ever come back
       // for it. Retire its owner with it, or the next transcript would be
       // paired with this abandoned utterance's conversation. Rounds

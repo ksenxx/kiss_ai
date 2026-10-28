@@ -22,6 +22,7 @@ from kiss.core.models.model import (
     Model,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    _python_type_to_json_schema,
     encode_binary_attachment,
     flatten_content_to_text,
     parse_binary_attachments,
@@ -434,8 +435,7 @@ def test_function_to_openai_tool_resolves_pep563_string_annotations() -> None:
 
 def test_python_type_to_json_schema_variants() -> None:
     """Type-annotation conversion covers unions, containers and fallbacks."""
-    m = _ConcreteModel("m")
-    conv = m._python_type_to_json_schema
+    conv = _python_type_to_json_schema
     assert conv(str) == {"type": "string"}
     assert conv(bool) == {"type": "boolean"}
     assert conv(float) == {"type": "number"}

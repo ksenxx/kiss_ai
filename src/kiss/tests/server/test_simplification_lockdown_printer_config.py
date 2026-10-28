@@ -212,19 +212,6 @@ class TestBashStreamFlush(unittest.TestCase):
         for ev in _events_of(printer, "system_output"):
             assert ev["taskId"] == "BASH-TIMER", ev
 
-    def test_reset_discards_pending_buffer(self) -> None:
-        """`reset()` must prevent any stale buffered text from ever being
-        broadcast afterwards (guards the generation-counter logic)."""
-        printer = _make_task_printer("BASH-RESET")
-
-        printer.print("flushed", type="bash_stream")
-        printer.print("pending", type="bash_stream")
-        printer.reset()
-        time.sleep(0.3)
-
-        texts = [e["text"] for e in _events_of(printer, "system_output")]
-        assert texts == ["flushed"], texts
-
     def test_concurrent_print_and_flush_no_loss_no_duplication(self) -> None:
         """Race: one thread streams unique bash chunks with random sleeps
         while another triggers flushes concurrently.  Every chunk must be

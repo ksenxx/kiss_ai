@@ -7,7 +7,7 @@
 Every task's ``task_settings`` event (the persisted display event
 :meth:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent._task_settings_payload`
 builds) carries, besides the model, work directory and budget, the
-run-configuration keys of :data:`RUN_CONFIG_KEYS`: which SEA ran,
+run-configuration keys :func:`run_config_line` documents: which SEA ran,
 whether it is a channel, the tool profile, the caller's timeout, which values were
 inherited from the calling agent and which inherited or default values
 the SEA pinned to its own.  :func:`run_config_line` renders that record
@@ -26,34 +26,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
-
-RUN_CONFIG_KEYS = (
-    "sea",
-    "channel",
-    "tool_profile",
-    "tool_profile_inferred",
-    "timeout",
-    "inherited",
-    "pinned",
-    "defaulted",
-)
-"""The ``task_settings`` keys :func:`run_config_line` reads besides ``model``, ``work_dir``
-and ``max_budget``.
-
-``sea``: the SEA's name (its file stem), ``""`` for a plain sub-agent;
-``channel``: ``True`` for a channel (a SEA deriving from ``ChannelSea``; shown as
-``(channel)`` on the line);
-``tool_profile``: the effective profile, ``""`` for the full toolset;
-``tool_profile_inferred``: ``True`` when nobody named the profile and the run got
-``review`` because it is a reviewer sub-agent (``tools=review(inferred)`` on the line);
-``timeout``: the caller's wait in seconds, or ``None``;
-``inherited``: the setting keys filled from the calling agent;
-``pinned``: ``{key: [before, pinned]}`` for every inherited or default value the SEA's
-``settings()`` replaced;
-``defaulted``: the setting keys that neither the call, the SEA, the calling agent nor
-the tab supplied, so the daemon filled them from its own defaults
-(:func:`defaulted_keys`).
-"""
 
 PROVENANCE_EXPLICIT = "explicit"
 PROVENANCE_INHERITED = "inherited"
@@ -170,9 +142,22 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
 
     A channel's line starts ``slack (channel)``.
 
+    The keys read besides ``model``, ``work_dir`` and ``max_budget``:
+    ``sea``, the SEA's name (its file stem), ``""`` for a plain sub-agent;
+    ``channel``, ``True`` for a channel (a SEA deriving from ``ChannelSea``;
+    shown as ``(channel)``); ``tool_profile``, the effective profile, ``""``
+    for the full toolset; ``tool_profile_inferred``, ``True`` when nobody
+    named the profile and the run got ``review`` because it is a reviewer
+    sub-agent (``tools=review(inferred)``); ``timeout``, the caller's wait
+    in seconds, or ``None``; ``inherited``, the setting keys filled from the
+    calling agent; ``pinned``, ``{key: [before, pinned]}`` for every
+    inherited or default value the SEA's ``settings()`` replaced.  The
+    payload's ``defaulted`` list (the keys the daemon filled from its own
+    defaults, :func:`defaulted_keys`) is persisted but not rendered.
+
     Args:
-        settings: A ``task_settings`` payload (see :data:`RUN_CONFIG_KEYS`);
-            missing keys render as unknown / none.
+        settings: A ``task_settings`` payload; missing keys render as
+            unknown / none.
         alias: The registered command name of a SEA the call reached
             by path, appended as ``(also agent="name")`` so the caller
             learns the shorter spelling; empty for none.

@@ -25,17 +25,26 @@ const {pendingCounts} = require('./file_link_helpers');
 const HOME = 'home';
 const BOX = 'box';
 
-// A page whose tab BOX is bound to machine `box`; with `hidden`, a
-// second tab HOME is on screen and BOX is parked.
+// A page whose tab BOX is bound to machine `box`, whose working
+// directory is /box/work (the directory the tab's file links are
+// checked under: the check is forwarded to the machine); with
+// `hidden`, a second tab HOME is on screen and BOX is parked.
 function makeBoundPage(hidden) {
   const page = makePage();
-  const tabs = [{tabId: BOX, chatId: 'chat-box', title: 'box', workDir: '/box/work'}];
+  const tabs = [{tabId: BOX, chatId: 'chat-box', title: 'box', workDir: '/local/box'}];
   if (hidden) {
     tabs.unshift({tabId: HOME, chatId: 'chat-home', title: 'home', workDir: '/home/w'});
   }
   send(page.win, {type: 'daemonStatus', connected: true});
   send(page.win, {type: 'tabs_state', tabs});
   send(page.win, {type: 'tabMachine', tabId: BOX, machine: 'box'});
+  send(page.win, {
+    type: 'machineWorkDirs',
+    machine: 'box',
+    workDir: '/box/work',
+    recentWorkDirs: [],
+    error: '',
+  });
   if (hidden) {
     page.win._testApi.switchToTab(HOME);
     page.win._testApi.endLaunch();

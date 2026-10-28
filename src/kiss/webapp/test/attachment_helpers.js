@@ -39,21 +39,27 @@ function makePage(sourceUrl) {
   return {win, posted, decodes};
 }
 
+// main.js's ATTACH_PREPARE_TIMEOUT_MS: the attachment prepare deadline.
+const ATTACH_DEADLINE_MS = 60 * 1000;
+
 /**
  * Build a chat page whose decoder is wedged (every `createImageBitmap`
- * call parks for ever) and whose attachment-prepare deadline is lowered
- * from the production 60 s to `deadlineMs`, so only the deadline can
- * settle an image slot.  main.js is loaded with that ONE constant
- * replaced; the substitution is asserted so a rename fails loudly.
+ * call parks for ever), so only the attachment prepare deadline can
+ * settle an image slot.  That 60 s deadline is recorded instead of armed
+ * (harness `recordTimers`), so a suite asserts "before the deadline" and
+ * "after the deadline" without racing a real timer: `fireDeadline()` runs
+ * the deadline main.js recorded for the oldest pending slot (asserting
+ * one exists).  Await `settle()` afterwards for the rejection to land.
  *
- * @param {number} deadlineMs The ATTACH_PREPARE_TIMEOUT_MS to run with.
  * @param {string} sourceUrl Name for the eval'd main.js (a `*.coverage.js`
  *   gate keys on it).
- * @returns {{win: object, posted: Array<object>, decodeCount: Function}}
- *   The page, the messages it posted and a counter of decodes asked for.
+ * @returns {{win: object, posted: Array<object>, decodeCount: Function,
+ *   fireDeadline: Function}} The page, the messages it posted and a
+ *   counter of decodes asked for.
  */
-function makeWedgedDecoderPage(deadlineMs, sourceUrl) {
+function makeHeldDeadlinePage(sourceUrl) {
   let decodes = 0;
+  let deadlines;
   const {win, posted} = harness.makePage({
     sourceUrl,
     beforeScripts(w) {
@@ -61,20 +67,14 @@ function makeWedgedDecoderPage(deadlineMs, sourceUrl) {
         decodes += 1;
         return new Promise(() => {});
       };
-    },
-    mainSource(mainSrc) {
-      const needle = 'const ATTACH_PREPARE_TIMEOUT_MS = 60 * 1000;';
-      assert.ok(
-        mainSrc.includes(needle),
-        'main.js no longer defines ATTACH_PREPARE_TIMEOUT_MS as expected',
-      );
-      return mainSrc.replace(
-        needle,
-        `const ATTACH_PREPARE_TIMEOUT_MS = ${deadlineMs};`,
-      );
+      deadlines = harness.recordTimers(w, ATTACH_DEADLINE_MS);
     },
   });
-  return {win, posted, decodeCount: () => decodes};
+  function fireDeadline() {
+    assert.ok(deadlines.length, 'main.js armed the attachment deadline');
+    harness.fireTimers(deadlines.splice(0, 1));
+  }
+  return {win, posted, decodeCount: () => decodes, fireDeadline};
 }
 
 /**
@@ -129,11 +129,7 @@ function submits(posted) {
  *   surfacing through whatever assertion the caller makes next.
  */
 async function settle(until) {
-  if (until) {
-    const deadline = Date.now() + 3000;
-    while (!until() && Date.now() < deadline) await harness.sleep(10);
-    if (!until()) throw new Error('settle: condition not met within 3 s');
-  }
+  if (until) await harness.waitFor(until, 'settle: condition not met within 3 s');
   await harness.sleep(50);
 }
 
@@ -156,7 +152,7 @@ async function failDecode(decodes, first, reason) {
 
 module.exports = {
   makePage,
-  makeWedgedDecoderPage,
+  makeHeldDeadlinePage,
   paste,
   typeAndEnter,
   submits,

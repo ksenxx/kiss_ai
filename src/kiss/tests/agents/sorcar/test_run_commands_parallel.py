@@ -148,6 +148,23 @@ class TestWorktreeGuard:
         assert (repo / "f.txt").read_text() == "main content\n"
 
 
+class TestSleepGuard:
+    """A long foreground sleep is refused per command, as in ``Bash``."""
+
+    def test_long_sleep_refused_without_running_others_run(self, tmp_path: Path) -> None:
+        tools = UsefulTools(work_dir=str(tmp_path))
+        started = time.monotonic()
+        out = tools.run_commands_parallel(
+            '["sleep 60; touch ran", "echo quick"]', timeout_seconds=5
+        )
+        assert time.monotonic() - started < 2
+        assert out.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
+        assert "[1/2] exit -1" in out
+        assert "REFUSED: the Bash call did NOT run: a foreground sleep of 60s" in out
+        assert "$ echo quick\nquick" in out
+        assert not (tmp_path / "ran").exists()
+
+
 class TestStop:
     """The task's Stop and the tool panel's Stop both kill every running command."""
 

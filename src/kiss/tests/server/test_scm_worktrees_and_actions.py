@@ -49,16 +49,34 @@ from kiss.tests.server.test_explorer_scm_commands import (
 async def _open_file_unbounded(harness: ExplorerHarness, name: str) -> dict:
     """``openFile`` *name* on a client with no frame-size limit (a
     browser has none; the harness client's 1 MiB default would drop a
-    reply at the display cap)."""
+    reply at the display cap).  A reply sent in pieces (``more`` on
+    every frame but the last) is returned joined, with ``frames``
+    counting them; a reply sent whole has ``frames`` 1."""
     async with connect(harness.ws_url, ssl=no_verify_ssl(), max_size=None) as ws:
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         while json.loads(await asyncio.wait_for(ws.recv(), 30)).get("type") != "auth_ok":
             pass
         await ws.send(json.dumps({"type": "openFile", "path": name}))
+        head: dict | None = None
+        pieces: list[str] = []
         while True:
             msg: dict = json.loads(await asyncio.wait_for(ws.recv(), 60))
-            if msg.get("type") == "fileContent":
-                return msg
+            if msg.get("type") != "fileContent":
+                continue
+            if head is None:
+                head = msg
+            else:
+                # A later piece carries only what identifies the request.
+                assert set(msg) <= {"type", "path", "tabId", "token", "content", "more"}, msg
+                assert msg["path"] == head["path"] and msg["tabId"] == head["tabId"]
+            pieces.append(msg.get("content", ""))
+            if msg.get("more") is not True:
+                break
+        head["frames"] = len(pieces)
+        if len(pieces) > 1:
+            head["content"] = "".join(pieces)
+            del head["more"]
+        return head
 
 
 _PDF_BYTES = (
@@ -908,6 +926,65 @@ class TestOpenBinaryFiles:
             finally:
                 path.unlink()
 
+    def test_big_html_page_opens_read_only_in_pieces(self, harness) -> None:
+        """An HTML page of any size opens, read-only past the editor cap.
+
+        A shared chat page of a long task (``shareChat`` writes
+        ``reports/chat-<slug>-<id>.html``) runs to tens of MB; the
+        client shows it in its preview frame, which needs no editor,
+        so the daemon has no cap for it: past ``_OPEN_FILE_MAX_BYTES``
+        it comes without a ``version`` stamp (the client then opens no
+        editor for it), and past ``_FILE_CONTENT_CHUNK_CHARS`` in
+        several frames.  Below the editor cap an HTML file stays
+        editable and arrives whole.
+        """
+        from kiss.server import web_server
+
+        page = harness.work_dir / "reports" / "chat-big-chat-1.html"
+        made_dir = not page.parent.exists()
+        page.parent.mkdir(exist_ok=True)
+        filler = "<p>" + "x" * 1000 + "</p>\n"
+        head = "<!DOCTYPE html><html><body>\n"
+        chunk = web_server._FILE_CONTENT_CHUNK_CHARS
+        # ``newline=""``: the daemon serves the file's bytes as they are,
+        # so the text must not pick up ``\r\n`` on Windows.
+        try:
+            page.write_text(head + filler * 5, encoding="utf-8", newline="")
+            reply = harness.run(_open_file_unbounded(harness, "reports/chat-big-chat-1.html"))
+            assert "error" not in reply, reply
+            assert reply["version"] == web_server._file_version(page.stat())
+            assert reply["frames"] == 1
+
+            # Past the editor cap, within one frame: read-only, whole.
+            page.write_text(
+                head + filler * (web_server._OPEN_FILE_MAX_BYTES // len(filler) + 1),
+                encoding="utf-8",
+                newline="",
+            )
+            assert web_server._OPEN_FILE_MAX_BYTES < page.stat().st_size <= chunk
+            reply = harness.run(_open_file_unbounded(harness, "reports/chat-big-chat-1.html"))
+            assert "error" not in reply, reply
+            assert reply["content"] == page.read_text(encoding="utf-8")
+            assert "version" not in reply
+            assert reply["name"] == "chat-big-chat-1.html"
+            assert reply["frames"] == 1
+
+            # Several frames, the text split at arbitrary points (a
+            # non-ASCII rune at the first boundary must survive).
+            text = head + "é" * (chunk - len(head)) + filler * (2 * chunk // len(filler) + 1)
+            page.write_text(text, encoding="utf-8", newline="")
+            assert page.stat().st_size > 3 * chunk
+            reply = harness.run(_open_file_unbounded(harness, "reports/chat-big-chat-1.html"))
+            assert "error" not in reply, reply
+            assert reply["content"] == text
+            assert reply["frames"] == -(-len(text) // chunk)
+            assert "version" not in reply
+            assert reply["path"] == str(page)
+        finally:
+            page.unlink()
+            if made_dir:
+                page.parent.rmdir()
+
     def test_background_flag_is_echoed(self, harness) -> None:
         reply = _request(
             harness,
@@ -1196,16 +1273,15 @@ class TestReviewRegressions:
         from kiss.server import explorer
 
         text = "\u00e9" * (explorer.GIT_SHOW_MAX_BYTES // 2 + 10)  # 2 bytes each
-        cut, truncated = explorer._truncate(text)
-        assert truncated is True
+        cut = explorer._truncate(text)
+        assert len(cut) < len(text)
         assert len(cut.encode()) <= explorer.GIT_SHOW_MAX_BYTES
         assert "truncated" not in cut  # the client adds the marker
-        kept, flag = explorer._truncate("short")
-        assert (kept, flag) == ("short", False)
+        assert explorer._truncate("short") == "short"
         # A non-UTF-8 byte git reported (surrogateescape) survives the cut.
         odd = "\udcff" + "x" * explorer.GIT_SHOW_MAX_BYTES
-        cut, truncated = explorer._truncate(odd)
-        assert truncated is True and cut.startswith("\udcff")
+        cut = explorer._truncate(odd)
+        assert len(cut) < len(odd) and cut.startswith("\udcff")
 
     def test_confinement_follows_symlinked_folders_on_disk(self, harness) -> None:
         root = harness.plain_dir

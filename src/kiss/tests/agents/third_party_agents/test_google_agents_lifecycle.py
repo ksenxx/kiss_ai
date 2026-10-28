@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
@@ -42,7 +41,6 @@ class _GoogleAgent:
 
     agent: type
     backend: type
-    sea: type
     service: str
     label: str
     auth_tools: list[str]
@@ -55,7 +53,6 @@ _AGENTS = [
     _GoogleAgent(
         gcal_mod.GoogleCalendarAgent,
         gcal_mod.GoogleCalendarChannelBackend,
-        gcal_mod.GcalSea,
         "google_calendar",
         "Google Calendar",
         [
@@ -79,7 +76,6 @@ _AGENTS = [
     _GoogleAgent(
         gdocs_mod.GoogleDocsAgent,
         gdocs_mod.GoogleDocsChannelBackend,
-        gdocs_mod.GdocsSea,
         "google_docs",
         "Google Docs",
         [
@@ -103,7 +99,6 @@ _AGENTS = [
     _GoogleAgent(
         gdrive_mod.GoogleDriveAgent,
         gdrive_mod.GoogleDriveChannelBackend,
-        gdrive_mod.GdriveSea,
         "google_drive",
         "Google Drive",
         [
@@ -129,7 +124,6 @@ _AGENTS = [
     _GoogleAgent(
         gsheets_mod.GoogleSheetsAgent,
         gsheets_mod.GoogleSheetsChannelBackend,
-        gsheets_mod.GsheetsSea,
         "google_sheets",
         "Google Sheets",
         [
@@ -156,19 +150,6 @@ _AGENTS = [
 _IDS = [a.service for a in _AGENTS]
 
 
-def _tool_names(agent: Any) -> list[str]:
-    return [t.__name__ for t in agent._get_tools()]
-
-
-@pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
-def test_unauthenticated_agent_exposes_only_auth_tools(spec: _GoogleAgent) -> None:
-    """A fresh agent is unauthenticated and exposes exactly the four auth tools."""
-    agent = spec.agent()
-    assert agent.name == f"{spec.label} Agent"
-    assert agent._is_authenticated() is False
-    assert _tool_names(agent) == spec.auth_tools
-
-
 @pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
 def test_check_auth_unauthenticated_explains_setup(
     spec: _GoogleAgent, monkeypatch: pytest.MonkeyPatch
@@ -187,6 +168,7 @@ def test_connect_link_flow_authenticates_agent(
 ) -> None:
     """authenticate -> user approves -> finish unlocks the backend tools."""
     agent = spec.agent()
+    assert agent.name == f"{spec.label} Agent"
     tools = tools_by_name(agent)
     started = json.loads(tools[f"authenticate_{spec.service}"]())
     assert started["status"] == "consent_required"
@@ -194,7 +176,7 @@ def test_connect_link_flow_authenticates_agent(
     assert json.loads(tools[f"finish_{spec.service}_auth"]())["ok"] is True
     assert agent._is_authenticated() is True
     assert agent._backend.connection_info == f"{spec.label} connected through Composio."
-    names = set(_tool_names(agent))
+    names = set(tools_by_name(agent))
     assert set(spec.auth_tools) <= names
     assert spec.backend_tools <= names
     # Channel protocol methods are not LLM tools.
@@ -214,15 +196,9 @@ def test_clear_auth_removes_connection_and_relocks_tools(
     assert "cleared" in result.lower()
     assert composio.deleted == [account]
     assert agent._is_authenticated() is False
-    assert _tool_names(agent) == spec.auth_tools
-
-
-@pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)
-def test_sea_tools_method_returns_auth_tools_when_locked(spec: _GoogleAgent) -> None:
-    """The SEA's ``tools`` method returns the auth tool set of a fresh agent."""
-    tools = spec.sea().tools([])
-    assert [t.__name__ for t in tools] == spec.auth_tools
-    assert all(callable(t) for t in tools)
+    # The full ordered list, not the de-duplicated keys: a tool listed
+    # twice would hide behind the mapping.
+    assert [t.__name__ for t in agent._get_tools()] == spec.auth_tools
 
 
 @pytest.mark.parametrize("spec", _AGENTS, ids=_IDS)

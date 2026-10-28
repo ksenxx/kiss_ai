@@ -72,7 +72,7 @@ class TestAppendMyInjectionTrick(_TricksHome):
             tricks.DEFAULT_MY_INJECTION + "\n## Trick\n\nBe terse.\n",
         )
         self.assertEqual(
-            tricks.read_tricks(),
+            tricks.read_tricks_data()["tricks"],
             [
                 tricks.MY_INJECTION_DEFAULT_BODY,
                 "Be terse.",
@@ -87,18 +87,18 @@ class TestAppendMyInjectionTrick(_TricksHome):
         self.assertEqual(
             self.user_text(), "## Trick\n\nFirst.\n\n## Trick\n\nSecond.\n"
         )
-        self.assertEqual(tricks.read_tricks()[:2], ["First.", "Second."])
+        self.assertEqual(tricks.read_tricks_data()["tricks"][:2], ["First.", "Second."])
 
     def test_appends_to_empty_file(self) -> None:
         self.user_file.write_text("", encoding="utf-8")
         self.assertIsNone(tricks.append_my_injection_trick("Only one."))
         self.assertEqual(self.user_text(), "\n## Trick\n\nOnly one.\n")
-        self.assertEqual(tricks.read_tricks()[0], "Only one.")
+        self.assertEqual(tricks.read_tricks_data()["tricks"][0], "Only one.")
 
     def test_multiline_body_survives_the_round_trip(self) -> None:
         body = "Line one.\nLine two with `code`."
         self.assertIsNone(tricks.append_my_injection_trick(body))
-        self.assertIn(body, tricks.read_tricks())
+        self.assertIn(body, tricks.read_tricks_data()["tricks"])
 
     def test_rejects_empty_body_without_touching_file(self) -> None:
         self.assertEqual(
@@ -135,7 +135,7 @@ class TestAppendMyInjectionTrick(_TricksHome):
         self.assertEqual(self.user_text(), before)
         self.assertIsNone(tricks.append_my_injection_trick("Fresh.\r\nBody."))
         self.assertNotIn("\r", self.user_text())
-        self.assertIn("Fresh.\nBody.", tricks.read_tricks())
+        self.assertIn("Fresh.\nBody.", tricks.read_tricks_data()["tricks"])
 
     def test_markdown_escapes_round_trip_verbatim(self) -> None:
         # The reader strips CommonMark backslash escapes, so the writer
@@ -143,7 +143,7 @@ class TestAppendMyInjectionTrick(_TricksHome):
         # shows exactly what was typed, and a retry is a duplicate.
         body = "Keep the escape \\* and the path C:\\dir\\.hidden literal"
         self.assertIsNone(tricks.append_my_injection_trick(body))
-        self.assertIn(body, tricks.read_tricks())
+        self.assertIn(body, tricks.read_tricks_data()["tricks"])
         self.assertIn(
             "Keep the escape \\\\* and the path C:\\dir\\\\.hidden literal\n",
             self.user_text(),
@@ -155,7 +155,7 @@ class TestAppendMyInjectionTrick(_TricksHome):
         # A backslash before a non-escapable character is stored as is.
         self.assertIsNone(tricks.append_my_injection_trick("Say \\n here"))
         self.assertIn("\n## Trick\n\nSay \\n here\n", self.user_text())
-        self.assertIn("Say \\n here", tricks.read_tricks())
+        self.assertIn("Say \\n here", tricks.read_tricks_data()["tricks"])
 
     def test_concurrent_identical_adds_write_one_section(self) -> None:
         body = "Only once, please."
@@ -183,7 +183,7 @@ class TestAppendMyInjectionTrick(_TricksHome):
         # Only the user's own file is deduplicated: a copy of a bundled
         # trick is how a user pins it above the bundled list.
         self.assertIsNone(tricks.append_my_injection_trick("Bundled two."))
-        self.assertEqual(tricks.read_tricks().count("Bundled two."), 2)
+        self.assertEqual(tricks.read_tricks_data()["tricks"].count("Bundled two."), 2)
 
     @posix_only("directory and file permission bits")
     @unittest.skipIf(is_root(), "root ignores directory permissions")

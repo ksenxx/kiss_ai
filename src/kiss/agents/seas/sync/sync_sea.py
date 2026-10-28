@@ -2,22 +2,24 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Sync agent — fetches origin/main, merges it into the current branch and pushes.
+"""Sync agent — commits the checkout's changes, merges origin/main into its branch, pushes.
 
 Typed into a tab as ``/sync`` (or ``/sync upstream/dev`` to merge another
 remote branch), the command runs this file as a Sorcar Extension Agent
 on the tab's working directory: a worker that works on the checkout in
 place, with the ``git_sync`` tool (:func:`kiss.agents.seas.sync.git_sync.sync`)
-doing the fetch, merge and push in one deterministic call and the shell
-and file tools only for resolving a merge that stops on conflicts.  It
-replaces the "pull origin/main, merge, push" prompts that used to be
+doing the commit of whatever is uncommitted in the working tree, the
+fetch, merge and push in one deterministic call and the shell and file
+tools only for resolving a merge that stops on conflicts.  It replaces
+the "commit, pull origin/main, merge, push" prompts that used to be
 typed by hand.
 
 When machines are registered (``/machine add``), the same ``/sync``
 then runs on each of them, one after the other, as a sub-task
 (``run_agent(agent="sync", machine=<name>)``) on that machine's
-checkout of the same repository, and finally syncs this checkout once
-more so it gets what the machines pushed.  The sub-task names the
+checkout of the same repository (committing the changes left
+uncommitted there too), and finally syncs this checkout once more so
+it gets what the machines pushed.  The sub-task names the
 repository by its remote URL (``origin/main of https://... this
 machine only``), never by this machine's path: the checkout lives
 wherever the machine keeps it (its daemon's working directory, or
@@ -49,8 +51,9 @@ are registered: the sub-task sent to a machine ends in them, so it never fans ou
 to the machines registered there."""
 
 ADD_TO_PROMPT = (
-    "Sync the work dir checkout: fetch the remote branch named above "
-    f"({DEFAULT_REF} when none is named), merge it into the current branch and push."
+    "Sync the work dir checkout: commit its uncommitted changes on the current branch, "
+    f"fetch the remote branch named above ({DEFAULT_REF} when none is named), merge it "
+    "into the current branch and push."
 )
 """Appended to every task: a bare ``/sync`` runs on this text alone, and a caller that
 prefixes its own text (the cron preamble) keeps it."""
@@ -65,17 +68,19 @@ this times the number of registered machines plus one, and each machine's sub-ta
 sent exactly this much, whatever that machine has registered."""
 
 SYSTEM_PROMPT = f"""\
-You are the git sync agent. You update the checkout in the work dir from a remote
-branch and push the result, here and on the registered machines the message lists.
-Nothing else.
+You are the git sync agent. You commit what is uncommitted in the checkout in the work
+dir, update it from a remote branch and push the result, here and on the registered
+machines the message lists. Nothing else.
 
 1. Call `git_sync` once with `repo` = the work dir named below, `ref` = the
    `<remote>/<branch>` the message names (default `origin/main`) and `url` = the
    repository URL the message names after that ref with the word "of" (as in
    "origin/main of https://github.com/me/kiss.git"; leave `url` empty when the message
-   names none). It fetches, merges, pushes and returns a report whose first lines name
-   the checkout it synced and the remote's URL. Never run `git fetch`, `git merge`,
-   `git pull` or `git push` yourself.
+   names none). It commits the uncommitted changes of the working tree on the current
+   branch (edited, deleted and new files that are not ignored), fetches, merges, pushes
+   and returns a report whose first lines name the checkout it synced and the remote's
+   URL. Never run `git add`, `git commit`, `git fetch`, `git merge`, `git pull` or
+   `git push` yourself, except to finish a conflicted merge as step 2 says.
 2. If the report says the merge stopped on conflicts: read each conflicted file,
    resolve every `<<<<<<< ... ======= ... >>>>>>>` block keeping the intent of both
    sides, remove the markers, `git add` the files, `git commit --no-edit`, then call
@@ -83,8 +88,8 @@ Nothing else.
    the work dir, the files are under it and git runs there: `git -C <checkout> ...`).
    Never run `git merge --abort`, `git reset`, `git checkout --`, `git restore`,
    `git stash` or `git push --force`.
-3. If the report says anything else failed (not a checkout, detached HEAD, a refused
-   push), stop and report it. Do not work around it.
+3. If the report says anything else failed (not a checkout, detached HEAD, a commit
+   that failed, a refused push), stop and report it. Do not work around it.
 4. If the message lists registered machines, sync each of them in the order given,
    one at a time: call `run_agent(agent="sync", task="<ref> of <the remote's URL from
    the git_sync report> {THIS_MACHINE_ONLY}", machine="<name>",
@@ -96,15 +101,16 @@ Nothing else.
    reached or whose sync fails is reported, with the reason its result gives, not
    retried; go on to the next one. When the last machine is done, call `git_sync` once
    more here so this checkout gets what the machines pushed.
-5. Call `finish` with a short HTML summary: branch, what was merged (fast-forward,
-   merge commit or nothing), what was pushed, any warning, and one line per machine
-   saying what its sync did or why it failed.
+5. Call `finish` with a short HTML summary: branch, what was committed (how many files,
+   or nothing), what was merged (fast-forward, merge commit or nothing), what was
+   pushed, any warning, and one line per machine saying what its sync did or why it
+   failed.
 """
 """The whole base system prompt of the sync agent (replaces ``SYSTEM.md``)."""
 
 
 def git_sync(repo: str, ref: str = DEFAULT_REF, url: str = "") -> str:
-    """Fetch *ref*, merge it into the current branch of the checkout at *repo* and push.
+    """Commit the changes at *repo*, fetch *ref*, merge it into the current branch and push.
 
     Args:
         repo: Absolute path of the git checkout (the run's work dir).
@@ -115,9 +121,10 @@ def git_sync(repo: str, ref: str = DEFAULT_REF, url: str = "") -> str:
             instead and the report says so; empty skips the check.
 
     Returns:
-        A report of the checkout and remote URL synced, what was fetched,
-        merged and pushed, or of the step that failed (conflicts are left
-        in progress for you to resolve).
+        A report of the checkout and remote URL synced, what was committed
+        (the uncommitted changes of the working tree, when there were
+        any), fetched, merged and pushed, or of the step that failed
+        (conflicts are left in progress for you to resolve).
     """
     try:
         return sync(repo, ref, url)
@@ -141,8 +148,9 @@ class SyncSea(WorkerSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/sync help``."""
         return (
-            "Fetches origin/main, merges it into the current branch of the tab's working "
-            "directory and pushes, resolving merge conflicts when they stop the merge, then "
+            "Commits the uncommitted changes of the tab's working directory on its current "
+            "branch, fetches origin/main, merges it into that branch "
+            "and pushes, resolving merge conflicts when they stop the merge, then "
             "does the same on every registered machine (`/machine list`), one at a time, on "
             "that machine's checkout of the same repository (found by its remote URL), and "
             "syncs here once more; use `/sync` in "

@@ -122,13 +122,11 @@ def _authenticated_agent(emulator: _NtfyServer, topic: str = "alerts", token: st
     return agent
 
 
-def test_unauthenticated_agent_exposes_only_auth_trio() -> None:
-    """A fresh agent is unauthenticated and offers exactly the auth trio."""
+def test_unauthenticated_agent_name_and_status() -> None:
+    """A fresh agent carries its name and reports "Not configured" (the auth trio is
+    checked in test_base_channel_agent)."""
     agent = NtfyAgent()
     assert agent.name == "Ntfy Agent"
-    assert agent._is_authenticated() is False
-    names = sorted(t.__name__ for t in agent._get_tools())
-    assert names == ["authenticate_ntfy", "check_ntfy_auth", "clear_ntfy_auth"]
     assert "Not configured" in agent._get_auth_tools()[0]()
 
 

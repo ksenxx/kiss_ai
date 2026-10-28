@@ -44,6 +44,7 @@ from kiss.agents.sorcar import web_stealth
 from kiss.server.remote_views import RemoteViews, RemoteViewStream, namespaced, split_tab_id
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.pause import Pause, Pauses
+from kiss.tests.server.test_terminal_tab_service import session_count
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
@@ -172,7 +173,7 @@ class RemoteViewsTest(TwoClientHarness):
         for ev in a.of_type("terminalData", tab_id="term-1"):
             self.assertEqual(ev["machine"], "box")
         # The local daemon ran no shell of its own.
-        self.assertEqual(self.server._agent_server.terminals.session_count(), 0)
+        self.assertEqual(session_count(self.server._agent_server.terminals), 0)
 
         a.send({"type": "terminalInput", "tab_id": "term-1", "data": "exit 3\n"})
         exited = self.wait_event(a, "terminalExit", timeout=60, tab_id="term-1")
@@ -194,11 +195,11 @@ class RemoteViewsTest(TwoClientHarness):
         # Without a machine the shell is this daemon's, as before; a
         # browser command with a plain id is this daemon's too.
         self._open_terminal(a, "term-local", machine="")
-        self.assertEqual(self.server._agent_server.terminals.session_count(), 1)
+        self.assertEqual(session_count(self.server._agent_server.terminals), 1)
         a.send({"type": "browserViewport", "tab_id": "browser__9", "visible": False})
         a.send({"type": "terminalClose", "tab_id": "term-local"})
         self.wait_for(
-            lambda: self.server._agent_server.terminals.session_count() == 0, what="hung up",
+            lambda: session_count(self.server._agent_server.terminals) == 0, what="hung up",
         )
         self.assertEqual(self._views()._streams, {})
 
@@ -213,7 +214,7 @@ class RemoteViewsTest(TwoClientHarness):
         a.send({"type": "terminalInput", "tab_id": "term-lost", "data": "echo x\n"})
         a.send({"type": "terminalClose", "tab_id": "term-lost"})
         time.sleep(0.3)
-        self.assertEqual(self.server._agent_server.terminals.session_count(), 0)
+        self.assertEqual(session_count(self.server._agent_server.terminals), 0)
 
     def test_a_dropped_page_s_terminal_is_reclaimed_by_its_reload(self) -> None:
         a = self.a
@@ -277,7 +278,7 @@ class RemoteViewsTest(TwoClientHarness):
         self.assertEqual(a.of_type("terminalExit"), [])
         self.assertEqual(b.of_type("terminalData") + b.of_type("terminalError"), [])
         # Neither daemon treated b's commands as its own.
-        self.assertEqual(self.server._agent_server.terminals.session_count(), 0)
+        self.assertEqual(session_count(self.server._agent_server.terminals), 0)
         self.assertIn("term-own", self._views()._streams["box"].terminals)
         a.send({"type": "terminalClose", "tab_id": "term-own"})
         self.wait_for(lambda: not self._views()._streams, timeout=30, what="idle stream closed")

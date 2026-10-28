@@ -16,7 +16,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Iterator
-from typing import cast
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -48,13 +48,13 @@ def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, st
 class _WeixinApi(RecordingServer):
     """Recording server with the emulated WeChat API's response knobs.
 
-    ``requests`` holds the JSON payloads POSTed to the custom-send
-    endpoint and ``queries`` the query parameters of every request, so
-    the test body checks the credentials each call carried.
+    ``sent_payloads`` holds the JSON bodies POSTed to the custom-send
+    endpoint; ``queries`` the query parameters of every request.
     """
 
     def __init__(self, address: tuple[str, int], handler: type) -> None:
         super().__init__(address, handler)
+        self.sent_payloads: list[dict[str, Any]] = []
         self.queries: list[dict[str, list[str]]] = []
         self.token_hits = 0
         self.send_errcode = 0
@@ -99,7 +99,7 @@ class _WeixinApiHandler(RecordingHandler):
         if parsed.path == "/cgi-bin/message/custom/send":
             if not self._token_ok(params):
                 return
-            self.api.requests.append(body)
+            self.api.sent_payloads.append(body)
             if self.api.send_http_status != 200:
                 self._json(self.api.send_http_status, {})
             elif self.api.send_errcode:
@@ -147,20 +147,15 @@ def _connected_backend(callback_token: str = "cbtok") -> tuple[WeixinChannelBack
     return backend, connect_on_ephemeral_port(_config, backend, "_callback_server")
 
 
-def test_unauthenticated_state() -> None:
-    """Fresh agent exposes only the auth trio and reports unconfigured."""
-    agent = WeixinAgent()
-    assert agent.name == "Weixin Agent"
-    assert agent._is_authenticated() is False
-    tools = {t.__name__ for t in agent._get_tools()}
-    assert tools == {"check_weixin_auth", "authenticate_weixin", "clear_weixin_auth"}
-    check = tools_by_name(agent)["check_weixin_auth"]
-    assert "not configured" in check().lower()
-
-
 def test_auth_trio_persistence() -> None:
-    """authenticate persists 0600 config; check reports it; clear removes it."""
+    """authenticate persists 0600 config; check reports it; clear removes it.
+
+    The fresh-agent auth-trio contract is pinned for every channel by
+    test_base_channel_agent.py; only the name and the unconfigured check
+    wording (checked after clear) are channel-specific.
+    """
     agent = _authenticated_agent(api_base="http://127.0.0.1:1/")
+    assert agent.name == "Weixin Agent"
     assert _config.path.exists()
     if sys.platform != "win32":
         assert _config.path.stat().st_mode & 0o777 == 0o600
@@ -176,6 +171,7 @@ def test_auth_trio_persistence() -> None:
     assert "cleared" in tools["clear_weixin_auth"]().lower()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
+    assert "not configured" in tools["check_weixin_auth"]().lower()
 
 
 def test_send_reuses_cached_token(api: _WeixinApi) -> None:
@@ -191,8 +187,8 @@ def test_send_reuses_cached_token(api: _WeixinApi) -> None:
         "secret": ["wx_secret"],
     }
     assert api.queries[1:] == [{"access_token": ["WXTOKEN"]}] * 2
-    assert len(api.requests) == 2
-    assert api.requests[0] == {
+    assert len(api.sent_payloads) == 2
+    assert api.sent_payloads[0] == {
         "touser": "openid1",
         "msgtype": "text",
         "text": {"content": "hi"},

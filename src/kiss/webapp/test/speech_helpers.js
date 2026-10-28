@@ -44,8 +44,10 @@ function assertNoSpeech(spoken, scenario) {
 
 /**
  * Install a recording `Audio` constructor on a jsdom window.  Every
- * player built is returned with its `src`, a `playCalls` counter and
- * `fire(type)`, which invokes the `on<type>` handler the page set
+ * player built is returned with its `src`, `playCalls` / `pauseCalls`
+ * counters, a `currentTime` that only moves when a test calls
+ * `advance(seconds)` (so a stalled clip is one the test stops advancing),
+ * and `fire(type)`, which invokes the `on<type>` handler the page set
  * (`fire('ended')`, `fire('error')`).
  *
  * @param {*} [playResult] What `play()` returns: a promise, or a function
@@ -56,7 +58,15 @@ function installAudio(win, playResult) {
   const players = [];
   win.Audio = function Audio(src) {
     this.src = src;
+    this.currentTime = 0;
     this.playCalls = 0;
+    this.pauseCalls = 0;
+    this.pause = () => {
+      this.pauseCalls++;
+    };
+    this.advance = seconds => {
+      this.currentTime += seconds;
+    };
     this.play = () => {
       this.playCalls++;
       const result =

@@ -35,7 +35,6 @@ from kiss.agents.third_party_agents.webhook.webhook_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
-_AUTH_TRIO = {"check_webhook_auth", "authenticate_webhook", "clear_webhook_auth"}
 _SECRET = "test-secret-123"
 
 
@@ -80,17 +79,15 @@ def _start_backend(**route_kwargs) -> tuple[WebhookChannelBackend, str]:
     return backend, f"http://127.0.0.1:{backend._bound_port}"
 
 
-def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
-    """A fresh agent is unauthenticated and offers exactly the auth trio."""
+def test_auth_trio_roundtrip_and_persistence() -> None:
+    """authenticate persists 0600 config, check reports it, clear removes it.
+
+    The fresh-agent auth-trio contract is pinned for every channel by
+    test_base_channel_agent.py; only the name and the unconfigured check
+    wording are channel-specific.
+    """
     agent = WebhookAgent()
     assert agent.name == "Webhook Agent"
-    assert agent._is_authenticated() is False
-    assert {t.__name__ for t in agent._get_tools()} == _AUTH_TRIO
-
-
-def test_auth_trio_roundtrip_and_persistence() -> None:
-    """authenticate persists 0600 config, check reports it, clear removes it."""
-    agent = WebhookAgent()
     tools = tools_by_name(agent)
 
     unauth = tools["check_webhook_auth"]()
@@ -391,15 +388,6 @@ def _make_backend():
     return _Backend()
 """
 
-_SYS_EXIT_DELIVERY_MODULE = """\
-import sys
-
-
-def _make_backend():
-    print("Not configured.")
-    sys.exit(1)
-"""
-
 _CONNECT_FALSE_DELIVERY_MODULE = """\
 from pathlib import Path
 
@@ -567,13 +555,17 @@ def test_deliver_only_failure_returns_502_and_can_be_retried(
         backend.disconnect()
 
 
-def test_deliver_only_sys_exit_factory_returns_502(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A factory that sys.exit()s (unconfigured module) yields 502, not a hang."""
-    module_name = _write_delivery_module(tmp_path, monkeypatch, _SYS_EXIT_DELIVERY_MODULE)
+def test_deliver_only_sys_exit_factory_returns_502() -> None:
+    """A factory that sys.exit()s (unconfigured module) yields 502, not a hang.
+
+    The real Slack module's ``_make_backend()`` exits with status 1 when
+    no token is stored, which is the case in the isolated KISS home.
+    """
     backend, base = _start_backend(
-        name="dx", secret=_SECRET, kind="github", deliver_module=module_name
+        name="dx",
+        secret=_SECRET,
+        kind="github",
+        deliver_module="kiss.agents.third_party_agents.slack.slack_sea",
     )
     try:
         body = b'{"n": 1}'

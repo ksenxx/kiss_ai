@@ -481,13 +481,23 @@ def test_main_repairs_a_thinking_only_drift(tmp_path: Path, monkeypatch, capsys)
 
 
 @pytest.mark.skipif(not _LIVE_CREDENTIALS, reason="no Bedrock credentials in the environment")
-def test_live_listing_returns_claude_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real listing yields ``bedrock/`` Claude ids, cross-region profiles among them."""
+def test_live_listing_returns_claude_profiles(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real listing yields ``bedrock/`` Claude ids, cross-region profiles among them.
+
+    Credentials whose IAM policy lacks ``bedrock:ListFoundationModels`` make
+    ``fetch_bedrock`` warn and return ``{}`` (its documented behaviour, covered
+    by the offline tests); that environment cannot exercise the live listing,
+    so the test skips rather than fail.
+    """
     from kiss.core.models.model_info import bedrock_claude_name
 
     for name, value in _AMBIENT_AWS.items():
         monkeypatch.setenv(name, value)
     listing = fetch_bedrock(verbose=True)
+    if not listing and "AccessDeniedException" in capsys.readouterr().out:
+        pytest.skip("Bedrock credentials are not authorized to list foundation models")
     assert listing
     for name, info in listing.items():
         assert name.startswith("bedrock/")

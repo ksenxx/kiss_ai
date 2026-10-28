@@ -7,9 +7,9 @@
 The "Save Configuration" button was removed long ago, and the
 ``#config-sidebar`` panel was first merged into the unified ``#sidebar``
 and later split out into a dedicated ``#settings-panel`` that slides in
-from the right.  Configuration is now saved automatically when the
-standalone Settings panel is closed while its form is populated; the
-helper ``saveSettingsIfPopulated`` is invoked by ``closeSettingsPanel``.
+from the right.  The fields the user edited are saved automatically when the
+standalone Settings panel is closed; the helper
+``saveSettingsIfPopulated`` is invoked by ``closeSettingsPanel``.
 
 These tests pin the surviving auto-save behaviour by reading the real
 ``main.js``.
@@ -65,10 +65,12 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
     def test_open_settings_panel_posts_get_config(self) -> None:
         body = self._extract_fn("openSettingsPanel")
         assert "getConfig" in body
-        assert "configFormPopulated = false" in body
+        assert "settingsEditedFields.clear()" in body
 
-    def test_save_settings_helper_is_guarded_by_form_populated(self) -> None:
+    def test_save_settings_helper_sends_only_edited_fields(self) -> None:
+        # The daemon merges the payload, so the close flushes the edited
+        # fields alone and stays silent when nothing was edited.
         helper = self._extract_fn("saveSettingsIfPopulated")
-        assert "configFormPopulated" in helper
-        assert "collectConfigForm()" in helper
+        assert "settingsEditedFields.size === 0" in helper
+        assert "collectConfigForm(settingsEditedFields)" in helper
         assert "saveConfig" in helper

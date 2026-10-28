@@ -26,6 +26,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.worktree_helpers import merge_conflict
 
 
@@ -149,13 +150,13 @@ class TestBug56ConflictCheckBaselineValidation:
         server = AgentServer()
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus,
-        )
+        ))
         state = _register_wt_state("bug56a-tab", agent)
 
         try:
@@ -193,13 +194,13 @@ class TestBug56ConflictCheckBaselineValidation:
         server = AgentServer()
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
-        )
+        ))
         state = _register_wt_state("bug56b-tab", agent)
 
         try:
@@ -223,13 +224,13 @@ class TestBug56ConflictCheckBaselineValidation:
         server = AgentServer()
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
-        )
+        ))
         state = _register_wt_state("bug56c-tab", agent)
 
         try:

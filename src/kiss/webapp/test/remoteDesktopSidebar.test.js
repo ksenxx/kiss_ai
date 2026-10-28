@@ -11,6 +11,9 @@ const {
   send,
   fakeMatchMedia,
 } = require('./simplify2_harness');
+const {makeRow, sendHistory} = require('./history_helpers');
+
+const OLD_TASK = makeRow({task_id: '7', title: 'Old task', has_events: true});
 
 function makePage(opts) {
   const {desktopMatches = true} = opts || {};
@@ -142,22 +145,7 @@ function testEscapeAndOverlayDoNotUndock() {
 function testHistoryClickKeepsDock() {
   const {win, posted} = makePage({desktopMatches: true});
   const sidebar = win.document.getElementById('sidebar');
-  const gen = getHistoryMsgs(posted).pop().generation;
-  send(win, {
-    type: 'history',
-    generation: gen,
-    offset: 0,
-    sessions: [
-      {
-        id: 'chat-1',
-        task_id: '7',
-        title: 'Old task',
-        preview: 'Old task',
-        has_events: true,
-        ts: Date.now() / 1000,
-      },
-    ],
-  });
+  sendHistory(win, posted, [OLD_TASK]);
   const row = win.document.querySelector('#history-list .sidebar-item');
   assert.ok(row, 'history row must render');
   row.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -179,22 +167,7 @@ function testHistoryClickStillClosesOnMobile() {
   const menuBtn = win.document.getElementById('menu-btn');
   menuBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(sidebar.classList.contains('open'), 'burger opens the drawer');
-  const gen = getHistoryMsgs(posted).pop().generation;
-  send(win, {
-    type: 'history',
-    generation: gen,
-    offset: 0,
-    sessions: [
-      {
-        id: 'chat-1',
-        task_id: '7',
-        title: 'Old task',
-        preview: 'Old task',
-        has_events: true,
-        ts: Date.now() / 1000,
-      },
-    ],
-  });
+  sendHistory(win, posted, [OLD_TASK]);
   const row = win.document.querySelector('#history-list .sidebar-item');
   row.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(

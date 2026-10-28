@@ -37,6 +37,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 class _WindowAgent(ChatSorcarAgent):
@@ -44,13 +45,13 @@ class _WindowAgent(ChatSorcarAgent):
 
     def __init__(self, repo_root: Path) -> None:
         super().__init__("Audit0902 window agent")
-        self._wt = GitWorktree(
+        seed_worktree(self, GitWorktree(
             repo_root=repo_root,
             branch="kiss/wt-audit0902",
             original_branch="main",
             wt_dir=repo_root / "wt",
             baseline_commit=None,
-        )
+        ))
         self.window_entered = threading.Event()
         self.window_release = threading.Event()
         self.blocking_thread: threading.Thread | None = None
@@ -80,13 +81,13 @@ class _WindowAgent(ChatSorcarAgent):
     def merge(self, conflict_resolver: Any = None) -> str:
         with self._counts:
             self.merge_calls += 1
-        self._wt = None
+        self._wts = {}
         return "Successfully merged worktree branch."
 
     def retire_for_disposal(self) -> bool:
         with self._counts:
             self.release_calls += 1
-        self._wt = None
+        self._wts = {}
         return True
 
 
@@ -182,27 +183,27 @@ class TestWorktreeActionStateToctou(unittest.TestCase):
             "No pending worktree changes to act on"
         ), "agent-less state"
         state.agent = agent
-        agent._wt = None
+        seed_worktree(agent, None)
         assert act("merge", tab_id)["message"] == (
             "No pending worktree changes to act on"
         ), "agent without a pending worktree"
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=Path(self.tmpdir),
             branch="kiss/wt-audit0902-b",
             original_branch="main",
             wt_dir=Path(self.tmpdir) / "wt",
             baseline_commit=None,
-        )
+        ))
         assert act("bogus", tab_id)["message"] == (
             "Unknown action: bogus"
         ), "the pending checks come first, then the action"
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=None,  # type: ignore[arg-type]
             branch="kiss/wt-audit0902-b",
             original_branch="main",
             wt_dir=Path(self.tmpdir) / "wt",
             baseline_commit=None,
-        )
+        ))
         assert act("discard", tab_id)["message"] == (
             "No pending worktree changes to act on"
         ), "pending worktree with an unknown repository root"

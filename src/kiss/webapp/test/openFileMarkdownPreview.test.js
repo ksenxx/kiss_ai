@@ -24,36 +24,25 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage,
   send,
   waitFor,
   activeFrameDoc,
   stubMonaco,
+  persistedDrafts,
 } = require('./simplify2_harness.js');
 const {contentTabs} = require('./subagent_tab_helpers');
 
-const MEDIA = path.join(__dirname, '..', 'media');
-
 function pageWithMarkedAndMonaco() {
   let created = [];
-  // The page's transport, so a test can read the state it persists
-  // (the unsent drafts a reload hands back).
-  let transport = null;
   const page = makePage({
+    extraScripts: ['marked.min.js'],
     beforeScripts: win => {
-      const acquire = win.acquireTransport;
-      win.acquireTransport = () => {
-        transport = acquire();
-        return transport;
-      };
-      win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
       created = stubMonaco(win);
     },
   });
-  return Object.assign(page, {created, persistedState: () => transport.getState()});
+  return Object.assign(page, {created});
 }
 
 // The user clicks a link in the chat, so the chat is on screen when
@@ -128,11 +117,10 @@ async function main() {
   assert.strictEqual(submit.tabId, tabId);
   // Until the daemon answers, the submitted path is a prompt it has not
   // acknowledged: a reload would hand it back as an unsent draft.
-  win.dispatchEvent(new win.Event('pagehide'));
   // (Object.entries: the page's objects come from jsdom's realm, whose
   // Object.prototype deepStrictEqual would not match.)
   assert.deepStrictEqual(
-    Object.entries(page.persistedState().inputDrafts),
+    Object.entries(persistedDrafts(win, page.getState)),
     [[tabId, 'docs/readme.md']],
     'an unacknowledged prompt is kept as the tab\'s draft',
   );
@@ -142,9 +130,8 @@ async function main() {
   assertMarkdownPreview(win, 'Readme', 'path-only submit');
   // promptOpened acknowledged the prompt without a task: the path must
   // not come back into the composer after a reload.
-  win.dispatchEvent(new win.Event('pagehide'));
   assert.deepStrictEqual(
-    Object.entries(page.persistedState().inputDrafts),
+    Object.entries(persistedDrafts(win, page.getState)),
     [],
     'the opened path is no longer an unsent draft',
   );

@@ -19,14 +19,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import persist_task, run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -69,22 +67,7 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert "task_transcript" in sea.SYSTEM_PROMPT
     assert agent.tools([]) == [sea.task_transcript]
     assert agent.tools([print]) == [print, sea.task_transcript]
-    assert isinstance(agent, WorkerSea)
-    assert agent.settings({}) == {"tool_profile": "bash", "max_budget": 1.0}
-    # A ``WorkerSea`` turns browser, memory, worktree, auto-commit and
-    # the classifier off (the base class's own ``settings`` layer, folded
-    # under the SEA's); ``system_prompt`` is a hook the daemon applies,
-    # so the resolved settings do not carry its text.
-    assert sea_commands.base_settings([agent]) == resolve_settings(
-        {**WORKER_DEFAULTS, **agent.settings({})}
-    ) == {
-        "tool_profile": "bash",
-        "max_budget": 1.0,
-        "use_web_tools": False,
-        "use_memory": False,
-        "auto_classify": False,
-    }
-    assert_no_removed_getters(sea)
+    assert_worker_contract(sea, agent, {"tool_profile": "bash", "max_budget": 1.0})
 
 
 def test_transcript_digests_a_running_task() -> None:

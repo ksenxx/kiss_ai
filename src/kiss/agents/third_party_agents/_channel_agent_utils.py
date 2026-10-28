@@ -640,6 +640,7 @@ def channel_state_lock(state_path: Path, blocking: bool) -> Iterator[Any | None]
 
 _ADMIN_LOCK_TIMEOUT_SECONDS = 30.0
 _ADMIN_LOCK_POLL_SECONDS = 0.25
+_SEND_RETRY_DELAY_SECONDS = 1.0
 
 
 @contextlib.contextmanager
@@ -1749,7 +1750,7 @@ class ChannelRunner:
             except Exception:
                 if attempt == 0:
                     logger.warning("Reply failed, retrying...", exc_info=True)
-                    _time.sleep(1)
+                    _time.sleep(_SEND_RETRY_DELAY_SECONDS)
                 else:
                     logger.error("Reply failed after retry", exc_info=True)
         return False

@@ -40,7 +40,7 @@ from kiss.agents.sorcar import web_stealth
 from kiss.server.remote_tabs import RemoteTab, RemoteTabs
 from kiss.server.remote_views import REOPEN_DELAY, RemoteViewStream
 from kiss.tests.remote_daemon import start_remote_daemon
-from kiss.tests.server.pause import Pause
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.two_client_harness import TwoClientHarness
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
@@ -372,25 +372,33 @@ class RemoteBoundTabBrowserPagesTest(TwoClientHarness):
     def test_an_unbind_while_the_view_stream_connects_closes_it(self) -> None:
         """The view stream a binding opens is closed again when the binding went meanwhile.
 
-        Held before it connects (nothing registered yet, so the close's
-        own release finds no stream), the stream meets the tab's close;
-        released, it connects and registers, and the open finds it
-        idle and unbound: it goes (the machine's snapshot answer runs
-        the same idle check, so the stream goes either way).
+        The bind warms the view stream as it starts, alongside the
+        tab's own stream (:meth:`RemoteViews.warm`).  Both held before
+        they connect (nothing registered yet, so the close's own
+        release finds no stream), they meet the tab's close, which
+        stands the bind down; released, the view stream connects and
+        registers, the bind finds itself stood down and its release
+        finds the stream idle and unbound: it goes (the machine's
+        snapshot answer runs the same idle check, so the stream goes
+        either way).
         """
-        b, views = self.b, self._views()
+        b, views, tabs = self.b, self._views(), self.server._server_api.remote_tabs
         created: list[RemoteViewStream] = []
 
         def about_to_connect(local: dict[str, Any]) -> bool:
             created.append(local["self"])
             return True
 
-        with Pause(RemoteViewStream.__init__.__code__, about_to_connect) as held:
+        view_held = Pause(RemoteViewStream.__init__.__code__, about_to_connect)
+        tab_held = Pause(RemoteTab.__init__.__code__, lambda local: local["tab_id"] == "tab-5")
+        with Pauses(view_held, tab_held):
             self._submit("tab-5")
-            self.assertTrue(held.paused.wait(60), "the view stream about to connect")
+            self.assertTrue(view_held.paused.wait(60), "the view stream about to connect")
+            self.assertTrue(tab_held.paused.wait(60), "the tab's stream about to connect")
             self.assertEqual(views._streams, {})
             b.send({"type": "closeTab", "tabId": "tab-5"})
-            self.wait_event(b, "tabMachine", tabId="tab-5", machine="")
+            # The close counts against the bind still connecting.
+            self.wait_for(lambda: tabs._unbinds.get("tab-5"), timeout=60, what="the close")
             self.assertEqual(views._bound, {})
         # The stream that then connected is the one that must go
         # (``retired`` exists once it is connected).
@@ -400,6 +408,9 @@ class RemoteBoundTabBrowserPagesTest(TwoClientHarness):
         )
         self.assertEqual(views._streams, {})
         self.assertEqual(views._bound, {})
+        # The bind stood down: the tab was never registered, nor announced.
+        self.assertEqual(self.a.of_type("tabMachine", tabId="tab-5"), [])
+        self.assertNotIn("tab-5", tabs._tabs)
 
     def test_a_bind_that_finds_the_tab_registered_waits_for_its_stream_too(self) -> None:
         """A second bind of a tab another bind registered forwards nothing before the stream.

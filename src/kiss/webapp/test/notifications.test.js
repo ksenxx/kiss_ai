@@ -14,10 +14,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor, click} = require('./simplify2_harness.js');
+const {makePage, send, click} = require('./simplify2_harness.js');
 const {toast: toastById} = require('./ui_antipattern_harness');
 
-async function main() {
+// Every step below is synchronous: `send` dispatches the message and the
+// page renders or removes the toast before it returns.
+function main() {
   const {win} = makePage();
 
   send(win, {
@@ -28,10 +30,8 @@ async function main() {
     actions: ['Enter Key', 'Skip'],
     sticky: true,
   });
-  let toast = await waitFor(
-    () => toastById(win, 'choose-1'),
-    'notification toast was not rendered',
-  );
+  let toast = toastById(win, 'choose-1');
+  assert.ok(toast, 'notification toast was not rendered');
   assert.ok(
     toast.classList.contains('kiss-notification-warning'),
     'the toast carries its severity class',
@@ -45,8 +45,9 @@ async function main() {
   const closeButton = toast.querySelector('.kiss-notification-close');
   assert.ok(closeButton, 'notification close button should exist');
   click(win, closeButton);
-  await waitFor(
-    () => !toastById(win, 'choose-1'),
+  assert.strictEqual(
+    toastById(win, 'choose-1'),
+    null,
     'the close button must dismiss the toast',
   );
 
@@ -58,16 +59,15 @@ async function main() {
     actions: ['Apply'],
     sticky: true,
   });
-  toast = await waitFor(
-    () => toastById(win, 'choose-2'),
-    'second notification toast was not rendered',
-  );
+  toast = toastById(win, 'choose-2');
+  assert.ok(toast, 'second notification toast was not rendered');
   const actionButton = toast.querySelector('.kiss-notification-action');
   assert.ok(actionButton, 'notification action button should exist');
   assert.strictEqual(actionButton.textContent.trim(), 'Apply');
   click(win, actionButton);
-  await waitFor(
-    () => !toastById(win, 'choose-2'),
+  assert.strictEqual(
+    toastById(win, 'choose-2'),
+    null,
     'clicking an action button must dismiss the toast',
   );
 
@@ -105,7 +105,9 @@ async function main() {
   console.log('notifications: all passed.');
 }
 
-main().catch(err => {
+try {
+  main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

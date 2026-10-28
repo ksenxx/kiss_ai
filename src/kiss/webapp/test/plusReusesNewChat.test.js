@@ -85,6 +85,7 @@ function testPlusOnNewChatKeepsIt() {
 function testPlusOnNewChatKeepsItsDraft() {
   const {win} = makePage();
   const boot = activeId(win);
+  assert.strictEqual(composer(win).value, '', 'the composer boots empty');
   composer(win).value = 'half-typed prompt';
 
   clickPlus(win);

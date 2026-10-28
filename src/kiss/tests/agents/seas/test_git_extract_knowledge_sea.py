@@ -24,13 +24,13 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.git_extract_knowledge import git_extract_knowledge_sea as sea
 from kiss.agents.seas.git_extract_knowledge import git_knowledge_index as index
 from kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea import (
@@ -43,15 +43,14 @@ from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     query_tokens,
 )
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
+from kiss.agents.sorcar.cron_agent import SCHEDULE_TZ, compute_next_run, cron_job, load_jobs
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.conftest import git, run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -145,25 +144,10 @@ def _keys(hits: list[Any]) -> list[str]:
 def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     """The settings pin the run: full tools + knowledge tools, no web, no memory."""
     agent = GitExtractKnowledgeSea()
-    assert isinstance(agent, WorkerSea)
-    assert agent.settings({}) == {"tool_profile": "full"}
-    assert agent.settings({"model": "m"})["model"] == "m"
-    # ``WorkerSea`` turns the classifier, browser and memory off;
-    # ``run_parallel`` is always available for the
-    # per-repository indexing sub-agents.  ``system_prompt`` is a hook
-    # the daemon applies (checked below through ``apply_sea``), not a
-    # settings key.
-    assert (
-        sea_commands.base_settings([agent])
-        == resolve_settings({**WORKER_DEFAULTS, **agent.settings({})})
-        == {
-            "tool_profile": "full",
-            "auto_classify": False,
-            "use_web_tools": False,
-            "use_memory": False,
-        }
-    )
-    assert_no_removed_getters(sea)
+    # The full toolset keeps ``run_parallel`` for the per-repository
+    # indexing sub-agents; ``system_prompt`` is a hook the daemon applies
+    # (checked below through ``apply_sea``).
+    assert_worker_contract(sea, agent, {"tool_profile": "full"})
     names = [tool.__name__ for tool in agent.tools([])]
     assert names == [
         "index_repo",
@@ -759,8 +743,6 @@ def test_daily_schedule_is_four_in_the_morning_pacific() -> None:
     the Pacific hour directly; converting it to the machine's local time
     (an earlier version) made a UTC daemon run the job at 11:00 Pacific.
     """
-    from kiss.agents.sorcar.cron_agent import SCHEDULE_TZ, compute_next_run
-
     assert sea.daily_update_schedule() == f"0 {sea.DAILY_UPDATE_HOUR_PACIFIC} * * *"
     for stamp in ("2026-07-15T12:00:00+00:00", "2026-01-15T12:00:00+00:00"):
         now = datetime.fromisoformat(stamp).timestamp()
@@ -864,48 +846,40 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         _remove_cron_jobs_named(name, "unrelated")
 
 
-def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
-    """Fan-out sub-agents and any shell user reach the tools through ``python -m``."""
-    env = {**os.environ, "KISS_HOME": str(kiss_home())}
+def test_cli_drives_the_same_tools(repo: Path) -> None:
+    """Fan-out sub-agents and any shell user reach the tools through ``python -m``.
 
-    def cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", sea.MODULE, *args],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=cwd,
-            timeout=600,
-        )
-
-    out = cli("index", "ledger", cwd=tmp_path)  # relative to the shell's directory
+    Two interpreter spawns: the module is runnable, a repo path is relative
+    to the shell's directory, and a tool error is the process's exit status
+    1.  The sub-commands themselves are covered in-process by
+    :func:`test_cli_in_process_covers_every_subcommand`.
+    """
+    out = _spawn_cli(repo.parent, "index", repo.name)
     assert out.returncode == 0 and "mode: full" in out.stdout, out.stderr
-    out = cli("search", str(repo), "withdraw", "--kinds", "symbol", "--k", "1")
-    assert out.returncode == 0 and out.stdout.startswith("1. symbol:src/pkg/bank.py:18:withdraw")
-    out = cli("search", str(repo), "withdraw", "--path", "docs/")
-    assert out.returncode == 0 and out.stdout.strip() == "No blocks match 'withdraw'."
-    out = cli("read", str(repo), "author:alice@example.com")
-    assert "commits: 3" in out.stdout
-    body = tmp_path / "page.md"
-    body.write_text("# Module src/pkg\n\n`bank.py` holds the Ledger (src/pkg/bank.py:11).\n")
-    out = cli(
-        "write-page",
-        str(repo),
-        "module-src-pkg",
-        "--title",
-        "Module src/pkg",
-        "--summary",
-        "The ledger package.",
-        "--file",
-        str(body),
+    out = _spawn_cli(repo.parent, "read", str(repo.parent), "repo")  # not a repository
+    assert out.returncode == 1 and out.stdout.startswith("Error: "), out.stderr
+
+
+def _main_output(capsys: pytest.CaptureFixture[str], *args: str) -> tuple[int, str]:
+    """Run ``sea.main(args)`` in-process and return its exit code and captured stdout."""
+    return sea.main(list(args)), capsys.readouterr().out
+
+
+def _run_cli(cwd: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run *argv* from *cwd* against the test's KISS home and return the completed process."""
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "KISS_HOME": str(kiss_home())},
+        cwd=cwd,
+        timeout=600,
     )
-    assert out.returncode == 0 and out.stdout.startswith("Wrote ledger/module-src-pkg.md")
-    assert "module-src-pkg" in cli("pages", str(repo)).stdout
-    assert "holds the Ledger" in cli("read-page", str(repo), "module-src-pkg").stdout
-    assert "last indexed HEAD" in cli("status", str(repo)).stdout
-    assert cli("delete-page", str(repo), "module-src-pkg").returncode == 0
-    out = cli("read", str(tmp_path), "repo")
-    assert out.returncode == 1 and out.stdout.startswith("Error: ")
+
+
+def _spawn_cli(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run ``python -m <sea.MODULE> *args`` from *cwd* and return the completed process."""
+    return _run_cli(cwd, [sys.executable, "-m", sea.MODULE, *args])
 
 
 def test_lookup_page_commands_run_for_paths_with_spaces(tmp_path: Path) -> None:
@@ -915,14 +889,7 @@ def test_lookup_page_commands_run_for_paths_with_spaces(tmp_path: Path) -> None:
     sea.index_repo(str(repo))
     page = MemoryDir(_memory_dir(repo)).read(sea.LOOKUP_PAGE).body
     command = next(line.strip() for line in page.splitlines() if " status " in line)
-    out = subprocess.run(
-        shlex.split(command),
-        capture_output=True,
-        text=True,
-        cwd=tmp_path,
-        env={**os.environ, "KISS_HOME": str(kiss_home())},
-        timeout=600,
-    )
+    out = _run_cli(tmp_path, shlex.split(command))
     assert out.returncode == 0 and f"repository: {repo}" in out.stdout, out.stderr
 
 
@@ -931,26 +898,44 @@ def test_cli_in_process_covers_every_subcommand(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``main`` maps each sub-command to its tool and exits 1 on an error message."""
-    assert sea.main(["index", str(repo)]) == 0
-    assert sea.main(["status", str(repo)]) == 0
-    assert sea.main(["search", str(repo), "ledger", "--k", "2", "--kinds", "file"]) == 0
-    assert sea.main(["read", str(repo), "repo"]) == 0
+    """``main`` maps each sub-command to its tool, prints its text and exits 1 on an error."""
+    cli = partial(_main_output, capsys)
+    code, out = cli("index", str(repo))
+    assert code == 0 and "mode: full" in out
+    code, out = cli("status", str(repo))
+    assert code == 0 and "last indexed HEAD" in out
+    code, out = cli("search", str(repo), "ledger", "--k", "2", "--kinds", "file")
+    assert code == 0 and out.startswith("1. file:")
+    code, out = cli("search", str(repo), "withdraw", "--kinds", "symbol", "--k", "1")
+    assert code == 0 and out.startswith("1. symbol:src/pkg/bank.py:18:withdraw")
+    code, out = cli("search", str(repo), "withdraw", "--path", "docs/")
+    assert code == 0 and out.strip() == "No blocks match 'withdraw'."
+    code, out = cli("read", str(repo), "repo")
+    assert code == 0 and "commits: 3" in out
+    code, out = cli("read", str(repo), "author:alice@example.com")
+    assert code == 0 and "commits: 3" in out
     body = tmp_path / "faq.md"
     body.write_text("# FAQ\n\nQ: what is a ledger? A: see src/pkg/bank.py:11.\n")
-    assert sea.main(["write-page", str(repo), "faq", "--file", str(body)]) == 0
-    assert sea.main(["pages", str(repo)]) == 0
-    assert sea.main(["read-page", str(repo), "faq"]) == 0
-    assert sea.main(["delete-page", str(repo), "faq"]) == 0
-    assert sea.main(["read-page", str(repo), "faq"]) == 1
+    code, out = cli("write-page", str(repo), "faq", "--title", "FAQ", "--summary",
+                    "Questions.", "--file", str(body))
+    assert code == 0 and out.startswith("Wrote ledger/faq.md")
+    code, out = cli("pages", str(repo))
+    assert code == 0 and "ledger/faq  —  FAQ: Questions." in out
+    code, out = cli("read-page", str(repo), "faq")
+    assert code == 0 and "Q: what is a ledger? A: see src/pkg/bank.py:11." in out
+    code, out = cli("delete-page", str(repo), "faq")
+    assert code == 0 and out.strip() == "Deleted ledger/faq."
+    code, out = cli("read-page", str(repo), "faq")
+    assert code == 1 and out.startswith("Error: no memory page named 'ledger/faq'.")
+    code, out = cli("read", str(tmp_path), "repo")  # not a repository
+    assert code == 1 and out.startswith("Error: ")
     try:
-        assert sea.main(["schedule", str(repo)]) == 0
-        out = capsys.readouterr().out
+        code, out = cli("schedule", str(repo))
+        assert code == 0 and out.startswith("created:")
         scheduled = [job for job in load_jobs() if job["name"] == sea.JOB_NAME_PREFIX + "ledger"]
         assert len(scheduled) == 1
     finally:
         _remove_cron_jobs_named(sea.JOB_NAME_PREFIX + "ledger")
-    assert "mode: full" in out and "1. file:" in out and "Wrote ledger/faq.md" in out
     with pytest.raises(SystemExit):
         sea.main([])
 

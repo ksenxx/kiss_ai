@@ -503,6 +503,66 @@ def test_env_float_rejects_non_finite(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Config().context_limit_fraction == 0.7
 
 
+def test_inferred_profile_is_decided_once_for_note_and_toolset(
+    env: IsolatedKissHome, model: _FinishingModel,
+) -> None:
+    """The note and the toolset follow one verdict, taken on the substituted task.
+
+    The raw template ("Review the parser: {detail}") reads as a review
+    task; the task the model sees ("... and fix any bug you find") asks
+    for changes, so the reviewer keeps the full toolset (the documented
+    exception for reviewers asked to implement) and gets no
+    restricted-profile note: the two must never disagree.
+    """
+    agent = ChatSorcarAgent("profile-once")
+    agent._subagent_info = {"reviewer": True}
+    agent.run(
+        prompt_template="Review the parser: {detail}",
+        arguments={"detail": "and fix any bug you find"},
+        model_name=STANDIN_MODEL, work_dir=str(env.repo), max_steps=3, max_budget=1.0,
+        model_config=model.server.model_config,
+        web_tools=False, use_memory=False, verbose=False,
+    )
+    assert len(model.requests) == 1
+    request = model.requests[0]
+    assert "# Restricted tool profile" not in request["messages"][0]["content"]
+    names = {t["function"]["name"] for t in request["tools"]}
+    assert {"Read", "Edit", "Write"} <= names
+    assert agent._run_profile == "full"
+
+
+def _first_request(env: IsolatedKissHome, model: _FinishingModel, profile: str) -> dict[str, Any]:
+    """Run a *profile* agent with memory on and return the model's first request."""
+    model.requests.clear()
+    ChatSorcarAgent(f"memory-{profile}").run(
+        prompt_template="Say done.", tool_profile=profile,
+        model_name=STANDIN_MODEL, work_dir=str(env.repo), max_steps=3, max_budget=1.0,
+        model_config=model.server.model_config,
+        web_tools=False, use_memory=True, verbose=False,
+    )
+    assert len(model.requests) == 1
+    return model.requests[0]
+
+
+def test_memory_protocol_follows_the_profile(env: IsolatedKissHome, model: _FinishingModel) -> None:
+    """A profile without memory tools gets neither the tools nor the protocol naming them.
+
+    ``review`` keeps the read-only memory tools and therefore the
+    protocol; ``shell`` has no memory group, so its system prompt must
+    not tell the model to call ``memory_write`` / ``memory_refresh``.
+    """
+    (env.kiss_home / "memories").mkdir(exist_ok=True)
+    review = _first_request(env, model, "review")
+    assert "memory_search" in {t["function"]["name"] for t in review["tools"]}
+    assert "## Memory" in review["messages"][0]["content"]
+    shell = _first_request(env, model, "shell")
+    assert {t["function"]["name"] for t in shell["tools"]} == {
+        "Bash", "bash_job", "Read", "run_commands_parallel", "finish",
+    }
+    system = shell["messages"][0]["content"]
+    assert "## Memory" not in system and "memory_write" not in system
+
+
 def test_review_share_in_prompt_leaves_reviewers_uncapped(
     env: IsolatedKissHome, daemon: str, model: _FinishingModel,
 ) -> None:

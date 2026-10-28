@@ -7,60 +7,13 @@
 
 const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
-const {visibleTitles} = require('./history_helpers');
+const {visibleTitles, makeRow} = require('./history_helpers');
 
+// One row per status chip: running, errored, succeeded.
 const SESSIONS_FIXTURE = [
-  {
-    id: 'chatR',
-    task_id: 1,
-    title: 'running task',
-    timestamp: 1_700_000_000,
-    preview: 'running task',
-    has_events: false,
-    failed: false,
-    is_running: true,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_000_000,
-    endTs: 0,
-  },
-  {
-    id: 'chatE',
-    task_id: 2,
-    title: 'errored task',
-    timestamp: 1_700_000_100,
-    preview: 'errored task',
-    has_events: false,
-    failed: true,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_100_000,
-    endTs: 1_700_000_110_000,
-  },
-  {
-    id: 'chatS',
-    task_id: 3,
-    title: 'succeeded task',
-    timestamp: 1_700_000_200,
-    preview: 'succeeded task',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_200_000,
-    endTs: 1_700_000_210_000,
-  },
+  makeRow({id: 'chatR', task_id: 1, title: 'running task', is_running: true, endTs: 0}),
+  makeRow({id: 'chatE', task_id: 2, title: 'errored task', failed: true}),
+  makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
 ];
 
 const CHIP_SPEC = [

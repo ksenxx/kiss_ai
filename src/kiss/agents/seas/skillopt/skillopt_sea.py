@@ -1260,7 +1260,7 @@ class Optimizer:
 
         best = self.target.materialize(self.state["best_text"], round_dir / "best")
         # A task with an imported trajectory is offline: the env may not be able
-        # to run it at all (a Terminal-Bench trial fed to an SWE-bench env), so
+        # to run it at all (a trajectory imported from another benchmark's env), so
         # its imported trajectory stands in for its training rollout every round.
         train_rollouts = [self.imported[t.id] for t in batch if t.id in self.imported]
         if train_rollouts:

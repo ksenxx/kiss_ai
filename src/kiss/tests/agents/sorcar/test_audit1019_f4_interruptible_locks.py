@@ -22,7 +22,7 @@
   which a descendant that left git's process group (``setsid``) kept
   open past the watchdog kill; and a git that could not start raised
   out of it.  A git alias starting such a descendant shows the read
-  giving up ``_PIPE_GIVE_UP_SECONDS`` after the kill, and an empty
+  giving up ``PIPE_GIVE_UP_SECONDS`` after the kill, and an empty
   ``PATH`` shows the "no output" return.
 * D2-1 — a re-entrant ``interruptible_locked_call`` (the thread already
   owns the ``RLock``) used to enter its ``try`` before acquiring, so a
@@ -55,7 +55,6 @@ import pytest
 
 from kiss.agents.sorcar._concurrency import interruptible_locked_call, locked_call
 from kiss.agents.sorcar.git_worktree import (
-    _PIPE_GIVE_UP_SECONDS,
     GitWorktree,
     GitWorktreeOps,
     _git_common_dir,
@@ -65,8 +64,9 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.processes import PIPE_GIVE_UP_SECONDS
 from kiss.server.task_runner import inject_keyboard_interrupt
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, seed_worktree
 
 _HOLD_SECONDS = 8.0
 
@@ -146,7 +146,7 @@ def _pending_worktree(repo: Path) -> tuple[SorcarAgent, GitWorktree]:
     agent = SorcarAgent("audit1019-f4-tab-b")
     agent.work_dir = str(repo)
     wt = GitWorktree(repo_root=repo, branch="kiss/wt-f4", original_branch="master", wt_dir=wt_dir)
-    agent._wt = wt
+    seed_worktree(agent, wt)
     return agent, wt
 
 
@@ -284,7 +284,7 @@ def test_stdout_head_gives_up_on_a_pipe_held_by_a_descendant_in_its_own_session(
             os.kill(int(pid_file.read_text()), signal.SIGKILL)
     elapsed = time.monotonic() - t0
     assert (text, truncated) == ("hello", True)
-    assert 1.0 <= elapsed < 1.0 + _PIPE_GIVE_UP_SECONDS + 4.0, f"read held for {elapsed:.1f}s"
+    assert 1.0 <= elapsed < 1.0 + PIPE_GIVE_UP_SECONDS + 4.0, f"read held for {elapsed:.1f}s"
 
 
 def test_stdout_head_without_git_on_the_path_reports_no_output(

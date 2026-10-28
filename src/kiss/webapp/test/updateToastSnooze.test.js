@@ -131,26 +131,9 @@ function testSnoozedBroadcastSuppressesToastKeepsBadge() {
   console.log('  ok - snoozed broadcast suppresses toast, keeps badge');
 }
 
-function testLegacyEventWithoutSnoozedFieldStillShowsToast() {
-  // An older daemon does not send the `snoozed` field; the toast must
-  // behave exactly as before.
-  const {win} = makePage();
-  const doc = win.document;
-  send(win, {
-    type: 'update_available',
-    available: true,
-    latest: '9.9.9',
-    current: '1.0.0',
-  });
-  assert.ok(
-    doc.querySelector(TOAST_SELECTOR),
-    'missing snoozed field defaults to showing the toast',
-  );
-  win.close();
-  console.log('  ok - legacy update_available event still shows the toast');
-}
+// An older daemon's `update_available` without the `snoozed` field still
+// shows the toast: updateNotification.test.js sends exactly that shape.
 
 testRemindMeLaterPostsSnoozeAndDismisses();
 testSnoozedBroadcastSuppressesToastKeepsBadge();
-testLegacyEventWithoutSnoozedFieldStillShowsToast();
 console.log('updateToastSnooze.test.js: all tests passed');

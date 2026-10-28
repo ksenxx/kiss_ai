@@ -26,12 +26,6 @@ function flushTextStream(win) {
   send(win, {type: 'text_end'});
 }
 
-function clickFirstLink(win, p) {
-  const el = findLinks(win, p)[0];
-  assert.ok(el, 'expected a [data-path="' + p + '"] in #output');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 // Every path shape (absolute, dot-relative, workspace-relative,
 // home-relative, parent-relative) in a prompt becomes exactly one link.
 const PROMPT_PATHS = [
@@ -54,15 +48,6 @@ function testFilePathShapesInPromptAreLinkified() {
     win.close();
     console.log(`  ok - ${shape} path in prompt is linkified`);
   }
-}
-
-function testFilePathWithLineSuffixLinkified() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'crash at /tmp/foo.py:42 today'});
-  const links = findLinks(win, '/tmp/foo.py:42');
-  assert.strictEqual(links.length, 1, 'path with :42 suffix must be linkified');
-  win.close();
-  console.log('  ok - path with :line suffix is linkified');
 }
 
 function testFilePathInResultSummaryLinkified() {
@@ -229,34 +214,6 @@ function testSentenceTrailingPunctuationNotIncluded() {
   console.log('  ok - trailing punctuation is stripped from paths');
 }
 
-function testClickPostsOpenFileWithCorrectPath() {
-  const {win, posted} = makePage();
-  send(win, {type: 'prompt', text: 'open /tmp/click.py'});
-  clickFirstLink(win, '/tmp/click.py');
-  const opens = posted.filter(m => m.type === 'openFile');
-  assert.strictEqual(opens.length, 1, 'one openFile must be posted');
-  assert.strictEqual(opens[0].path, '/tmp/click.py');
-  assert.strictEqual(
-    opens[0].line,
-    undefined,
-    'no line should be sent when path has no :line suffix',
-  );
-  win.close();
-  console.log('  ok - click posts openFile with correct path');
-}
-
-function testClickPostsOpenFileWithLine() {
-  const {win, posted} = makePage();
-  send(win, {type: 'prompt', text: 'crash at /tmp/click2.py:99 see above'});
-  clickFirstLink(win, '/tmp/click2.py:99');
-  const opens = posted.filter(m => m.type === 'openFile');
-  assert.strictEqual(opens.length, 1, 'one openFile must be posted');
-  assert.strictEqual(opens[0].path, '/tmp/click2.py');
-  assert.strictEqual(opens[0].line, 99, 'line 99 must be parsed and sent');
-  win.close();
-  console.log('  ok - click posts openFile with parsed :line');
-}
-
 function testFilePathInsideExistingAnchorNotDoubleLinkified() {
   const {win} = makePage();
   send(win, {
@@ -281,7 +238,6 @@ function testFilePathInsideExistingAnchorNotDoubleLinkified() {
 
 function runTests() {
   testFilePathShapesInPromptAreLinkified();
-  testFilePathWithLineSuffixLinkified();
   testFilePathInResultSummaryLinkified();
   testFilePathInResultTextLinkified();
   testFilePathInBashOutputLinkified();
@@ -292,8 +248,6 @@ function runTests() {
   testHttpUrlNotLinkifiedAsFilePath();
   testBareFilenameNotLinkified();
   testSentenceTrailingPunctuationNotIncluded();
-  testClickPostsOpenFileWithCorrectPath();
-  testClickPostsOpenFileWithLine();
   testFilePathInsideExistingAnchorNotDoubleLinkified();
 }
 

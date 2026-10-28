@@ -7,7 +7,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {visibleTitles} = require('./history_helpers');
+const {visibleTitles, makeRow} = require('./history_helpers');
 
 function makePage(preSetup) {
   return harness.makePage({beforeScripts: preSetup});
@@ -34,58 +34,11 @@ const FILTER_CONTROL_IDS = [
   'hf-tag',
 ];
 
+// One row per status chip: running, errored, succeeded.
 const SESSIONS_FIXTURE = [
-  {
-    id: 'chatR',
-    task_id: 1,
-    title: 'running task',
-    timestamp: 1_700_000_000,
-    preview: 'running task',
-    has_events: false,
-    failed: false,
-    is_running: true,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_000_000,
-    endTs: 0,
-  },
-  {
-    id: 'chatE',
-    task_id: 2,
-    title: 'errored task',
-    timestamp: 1_700_000_100,
-    preview: 'errored task',
-    has_events: false,
-    failed: true,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_100_000,
-    endTs: 1_700_000_110_000,
-  },
-  {
-    id: 'chatS',
-    task_id: 3,
-    title: 'succeeded task',
-    timestamp: 1_700_000_200,
-    preview: 'succeeded task',
-    has_events: false,
-    failed: false,
-    is_running: false,
-    tokens: 0,
-    cost: 0,
-    steps: 0,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_200_000,
-    endTs: 1_700_000_210_000,
-  },
+  makeRow({id: 'chatR', task_id: 1, title: 'running task', is_running: true, endTs: 0}),
+  makeRow({id: 'chatE', task_id: 2, title: 'errored task', failed: true}),
+  makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
 ];
 
 function testFiltersPanelMarkup() {
@@ -182,9 +135,9 @@ function testFiltersPanelMarkup() {
 function testDefaultCollapsedThenControlsVisibleOnExpand() {
   const {win} = makePage();
   const doc = win.document;
-
-  doc.getElementById('app').style.display = '';
-
+  // `#app` stays hidden behind the loading overlay until the daemon
+  // connects; the ancestor walk below would stop at it otherwise.
+  send(win, {type: 'daemonStatus', connected: true});
   const toggle = doc.getElementById('history-filters-toggle');
   const body = doc.getElementById('history-filters-body');
   assert.strictEqual(
@@ -199,6 +152,11 @@ function testDefaultCollapsedThenControlsVisibleOnExpand() {
   );
 
   clickToggle(win);
+  assert.strictEqual(
+    toggle.getAttribute('aria-expanded'),
+    'true',
+    'clicking the header must expand the panel',
+  );
   for (const id of FILTER_CONTROL_IDS) {
     let el = doc.getElementById(id);
     for (; el; el = el.parentElement) {
@@ -209,28 +167,6 @@ function testDefaultCollapsedThenControlsVisibleOnExpand() {
       );
     }
   }
-
-  win.close();
-  console.log('  ok - collapsed by default; expanding reveals controls');
-}
-
-function testToggleExpandsAndCollapses() {
-  const {win} = makePage();
-  const doc = win.document;
-  const toggle = doc.getElementById('history-filters-toggle');
-  const body = doc.getElementById('history-filters-body');
-
-  clickToggle(win);
-  assert.strictEqual(
-    toggle.getAttribute('aria-expanded'),
-    'true',
-    'clicking the header must expand the panel',
-  );
-  assert.strictEqual(
-    body.hidden,
-    false,
-    'the expanded body must not be hidden',
-  );
 
   clickToggle(win);
   assert.strictEqual(
@@ -245,28 +181,37 @@ function testToggleExpandsAndCollapses() {
   );
 
   win.close();
-  console.log('  ok - toggle expands and re-collapses the panel');
+  console.log('  ok - collapsed by default; the header expands and re-collapses');
+}
+
+/** Every localStorage entry of the page as `{key: value}`. */
+function storageSnapshot(win) {
+  const items = {};
+  for (let i = 0; i < win.localStorage.length; i++) {
+    const k = win.localStorage.key(i);
+    items[k] = win.localStorage.getItem(k);
+  }
+  return items;
+}
+
+/** A fresh page whose localStorage starts with *items*. */
+function makePageWithStorage(items) {
+  return makePage(win => {
+    for (const [k, v] of Object.entries(items)) win.localStorage.setItem(k, v);
+  });
 }
 
 function testExpandedStatePersists() {
   const first = makePage();
   clickToggle(first.win);
-  const persistedItems = {};
-  for (let i = 0; i < first.win.localStorage.length; i++) {
-    const k = first.win.localStorage.key(i);
-    persistedItems[k] = first.win.localStorage.getItem(k);
-  }
+  const persistedItems = storageSnapshot(first.win);
   first.win.close();
   assert.ok(
     Object.keys(persistedItems).length > 0,
     'expanding must persist the choice in localStorage',
   );
 
-  const second = makePage(win => {
-    for (const [k, v] of Object.entries(persistedItems)) {
-      win.localStorage.setItem(k, v);
-    }
-  });
+  const second = makePageWithStorage(persistedItems);
   assert.strictEqual(
     second.win.document
       .getElementById('history-filters-toggle')
@@ -281,18 +226,10 @@ function testExpandedStatePersists() {
   );
 
   clickToggle(second.win);
-  const collapsedItems = {};
-  for (let i = 0; i < second.win.localStorage.length; i++) {
-    const k = second.win.localStorage.key(i);
-    collapsedItems[k] = second.win.localStorage.getItem(k);
-  }
+  const collapsedItems = storageSnapshot(second.win);
   second.win.close();
 
-  const third = makePage(win => {
-    for (const [k, v] of Object.entries(collapsedItems)) {
-      win.localStorage.setItem(k, v);
-    }
-  });
+  const third = makePageWithStorage(collapsedItems);
   assert.strictEqual(
     third.win.document
       .getElementById('history-filters-toggle')
@@ -400,7 +337,6 @@ function testFiltersPanelCss() {
 function main() {
   testFiltersPanelMarkup();
   testDefaultCollapsedThenControlsVisibleOnExpand();
-  testToggleExpandsAndCollapses();
   testExpandedStatePersists();
   testFiltersStayAppliedWhileCollapsed();
   testLocalStorageUnavailableFallsBackToCollapsed();

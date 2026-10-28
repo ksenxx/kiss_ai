@@ -130,6 +130,7 @@ class TestListWorkspaces:
         # Listing validates each stored token with auth.test; keep that call
         # on the loopback emulator.
         monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
+        invalid_auth_server.requests.clear()  # the fixture is module-scoped
         ws = "test-ws-cli-list"
         _save_token("xoxb-cli-list-test", workspace=ws)
         monkeypatch.setattr(sys, "argv", ["kiss-slack", "--list-workspaces"])
@@ -189,7 +190,7 @@ _SLACK_TOOL_ERROR_CASES = [
     (
         "upload_file",
         {
-            "third_party_agents": "C01234567",
+            "channels": "C01234567",
             "content": "hello",
             "filename": "test.txt",
         },
@@ -225,6 +226,8 @@ class TestSlackAgent:
     """Tests for SlackAgent construction and tool integration."""
 
     def test_check_auth_unauthenticated(self) -> None:
+        """The exact unauthenticated message text (the generic parametrised check in
+        test_new_channel_agents only looks for any auth hint)."""
         agent = SlackAgent()
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
@@ -236,6 +239,7 @@ class TestSlackAgent:
         self, monkeypatch: pytest.MonkeyPatch, invalid_auth_server: RecordingServer
     ) -> None:
         monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
+        invalid_auth_server.requests.clear()  # the fixture is module-scoped
         _save_token("xoxb-invalid-token")
         agent = SlackAgent()
         tools = agent._get_tools()

@@ -60,6 +60,7 @@ function testWorktreeDoneRevivesDemotedLink() {
   const {win, posted} = makePage();
   const rel = 'reports/live.html';
   const wtCopy = path.join(wtDir, rel);
+  let tabId;
   try {
     // The result names the report, but the host has no fallback for
     // the tab yet (a reconnect replay dropped it): the link demotes.
@@ -81,7 +82,7 @@ function testWorktreeDoneRevivesDemotedLink() {
     fs.mkdirSync(path.dirname(wtCopy), {recursive: true});
     fs.writeFileSync(wtCopy, '<h1>live</h1>\n');
     // The demoted span is stamped with its owning tab id.
-    const tabId = findMissing(win, rel)[0].getAttribute('data-path-tab');
+    tabId = findMissing(win, rel)[0].getAttribute('data-path-tab');
     fallbackDirs[String(tabId)] = wtDir;
     const checksBefore = posted.filter(m => m.type === 'checkPaths').length;
     send(win, {
@@ -110,7 +111,7 @@ function testWorktreeDoneRevivesDemotedLink() {
     assert.strictEqual(opens.length, 1, 'click must post one openFile');
     assert.strictEqual(opens[0].path, rel);
   } finally {
-    delete fallbackDirs[Object.keys(fallbackDirs)[0]];
+    delete fallbackDirs[String(tabId)];
     fs.rmSync(wtDir, {recursive: true, force: true});
   }
   win.close();
@@ -121,6 +122,7 @@ function testWorktreeCreatedRechecksToo() {
   const {win, posted} = makePage();
   const rel = 'notes/plan.md';
   const wtCopy = path.join(wtDir, rel);
+  let tabId;
   try {
     send(win, {type: 'prompt', text: 'see ' + rel});
     assert.strictEqual(findLinks(win, rel).length, 0);
@@ -131,7 +133,7 @@ function testWorktreeCreatedRechecksToo() {
     const missingSpans = Array.from(
       win.document.querySelectorAll('#output [data-path-missing]'),
     ).filter(el => el.getAttribute('data-path-missing') === rel);
-    const tabId = missingSpans[0].getAttribute('data-path-tab');
+    tabId = missingSpans[0].getAttribute('data-path-tab');
     fallbackDirs[String(tabId)] = wtDir;
     const checksBefore = posted.filter(m => m.type === 'checkPaths').length;
     send(win, {
@@ -151,7 +153,7 @@ function testWorktreeCreatedRechecksToo() {
       'the link must resolve once the fallback is recorded',
     );
   } finally {
-    delete fallbackDirs[Object.keys(fallbackDirs)[0]];
+    delete fallbackDirs[String(tabId)];
     fs.rmSync(wtDir, {recursive: true, force: true});
   }
   win.close();

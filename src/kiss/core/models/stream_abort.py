@@ -121,9 +121,10 @@ class StreamAbortWatchdog:
         somebody else's next request.  Disarming under the same lock
         :meth:`_claim_abort` uses closes that window, and the join
         closes the "already decided, about to shut down" one.  Both are
-        bounded: the abort runs outside the lock and the join has a
-        timeout, so a transport that wedges during teardown delays the
-        caller instead of stalling it forever.
+        bounded: only the socket shutdown (a syscall) runs under the lock,
+        the close fallback runs outside it and the join has a timeout, so
+        a transport that wedges during teardown delays the caller instead
+        of stalling it forever.
         """
         locked_call(self._lock, self._done.set)
         try:
@@ -166,9 +167,10 @@ class StreamAbortWatchdog:
         while disarming, so the two cannot interleave: either this
         watchdog claims the abort before the caller disarms it (and
         ``stop`` then waits for the abort to finish), or the disarm wins
-        and no abort ever happens.  The abort itself runs outside the
-        lock, so tearing a stream down can never block :meth:`beat` or
-        the disarming caller for as long as the transport takes.
+        and no abort ever happens (:meth:`_abort` re-checks the disarm
+        before touching the socket).  The close fallback runs outside the
+        lock, so tearing a stream down can never block the disarming
+        caller for as long as the transport takes.
 
         Returns:
             ``True`` when this watchdog must now abort the stream.
@@ -209,10 +211,23 @@ class StreamAbortWatchdog:
         timeout exactly as if the watchdog did not exist.  Closing is
         therefore only the fallback for transports whose socket the
         shutdown could not reach.
+
+        The claim was taken under the lock, but the stream may reach EOF
+        and the caller disarm the watchdog before the abort gets here, by
+        which time the SDK may have returned the socket to the pool.  So
+        the shutdown (a non-blocking syscall) re-checks the disarm under
+        the same lock and, when the stream ended on its own, withdraws
+        the verdict instead: the caller has a complete result.  Only the
+        close fallback, which may block, stays outside the lock.
         """
         if hasattr(self._stream, "response") and self._stream.response is None:
             return False
-        if not self._shutdown_socket():
+        with self._lock:
+            if self._done.is_set():
+                self.stalled = self.stopped = False
+                return True
+            shut_down = self._shutdown_socket()
+        if not shut_down:
             _close_stream(self._stream)
         return True
 
@@ -237,17 +252,70 @@ class StreamAbortWatchdog:
             ``True`` when the socket was found and shut down.
         """
         try:
-            extensions = self._stream.response.extensions
-            network_stream = extensions.get("network_stream")
-            sock = network_stream.get_extra_info("socket") if network_stream is not None else None
-            if sock is not None:
-                sock.shutdown(socket.SHUT_RDWR)
-                if os.name == "nt":  # pragma: no cover — Windows-only branch
-                    sock.close()
-                return True
+            network_stream = self._stream.response.extensions.get("network_stream")
         except Exception:
             logger.debug("Exception caught", exc_info=True)
+            return False
+        return _shutdown_network_stream(network_stream)
+
+
+def _shutdown_network_stream(network_stream: Any) -> bool:
+    """Half-close the socket behind an httpcore network stream, ignoring any failure.
+
+    Args:
+        network_stream: An httpcore ``NetworkStream`` (or ``None``); its
+            documented ``get_extra_info("socket")`` yields the socket.
+
+    Returns:
+        ``True`` when the socket was found and shut down.
+    """
+    try:
+        sock = network_stream.get_extra_info("socket") if network_stream is not None else None
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+            if os.name == "nt":  # pragma: no cover — Windows-only branch
+                sock.close()
+            return True
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+    return False
+
+
+def shutdown_pool_sockets(http_client: Any) -> bool:
+    """Shut down every socket in an httpx client's connection pool.
+
+    The abort for a request that has no response yet: a non-streamed
+    call waits for the whole reply before the SDK hands anything back,
+    so there is no ``response`` whose socket a :class:`StreamAbortWatchdog`
+    could reach, and (as the module docstring explains) closing the
+    client does not wake a thread parked in ``recv()``.  The one socket
+    carrying the request is only reachable through httpx's transport and
+    httpcore's pool, so this walks ``_transport._pool.connections`` and
+    each connection's ``_connection._network_stream`` best-effort: the
+    pool's ``connections`` and the stream's ``get_extra_info("socket")``
+    are httpcore's documented API, the rest private attributes a future
+    httpx may rename, in which case nothing is shut down and the caller
+    falls back to abandoning the call until the client timeout.  Idle
+    keep-alive sockets go down too, so the caller closes the client
+    afterwards rather than reusing the pool.
+
+    Args:
+        http_client: The ``httpx.Client`` the SDK sends through.
+
+    Returns:
+        ``True`` when at least one socket was shut down.
+    """
+    try:
+        connections = list(http_client._transport._pool.connections)
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
         return False
+    shut_down = False
+    for connection in connections:
+        inner = getattr(connection, "_connection", None)
+        if _shutdown_network_stream(getattr(inner, "_network_stream", None)):
+            shut_down = True
+    return shut_down
 
 
 def _abort_error(
@@ -313,10 +381,30 @@ def stall_error(stall_timeout: float | None) -> TimeoutError:
     """
     seconds = stall_timeout if stall_timeout is not None else 0.0
     return TimeoutError(
-        f"Model stream stalled: no data received for {seconds:.0f}s "
+        f"{STALL_MARKER}: no data received for {seconds:.0f}s "
         f"(model_config 'stream_stall_timeout'). The request was aborted "
         f"instead of hanging; it will be retried."
     )
+
+
+#: Start of every :func:`stall_error` message; :func:`is_stall_error` keys on it.
+STALL_MARKER = "Model stream stalled"
+
+
+def is_stall_error(error: BaseException) -> bool:
+    """Whether *error* is the :func:`stall_error` of an aborted stream.
+
+    The agentic loop counts stalls separately from model errors (a stall
+    is the transport's, not the model's), so it needs to tell them apart
+    without a dedicated exception class that every transport would have
+    to import.  A transport may prefix the message with its model name
+    (``AnthropicModel._stall_error``), so the marker is searched, not
+    matched at the start.
+
+    Args:
+        error: The exception the model call raised.
+    """
+    return isinstance(error, TimeoutError) and STALL_MARKER in str(error)
 
 
 def stop_or_stall_error(stall_timeout: float | None) -> BaseException:

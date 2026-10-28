@@ -39,6 +39,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.core import user_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.conftest import find_free_port, run_git
 from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
@@ -179,12 +180,12 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         assert GitWorktreeOps.save_original_branch(self.repo, branch, "main")
         (wt_dir / _MERGED_FILE).write_text("agent work\n", encoding="utf-8")
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=self.repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
-        )
+        ))
         return agent
 
     def _release_hook(self) -> None:

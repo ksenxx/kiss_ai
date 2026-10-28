@@ -104,10 +104,12 @@ class TestFinalResultsJournal:
             task_id: {"result": "<p>done</p>", "success": None},
         }
 
-    def test_legacy_save_without_task_id_does_not_journal(self) -> None:
-        """The legacy task-text fallback path skips the journal."""
-        self._add_sentinel_task("legacy task")
-        th._save_task_result("<p>legacy</p>", task=("legacy task"))
+    def test_save_for_a_missing_row_does_not_journal(self) -> None:
+        """A save that resolves to no row is dropped before the journal."""
+        self._add_sentinel_task("some task")
+        th._save_task_result(
+            "<p>lost</p>", task_id="0123456789abcdef0123456789abcdef",
+        )
         assert not os.path.exists(self._sidecar())
 
     def test_sweep_restores_journalled_result_after_wal_loss(self) -> None:

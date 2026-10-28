@@ -12,7 +12,20 @@ const {
   fakeMatchMedia,
   ofType,
 } = require('./simplify2_harness');
-const {lastGetHistory, rowByTitle} = require('./history_helpers');
+const {
+  lastGetHistory,
+  rowByTitle,
+  makeRow,
+  sendHistory,
+} = require('./history_helpers');
+
+const OLD_TASK = makeRow({
+  id: 'chat-1',
+  task_id: 1,
+  title: 'old completed task',
+  has_events: true,
+  work_dir: '/var/repo/alpha',
+});
 
 function makePage(opts) {
   const {desktopMatches = false} = opts || {};
@@ -80,25 +93,7 @@ function testMobileLifecycleShowsTaskStartedWhileDisconnected() {
     apiKeys: {},
   });
   openDrawer(win);
-  const first = lastGetHistory(posted);
-  send(win, {
-    type: 'history',
-    generation: first.generation,
-    offset: 0,
-    sessions: [
-      {
-        id: 'chat-1',
-        task_id: 1,
-        title: 'old completed task',
-        preview: 'old completed task',
-        has_events: true,
-        timestamp: 1_700_000_000,
-        is_running: false,
-        failed: false,
-        work_dir: '/var/repo/alpha',
-      },
-    ],
-  });
+  sendHistory(win, posted, [OLD_TASK]);
   assert.ok(
     rowByTitle(win, 'old completed task'),
     'pre-disconnect history renders',
@@ -106,37 +101,19 @@ function testMobileLifecycleShowsTaskStartedWhileDisconnected() {
   send(win, {type: 'daemonStatus', connected: false});
   posted.length = 0;
   send(win, {type: 'daemonStatus', connected: true});
-  const refetch = lastGetHistory(posted);
-  assert.ok(refetch, 'reconnect must refetch history');
-  send(win, {
-    type: 'history',
-    generation: refetch.generation,
-    offset: 0,
-    sessions: [
-      {
-        id: 'chat-2',
-        task_id: 2,
-        title: 'started while offline',
-        preview: 'started while offline',
-        has_events: true,
-        timestamp: 1_700_000_100,
-        is_running: true,
-        failed: false,
-        work_dir: '/private/var/repo/alpha',
-      },
-      {
-        id: 'chat-1',
-        task_id: 1,
-        title: 'old completed task',
-        preview: 'old completed task',
-        has_events: true,
-        timestamp: 1_700_000_000,
-        is_running: false,
-        failed: false,
-        work_dir: '/var/repo/alpha',
-      },
-    ],
-  });
+  assert.ok(lastGetHistory(posted), 'reconnect must refetch history');
+  sendHistory(win, posted, [
+    makeRow({
+      id: 'chat-2',
+      task_id: 2,
+      title: 'started while offline',
+      has_events: true,
+      timestamp: 1_700_000_100,
+      is_running: true,
+      work_dir: '/private/var/repo/alpha',
+    }),
+    OLD_TASK,
+  ]);
   const row = rowByTitle(win, 'started while offline');
   assert.ok(row, 'the task started while offline must be rendered');
   assert.strictEqual(row.dataset.category, 'running');
@@ -160,41 +137,31 @@ function testStaleGenerationReplyIsDropped() {
   send(win, {type: 'daemonStatus', connected: true});
   const fresh = lastGetHistory(posted);
   assert.ok(fresh.generation > stale.generation, 'refetch bumps generation');
-  send(win, {
-    type: 'history',
-    generation: fresh.generation,
-    offset: 0,
-    sessions: [
-      {
-        id: 'chat-9',
-        task_id: 9,
-        title: 'fresh running task',
-        preview: 'fresh running task',
-        has_events: true,
-        timestamp: 1_700_000_200,
-        is_running: true,
-        failed: false,
-        work_dir: '/repo/x',
-      },
-    ],
-  });
+  sendHistory(win, posted, [
+    makeRow({
+      id: 'chat-9',
+      task_id: 9,
+      title: 'fresh running task',
+      has_events: true,
+      timestamp: 1_700_000_200,
+      is_running: true,
+      work_dir: '/repo/x',
+    }),
+  ]);
   assert.ok(rowByTitle(win, 'fresh running task'), 'fresh reply renders');
   send(win, {
     type: 'history',
     generation: stale.generation,
     offset: 0,
     sessions: [
-      {
+      makeRow({
         id: 'chat-8',
         task_id: 8,
         title: 'stale old task',
-        preview: 'stale old task',
         has_events: true,
         timestamp: 1_600_000_000,
-        is_running: false,
-        failed: false,
         work_dir: '/repo/x',
-      },
+      }),
     ],
   });
   assert.ok(

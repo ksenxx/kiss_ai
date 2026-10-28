@@ -29,6 +29,7 @@ from kiss.server.agent_state import AgentState
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.helpers import model_vendor
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 pytestmark = pytest.mark.usefixtures("clean_registry")
 
@@ -54,12 +55,12 @@ def _register_wt_state(
 def _set_agent_wt(agent: object, repo: Path, branch: str, original: str) -> None:
     """Helper to set agent._wt with a GitWorktree for testing."""
     slug = branch.replace("/", "_")
-    agent._wt = GitWorktree(  # type: ignore[attr-defined]
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch=branch,
         original_branch=original,
         wt_dir=repo / ".kiss-worktrees" / slug,
-    )
+    ))
 
 
 def _model_vendor_name(name: str) -> str:

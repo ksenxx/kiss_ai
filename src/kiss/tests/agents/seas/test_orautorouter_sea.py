@@ -241,16 +241,14 @@ def test_routing_prompt_refuses_an_autorouter_prompt_that_lost_its_intro(tmp_pat
     # that keeps them in step with ``routing_prompt`` does not break this test.
     source = Path(autorouter_sea.__file__).read_text(encoding="utf-8")
     opening = "\n" + autorouter_sea.INTRO.rsplit("\n", 1)[-1]  # "\nYou are the autorouter."
-    assert source.count(opening) == 1
     copy = tmp_path / "autorouter_sea.py"
-    copy.write_text(source.replace(opening, "\nYou route."), encoding="utf-8")
+    copy.write_text(source.replace(opening, "\nYou route.", 1), encoding="utf-8")
     namespace = execute_python_file(str(copy))
     with pytest.raises(ValueError, match="no longer opens with"):
         namespace["routing_prompt"]("x", "You are x.")
     # Likewise when the heading after the evidence block is renamed.
     heading = f"\n{autorouter_sea.AFTER_EVIDENCE.strip()}\n"  # "\n## Hard rules\n"
-    assert source.count(heading) == 1
-    copy.write_text(source.replace(heading, "\n## Rules\n"), encoding="utf-8")
+    copy.write_text(source.replace(heading, "\n## Rules\n", 1), encoding="utf-8")
     namespace = execute_python_file(str(copy))
     with pytest.raises(ValueError, match="evidence no longer ends at"):
         namespace["routing_prompt"]("x", "You are x.")
@@ -284,22 +282,3 @@ def test_routing_prompt_swaps_only_the_evidence_block_even_when_a_rule_matches_i
     assert derived.count(table) == 1 and derived.count(rule) == 1
     assert derived.index("## Observed model evidence") < derived.index(table)
     assert derived.index(table) < derived.index("## Hard rules") < derived.index(rule)
-
-
-def test_rsi7d_tunes_the_autorouter_constant_but_not_the_derived_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``/rsi7d``'s prompt editor sees the autorouter's f-string; the clone's prompt is derived."""
-    from kiss.agents.seas.rsi7d import rsi7d_sea
-    from kiss.tests.agents.seas.conftest import fake_checkout
-
-    fake_checkout(tmp_path, {
-        "autorouter": Path(autorouter_sea.__file__).read_text(encoding="utf-8"),
-        "orautorouter": _SEA_PATH.read_text(encoding="utf-8"),
-    })
-    monkeypatch.chdir(tmp_path)
-    shown = rsi7d_sea.sea_prompt("autorouter")
-    assert "# system_prompt() returns SYSTEM_PROMPT, an f-string" in shown, shown[:300]
-    assert "{EVIDENCE}" in shown and "You are the autorouter. Finish the task" in shown
-    derived = rsi7d_sea.sea_prompt("orautorouter")
-    assert derived.startswith("Error: ") and "module-level string constant" in derived

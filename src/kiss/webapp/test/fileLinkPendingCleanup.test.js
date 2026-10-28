@@ -21,7 +21,11 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {makeWorkDirPage, pendingCounts} = require('./file_link_helpers');
+const {
+  makeWorkDirPage,
+  pendingCounts,
+  checkPathCommands,
+} = require('./file_link_helpers');
 
 const {send, clickTab} = harness;
 const WORK_DIR = '/tmp/kiss-link-cleanup';
@@ -52,12 +56,6 @@ function sendToolResult(win, tabId, content) {
     tabId,
     workDir: WORK_DIR,
   });
-}
-
-function checkPathCommands(posted) {
-  return posted
-    .filter(m => m && m.type === 'checkPaths')
-    .map(m => ({tabId: m.tabId, paths: Array.from(m.paths || [])}));
 }
 
 // A dropped connection is the one case where the reply can never come.

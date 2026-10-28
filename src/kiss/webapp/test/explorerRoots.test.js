@@ -29,6 +29,8 @@ const {
   stubRaf,
   fakeMatchMedia,
   ofType,
+  captureTimers,
+  stubClipboard,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
@@ -37,24 +39,18 @@ const {
   showSection,
   menuItem,
   rightClick,
+  key,
+  openExplorer,
 } = require('./ui_antipattern_harness');
 
 function makePage(beforeMain) {
-  const copied = [];
+  let copied;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     beforeScripts: win => {
       stubRaf(win);
       fakeMatchMedia(win, true);
-      Object.defineProperty(win.navigator, 'clipboard', {
-        value: {
-          writeText: text => {
-            copied.push(text);
-            return Promise.resolve();
-          },
-        },
-        configurable: true,
-      });
+      copied = stubClipboard(win).writes;
       // Native dialogs are gone from main.js; any call is a regression.
       win.prompt = () => {
         throw new Error('window.prompt must not be called');
@@ -75,15 +71,6 @@ function makePage(beforeMain) {
 
 const WD = '/ws/repo';
 const OTHER = '/data/other';
-
-function key(win, el, name, extra) {
-  el.dispatchEvent(
-    new win.KeyboardEvent(
-      'keydown',
-      Object.assign({key: name, bubbles: true, cancelable: true}, extra || {}),
-    ),
-  );
-}
 
 /** Answer the in-page Delete question (it replaced window.confirm). */
 function confirmDelete(win) {
@@ -118,13 +105,6 @@ function answer(win, posted, p, entries, workDir) {
     entries,
   });
   return req;
-}
-
-/** Open the Explorer on WD with *entries* at its root. */
-function openExplorer(win, posted, entries) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
-  showSection(win, 'meta-explorer');
-  return answer(win, posted, WD, entries || []);
 }
 
 function rootRows(win) {
@@ -168,6 +148,29 @@ function rowFor(win, p, root) {
   );
 }
 
+/** The picker's latest listDir request (its tokens start with `picker:`). */
+function lastPickerListing(posted) {
+  return ofType(posted, 'listDir')
+    .filter(m => String(m.token).startsWith('picker:'))
+    .pop();
+}
+
+/**
+ * Add the folder *p* by typing it into the picker and pressing Select;
+ * answer the picker's (empty) listing of it.  Returns the picker.
+ */
+function addFolderByPath(win, posted, p) {
+  click(win, byId(win, 'explorer-add-folder'));
+  const picker = byId(win, 'folder-picker');
+  picker.querySelector('.folder-picker-input').value = p;
+  click(win, picker.querySelector('.folder-picker-select'));
+  const req = lastPickerListing(posted);
+  assert.strictEqual(req.path, p, 'the picker lists the folder as typed');
+  send(win, {type: 'dirListing', token: req.token, path: p, root: p, entries: []});
+  assert.ok(picker.hidden, 'picker closed after Add Folder');
+  return picker;
+}
+
 /** Add OTHER through the header button and the picker; answer its listing. */
 function addOtherFolder(win, posted, entries) {
   click(win, byId(win, 'explorer-add-folder'));
@@ -185,10 +188,7 @@ function addOtherFolder(win, posted, entries) {
   const input = picker.querySelector('.folder-picker-input');
   input.value = '/data';
   key(win, input, 'Enter');
-  const pick = ofType(posted, 'listDir').filter(m =>
-    String(m.token).startsWith('picker:'),
-  );
-  const req = pick[pick.length - 1];
+  const req = lastPickerListing(posted);
   assert.strictEqual(req.path, '/data');
   send(win, {
     type: 'dirListing',
@@ -282,22 +282,7 @@ async function main() {
     assert.strictEqual(sub.length, 1);
     assert.strictEqual(sub[0].workDir, OTHER);
     // Adding the same folder again neither duplicates it nor re-saves.
-    click(win, byId(win, 'explorer-add-folder'));
-    const picker = byId(win, 'folder-picker');
-    const input = picker.querySelector('.folder-picker-input');
-    input.value = OTHER;
-    click(win, picker.querySelector('.folder-picker-select'));
-    const pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    const req = pick[pick.length - 1];
-    send(win, {
-      type: 'dirListing',
-      token: req.token,
-      path: OTHER,
-      root: OTHER,
-      entries: [],
-    });
+    addFolderByPath(win, posted, OTHER);
     assert.strictEqual(rootRows(win).length, 2, 'still two top-level folders');
     assert.deepStrictEqual(
       JSON.parse(win.localStorage.getItem('kiss-explorer-roots')),
@@ -490,21 +475,7 @@ async function main() {
       {name: 'root.txt', path: WD + '/root.txt', isDir: false},
     ]);
     // Add WD/sub (a folder inside the working directory) as a top-level folder.
-    click(win, byId(win, 'explorer-add-folder'));
-    const picker = byId(win, 'folder-picker');
-    picker.querySelector('.folder-picker-input').value = SUB;
-    click(win, picker.querySelector('.folder-picker-select'));
-    const pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    send(win, {
-      type: 'dirListing',
-      token: pick[pick.length - 1].token,
-      path: SUB,
-      root: SUB,
-      entries: [],
-    });
-    assert.ok(picker.hidden);
+    addFolderByPath(win, posted, SUB);
     assert.deepStrictEqual(
       rootRows(win).map(r => r.dataset.explorerPath),
       [WD, SUB],
@@ -560,7 +531,6 @@ async function main() {
     confirmDelete(win);
     fsReq = ofType(posted, 'fsAction').pop();
     assert.strictEqual(fsReq.workDir, WD);
-    // Copy Relative Path is relative to the row's own top-level folder.
     win.close();
   });
 
@@ -599,20 +569,7 @@ async function main() {
     openExplorer(second.win, second.posted, [
       {name: 'a.txt', path: WD + '/a.txt', isDir: false},
     ]);
-    click(second.win, byId(second.win, 'explorer-add-folder'));
-    const picker = byId(second.win, 'folder-picker');
-    picker.querySelector('.folder-picker-input').value = SIB;
-    click(second.win, picker.querySelector('.folder-picker-select'));
-    const pick = ofType(second.posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    send(second.win, {
-      type: 'dirListing',
-      token: pick[pick.length - 1].token,
-      path: SIB,
-      root: SIB,
-      entries: [],
-    });
+    addFolderByPath(second.win, second.posted, SIB);
     answer(second.win, second.posted, SIB, [], SIB);
     rightClick(second.win, rowFor(second.win, WD + '/a.txt'));
     click(second.win, menuItem(second.win, 'Copy'));
@@ -701,24 +658,9 @@ async function main() {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
     const odd = '/data/odd\\';
-    click(win, byId(win, 'explorer-add-folder'));
-    const picker = byId(win, 'folder-picker');
+    // The backslash is part of the name: the picker lists it as typed.
+    const picker = addFolderByPath(win, posted, odd);
     const input = picker.querySelector('.folder-picker-input');
-    input.value = odd;
-    click(win, picker.querySelector('.folder-picker-select'));
-    let pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    let req = pick[pick.length - 1];
-    assert.strictEqual(req.path, odd, 'the backslash is part of the name');
-    send(win, {
-      type: 'dirListing',
-      token: req.token,
-      path: odd,
-      root: odd,
-      entries: [],
-    });
-    assert.ok(picker.hidden);
     assert.deepStrictEqual(
       rootRows(win).map(r => r.dataset.explorerPath),
       [WD, odd],
@@ -739,10 +681,7 @@ async function main() {
     click(win, byId(win, 'explorer-add-folder'));
     input.value = spaced;
     key(win, input, 'Enter');
-    pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    req = pick[pick.length - 1];
+    const req = lastPickerListing(posted);
     assert.strictEqual(req.path, spaced);
     send(win, {
       type: 'dirListing',
@@ -762,11 +701,8 @@ async function main() {
     click(win, byId(win, 'explorer-add-folder'));
     input.value = '   ';
     key(win, input, 'Enter');
-    pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
     assert.strictEqual(
-      pick[pick.length - 1].path,
+      lastPickerListing(posted).path,
       WD,
       'blank box: no navigation away from the folder shown',
     );
@@ -786,20 +722,7 @@ async function main() {
       [{name: 'f.txt', path: A + '/f.txt', isDir: false}],
       A,
     );
-    click(win, byId(win, 'explorer-add-folder'));
-    const picker = byId(win, 'folder-picker');
-    picker.querySelector('.folder-picker-input').value = B;
-    click(win, picker.querySelector('.folder-picker-select'));
-    const pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    send(win, {
-      type: 'dirListing',
-      token: pick[pick.length - 1].token,
-      path: B,
-      root: B,
-      entries: [],
-    });
+    addFolderByPath(win, posted, B);
     answer(win, posted, B, [], B);
     rightClick(win, rowFor(win, A + '/f.txt'));
     click(win, menuItem(win, 'Copy'));
@@ -918,15 +841,9 @@ async function main() {
     // Picker: Up from /tmp/lit\name goes to /tmp.
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
-    let pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    assert.strictEqual(pick[pick.length - 1].path, A);
+    assert.strictEqual(lastPickerListing(posted).path, A);
     click(win, picker.querySelector('.folder-picker-up'));
-    pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    assert.strictEqual(pick[pick.length - 1].path, '/tmp');
+    assert.strictEqual(lastPickerListing(posted).path, '/tmp');
     key(win, win.document, 'Escape');
     win.close();
   });
@@ -940,12 +857,9 @@ async function main() {
     openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
-    let pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
     send(win, {
       type: 'dirListing',
-      token: pick[pick.length - 1].token,
+      token: lastPickerListing(posted).token,
       path: WD,
       root: WD,
       entries: [{name: 'dir', path: WD + '/dir', isDir: true}],
@@ -956,10 +870,7 @@ async function main() {
     assert.strictEqual(item.getAttribute('aria-selected'), 'true');
     click(win, item);
     item.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
-    pick = ofType(posted, 'listDir').filter(m =>
-      String(m.token).startsWith('picker:'),
-    );
-    assert.strictEqual(pick[pick.length - 1].path, WD + '/dir', 'entered');
+    assert.strictEqual(lastPickerListing(posted).path, WD + '/dir', 'entered');
     assert.strictEqual(
       ofType(posted, 'openFile').length,
       opens,
@@ -969,8 +880,11 @@ async function main() {
     win.close();
   });
 
-  await test('Set as Working Directory keeps the keyboard in the tree past the composer focus retries', async () => {
-    const {win, posted} = makePage();
+  await test('Set as Working Directory keeps the keyboard in the tree past the composer focus retries', () => {
+    let timers = [];
+    const {win, posted} = makePage(w => {
+      timers = captureTimers(w);
+    });
     openExplorer(win, posted, []);
     // The active chat is a task of the old workspace: switching the
     // workspace hides its tab and activates another one, which
@@ -986,10 +900,13 @@ async function main() {
     addOtherFolder(win, posted, []);
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
+    const armedBefore = timers.length;
     click(win, menuItem(win, 'Set as Working Directory'));
     answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
-    await sleep(400);
+    // Fire the deferred focus timers (100 / 300 ms) the switch armed,
+    // including any a fired one arms in turn.
+    for (let i = armedBefore; i < timers.length; i++) timers[i].cb();
     const active = win.document.activeElement;
     assert.ok(
       active && active.classList.contains('explorer-row'),
@@ -1101,12 +1018,6 @@ async function main() {
     return Array.from(
       picker.querySelectorAll('.folder-picker-recent-list .workdir-item'),
     );
-  }
-
-  function lastPickerListing(posted) {
-    return ofType(posted, 'listDir')
-      .filter(m => String(m.token).startsWith('picker:'))
-      .pop();
   }
 
   await test('Add Folder: the picker lists the recently opened folders (newest first, those already shown left out) and one click adds one', async () => {
@@ -1306,10 +1217,7 @@ async function main() {
       [WD, WD + '/sub'],
     );
     // The only new listDir is the Explorer's own listing of the new folder.
-    const added = posted
-      .slice(0)
-      .filter(m => m.type === 'listDir')
-      .slice(listings);
+    const added = ofType(posted, 'listDir').slice(listings);
     assert.strictEqual(added.length, 1);
     assert.strictEqual(added[0].path, WD + '/sub');
     assert.ok(!String(added[0].token).startsWith('picker:'));
@@ -1369,7 +1277,6 @@ async function main() {
   });
 
   report('explorerRoots');
-  process.exit(0);
 }
 
 main().catch(e => {

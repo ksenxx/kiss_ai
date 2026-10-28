@@ -33,13 +33,12 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import (
-    _PIPE_GIVE_UP_SECONDS,
     COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
     GitWorktreeOps,
     _git_stdout_head,
 )
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
-from kiss.core.processes import IS_WINDOWS
+from kiss.core.processes import IS_WINDOWS, PIPE_GIVE_UP_SECONDS
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -218,7 +217,7 @@ def test_stdout_head_gives_up_on_an_escaped_child_that_keeps_writing(
     thread, results = _read_head_in_thread(
         ("-c", alias, "spew"), repo, max_bytes=1_000_000, timeout=1.0,
     )
-    limit = 1.0 + _PIPE_GIVE_UP_SECONDS + 3.0
+    limit = 1.0 + PIPE_GIVE_UP_SECONDS + 3.0
     thread.join(limit)
     try:
         assert not thread.is_alive(), f"still reading the pipe after {limit}s"
@@ -226,7 +225,7 @@ def test_stdout_head_gives_up_on_an_escaped_child_that_keeps_writing(
         with contextlib.suppress(OSError, ValueError):
             os.kill(int(pid_file.read_text()), signal.SIGKILL)
     elapsed = time.monotonic() - started
-    assert 1.0 + _PIPE_GIVE_UP_SECONDS <= elapsed < limit
+    assert 1.0 + PIPE_GIVE_UP_SECONDS <= elapsed < limit
     text, truncated = results[0]
     assert truncated is True
     assert text.startswith("x" * 100)

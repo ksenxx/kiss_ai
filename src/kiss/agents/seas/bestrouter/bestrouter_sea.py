@@ -59,6 +59,8 @@ Working rules:
 - Write a file longer than about 150 lines in `Write` / `Edit` calls of at most 150 lines
   each, the first chunk on disk before you compose the next. Save gathered facts to
   `tmp/` files before composing.
+- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
+  otherwise the 10th, 20th, ... call is refused.
 """
 """The routing protocol added to the system prompt of every run.
 

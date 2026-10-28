@@ -45,7 +45,7 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _meta_content,
     _normalize_cookie,
 )
-from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -240,19 +240,22 @@ def _ws_recv(rfile: BufferedIOBase) -> tuple[int, bytes] | None:
 class _OverleafServer(RecordingServer):
     """The emulator's server, carrying the recorded traffic and behaviour switches."""
 
-    uploads: list[dict[str, Any]]
-    ws_received: list[str]
-    csrf: str
-    dev_csrf: bool
-    login_page: bool
-    rate_limited: bool
-    empty_profile: bool
-    features_fail: bool
-    unauthorized_401: bool
-    handshake_rejected: bool
-    git_root: Path
-    tree: dict[str, Any]
-    contents: dict[str, bytes]
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.uploads: list[dict[str, Any]] = []
+        self.ws_received: list[str] = []
+        self.ws_threads: list[threading.Thread] = []
+        self.csrf = "tok-1"
+        self.dev_csrf = True
+        self.login_page = False
+        self.rate_limited = False
+        self.empty_profile = False
+        self.features_fail = False
+        self.unauthorized_401 = False
+        self.handshake_rejected = False
+        self.git_root = Path("/nonexistent")
+        self.tree: dict[str, Any] = copy.deepcopy(_ROOT_FOLDER)
+        self.contents: dict[str, bytes] = {"d-main": b"\\documentclass{article}"}
 
 
 class _OverleafHandler(RecordingHandler):
@@ -376,6 +379,7 @@ class _OverleafHandler(RecordingHandler):
 
     def _websocket(self, project_id: str) -> None:
         """Upgrade to WebSocket and play the socket.io joinProject exchange."""
+        self.server.ws_threads.append(threading.current_thread())
         key = self.headers["Sec-WebSocket-Key"]
         accept = base64.b64encode(hashlib.sha1((key + _WS_GUID).encode()).digest())
         self.wfile.write(
@@ -421,21 +425,7 @@ class _OverleafHandler(RecordingHandler):
 @pytest.fixture()
 def overleaf_server():
     """Start the emulated Overleaf server; yield (base_url, server)."""
-    server = _OverleafServer(("127.0.0.1", 0), _OverleafHandler)
-    server.uploads = []
-    server.ws_received = []
-    server.csrf = "tok-1"
-    server.dev_csrf = True
-    server.login_page = False
-    server.rate_limited = False
-    server.empty_profile = False
-    server.features_fail = False
-    server.unauthorized_401 = False
-    server.handshake_rejected = False
-    server.git_root = Path("/nonexistent")
-    server.tree = copy.deepcopy(_ROOT_FOLDER)
-    server.contents = {"d-main": b"\\documentclass{article}"}
-    with serving(server):
+    with serving(_OverleafServer(("127.0.0.1", 0), _OverleafHandler)) as server:
         yield server.base_url, server
 
 
@@ -769,7 +759,6 @@ def test_realtime_emulator_survives_client_dropping_connection(
     """
     base_url, server = overleaf_server
     port = int(base_url.rsplit(":", 1)[1])
-    threads_before = threading.active_count()
     with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
         sock.sendall(
             b"GET /socket.io/1/websocket/sid-p1?projectId=p1 HTTP/1.1\r\n"
@@ -785,8 +774,10 @@ def test_realtime_emulator_survives_client_dropping_connection(
             assert chunk, "emulator closed the connection before joinProjectResponse"
             greeting += chunk
     # The connection is gone; the handler thread must finish on its own.
-    assert wait_until(lambda: threading.active_count() <= threads_before, timeout=10.0)
-    assert capfd.readouterr().err == ""
+    (handler_thread,) = server.ws_threads
+    handler_thread.join(timeout=10.0)
+    assert not handler_thread.is_alive()
+    assert "Traceback" not in capfd.readouterr().err
 
 
 def test_read_and_download_files(backend, tmp_path: Path) -> None:

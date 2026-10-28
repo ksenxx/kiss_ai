@@ -25,7 +25,11 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {makeWorkDirPage, pendingCounts} = require('./file_link_helpers');
+const {
+  makeWorkDirPage,
+  pendingCounts,
+  checkPathCommands: postedChecks,
+} = require('./file_link_helpers');
 const {clickTab} = harness;
 
 const {send} = harness;
@@ -35,14 +39,9 @@ function sendToolResult(win, tabId, content) {
   send(win, {type: 'tool_result', content, tabId, workDir: WORK_DIR});
 }
 
+/** The checkPaths commands with their paths sorted (order is not under test). */
 function checkPathCommands(posted) {
-  return posted
-    .filter(m => m && m.type === 'checkPaths')
-    .map(m => ({
-      tabId: m.tabId,
-      workDir: m.workDir,
-      paths: Array.from(m.paths || []).sort(),
-    }));
+  return postedChecks(posted).map(c => ({...c, paths: c.paths.sort()}));
 }
 
 function outage(win) {

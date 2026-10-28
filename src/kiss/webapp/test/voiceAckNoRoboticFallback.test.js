@@ -8,13 +8,9 @@
 const assert = require('assert');
 const {installSpeech, assertNoSpeech} = require('./speech_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {send: sendHostMessage} = require('./simplify2_harness');
+const {send: sendHostMessage, settle} = require('./simplify2_harness');
 const {makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
-
-function flush() {
-  return new Promise(resolve => setTimeout(resolve, 25));
-}
 
 function makeWindow(cfg, {withAudio = true} = {}) {
   const record = {audioUrls: [], audioPlays: 0, posts: [], spoken: null};
@@ -44,7 +40,7 @@ async function main() {
       ackAudioUrl: 'https://localhost/media/working-on-it.mp3',
     });
     sendHostMessage(win, {type: 'voiceSpeech', text: 'Deploy it', speaker: 1});
-    await flush();
+    await settle();
     assert.deepStrictEqual(
       record.audioUrls,
       ['https://localhost/media/working-on-it.mp3'],
@@ -65,7 +61,7 @@ async function main() {
       {withAudio: false},
     );
     sendHostMessage(win, {type: 'voiceSpeech', text: 'Ship it', speaker: 3});
-    await flush();
+    await settle();
     assertNoSpeech(record.spoken, 'missing Audio API');
     assert.deepStrictEqual(record.audioUrls, [], 'no Audio constructor to call');
     assert.deepStrictEqual(record.posts, [], 'nothing is posted for the ack');

@@ -59,14 +59,67 @@ function inlineDesignTokens(css) {
 /**
  * Append media/`name` to `win`'s <head> as a <style> with its design
  * tokens inlined, so computed styles carry the concrete values.
+ * jsdom matches only plain media types, never width features, so a
+ * suite that needs a width-gated block applied passes `applyMedia`, a
+ * RegExp over the `@media` prelude (e.g. `/\(width >= 900px\)/`): every
+ * matching prelude becomes `@media screen`.
  */
-function installTokenisedCss(win, name) {
+function installTokenisedCss(win, name, {applyMedia} = {}) {
+  let css = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
+  if (applyMedia) {
+    css = css.replace(/@media ([^{]+)\{/g, (m, prelude) =>
+      applyMedia.test(prelude) ? '@media screen {' : m,
+    );
+  }
   const style = win.document.createElement('style');
-  style.textContent = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, name), 'utf8'),
-  );
+  style.textContent = css;
   win.document.head.appendChild(style);
   return style;
 }
 
-module.exports = {inlineDesignTokens, installTokenisedCss};
+/**
+ * The bodies, in source order, of every rule in the stylesheet text `css`
+ * whose selector is exactly `selector` (anchored at a line start, so `#x`
+ * does not match `body.y #x`; a media query may restate one).  Throws
+ * when there is none.
+ */
+function cssRuleBodies(css, selector) {
+  const src = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    String.raw`(?:^|\n)\s*` + src + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`,
+    'g',
+  );
+  const bodies = [];
+  let m;
+  while ((m = re.exec(css)) !== null) bodies.push(m[1]);
+  if (bodies.length === 0) throw new Error('CSS rule missing: ' + selector);
+  return bodies;
+}
+
+/**
+ * The joined bodies of every rule in `css` whose selector is exactly
+ * `selector`, for rules jsdom cannot compute (pseudo-elements,
+ * `prefers-reduced-motion` blocks); prefer `getComputedStyle` on a live
+ * element wherever it can.  Use `lastCssRule` when a later same-selector
+ * rule must not be able to override the declaration under test.
+ */
+function cssRule(css, selector) {
+  return cssRuleBodies(css, selector).join('\n');
+}
+
+/**
+ * The body of the LAST rule in `css` whose selector is exactly `selector`:
+ * the one that wins the cascade at equal specificity, so an appended
+ * override of the declaration under test fails the assertion instead of
+ * hiding behind an earlier match.
+ */
+function lastCssRule(css, selector) {
+  return cssRuleBodies(css, selector).at(-1);
+}
+
+module.exports = {
+  inlineDesignTokens,
+  installTokenisedCss,
+  cssRule,
+  lastCssRule,
+};

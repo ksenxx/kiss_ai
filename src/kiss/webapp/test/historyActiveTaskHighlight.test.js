@@ -44,10 +44,12 @@ const {
   stubRaf,
   fakeMatchMedia,
   ofType,
-  lastMsg,
   sendEmptyWorkDir,
 } = require('./simplify2_harness');
-const {gatewaySession} = require('./history_helpers');
+const {
+  gatewaySession,
+  answerHistory: sendHistory,
+} = require('./history_helpers');
 
 function makePage() {
   // jsdom has no scrollIntoView: record every call and its target.
@@ -131,19 +133,6 @@ function threeSessions() {
       timestamp: 1_700_000_100,
     }),
   ];
-}
-
-// renderHistory drops replies whose generation is stale, so always
-// answer the generation the page last asked for.
-function sendHistory(win, posted, sessions) {
-  const req = lastMsg(posted, 'getHistory');
-  assert.ok(req, 'the page must have requested history');
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req.generation,
-    sessions,
-  });
 }
 
 function rows(win) {

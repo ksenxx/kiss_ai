@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for: web browser toggle wiring and API key deletion
+"""Integration tests for: API key deletion and the Chrome bridge toggle
 through the daemon's saveConfig handler.
 
 The core-only methods (budget limit, custom endpoint, config persistence,
@@ -18,6 +18,7 @@ isolation, which is not a test double).
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -88,3 +89,42 @@ class TestApiKeySetupAndDeletion:
         # The delete must survive what a daemon restart would do.
         load_api_keys()
         assert os.environ.get("ANTHROPIC_API_KEY") is None
+
+
+class TestChromeBridgeToggle:
+    """Ticking "Drive my Chrome" in Settings starts the bridge at once."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import kiss.core.user_config as _vc
+
+        monkeypatch.setitem(vars(_vc), "CONFIG_DIR", tmp_path / ".kiss")
+        monkeypatch.setitem(vars(_vc), "CONFIG_PATH", tmp_path / ".kiss" / "config.json")
+
+    def test_save_config_starts_the_bridge_when_enabled(self) -> None:
+        from kiss.agents.sorcar.chrome_bridge import CONFIG_FILE_NAME, ChromeBridge, extension_dir
+        from kiss.core.user_config import load_config
+        from kiss.server.server import AgentServer
+
+        ChromeBridge.shutdown()
+        server = AgentServer()
+        try:
+            # Off (the default): saving leaves the bridge alone.
+            server._handle_command({"type": "saveConfig", "config": {"max_budget": 100}})
+            assert load_config()["chrome_bridge"] is False
+            assert ChromeBridge._instance is None
+
+            server._handle_command({"type": "saveConfig", "config": {"chrome_bridge": True}})
+            assert load_config()["chrome_bridge"] is True
+            bridge = ChromeBridge._instance
+            assert bridge is not None
+            # The daemon owns the extension: its port and token are published
+            # where the unpacked extension reads them.
+            published = json.loads((extension_dir() / CONFIG_FILE_NAME).read_text())
+            assert published == {"port": bridge.port, "token": bridge.token}
+            # Saving again keeps the running bridge.
+            server._handle_command({"type": "saveConfig", "config": {"chrome_bridge": True}})
+            assert ChromeBridge._instance is bridge
+        finally:
+            ChromeBridge.shutdown()
+        assert not (extension_dir() / CONFIG_FILE_NAME).exists()

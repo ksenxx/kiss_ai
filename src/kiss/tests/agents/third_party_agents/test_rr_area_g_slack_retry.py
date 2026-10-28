@@ -13,11 +13,10 @@ helpers with real callables — no mocks, patches, or test doubles.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from kiss.agents.third_party_agents.slack.slack_sea import _advance_cursor, _call_with_retry
+from kiss.tests.agents.third_party_agents.muse_test_utils import recorded_sleeps
 
 
 class FlakyCall:
@@ -48,19 +47,20 @@ class TestCallWithRetry:
     def test_recovers_after_transient_failures(self) -> None:
         """Two OSErrors are retried with backoff; the third attempt wins."""
         fn = FlakyCall(failures=2, result="resp")
-        start = time.monotonic()
-        assert _call_with_retry(fn, "thread replies") == "resp"
-        elapsed = time.monotonic() - start
+        with recorded_sleeps() as sleeps:
+            assert _call_with_retry(fn, "thread replies", backoff=0.01) == "resp"
         assert fn.calls == 3
-        # Backoff slept 2**0 + 2**1 = 3 seconds between the attempts.
-        assert elapsed >= 3.0
+        # Exponential backoff between the attempts: 0.01 * 2**0, 0.01 * 2**1.
+        assert sleeps == [0.01, 0.02]
 
     def test_raises_after_three_failures(self) -> None:
         """The last OSError propagates when every attempt fails."""
         fn = FlakyCall(failures=5)
-        with pytest.raises(OSError, match="transient error #3"):
-            _call_with_retry(fn, "messages")
+        with recorded_sleeps() as sleeps, pytest.raises(OSError, match="transient error #3"):
+            _call_with_retry(fn, "messages", backoff=0.01)
         assert fn.calls == 3
+        # No sleep follows the last attempt.
+        assert sleeps == [0.01, 0.02]
 
     def test_non_oserror_propagates_immediately(self) -> None:
         """Only OSError is retried; other exceptions escape on attempt one."""

@@ -186,7 +186,7 @@
     }
 
     function openShell() {
-      lastSize = {cols: term ? term.cols : 80, rows: term ? term.rows : 24};
+      lastSize = {cols: term.cols, rows: term.rows};
       openRequested = true;
       const open = {
         type: 'terminalOpen',
@@ -346,6 +346,9 @@
     };
 
     view.error = function (text) {
+      // A restart the daemon refused is over: the next shell to open
+      // is not its fresh shell.
+      restarting = false;
       view.exited = true;
       note(text, RED);
     };

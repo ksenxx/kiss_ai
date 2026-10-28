@@ -14,15 +14,13 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeSharedPage,
   send,
   stubRaf,
+  fakeIntervals,
   fakeMatchMedia,
-  loadMainCss,
-  MEDIA,
+  loadRemoteCss,
 } = require('./simplify2_harness');
 
 const TASKS = [
@@ -38,26 +36,16 @@ const MACHINES = [
 /** Boot a chat page with the given body attributes and the real CSS. */
 function makePage() {
   const {win} = makeSharedPage({
-    bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
     beforeScripts: win => {
       stubRaf(win);
-      win.setInterval = function () {
-        return 1;
-      };
-      win.clearInterval = function () {};
+      fakeIntervals(win);
       win.ResizeObserver = class {
         observe() {}
         disconnect() {}
       };
       fakeMatchMedia(win, true);
-      loadMainCss(win);
-      const remoteStyle = win.document.createElement('style');
-      remoteStyle.textContent = fs.readFileSync(
-        path.join(MEDIA, 'remote-codex.css'),
-        'utf8',
-      );
-      win.document.head.appendChild(remoteStyle);
+      loadRemoteCss(win);
     },
   });
   return win;
