@@ -122,7 +122,7 @@ class _EvictionGateLock:
     """
 
     def __init__(self, manager: MCPManager, key: str) -> None:
-        self._inner = threading.Lock()
+        self._inner = threading.RLock()
         self._manager = manager
         self._key = key
         self._armed_ident: int | None = None
@@ -148,6 +148,10 @@ class _EvictionGateLock:
         """Release the underlying lock, then maybe run the hook."""
         self._inner.release()
         self._after_release()
+
+    def _is_owned(self) -> bool:
+        """Whether the calling thread holds the lock (``locked_call``'s re-entrancy check)."""
+        return bool(self._inner._is_owned())  # type: ignore[attr-defined]
 
     def __enter__(self) -> _EvictionGateLock:
         self._inner.acquire()

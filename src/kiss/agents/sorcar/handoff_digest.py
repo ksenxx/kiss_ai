@@ -25,9 +25,12 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from kiss.agents.sorcar.task_digest import clip
 
 TASK_CHARS = 3000
 """Characters of the task text (the first user message) kept."""
@@ -128,14 +131,6 @@ def parse_tool_calls(messages: list[dict[str, Any]]) -> list[ToolCall]:
     return calls
 
 
-def _clip(text: str, limit: int) -> str:
-    """Return *text* cut to *limit* characters with a marker naming the full length."""
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f" … [{len(text):,} chars]"
-
-
 def _python_symbols(path: Path) -> list[str]:
     """Return the top-level function and class names of a Python file (``[]`` if unparsable)."""
     try:
@@ -149,11 +144,12 @@ def _python_symbols(path: Path) -> list[str]:
     return names
 
 
-def describe_written_files(paths: list[Path]) -> list[str]:
+def describe_written_files(paths: Collection[Path]) -> list[str]:
     """Return one line per written file: path, size and (for Python) its top-level symbols.
 
     Args:
-        paths: Files the session wrote; missing ones are reported as deleted.
+        paths: Files the session wrote, listed in sorted order; missing
+            ones are reported as deleted.
     """
     lines: list[str] = []
     for path in sorted(paths)[:MAX_WRITTEN_FILES]:
@@ -180,40 +176,28 @@ def _call_title(call: ToolCall) -> str:
     return f"{call.name}({', '.join(parts)})"
 
 
-def handoff_digest(
-    messages: list[dict[str, Any]],
-    written_files: list[Path],
-    last_calls: int = LAST_CALLS,
-    recaps: list[str] | None = None,
-) -> str:
+def handoff_digest(messages: list[dict[str, Any]], written_files: Collection[Path]) -> str:
     """Return the Markdown digest of a session the summarizer writes its narrative from.
+
+    The newest :data:`LAST_CALLS` tool calls are listed.
 
     Args:
         messages: The executor's ``messages`` list (its trajectory).
         written_files: Files the task has written so far.
-        last_calls: How many of the newest tool calls are listed.
-        recaps: The framework recaps the session emitted
-            (``KISSAgent.recaps``); they are not in *messages*.
     """
     calls = parse_tool_calls(messages)
     task = next(
         (str(m.get("content")) for m in messages if m.get("role") == "user"), "",
     )
-    sections = [f"## Task\n{_clip(task, TASK_CHARS)}"]
+    sections = [f"## Task\n{clip(task.strip(), TASK_CHARS)}"]
 
-    # The model's own summaries come first and are never displaced by
-    # framework recaps (whose tool calls the last section lists anyway);
-    # recaps only fill the slots the model left empty.
     summaries = [
         str(c.args["description"])
         for c in calls
         if c.name == "summary" and c.args.get("description")
     ][-LAST_SUMMARIES:]
-    spare = LAST_SUMMARIES - len(summaries)
-    if recaps and spare > 0:
-        summaries = list(recaps[-spare:]) + summaries
     if summaries:
-        texts = [_clip(text, SUMMARY_CHARS) for text in summaries]
+        texts = [clip(text.strip(), SUMMARY_CHARS) for text in summaries]
         sections.append("## Last progress summaries the session wrote\n" + "\n\n".join(texts))
 
     written = describe_written_files(written_files)
@@ -222,14 +206,14 @@ def handoff_digest(
 
     errors = [c for c in calls if c.is_error][-LAST_ERRORS:]
     if errors:
-        lines = [f"- {_call_title(c)}\n  {_clip(c.result, ERROR_CHARS)}" for c in errors]
+        lines = [f"- {_call_title(c)}\n  {clip(c.result.strip(), ERROR_CHARS)}" for c in errors]
         sections.append("## Last failing tool calls\n" + "\n".join(lines))
 
-    recent = calls[-last_calls:]
+    recent = calls[-LAST_CALLS:]
     if recent:
         first = len(calls) - len(recent) + 1
         lines = [
-            f"{first + i}. {_call_title(c)} -> {_clip(c.result, RESULT_CHARS)}"
+            f"{first + i}. {_call_title(c)} -> {clip(c.result.strip(), RESULT_CHARS)}"
             for i, c in enumerate(recent)
         ]
         sections.append(

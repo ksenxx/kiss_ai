@@ -371,29 +371,7 @@
     // close done by a collapsing panel returns to the root chat.
     const before = [null].concat(openSubTabs);
     const activeAt = before.indexOf(activeSubTab);
-    let activeClosed = false;
-    for (let i = openSubTabs.length - 1; i >= 0; i--) {
-      const open = openSubTabs[i];
-      if (!isSubagentDescendant(open, taskId)) continue;
-      openSubTabs.splice(i, 1);
-      if (activeSubTab === open) activeClosed = true;
-      const section = subagentSection(open);
-      if (!section) continue;
-      setSectionShown(section, false);
-      // A sub-agent tab the chat page reopens replays its transcript
-      // with the fan-outs collapsed; fold this section's the same
-      // way, so reopening the tab never resurrects grandchild tabs
-      // on its own.
-      const panels = section.querySelectorAll(
-        '.tc-run-parallel[data-rp-subagents]',
-      );
-      for (let j = 0; j < panels.length; j++) {
-        panels[j].classList.add('collapsed');
-        panels[j].classList.remove('user-pinned');
-        collapsePreview(panels[j]);
-        panels[j]._shareClosedSubs = {};
-      }
-    }
+    const activeClosed = dropSubagentTabs(taskId);
     if (byUser) {
       const panels = document.querySelectorAll(
         '.tc-run-parallel[data-rp-subagents]',
@@ -417,6 +395,41 @@
   }
 
   /**
+   * Take *taskId*'s tab and its descendants' out of the open list and
+   * hide their transcripts.  The strip is not rebuilt here: the caller
+   * does that once, after every tab it closes.
+   *
+   * @param {string} taskId The sub-agent whose tabs go.
+   * @returns {boolean} Whether the selected tab was among them.
+   */
+  function dropSubagentTabs(taskId) {
+    let activeClosed = false;
+    for (let i = openSubTabs.length - 1; i >= 0; i--) {
+      const open = openSubTabs[i];
+      if (!isSubagentDescendant(open, taskId)) continue;
+      openSubTabs.splice(i, 1);
+      if (activeSubTab === open) activeClosed = true;
+      const section = subagentSection(open);
+      if (!section) continue;
+      setSectionShown(section, false);
+      // A sub-agent tab the chat page reopens replays its transcript
+      // with the fan-outs collapsed; fold this section's the same
+      // way, so reopening the tab never resurrects grandchild tabs
+      // on its own.
+      const panels = section.querySelectorAll(
+        '.tc-run-parallel[data-rp-subagents]',
+      );
+      for (let j = 0; j < panels.length; j++) {
+        panels[j].classList.add('collapsed');
+        panels[j].classList.remove('user-pinned');
+        collapsePreview(panels[j]);
+        panels[j]._shareClosedSubs = {};
+      }
+    }
+    return activeClosed;
+  }
+
+  /**
    * Put a fan-out panel's sub-agent tabs in step with its collapsed
    * state — the shared page's syncRunParallelPanel. A collapsed panel
    * takes its sub-agents' tabs with it and forgives every hand-close
@@ -430,8 +443,15 @@
     if (ids.length === 0) return;
     const collapsed = panelEl.classList.contains('collapsed');
     if (collapsed) {
-      for (let i = 0; i < ids.length; i++) closeSubagentTab(ids[i], false);
+      // Every child goes, then the strip is rebuilt once; a close done
+      // by the collapsing panel returns to the root chat.
+      let activeClosed = false;
+      for (let i = 0; i < ids.length; i++) {
+        if (dropSubagentTabs(ids[i])) activeClosed = true;
+      }
       panelEl._shareClosedSubs = {};
+      if (activeClosed) selectSubTab(null);
+      else renderShareTabBar();
       return;
     }
     const closed = panelEl._shareClosedSubs || {};

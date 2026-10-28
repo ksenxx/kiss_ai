@@ -9,12 +9,17 @@ the fake on an ephemeral port; ``server.server_address[1]`` is the port to
 pass as ``bridge_port``.  Every POST is recorded in ``server.requests``
 (see ``JsonWebhookServer``); every other verb answers 405 exactly like the
 Go bridge's mux, so a tool that stops using POST fails its test.
+
+:func:`make_messages_db` writes the bridge's ``store/messages.db`` with
+its real schema and the given rows.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from kiss.tests.agents.third_party_agents.recording_http import (
@@ -22,6 +27,61 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     JsonWebhookServer,
     recording_server,
 )
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chats (
+    jid TEXT PRIMARY KEY,
+    name TEXT,
+    last_message_time TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT,
+    chat_jid TEXT,
+    sender TEXT,
+    content TEXT,
+    timestamp TIMESTAMP,
+    is_from_me BOOLEAN,
+    media_type TEXT,
+    filename TEXT,
+    url TEXT,
+    media_key BLOB,
+    file_sha256 BLOB,
+    file_enc_sha256 BLOB,
+    file_length INTEGER,
+    PRIMARY KEY (id, chat_jid),
+    FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+);
+"""
+
+
+def make_messages_db(
+    repo_dir: Path, chats: list[tuple[Any, ...]], messages: list[tuple[Any, ...]]
+) -> Path:
+    """Create ``<repo_dir>/whatsapp-bridge/store/messages.db`` with the bridge's schema.
+
+    Args:
+        repo_dir: The configured whatsapp-mcp checkout directory.
+        chats: ``(jid, name, last_message_time)`` rows.
+        messages: ``(id, chat_jid, sender, content, timestamp, is_from_me,
+            media_type)`` rows.
+
+    Returns:
+        The database path.
+    """
+    store = repo_dir / "whatsapp-bridge" / "store"
+    store.mkdir(parents=True, exist_ok=True)
+    db = store / "messages.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA)
+    conn.executemany("INSERT INTO chats (jid, name, last_message_time) VALUES (?,?,?)", chats)
+    conn.executemany(
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me,"
+        " media_type) VALUES (?,?,?,?,?,?,?)",
+        messages,
+    )
+    conn.commit()
+    conn.close()
+    return db
 
 
 class _BridgeHandler(JsonWebhookHandler):

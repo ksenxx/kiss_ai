@@ -33,7 +33,11 @@ from typing import Any
 import yaml
 
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
+from kiss.core.utils import (
+    atomic_write_text,
+    read_bytes_waiting_for_writer,
+    unlink_waiting_for_holders,
+)
 
 # Page filenames: ASCII lowercase letters, digits and hyphens, starting and
 # ending with a letter or digit (memoryfield spec, "Pages").
@@ -446,4 +450,4 @@ class MemoryDir:
             # of the deletion.
             tombstone.parent.mkdir(exist_ok=True)
             atomic_write_text(tombstone, now_iso() + "\n", create_mode=0o666)
-            path.unlink()
+            unlink_waiting_for_holders(path)

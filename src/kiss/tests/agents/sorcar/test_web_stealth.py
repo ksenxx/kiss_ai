@@ -20,8 +20,11 @@ properties :mod:`kiss.agents.sorcar.web_stealth` provides:
    get clicked (plain-click fallbacks).
 4. Challenge pages: a Cloudflare-style ``cf-mitigated: challenge``
    interstitial that clears is waited out and the real page returned; one
-   that stays is reported with a ``Note:``; a Google "unusual traffic"
-   page is answered by re-running the query on Bing.
+   that stays is reported with a ``Note:``; Turnstile's checkbox is
+   ticked; HUMAN / PerimeterX's press-and-hold bar is held for seconds
+   (twice for the two-step variant) and a page without the bar is
+   reported; an Anubis proof-of-work page gets its longer wait; a Google
+   "unusual traffic" page is answered by re-running the query on Bing.
 
 Unreachable without doubles (documented, not mocked): the ``chrome``
 channel branch of ``chrome_channel`` (needs Google Chrome installed), the
@@ -37,7 +40,9 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import json
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -46,7 +51,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -82,6 +87,38 @@ document.getElementById('box').addEventListener('keydown', e => ev.keys.push(per
 </script></body></html>"""
 
 
+# HUMAN / PerimeterX's block page as walmart.com/blocked shows it: the
+# heading and sentence the detector keys on, and the ``#px-captcha``
+# element whose iframe holds the "Press & Hold" bar.  The bar counts a
+# hold of at least 5 s (the real bar fills over several seconds) and the
+# page loads the content once ``NEED`` holds were counted, carrying the
+# last hold's length and the pointer moves seen while held.  ``WIDTH`` x
+# ``HEIGHT`` is the element's size (the real bar is about 300 x 100).
+_PRESS_HOLD_PAGE = """<!doctype html><html><head><title>Robot or human?</title></head>
+<body style="margin:0;padding:40px;font:16px sans-serif">
+<h1>Robot or human?</h1>
+<p>Activate and hold the button to confirm that you\u2019re human.</p>
+<div id="px-captcha" style="width:WIDTHpx;height:HEIGHTpx"><iframe
+ style="width:100%;height:100%;border:0" srcdoc="<body style='margin:0'>
+<div id=b style='width:100%;height:100px;background:#ddd;user-select:none'>Press &amp; Hold</div>
+<script>
+let down = 0, moves = 0, holds = 0;
+const b = document.getElementById('b');
+b.addEventListener('mousedown', () => { down = performance.now(); moves = 0; });
+b.addEventListener('mousemove', () => { if (down) moves++; });
+b.addEventListener('mouseup', () => {
+  const ms = performance.now() - down; down = 0;
+  if (ms >= 5000) { holds++; parent.postMessage({holds, ms, moves}, '*'); }
+});
+</script></body>"></iframe></div>
+<script>
+addEventListener('message', e => {
+  if (e.data.holds >= NEED)
+    location.href = '/press-hold-done?ms=' + Math.round(e.data.ms) + '&moves=' + e.data.moves;
+});
+</script></body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Serve the probe pages.
 
@@ -89,8 +126,13 @@ class _Handler(BaseHTTPRequestHandler):
     answers the first *N* requests per path with a Cloudflare-style
     interstitial (``cf-mitigated: challenge`` header, "Just a moment..."
     title, a script reloading after 1 s) and content afterwards;
-    ``/blocked`` never clears; ``/sorry/index`` is Google's "unusual
-    traffic" page.
+    ``/blocked`` never clears; ``/press-hold?need=N&w=W&h=H`` is a
+    press-and-hold page cleared by *N* holds of its *W* x *H* bar and
+    ``/press-hold-bare`` the same page without the bar; ``/anubis``
+    answers the first request per query with an Anubis page that reloads
+    after 16 s (more than the ordinary 12 s wait); ``/sorry/index`` is
+    Google's "unusual traffic" page; ``/headers`` echoes the request's
+    ``User-Agent`` and ``Sec-CH-UA`` headers as JSON.
     """
 
     challenge_hits: dict[str, int] = {}
@@ -115,6 +157,27 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/blocked":
             headers["cf-mitigated"] = "challenge"
             body = "<title>Just a moment...</title><body>Verifying you are human.</body>"
+        elif path == "/press-hold":
+            query = parse_qs(urlparse(self.path).query)
+            body = (
+                _PRESS_HOLD_PAGE.replace("NEED", query.get("need", ["1"])[0])
+                .replace("WIDTH", query.get("w", ["300"])[0])
+                .replace("HEIGHT", query.get("h", ["100"])[0])
+            )
+        elif path == "/press-hold-bare":
+            body = _PRESS_HOLD_PAGE.split('<div id="px-captcha"')[0] + "</body></html>"
+        elif path == "/press-hold-done":
+            body = "<title>Real content</title><body><h1>Welcome</h1></body>"
+        elif path == "/anubis":
+            n = self.challenge_hits.get(self.path, 0) + 1
+            self.challenge_hits[self.path] = n
+            if n == 1:
+                body = (
+                    "<title>Making sure you're not a bot!</title><body>Calculating..."
+                    "<script>setTimeout(()=>location.reload(),16000)</script></body>"
+                )
+            else:
+                body = "<title>Real content</title><body><h1>Welcome</h1></body>"
         elif path == "/turnstile":
             # Cloudflare's interactive managed challenge: the widget iframe
             # (served by the test's route on challenges.cloudflare.com)
@@ -137,6 +200,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "detected unusual traffic from your computer network. IP address: 10.0.0.1"
                 "</body>"
             )
+        elif path == "/headers":
+            echo = {
+                "user_agent": self.headers.get("User-Agent", ""),
+                "sec_ch_ua": self.headers.get("Sec-CH-UA", ""),
+            }
+            body = f"<title>headers</title><body><pre id=h>{json.dumps(echo)}</pre></body>"
         else:
             body = "<title>inert</title><body>a page</body>"
         payload = body.encode()
@@ -160,9 +229,23 @@ _TURNSTILE_WIDGET = (
 )
 
 
+# The same box with a slow verdict: it stays visible and checked for 5 s
+# and only then reports the tick — unless it was clicked again meanwhile,
+# which unticks it (as a real checkbox does) and loses the verdict.
+_SLOW_TURNSTILE_WIDGET = _TURNSTILE_WIDGET.replace(
+    "onclick=\"parent.postMessage('ticked', '*')\"",
+    "onclick=\"setTimeout(() => { if (cb.checked) parent.postMessage('ticked', '*'); }, 5000)\"",
+)
+
+
 def _serve_turnstile_widget(route) -> None:
     """Answer the challenges.cloudflare.com iframe request with a checkbox widget."""
     route.fulfill(status=200, content_type="text/html", body=_TURNSTILE_WIDGET)
+
+
+def _serve_slow_turnstile_widget(route) -> None:
+    """Answer the iframe request with the checkbox whose verdict takes 5 s."""
+    route.fulfill(status=200, content_type="text/html", body=_SLOW_TURNSTILE_WIDGET)
 
 
 @pytest.fixture(scope="module")
@@ -329,9 +412,10 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
     assert len(os.listdir("/proc/self/fd")) == fds_before
 
     # No Xvfb binary on PATH -> no display -> the launch falls back to
-    # real headless mode (and masks the HeadlessChrome UA token).  Only
-    # one sync Playwright driver may live per thread, so the shared tool
-    # is closed first (it relaunches on its next call).
+    # real headless mode (with its headed user agent, see
+    # test_headless_fallback_uses_a_native_user_agent).  Only one sync
+    # Playwright driver may live per thread, so the shared tool is closed
+    # first (it relaunches on its next call).
     tool.close()
     saved_path = os.environ["PATH"]
     os.environ["PATH"] = str(os.devnull)
@@ -345,12 +429,11 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
                 "viewport": {"width": 1280, "height": 900}
             }
             assert headless_tool._viewport_size() == (1280, 900)
-            # Site scripts (main world) and the request header see a
-            # headed Chrome; only Patchright's isolated world keeps the
-            # raw token, and no page can reach that world.
+            # The browser itself reports a headed Chrome: both worlds
+            # agree, nothing was patched from inside the page.
             main_ua = _main(headless_tool, "navigator.userAgent")
             assert isinstance(main_ua, str) and "HeadlessChrome" not in main_ua
-            assert "HeadlessChrome" in headless_tool._page.evaluate("navigator.userAgent")
+            assert headless_tool._page.evaluate("navigator.userAgent") == main_ua
         finally:
             headless_tool.close()
     finally:
@@ -611,6 +694,15 @@ def test_mouse_path_shape_and_typing_chunks():
     assert all(35 <= d <= 115 for c, d in chunks if c != " ")
     assert web_stealth.typing_chunks("") == []
     assert web_stealth.typing_duration_secs([("ab", 100), (" ", 200)]) == 0.4
+    assert all(
+        8 <= web_stealth.press_hold_secs(web_stealth.PERIMETERX_CHECK) <= 10 for _ in range(20)
+    )
+    assert all(
+        0.06 <= web_stealth.press_hold_secs(web_stealth.CLOUDFLARE_CHALLENGE) <= 0.14
+        for _ in range(20)
+    )
+    tx, ty = web_stealth.hold_tremor(100.0, 50.0)
+    assert abs(tx - 100.0) <= 1.5 and abs(ty - 50.0) <= 1.5
 
 
 @pytest.mark.timeout(120)
@@ -757,6 +849,24 @@ def test_turnstile_checkbox_is_ticked_like_a_person(tool, server):
     assert time.monotonic() - start < 2 * 12 + 10
 
 
+def test_turnstile_checkbox_is_ticked_once(tool, server):
+    """A box whose verdict takes 5 s is not ticked again while it waits.
+
+    A second click on a checked box unticks it and throws the verdict
+    away; the tool ticks Turnstile once and waits.
+    """
+    tool.go_to_url(f"{server}/inert")  # launches the browser: ``_context`` is None before
+    tool._context.route("https://challenges.cloudflare.com/**", _serve_slow_turnstile_widget)
+    start = time.monotonic()
+    try:
+        tree = tool.go_to_url(f"{server}/turnstile")
+    finally:
+        tool._context.unroute("https://challenges.cloudflare.com/**")
+    elapsed = time.monotonic() - start
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert 5 <= elapsed < 2 * 12 + 10, elapsed
+
+
 def test_turnstile_is_not_ticked_when_the_widget_shows_no_box(tool, server):
     """Without a checkbox in the widget frame nothing is pressed and the block is reported."""
     tool.go_to_url(f"{server}/inert")
@@ -771,6 +881,92 @@ def test_turnstile_is_not_ticked_when_the_widget_shows_no_box(tool, server):
         tool._context.unroute("https://challenges.cloudflare.com/**")
     assert tree.splitlines()[0].startswith("Note:") and "(Cloudflare challenge)" in tree
     assert tool._turnstile_checkbox() is None
+
+
+def test_press_and_hold_bar_is_held_like_a_person(tool, server):
+    """HUMAN's "Press & Hold" bar is pressed in its iframe and held for seconds.
+
+    The page is the walmart.com/blocked layout; its bar counts a hold of
+    5 s or more and the page then loads the content, reporting how long
+    the button was down and how often the pointer moved meanwhile (a
+    resting hand drifts; a pointer frozen on one pixel is a script).
+    """
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold?need=1")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    result = parse_qs(urlparse(tool._page.url).query)
+    held_ms = int(result["ms"][0])
+    assert 8000 <= held_ms < 11000, held_ms
+    assert int(result["moves"][0]) >= 10, result
+    assert time.monotonic() - start < 12 + 10 + 10
+
+
+def test_press_and_hold_two_step_variant_is_pressed_again(tool, server):
+    """A bar that asks to "press again when prompted" gets a second hold, not a note.
+
+    The second hold comes only after the bar has stayed showing for 5 s
+    after the first (a cleared bar reloads the page within ~2 s; pressing
+    inside that window threw away a real pass).
+    """
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold?need=2")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    elapsed = time.monotonic() - start
+    assert 2 * 8 + 5 <= elapsed < 2 * 12 + 2 * 10 + 10, elapsed
+
+
+def test_press_and_hold_gives_up_after_two_holds(tool, server):
+    """A bar that keeps asking is held twice at most, then the page is reported."""
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold?need=3")
+    elapsed = time.monotonic() - start
+    first = tree.splitlines()[0]
+    assert first.startswith("Note:") and "(PerimeterX press-and-hold check)" in first, first
+    assert "show_browser()" in first
+    # Two holds of 8-10 s, 5 s apart, then the 12 s verdict wait; the note
+    # states the time actually spent, not the nominal 12 s.
+    assert 2 * 8 + 5 + 12 <= elapsed < 2 * 10 + 5 + 12 + 2 * 12, elapsed
+    match = re.search(r"did not clear within (\d+)s", first)
+    assert match is not None, first
+    assert elapsed - 6 <= int(match.group(1)) <= elapsed, (first, elapsed)
+    assert "Page: Robot or human?" in tree
+
+
+def test_press_and_hold_page_without_a_bar_is_reported(tool, server):
+    """The block page without its widget (nothing to press) is waited out and reported."""
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold-bare")
+    elapsed = time.monotonic() - start
+    first = tree.splitlines()[0]
+    assert first.startswith("Note:") and "(PerimeterX press-and-hold check)" in first, first
+    assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None
+    assert 12 <= elapsed < 40, elapsed
+    # The empty ``#px-captcha`` placeholder that content pages carry (too
+    # narrow or too short to be the bar) is not a widget either; other
+    # vendors' pages have nothing to press at all.
+    for size in ("w=30&h=100", "w=300&h=10"):
+        tool._page.goto(f"{server}/press-hold?{size}", wait_until="domcontentloaded")
+        assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None, size
+    tool._page.goto(f"{server}/press-hold", wait_until="domcontentloaded")
+    box = tool._challenge_widget(web_stealth.PERIMETERX_CHECK)
+    assert box is not None and box["width"] == 300 and box["height"] == 100, box
+    assert tool._challenge_widget("Akamai block") is None
+    assert web_stealth.widget_presses(web_stealth.PERIMETERX_CHECK) == 2
+    assert web_stealth.widget_presses(web_stealth.CLOUDFLARE_CHALLENGE) == 1
+    assert web_stealth.widget_presses(web_stealth.ANUBIS_CHECK) == 0
+
+
+def test_anubis_proof_of_work_gets_its_longer_wait(tool, server):
+    """An Anubis page that takes 16 s (more than the 12 s most vendors get) still clears."""
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/anubis?t={int(start)}")
+    elapsed = time.monotonic() - start
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert 16 <= elapsed < 45 + 10, elapsed
+    assert web_stealth.challenge_wait_secs(web_stealth.ANUBIS_CHECK) == 45
+    assert web_stealth.challenge_wait_secs(web_stealth.CLOUDFLARE_CHALLENGE) == 12
 
 
 def test_live_cloudflare_protected_site_loads(tool):
@@ -820,6 +1016,16 @@ def test_challenge_vendor_recognises_each_vendor():
         ("Robot or human?", "Press & Hold"): "PerimeterX press-and-hold check",
         ("Walmart", "Hold the button to confirm that you're human. Press & Hold"):
             "PerimeterX press-and-hold check",
+        # walmart.com/blocked, fiverr and PerimeterX's stock page, as seen live.
+        ("", "Robot or human?\n\nActivate and hold the button to confirm that you\u2019re human"):
+            "PerimeterX press-and-hold check",
+        ("It needs a human touch", "Complete the task and we\u2019ll get you right back"):
+            "PerimeterX press-and-hold check",
+        ("Access to this page has been denied.", "Please verify you are a human"):
+            "PerimeterX press-and-hold check",
+        ("zillow.com", "Press & Hold ... Access to this page has been denied because we believe "
+                       "you are using automation tools to browse the website. Reference ID"):
+            "PerimeterX press-and-hold check",
         ("Are you a robot?", "ScienceDirect"): "CAPTCHA",
         ("Security check required", ""): "CAPTCHA",
         ("https://www.google.com/search",
@@ -833,6 +1039,13 @@ def test_challenge_vendor_recognises_each_vendor():
         ("Blog: unusual traffic", "Google shows 'unusual traffic from your computer network'"):
             None,
         ("Docs", "Just a moment... while the demo loads; verify you are human later"): None,
+        # Two articles about the widget that the old 'press and hold' + 'human'
+        # pair mistook for it (docs.humansecurity.com, scrapfly.io).
+        ("HUMAN Challenge | HUMAN Documentation",
+         "HUMAN Challenge is a simple, no-hassle \u201cpress and hold\u201d challenge ... "
+         "detect if a user is a bot or a human"): None,
+        ("How to scrape Perimeter X: Please verify you are human?",
+         "we might encounter messages like \"Please verify you are Human: Press & Hold\""): None,
     }
     for (title, body), expected in cases.items():
         assert web_stealth.challenge_vendor(title, body) == expected, (title, body)
@@ -902,6 +1115,105 @@ def test_headless_fallback_still_waits_out_challenges(tool, server):
         os.environ["PATH"] = saved_path
 
 
+def test_headed_user_agent_helpers():
+    """The token is rewritten natively and the headed string is remembered per channel."""
+    raw = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/154.0.0.0 Safari/537"
+    headed = web_stealth.headed_user_agent(raw)
+    assert headed == raw.replace("HeadlessChrome", "Chrome")
+    assert headed is not None and web_stealth.headed_user_agent(headed) is None
+    assert web_stealth.headed_user_agent("") is None
+    channel = f"test-{time.time_ns()}"
+    assert web_stealth.user_agent_switch(channel) is None
+    web_stealth.remember_user_agent(channel, headed)
+    assert web_stealth.user_agent_switch(channel) == f"--user-agent={headed}"
+    web_stealth.forget_user_agent(channel)
+    assert web_stealth.user_agent_switch(channel) is None
+    web_stealth.forget_user_agent(channel)  # idempotent
+    assert web_stealth.user_agent_matches_version(headed, "154.0.8037.57")
+    assert web_stealth.user_agent_matches_version(f"--user-agent={headed}", "154.0.8037.57")
+    assert not web_stealth.user_agent_matches_version(headed, "155.0.8100.1")
+    assert not web_stealth.user_agent_matches_version("Mozilla/5.0 Firefox/154.0", "154.0.1")
+
+
+def test_headless_fallback_uses_a_native_user_agent(tool, server):
+    """Real headless mode reports a headed Chrome everywhere, with nothing patched.
+
+    The blocks of Oct 2026 came from the macOS daemon, where there is no
+    Xvfb: Cloudflare's challenge rejected every headless browser whose
+    ``navigator.userAgent`` had been rewritten by an init script while
+    ``navigator.appVersion`` still said ``HeadlessChrome``.  With Chrome's
+    own ``--user-agent`` switch the header, ``userAgent`` and
+    ``appVersion`` agree, the property stays on the prototype, and the
+    client-hint brands are still sent.  The headed string is learnt from
+    the first launch (one relaunch) and remembered for the next; one
+    remembered for another Chrome build is forgotten and relearnt.
+    """
+    tool.close()  # one sync driver per thread
+    saved_path = os.environ["PATH"]
+    web_stealth.stop_virtual_display()
+    os.environ["PATH"] = str(os.devnull)
+    channel = web_stealth.chrome_channel()
+    remembered = web_stealth._HEADED_USER_AGENTS.pop(channel, None)
+    launches: list[list[str]] = []
+    original_launch = WebUseTool._launch_browser
+
+    def counting_launch(self, launcher, kwargs):
+        launches.append(list(kwargs["args"]))
+        original_launch(self, launcher, kwargs)
+
+    WebUseTool._launch_browser = counting_launch  # type: ignore[method-assign]
+    try:
+        for expected_launches in (2, 3):
+            web = WebUseTool(user_data_dir=None)
+            try:
+                web.go_to_url(f"{server}/headers")
+                assert web._chromium_headless is True
+                probe = _main(
+                    web,
+                    "() => ({ua: navigator.userAgent, av: navigator.appVersion,"
+                    " own: Object.getOwnPropertyDescriptor(navigator, 'userAgent') !== undefined,"
+                    " brands: navigator.userAgentData.brands.map(b => b.brand),"
+                    " echo: JSON.parse(document.getElementById('h').textContent)})",
+                )
+                assert isinstance(probe, dict)
+                assert "HeadlessChrome" not in probe["ua"] and "Chrome/" in probe["ua"]
+                assert "HeadlessChrome" not in probe["av"] and probe["ua"].endswith(probe["av"])
+                assert probe["own"] is False, "userAgent must stay on Navigator.prototype"
+                assert probe["echo"]["user_agent"] == probe["ua"]
+                assert "HeadlessChrome" not in probe["echo"]["sec_ch_ua"]
+                assert probe["echo"]["sec_ch_ua"], "client-hint brands are still sent"
+                assert any(b in ("Chromium", "Google Chrome") for b in probe["brands"])
+                assert web._page.evaluate("navigator.appVersion") == probe["av"]
+            finally:
+                web.close()
+            # First tool: a plain launch, then the relaunch with the switch.
+            # Second tool: the remembered switch from the start, no relaunch.
+            assert len(launches) == expected_launches, launches
+            assert any(a.startswith("--user-agent=") for a in launches[-1])
+            assert web_stealth.user_agent_switch(channel) == launches[-1][-1]
+        good = launches[-1][-1]
+        # Chrome updated under the daemon: the remembered string names
+        # the old major version.  That launch is discarded, the build is
+        # asked again and the relaunch carries the current string.
+        stale = re.sub(r"Chrome/\d+\.", "Chrome/1.", good)
+        web_stealth.remember_user_agent(channel, stale[len("--user-agent=") :])
+        web = WebUseTool(user_data_dir=None)
+        try:
+            web.go_to_url(f"{server}/headers")
+            assert _main(web, "navigator.userAgent") == good[len("--user-agent=") :]
+        finally:
+            web.close()
+        assert [a[-1] for a in launches[3:]] == [stale, launches[0][-1], good], launches[3:]
+        assert web_stealth.user_agent_switch(channel) == good
+    finally:
+        WebUseTool._launch_browser = original_launch  # type: ignore[method-assign]
+        os.environ["PATH"] = saved_path
+        if remembered is not None:
+            web_stealth.remember_user_agent(channel, remembered)
+    assert not any(a.startswith("--user-agent=") for a in launches[0])
+    assert len(launches) == 6
+
+
 def test_tab_list_uses_the_selected_api_timeout_error(tool, server):
     """tab:list survives an unresponsive tab under the Patchright API."""
     tool.go_to_url(f"{server}/inert")
@@ -920,3 +1232,58 @@ def test_typing_deadline_scales_with_text(tool, server):
     tool.type_text(box_id, text.strip())
     assert tool._page.evaluate("document.getElementById('box').value") == text.strip()
     assert tool._is_alive()
+
+
+_CONCURRENT_API_SCRIPT = r"""
+import json, sys, threading
+from importlib import import_module
+from kiss.agents.sorcar import web_stealth
+
+workers = 16
+barrier = threading.Barrier(workers)
+unguarded = []
+
+def body():
+    barrier.wait()
+    api = web_stealth.playwright_api()
+    sync_base = import_module(api.__name__.split(".")[0] + "._impl._sync_base").SyncBase
+    if not getattr(sync_base, "_kiss_dead_driver_guard", False):
+        unguarded.append(1)
+
+threads = [threading.Thread(target=body) for _ in range(workers)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+
+api = web_stealth.playwright_api()
+sync_base = import_module(api.__name__.split(".")[0] + "._impl._sync_base").SyncBase
+layers = 0
+fn = sync_base._sync
+while fn.__qualname__.endswith("_guard_sync_api_against_dead_driver.<locals>._sync"):
+    layers += 1
+    fn = next(c.cell_contents for c in fn.__closure__ if callable(c.cell_contents))
+print(json.dumps({"layers": layers, "unguarded": len(unguarded)}))
+"""
+
+
+@pytest.mark.timeout(120)
+def test_concurrent_first_callers_get_one_guarded_api():
+    """Task threads racing the first ``playwright_api`` call share one guarded module.
+
+    Unlocked, two threads could both import and both wrap
+    ``SyncBase._sync`` (a guard around a guard), and a thread that saw
+    the module published before its guard was installed drove an
+    unguarded API.  A fresh interpreter makes every thread a first
+    caller; the result must be exactly one wrapper layer and no caller
+    returning before the guard is in place.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _CONCURRENT_API_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=100,
+        check=True,
+    )
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result == {"layers": 1, "unguarded": 0}

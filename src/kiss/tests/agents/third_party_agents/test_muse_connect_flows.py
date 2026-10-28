@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -135,8 +136,11 @@ class _AuthServer(RecordingServer):
             return f"{prefix}-{self._counters[prefix]}"
 
     def pending_codes(self) -> list[str]:
-        """Return the device codes not yet approved or denied."""
-        return [c for c, d in self.devices.items() if not d.approved and not d.denied]
+        """Return the device codes not yet approved or denied.
+
+        Snapshots the dict: handler threads delete redeemed codes concurrently.
+        """
+        return [c for c, d in list(self.devices.items()) if not d.approved and not d.denied]
 
     def approve(self, device_code: str | None = None) -> None:
         """Approve the given (or the only pending) device code."""
@@ -603,6 +607,7 @@ def test_github_device_flow_enrolls_bearer_and_connects(
     # Nothing is written until the sign-in lands.
     assert not gh_config.path.exists()
 
+    monkeypatch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
     pending = json.loads(tools["finish_github_auth"]())
     assert pending == {
         "ok": False,
@@ -815,13 +820,14 @@ def test_twitch_slow_down_and_token_path(
     agent = TwitchAgent()
     agent._backend._helix_base = f"{auth_server.base_url}/helix"
     tools = auth_tools(agent)
+    monkeypatch.setattr(_device_auth, "_SLOW_DOWN_STEP", 0.05)
     tools["authenticate_twitch"]("cid1", scopes="clips:edit")
     session = ConsentSession._active["twitch"]
     assert isinstance(session, DeviceFlowSession)
     auth_server.approve()
     done = _finish(tools["finish_twitch_auth"])
     assert done["ok"] is True
-    assert session._interval == 6.0  # 1 s + the 5 s slow-down step
+    assert session._interval == pytest.approx(1.05)  # 1 s + the slow-down step
     assert _vault_entry("twitch")["authorized_user_info"] == {
         "kind": "bearer",
         "token": "access-1",
@@ -972,7 +978,7 @@ def test_msteams_legacy_mode_rejects_device_code(
 
 
 def test_nextcloud_login_flow_v2_enrolls_app_password(
-    muse_env: Path, nextcloud_server: _NextcloudServer
+    muse_env: Path, nextcloud_server: _NextcloudServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nextcloud: URL only → login link → grant → app password in the vault."""
     agent = NextcloudTalkAgent()
@@ -989,6 +995,7 @@ def test_nextcloud_login_flow_v2_enrolls_app_password(
     assert started["user_code"] == ""
     assert "enter the code" not in started["instructions"]
     assert nextcloud_server.requests[0]["headers"]["User-Agent"] == PRODUCT_NAME
+    monkeypatch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
     pending = json.loads(tools["finish_nextcloud_auth"]())
     assert pending["status"] == "pending"
     nextcloud_server.grant()
@@ -1166,8 +1173,8 @@ def test_device_session_expiry_and_bounds(auth_server: _AuthServer) -> None:
         token_url=f"{auth_server.base_url}/login/oauth/access_token",
     )
     session = DeviceFlowSession("github", provider, "app", "repo")
-    # Shorten the deadline so the expiry branch runs quickly.
-    session._deadline = time.monotonic() + 1.5
+    # An already-passed deadline makes the expiry branch run on the first loop check.
+    session._deadline = time.monotonic()
     session.register()
     session._thread.join(timeout=10.0)
     assert session.result is None
@@ -1408,7 +1415,9 @@ class _ScriptedSession(ConsentSession):
         return step  # type: ignore[no-any-return]
 
 
-def test_session_registry_is_race_safe_and_backs_off_on_timeouts() -> None:
+def test_session_registry_is_race_safe_and_backs_off_on_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A newer session survives a stale finish; timeouts slow the poll down."""
     # Compare-and-pop: the stale session A completes while finish() waits
     # on it, but session B took A's place meanwhile → A is not handed out.
@@ -1430,7 +1439,8 @@ def test_session_registry_is_race_safe_and_backs_off_on_timeouts() -> None:
     assert not late._thread.is_alive() and "scripted" not in ConsentSession._active
 
     # RFC 8628 section 3.5: a connection timeout is not terminal; the
-    # interval grows by 5 s (capped) and polling continues.
+    # interval grows by one step (capped) and polling continues.
+    monkeypatch.setattr(_device_auth, "_SLOW_DOWN_STEP", 0.05)
     flaky = _ScriptedSession(
         "flaky",
         [requests.ConnectionError("boom"), requests.Timeout("slow"), {"access_token": "t"}],
@@ -1439,7 +1449,7 @@ def test_session_registry_is_race_safe_and_backs_off_on_timeouts() -> None:
     flaky.register()
     flaky._thread.join(timeout=30.0)
     assert flaky.result == {"access_token": "t"} and flaky.polls == 3
-    assert flaky._interval == pytest.approx(10.1)
+    assert flaky._interval == pytest.approx(0.2)
     assert flaky.result_at > 0
     got, status = ConsentSession.finish("flaky")
     assert got is flaky and status == "ok"
@@ -1649,7 +1659,7 @@ def _matrix_client(homeserver: str, access_token: str) -> AsyncClient:
 
 
 def test_matrix_oauth_device_flow_registers_client_and_refreshes(
-    isolated_kiss_home: Path, auth_server: _AuthServer
+    isolated_kiss_home: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Matrix: discovery → dynamic registration → device grant → self-refresh → revoke."""
     auth_server.expiring = True
@@ -1681,6 +1691,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     assert len(device_id) == 10 and device_id.isalnum()
     assert not mx_config.path.exists()
 
+    monkeypatch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
     assert json.loads(tools["finish_matrix_auth"]())["status"] == "pending"
     auth_server.approve()
     done = _finish(tools["finish_matrix_auth"])
@@ -1910,7 +1921,7 @@ def fake_signal_cli(tmp_path: Path) -> Path:
 
 
 def test_signal_link_flow_renders_qr_and_records_linked_account(
-    isolated_kiss_home: Path, fake_signal_cli: Path
+    isolated_kiss_home: Path, fake_signal_cli: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Signal: ``signal-cli link`` → QR → phone scans → account recorded."""
     agent = SignalAgent()
@@ -1943,6 +1954,7 @@ def test_signal_link_flow_renders_qr_and_records_linked_account(
     assert _qr_text(_qr_rows(uri)) == qr_text
     assert not sg_config.path.exists()
 
+    monkeypatch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
     pending = json.loads(tools["finish_signal_auth"]())
     assert pending["status"] == "pending" and "scan" in pending["error"]
     (fake_signal_cli.parent / "scanned").touch()
@@ -2037,3 +2049,43 @@ def test_signal_link_failure_paths(isolated_kiss_home: Path, fake_signal_cli: Pa
         "ok": False,
         "error": "Signal linking failed: the sign-in request expired before it was approved",
     }
+
+
+def _fetch_tokens(base_url: str, codes: list[str], errors: list[BaseException]) -> None:
+    """Redeem every approved device code over HTTP (each redemption deletes it)."""
+    try:
+        with requests.Session() as session:
+            for code in codes:
+                form = {
+                    "grant_type": _device_auth.DEVICE_CODE_GRANT,
+                    "device_code": code,
+                    "client_id": "cid",
+                }
+                session.post(f"{base_url}/login/oauth/access_token", data=form, timeout=10)
+    except BaseException as exc:  # noqa: BLE001 (surfaced on the test thread)
+        errors.append(exc)
+
+
+def test_pending_codes_tolerates_concurrent_token_redemptions(auth_server: _AuthServer) -> None:
+    """``pending_codes()`` on the test thread survives handler threads deleting codes."""
+    codes = [f"device-{i}" for i in range(400)]
+    for code in codes:
+        auth_server.devices[code] = _DeviceState("github", "repo")
+        auth_server.devices[code].approved = True
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=_fetch_tokens, args=(auth_server.base_url, codes, errors), daemon=True
+    )
+    switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    deadline = time.monotonic() + 60
+    try:
+        worker.start()
+        while worker.is_alive():
+            assert time.monotonic() < deadline, "token redemptions did not finish in 60 s"
+            auth_server.pending_codes()
+    finally:
+        sys.setswitchinterval(switch_interval)
+        worker.join(timeout=30)
+    assert not worker.is_alive() and errors == []
+    assert auth_server.devices == {} and auth_server.pending_codes() == []

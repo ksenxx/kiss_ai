@@ -83,17 +83,17 @@ class _TricksEnv(TestCase):
 
 
 class TestReadTricksUnescapes(_TricksEnv):
-    """``read_tricks`` must return the trick as the author wrote it."""
+    """``read_tricks_data`` must return the trick as the author wrote it."""
 
     def test_bundled_trick_is_unescaped(self) -> None:
-        self.assertEqual(tricks.read_tricks(), [_UNESCAPED_BODY])
+        self.assertEqual(tricks.read_tricks_data()["tricks"], [_UNESCAPED_BODY])
 
     def test_user_trick_is_unescaped(self) -> None:
         (self.kiss_dir / "MY_INJECTION.md").write_text(
             "## Trick\n\nUse `a\\_b` and \\[x\\](y).\n", encoding="utf-8",
         )
         self.assertEqual(
-            tricks.read_tricks(),
+            tricks.read_tricks_data()["tricks"],
             ["Use `a_b` and [x](y).", _UNESCAPED_BODY],
         )
 

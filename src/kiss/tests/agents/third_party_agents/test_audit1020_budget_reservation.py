@@ -40,6 +40,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_parallel_tool,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 DUMMY_SEA = str(
@@ -151,7 +152,7 @@ def test_overlapping_non_blocking_children_split_what_is_left(
 def _plan(parent: SorcarAgent, work_dir: Path, task: str, max_budget: str = "") -> dict[str, Any]:
     """Plan a ``run_agent`` call of *parent* without starting it."""
     plan = agent_dispatch.plan_run_agent(
-        str(work_dir), task, DUMMY_SEA, max_budget=max_budget, parent_agent=parent,
+        str(work_dir), task, DUMMY_SEA, max_budget=max_budget, parent_agent=parent
     )
     assert isinstance(plan, dict), plan
     return plan
@@ -322,9 +323,10 @@ def test_fan_out_siblings_split_the_unreserved_remainder_equally(
         run_agent("first", DUMMY_SEA, wait="false", timeout="60")
         # The call blocks for its timeout: short, so the two children are
         # still held when it returns their notices.
-        out = run_parallel(json.dumps(["second", "third"]), DUMMY_SEA, timeout="2")
+        out = run_parallel(json.dumps(["second", "third"]), DUMMY_SEA, timeout="0.5")
         entries = yaml.safe_load(out)
         assert len(entries) == 2 and all("still running" in e for e in entries), out
+        assert wait_until(lambda: len(daemon.run_commands) == 3, 10.0), daemon.run_commands
         # (10 - 5) / (2 + 1): the siblings of one call never subtract
         # each other, whichever thread resolves its budget first.
         assert _budgets(daemon) == pytest.approx([5.0, 5.0 / 3, 5.0 / 3])

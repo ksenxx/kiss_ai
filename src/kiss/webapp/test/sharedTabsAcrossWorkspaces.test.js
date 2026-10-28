@@ -267,29 +267,8 @@ function testOneContentTabPerPathAcrossWorkspaces() {
   assert.strictEqual(tabBarIds(win).length, 3, 'one content tab for the path');
 }
 
-function testCloseOthersClosesEveryOtherTab() {
-  // "Close Others" from a1's context menu closes b1 too: there is no
-  // hidden tab a bulk close could spare.
-  const {win, posted} = makePage();
-  setWorkspace(win, '/ws/a');
-  send(win, {
-    type: 'tabs_state',
-    tabs: [entry('a1', '/ws/a', 'chat-1'), entry('b1', '/ws/b', 'chat-2')],
-  });
-  const strip = win.document.querySelector('.chat-tab[data-tab-id="a1"]');
-  strip.dispatchEvent(
-    new win.MouseEvent('contextmenu', {bubbles: true, clientX: 5, clientY: 5}),
-  );
-  const item = Array.from(
-    win.document.querySelectorAll('.tab-context-menu-item, [role="menuitem"]'),
-  ).find(el => (el.textContent || '').trim() === 'Close Others');
-  assert.ok(item, 'the context menu offers Close Others');
-  clickEl(win, item);
-  const closed = posted
-    .filter(m => m && m.type === 'closeTab')
-    .map(m => m.tabId);
-  assert.deepStrictEqual(closed, ['b1'], 'the other workspace tab is closed');
-}
+// "Close Others" closing every other shown tab (there is no hidden tab
+// a bulk close could spare) is pinned by tabMenuCloseAllActiveLast.
 
 function testReadySendsCanonicalWorkDir() {
   // Restart recovery must serialize the registry's CANONICAL work dir
@@ -319,7 +298,6 @@ const tests = [
   testHistoryClickOnAnotherWorkspaceChatActivatesItsTab,
   testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab,
   testOneContentTabPerPathAcrossWorkspaces,
-  testCloseOthersClosesEveryOtherTab,
   testReadySendsCanonicalWorkDir,
 ];
 

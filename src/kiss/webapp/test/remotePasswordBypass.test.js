@@ -14,7 +14,6 @@ const {
   installFakeWebSocket,
   readShimJs,
   bootShim,
-  waitForSocket,
 } = require('./transport_page_helpers');
 
 const MEDIA = path.resolve(__dirname, '..', 'media');
@@ -92,15 +91,86 @@ function wireOverlayContract(window) {
 }
 
 /**
- * A page with the overlay contract and a fake WebSocket wired, ready for
- * `bootShim`; *opts* are `buildDom`'s switches.
+ * Wrap `window.setTimeout` / `clearTimeout` so every timer still runs
+ * for real but is also recorded as `{id, fn, ms, ran, cleared}`, which
+ * lets `fireReconnect` fire the shim's jittered (0.5-60 s) reconnect
+ * backoff at once instead of sleeping across it.
+ */
+function recordTimers(window) {
+  const timers = [];
+  const realSetTimeout = window.setTimeout;
+  const realClearTimeout = window.clearTimeout;
+  window.setTimeout = function (fn, ms, ...args) {
+    const timer = {fn, ms, ran: false, cleared: false};
+    timer.id = realSetTimeout.call(
+      window,
+      () => {
+        timer.ran = true;
+        fn(...args);
+      },
+      ms,
+    );
+    timers.push(timer);
+    return timer.id;
+  };
+  window.clearTimeout = function (id) {
+    const timer = timers.find(t => t.id === id);
+    if (timer) timer.cleared = true;
+    return realClearTimeout.call(window, id);
+  };
+  // For fireReconnect: some blocks later replace window.clearTimeout
+  // with one that throws, to pin the shim's tolerance of that.
+  timers.cancel = id => realClearTimeout.call(window, id);
+  return timers;
+}
+
+/**
+ * Fire the shim's pending reconnect backoff (the last recorded timer of
+ * 500 ms or more that neither ran nor was cleared) now, cancelling its
+ * real timer, and return the socket it opened.
+ */
+function fireReconnect(pg) {
+  const {sockets, timers} = pg;
+  const pending = timers.filter(t => !t.ran && !t.cleared && t.ms >= 500);
+  assert.ok(
+    pending.length > 0,
+    'the shim must have a reconnect backoff pending',
+  );
+  const timer = pending[pending.length - 1];
+  const before = sockets.length;
+  timers.cancel(timer.id);
+  timer.ran = true;
+  timer.fn();
+  assert.strictEqual(
+    sockets.length,
+    before + 1,
+    'firing the backoff timer must open the next socket',
+  );
+  return sockets[before];
+}
+
+/**
+ * A page with the overlay contract, a fake WebSocket and the timer
+ * recorder wired, ready for `bootShim`; *opts* are `buildDom`'s
+ * switches, plus `noOverlay` to leave the overlay contract out.  The
+ * `statuses` / `appFrames` arrays collect the `daemonStatus` frames,
+ * respectively every other frame, the shim posts to the app.
  */
 function page(opts) {
+  opts = opts || {};
   const {window} = buildDom(opts);
   const sockets = [];
   installFakeWebSocket(window, sockets, {connecting: true});
-  wireOverlayContract(window);
-  return {window, sockets};
+  const timers = recordTimers(window);
+  if (!opts.noOverlay) wireOverlayContract(window);
+  const statuses = [];
+  const appFrames = [];
+  window.addEventListener('message', ev => {
+    if (!ev.data) return;
+    if (ev.data.type === 'daemonStatus') statuses.push(ev.data);
+    else appFrames.push(ev.data);
+  });
+  return {window, sockets, timers, statuses, appFrames, reloads: opts.reloads};
 }
 
 function isVisible(el) {
@@ -137,13 +207,9 @@ async function run() {
   const shimJs = readShimJs();
 
   for (const mode of ['reject', 'throw']) {
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
+    const {window, sockets} = page();
     const swCalls = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
     installFakeServiceWorker(window, mode, swCalls);
-    wireOverlayContract(window);
     bootShim(window);
     await tick();
     try {
@@ -171,14 +237,7 @@ async function run() {
   {
     // The post-auth drop is flagged `reconnecting` so main.js keeps the
     // app on screen; a drop before any auth_ok is not.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    const statuses = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    window.addEventListener('message', ev => {
-      if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
-    });
+    const {window, sockets, statuses} = page({noOverlay: true});
     bootShim(window);
     sockets[0].fireOpen();
     sockets[0].fireClose();
@@ -219,43 +278,6 @@ async function run() {
       ok('unauthenticated commands are queued, never sent to the socket');
     } catch (err) {
       fail('SEND-path password gate is broken', err);
-    }
-    window.close();
-  }
-
-  {
-    const {window, sockets} = page();
-    bootShim(window);
-    const sock = sockets[0];
-
-    sock.fireOpen();
-    sock.fireMessage({type: 'auth_required'});
-
-    const overlay = window.document.getElementById('kiss-server-loading');
-    const app = window.document.getElementById('app');
-    const modal = window.document.getElementById('auth-modal');
-
-    assert.ok(isVisible(app), 'app revealed while auth modal is open');
-    assert.ok(isVisible(modal), 'auth modal is open on auth_required');
-    ok('auth_required opens the modal over a revealed #app');
-
-    window.document.getElementById('auth-modal-cancel').click();
-    await tick();
-
-    try {
-      assert.ok(
-        !isVisible(app),
-        'BYPASS: #app must be re-hidden after the password prompt is ' +
-          'cancelled (unauthenticated visitor must not keep the app)',
-      );
-      assert.ok(
-        isVisible(overlay),
-        'the loading overlay must reappear after a cancelled password prompt',
-      );
-      assert.ok(!isVisible(modal), 'the modal is closed after cancel');
-      ok('cancelling the password prompt re-gates the webapp');
-    } catch (err) {
-      fail('remote-password check is bypassed by cancelling the modal', err);
     }
     window.close();
   }
@@ -376,20 +398,10 @@ async function run() {
 
   {
     const reloads = [];
-    const dom = buildDom({reloads});
-    const {window} = dom;
-    const appFrames = [];
-    const statusFrames = [];
-    window.addEventListener('message', ev => {
-      if (!ev.data) return;
-      if (ev.data.type === 'daemonStatus') statusFrames.push(ev.data);
-      else appFrames.push(ev.data);
-    });
+    const pg = page({reloads});
+    const {window, sockets, appFrames, statuses: statusFrames} = pg;
     window.sessionStorage.setItem('sorcar-state', '{"foo":1}');
     window.localStorage.setItem('sorcar-remote-pwd', 'savedpw');
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
     bootShim(window);
 
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
@@ -499,9 +511,8 @@ async function run() {
     s0.fireClose();
     assert.strictEqual(sockets.length, 1, 'no eager reconnect');
 
-    await waitForSocket(sockets, 2);
+    const s1 = fireReconnect(pg);
     assert.strictEqual(sockets.length, 2, 'backoff timer reconnects');
-    const s1 = sockets[1];
 
     window.dispatchEvent(new window.Event('online'));
     assert.strictEqual(sockets.length, 2);
@@ -582,8 +593,7 @@ async function run() {
       assert.deepStrictEqual(plain(statusFrames), [
         {type: 'daemonStatus', connected: false, reconnecting: true},
       ]);
-      await waitForSocket(sockets, 4);
-      const s3 = sockets[3];
+      const s3 = fireReconnect(pg);
       s3.fireOpen();
       s3.fireMessage({type: 'auth_ok'});
       assert.strictEqual(
@@ -614,17 +624,9 @@ async function run() {
     // itself, otherwise a replacement socket that fails would show the
     // cold-start overlay label for a server that was merely dropped.
     const reloads = [];
-    const dom = buildDom({reloads});
-    const {window} = dom;
-    const statusFrames = [];
-    window.addEventListener('message', ev => {
-      if (ev.data && ev.data.type === 'daemonStatus')
-        statusFrames.push(ev.data);
-    });
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
+    const pg = page({reloads});
+    const {window, sockets, statuses: statusFrames} = pg;
     const FakeWebSocket = window.WebSocket;
-    wireOverlayContract(window);
     bootShim(window);
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     const s0 = sockets[0];
@@ -660,8 +662,7 @@ async function run() {
       window
         .acquireTransport()
         .postMessage({type: 'runTask', prompt: 'queued'});
-      await waitForSocket(sockets, 3);
-      const s2 = sockets[2];
+      const s2 = fireReconnect(pg);
       s2.fireOpen();
       s2.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(
@@ -697,19 +698,15 @@ async function run() {
     // Also an offline-cached page here: with sessionStorage unreadable
     // the reload-once guard cannot be recorded, so no reload is risked.
     const reloads = [];
-    const dom = buildDom({
+    const {window, sockets} = page({
       opaqueOrigin: true,
       noModal: true,
       offlineShell: true,
       reloads,
     });
-    const {window} = dom;
     window.prompt = function () {
       return 'promptpwd';
     };
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
     bootShim(window);
     const sock = sockets[0];
 
@@ -820,7 +817,9 @@ async function run() {
         {type: 'auth', password: 'pw2'},
         'the reconnect carries the typed password',
       );
-      ok('Enter keeps the password for the reconnect; a dead socket gets nothing');
+      ok(
+        'Enter keeps the password for the reconnect; a dead socket gets nothing',
+      );
     } catch (err) {
       fail('Enter-key submit path broken', err);
     }
@@ -1068,7 +1067,8 @@ async function run() {
     // dies first re-sends them), and a confirmed batch is never sent
     // again; the page itself is never reloaded along the way.
     const reloads = [];
-    const {window, sockets} = page({reloads});
+    const pg = page({reloads});
+    const {window, sockets} = pg;
     bootShim(window);
     const api = window.acquireTransport();
     const types = sock => sock.sent.map(d => JSON.parse(d).type);
@@ -1076,8 +1076,7 @@ async function run() {
     sockets[0].fireMessage({type: 'auth_ok'});
     sockets[0].fireClose();
     api.postMessage({type: 'saveConfig', config: {edited: 'first outage'}});
-    await waitForSocket(sockets, 2);
-    const s1 = sockets[1];
+    const s1 = fireReconnect(pg);
     s1.fireOpen();
     // Dies before it authenticates; the user keeps working meanwhile.
     s1.fireClose();
@@ -1136,16 +1135,14 @@ async function run() {
     // browsing session: when the page fetch keeps timing out while the
     // WebSocket works, the second cached load must not loop.
     const reloads = [];
-    const dom = buildDom({offlineShell: true, reloads});
-    const {window} = dom;
-    const statusFrames = [];
-    window.addEventListener('message', ev => {
-      if (ev.data && ev.data.type === 'daemonStatus')
-        statusFrames.push(ev.data);
+    const {
+      window,
+      sockets,
+      statuses: statusFrames,
+    } = page({
+      offlineShell: true,
+      reloads,
     });
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
     bootShim(window);
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     try {
@@ -1205,11 +1202,7 @@ async function run() {
     window.close();
 
     // Storage that fails at reload time (quota) cannot stop the reload.
-    const domQ = buildDom({offlineShell: true, reloads});
-    const wq = domQ.window;
-    const socketsQ = [];
-    installFakeWebSocket(wq, socketsQ, {connecting: true});
-    wireOverlayContract(wq);
+    const {window: wq, sockets: socketsQ} = page({offlineShell: true, reloads});
     bootShim(wq);
     socketsQ[0].fireOpen();
     Object.defineProperty(wq.Storage.prototype, 'setItem', {
@@ -1234,12 +1227,9 @@ async function run() {
     // Second cached load in the same session: the guard holds, and the
     // page is a normal live page from here on (a later drop resyncs it
     // in place like any other).
-    const dom2 = buildDom({offlineShell: true, reloads});
-    const w2 = dom2.window;
+    const pg2 = page({offlineShell: true, reloads});
+    const {window: w2, sockets: sockets2} = pg2;
     w2.sessionStorage.setItem('sorcar-offline-reloaded', '1');
-    const sockets2 = [];
-    installFakeWebSocket(w2, sockets2, {connecting: true});
-    wireOverlayContract(w2);
     bootShim(w2);
     sockets2[0].fireOpen();
     sockets2[0].fireMessage({type: 'auth_ok'});
@@ -1258,7 +1248,7 @@ async function run() {
         '1',
       );
       sockets2[0].fireClose();
-      await waitForSocket(sockets2, 2);
+      fireReconnect(pg2);
       sockets2[1].fireOpen();
       sockets2[1].fireMessage({type: 'auth_ok'});
       assert.strictEqual(
@@ -1273,10 +1263,8 @@ async function run() {
     w2.close();
 
     // A page the server itself served clears the guard.
-    const dom3 = buildDom({reloads});
-    const w3 = dom3.window;
+    const {window: w3} = page({reloads, noOverlay: true});
     w3.sessionStorage.setItem('sorcar-offline-reloaded', '1');
-    installFakeWebSocket(w3, [], {connecting: true});
     bootShim(w3);
     try {
       assert.strictEqual(
@@ -1295,14 +1283,7 @@ async function run() {
     // Half-open socket: no onclose ever fires, so the shim's stale check
     // (every 15 s; the server sends a heartbeat frame every 15 s) must
     // drop a socket that has been silent for 45 s and reconnect.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    const statuses = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    window.addEventListener('message', ev => {
-      if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
-    });
+    const {window, sockets, statuses} = page({noOverlay: true});
     const timers = [];
     window.setTimeout = function (fn, ms) {
       timers.push({fn, ms});
@@ -1546,7 +1527,8 @@ async function run() {
   // long it has been trying, hint at the fix and offer "Retry now",
   // which reconnects immediately; a server answer removes the button.
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     // Real timers drive the 1 s overlay tick; the wrappers only record
     // which setTimeout ids the shim arms and clears, so the backoff
     // cancellation below is checked by id instead of by sleeping
@@ -1581,7 +1563,7 @@ async function run() {
         return realNow() + 9000;
       };
       clock.tick(1000);
-      await waitForSocket(sockets, 2);
+      fireReconnect(pg);
       assert.match(
         msg.textContent,
         /^Still trying to reach the KISS Sorcar server \(\d+ s\)\. Check that it is running on this machine\.$/,
@@ -1636,10 +1618,11 @@ async function run() {
   // A page without the overlay message node (older cached shell) must
   // survive the escalation tick without a script error.
   {
-    const dom = buildDom({noModal: true, silent: true});
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
+    const {window, sockets} = page({
+      noModal: true,
+      silent: true,
+      noOverlay: true,
+    });
     const clock = fakeIntervals(window);
     bootShim(window);
     try {
@@ -1666,15 +1649,32 @@ async function run() {
   // spinner that pretends the server is starting: the overlay says a
   // password is needed and "Enter password" re-opens the dialog.
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     bootShim(window);
     const doc = window.document;
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
+    const overlay = doc.getElementById('kiss-server-loading');
+    const app = doc.getElementById('app');
+    const modal = doc.getElementById('auth-modal');
+    assert.ok(isVisible(app), 'app revealed while auth modal is open');
+    assert.ok(isVisible(modal), 'auth modal is open on auth_required');
+    ok('auth_required opens the modal over a revealed #app');
     doc.getElementById('auth-modal-cancel').click();
     await tick();
     try {
+      assert.ok(
+        !isVisible(app),
+        'BYPASS: #app must be re-hidden after the password prompt is ' +
+          'cancelled (unauthenticated visitor must not keep the app)',
+      );
+      assert.ok(
+        isVisible(overlay),
+        'the loading overlay must reappear after a cancelled password prompt',
+      );
+      assert.ok(!isVisible(modal), 'the modal is closed after cancel');
       assert.strictEqual(
         doc.getElementById('kiss-server-loading-msg').textContent,
         'A password is needed to use this server.',
@@ -1686,7 +1686,7 @@ async function run() {
       // the reconnect gets auth_required again: the cancelled dialog
       // must stay closed and the overlay must keep its explanation.
       sock.fireClose();
-      await waitForSocket(sockets, sockets.length + 1);
+      fireReconnect(pg);
       const msgEl = doc.getElementById('kiss-server-loading-msg');
       assert.strictEqual(
         msgEl.textContent,
@@ -1747,8 +1747,7 @@ async function run() {
         'auth_ok closes a pending dialog',
       );
       sock3.fireClose();
-      await waitForSocket(sockets, sockets.length + 1);
-      const sock4 = sockets[sockets.length - 1];
+      const sock4 = fireReconnect(pg);
       sock4.fireOpen();
       sock4.fireMessage({type: 'auth_required'});
       assert.ok(
@@ -1891,17 +1890,14 @@ async function run() {
   // _promptForPassword a no-op and left the revealed app without any
   // way to log in.
   {
-    const dom = buildDom({noModal: true});
-    const {window} = dom;
+    const pg = page({noModal: true});
+    const {window, sockets} = pg;
     const answers = ['wrong', 'right'];
     const prompts = [];
     window.prompt = function (label) {
       prompts.push(label);
       return answers.shift();
     };
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
-    wireOverlayContract(window);
     bootShim(window);
     const doc = window.document;
     const app = doc.getElementById('app');
@@ -1922,8 +1918,7 @@ async function run() {
       });
       assert.ok(!isVisible(app), 'auth_failed re-gates the app');
       s0.fireClose();
-      await waitForSocket(sockets, 2);
-      const s1 = sockets[1];
+      const s1 = fireReconnect(pg);
       s1.fireOpen();
       s1.fireMessage({type: 'auth_required'});
       assert.strictEqual(
@@ -1952,7 +1947,8 @@ async function run() {
   // never open): the overlay first returns to the plain label, then
   // escalates to "Still trying ..." + "Retry now" like any outage.
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     const clock = fakeIntervals(window);
     bootShim(window);
     const doc = window.document;
@@ -1982,7 +1978,7 @@ async function run() {
         return realNow() + 2000;
       };
       clock.tick(1000);
-      await waitForSocket(sockets, 2);
+      fireReconnect(pg);
       assert.ok(
         sockets.length >= 2,
         'the reconnect scheduled for the lockout end was attempted',
@@ -2141,7 +2137,8 @@ async function run() {
   // counted: when it expires offline the earlier outage clock is kept,
   // so the escalation follows from the original outage start.
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     const clock = fakeIntervals(window);
     bootShim(window);
     const doc = window.document;
@@ -2149,8 +2146,7 @@ async function run() {
     const realNow = window.Date.now;
     try {
       sockets[0].fireClose();
-      await waitForSocket(sockets, 2);
-      const s1 = sockets[1];
+      const s1 = fireReconnect(pg);
       s1.fireOpen();
       s1.fireMessage({type: 'auth_locked', retry_after: 1});
       assert.match(msg.textContent, /try again in 1 s/);
@@ -2176,112 +2172,23 @@ async function run() {
     window.close();
   }
 
-  // An interactively typed password is handed to the Credential
-  // Management API on auth_ok so the browser's Save Password bubble is
-  // settled here and never surfaces later on Terminal's xterm fetch.  A
-  // rejected store and a throwing constructor must both leave the
-  // handshake intact, and a silent reconnect with the cached password
-  // never re-offers a save.
-  {
-    const {window, sockets} = page();
-    const stored = [];
-    let ctorThrows = false;
-    window.PasswordCredential = function PasswordCredential(data) {
-      if (ctorThrows) throw new TypeError('PasswordCredential disabled');
-      this.id = data.id;
-      this.password = data.password;
-    };
-    Object.defineProperty(window.navigator, 'credentials', {
-      configurable: true,
-      value: {
-        store(cred) {
-          stored.push({id: cred.id, password: cred.password});
-          return Promise.reject(new window.Error('NotAllowedError'));
-        },
-      },
-    });
-    bootShim(window);
-    const doc = window.document;
-    try {
-      const s0 = sockets[0];
-      s0.fireOpen();
-      s0.fireMessage({type: 'auth_required'});
-      doc.getElementById('auth-modal-input').value = 'typed-secret';
-      doc.getElementById('auth-modal-ok').click();
-      await tick();
-      s0.fireMessage({type: 'auth_ok'});
-      await tick();
-      assert.deepStrictEqual(
-        stored,
-        [{id: 'remote', password: 'typed-secret'}],
-        'the typed password is stored once on auth_ok',
-      );
-      assert.ok(
-        !isVisible(doc.getElementById('auth-modal')),
-        'a rejected credential store does not keep the dialog open',
-      );
-      assert.strictEqual(
-        doc.getElementById('auth-modal-input').value,
-        '',
-        'the dialog input is cleared once the password is stored',
-      );
-      // Silent reconnect: the cached password goes out from onopen and
-      // must not be offered to the credential store again.
-      s0.fireClose();
-      await waitForSocket(sockets, 2);
-      const s1 = sockets[1];
-      s1.fireOpen();
-      assert.deepStrictEqual(
-        JSON.parse(s1.sent[0]),
-        {type: 'auth', password: 'typed-secret'},
-        'the cached password reconnects',
-      );
-      s1.fireMessage({type: 'auth_ok'});
-      await tick();
-      assert.strictEqual(
-        stored.length,
-        1,
-        'a silent reconnect never re-offers a save',
-      );
-      // A constructor that throws (the API exists but is disabled) must
-      // not break the handshake either.
-      ctorThrows = true;
-      s1.fireMessage({type: 'auth_required'});
-      doc.getElementById('auth-modal-input').value = 'typed-again';
-      doc.getElementById('auth-modal-ok').click();
-      await tick();
-      s1.fireMessage({type: 'auth_ok'});
-      await tick();
-      assert.strictEqual(
-        stored.length,
-        1,
-        'a throwing constructor stores nothing',
-      );
-      assert.ok(
-        !isVisible(doc.getElementById('auth-modal')),
-        'auth_ok still completes when PasswordCredential throws',
-      );
-      ok(
-        'an interactive password is stored via the Credential Management API on auth_ok',
-      );
-    } catch (err) {
-      fail('credential store on auth_ok broken', err);
-    }
-    window.close();
-  }
-
   // WebSocket auth is invisible to the browser's login heuristics, so an
   // interactive login is completed explicitly through the Credential
   // Management API on auth_ok (otherwise Terminal's later fetch opened a
   // "Save password?" prompt).  jsdom has no PasswordCredential: provide
   // one that records what was stored, and make store() resolve, reject
-  // and throw in turn; none of these may block the login.  A reload that
-  // reuses the stored password is a silent login and must not re-offer.
+  // and throw, then the constructor throw (the API exists but is
+  // disabled), in turn; none of these may block the login.  A silent
+  // reconnect with the cached password never re-offers a save (nor does
+  // a reload that reuses the stored password, next block).
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     const stored = [];
     let storeMode = 'resolve';
     window.PasswordCredential = function PasswordCredential(init) {
+      if (storeMode === 'ctor-throw')
+        throw new TypeError('PasswordCredential disabled');
       this.id = init.id;
       this.password = init.password;
     };
@@ -2309,6 +2216,7 @@ async function run() {
         ['resolve', 'pw1'],
         ['reject', 'pw2'],
         ['throw', 'pw3'],
+        ['ctor-throw', 'pw4'],
       ]) {
         storeMode = mode;
         sock.fireMessage({type: 'auth_required'});
@@ -2323,6 +2231,12 @@ async function run() {
         sock.fireMessage({type: 'auth_ok'});
         await tick();
         assert.ok(!isVisible(modal), `the dialog closes on auth_ok (${mode})`);
+        assert.strictEqual(
+          input.value,
+          '',
+          `the dialog input is cleared once the login completes (${mode})`,
+        );
+        if (mode === 'ctor-throw') continue;
         const last = stored[stored.length - 1];
         assert.ok(
           last instanceof window.PasswordCredential,
@@ -2337,7 +2251,26 @@ async function run() {
       assert.strictEqual(
         stored.length,
         3,
-        'every interactive login offers the password to the browser exactly once',
+        'every interactive login offers the password to the browser exactly ' +
+          'once; a throwing constructor stores nothing',
+      );
+      // Silent reconnect: the cached password goes out from onopen and
+      // must not be offered to the credential store again.
+      storeMode = 'resolve';
+      sock.fireClose();
+      const s1 = fireReconnect(pg);
+      s1.fireOpen();
+      assert.deepStrictEqual(
+        JSON.parse(s1.sent[0]),
+        {type: 'auth', password: 'pw4'},
+        'the cached password reconnects',
+      );
+      s1.fireMessage({type: 'auth_ok'});
+      await tick();
+      assert.strictEqual(
+        stored.length,
+        3,
+        'a silent reconnect never re-offers a save',
       );
       ok(
         'an interactive login offers the password to the browser; store rejecting or throwing is harmless',
@@ -2392,7 +2325,8 @@ async function run() {
   // stale password is forgotten so the reconnect probes with the
   // uncounted empty one and gets the dialog, not a counted wrong guess.
   {
-    const {window, sockets} = page();
+    const pg = page();
+    const {window, sockets} = pg;
     window.localStorage.setItem('sorcar-remote-pwd', 'rotated-away');
     bootShim(window);
     const doc = window.document;
@@ -2447,8 +2381,7 @@ async function run() {
         'the rotated-away password is forgotten',
       );
       sock.fireClose();
-      await waitForSocket(sockets, 2);
-      const s1 = sockets[1];
+      const s1 = fireReconnect(pg);
       s1.fireOpen();
       assert.deepStrictEqual(
         JSON.parse(s1.sent[s1.sent.length - 1]),
@@ -2575,10 +2508,7 @@ async function run() {
     // The macOS standalone app's popup window (named by
     // media/appWindow.html) marks its connection so the daemon can
     // tell whether the window is open; any other page connects bare.
-    const dom = buildDom();
-    const {window} = dom;
-    const sockets = [];
-    installFakeWebSocket(window, sockets, {connecting: true});
+    const {window, sockets} = page({noOverlay: true});
     window.name = 'kiss-app-window';
     bootShim(window);
     try {
@@ -2592,13 +2522,11 @@ async function run() {
       fail('standalone app window connection broken', err);
     }
     window.close();
-    const bare = buildDom();
-    const bareSockets = [];
-    installFakeWebSocket(bare.window, bareSockets, {connecting: true});
+    const bare = page({noOverlay: true});
     bootShim(bare.window);
     try {
       assert.strictEqual(
-        bareSockets[0].url,
+        bare.sockets[0].url,
         'wss://example.test/ws',
         'other pages connect bare',
       );
@@ -2651,7 +2579,9 @@ async function run() {
         page.some(ms => ms > 10000),
         `other pages back off beyond 10 s: ${page}`,
       );
-      ok('the standalone app window reconnects within 10 s, other pages back off further');
+      ok(
+        'the standalone app window reconnects within 10 s, other pages back off further',
+      );
     } catch (err) {
       fail('standalone app window reconnect cap broken', err);
     }

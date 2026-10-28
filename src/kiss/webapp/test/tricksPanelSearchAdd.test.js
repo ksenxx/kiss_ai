@@ -80,7 +80,7 @@ function run() {
   );
   assert.strictEqual(posted.length, before, 'Enter on blank posts nothing');
 
-  // --- Add click posts addTrick with the trimmed text and clears the box
+  // --- Add click posts addTrick with the trimmed text
   input(win, addInput, '  Delta promptlet  ');
   assert.ok(!addBtn.disabled, 'Add enabled with text');
   addBtn.click();
@@ -91,19 +91,7 @@ function run() {
     {type: 'addTrick', text: 'Delta promptlet'},
   ]);
   // The box keeps its text until the daemon's tricksData lists the new
-  // promptlet (ui_antipattern_drafts.test.js): a rejection must not
-  // lose what was typed.
-  assert.strictEqual(addInput.value, '  Delta promptlet  ', 'box kept until confirmed');
-  const beforeAdd = [...win.__TRICKS__];
-  send(win, {
-    type: 'tricksData',
-    tricks: ['Delta promptlet', ...beforeAdd],
-    userCount: 1,
-  });
-  assert.strictEqual(addInput.value, '', 'box cleared once confirmed');
-  // Back to the pre-add list for the reload checks below.
-  send(win, {type: 'tricksData', tricks: beforeAdd, userCount: 0});
-  assert.ok(addBtn.disabled, 'Add disabled again after clearing');
+  // promptlet, then clears: ui_antipattern_drafts.test.js.
   assert.strictEqual(doc.activeElement, addInput, 'focus stays in the box');
 
   // --- Enter in the box also submits
@@ -143,10 +131,7 @@ function run() {
   doc.getElementById('tricks-btn').click();
   assert.deepStrictEqual(rows(doc), reloaded);
 
-  // --- a malformed tricksData empties the list rather than throwing
-  send(win, {type: 'tricksData', tricks: 'nope'});
-  assert.strictEqual(JSON.stringify(win.__TRICKS__), '[]');
-  assert.strictEqual(list.textContent.trim(), 'No tricks available');
+  // A malformed tricksData emptying the list: tricksPanelCopyDelete.test.js.
 
   // --- the daemon's error reply surfaces in the error banner
   send(win, {type: 'error', text: 'Promptlet must not be empty'});

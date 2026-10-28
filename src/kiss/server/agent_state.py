@@ -47,6 +47,39 @@ agent_states: dict[str, AgentState] = {}
 """The registry: task id → live agent state."""
 
 
+def drain_queue(q: queue.Queue[str]) -> None:
+    """Discard every item queued in *q* without blocking.
+
+    Used on the ``maxsize=1`` ask-answer queues before a new question
+    is published or a new answer is put, so a stale answer never
+    satisfies a later question.
+
+    Args:
+        q: The queue to empty.
+    """
+    while not q.empty():
+        try:
+            q.get_nowait()
+        except queue.Empty:  # pragma: no cover — race guard
+            break
+
+
+def thread_alive(thread: threading.Thread | None) -> bool:
+    """True while *thread* is installed and not dead.
+
+    A thread that has been created but not yet started (``ident is
+    None``) counts as alive: between submitting a run and the worker
+    raising ``is_task_active`` the task is real and must not be
+    treated as finished.  Shared by :meth:`AgentState.thread_alive`
+    and the stop path, which evaluates the thread it captured under
+    :data:`STATE_LOCK` rather than the state's current one.
+
+    Args:
+        thread: The worker thread, or ``None`` when none is installed.
+    """
+    return thread is not None and (thread.ident is None or thread.is_alive())
+
+
 class AgentState:
     """State of one agent (or sub-agent) task run.
 
@@ -89,7 +122,6 @@ class AgentState:
         "frontend_closed",
         "use_parallel",
         "last_user_prompt",
-        "last_result_summary",
         "client_run_token",
     )
 
@@ -173,7 +205,6 @@ class AgentState:
         self.frontend_closed: bool = False
         self.use_parallel: bool = True
         self.last_user_prompt: str = ""
-        self.last_result_summary: str = ""
         # The client-minted per-submission ``taskId`` of the ``run``
         # command that created this state (``""`` for runs whose
         # client sent none).  A ``stop`` command carrying a ``taskId``
@@ -189,15 +220,8 @@ class AgentState:
         return self.parent_task_id is not None
 
     def thread_alive(self) -> bool:
-        """True while the run's worker thread is installed and not dead.
-
-        A thread that has been created but not yet started
-        (``ident is None``) counts as alive: between submitting a run
-        and the worker raising ``is_task_active`` the task is real and
-        must not be treated as finished.
-        """
-        thread = self.task_thread
-        return thread is not None and (thread.ident is None or thread.is_alive())
+        """True while the run's worker thread is installed and not dead (:func:`thread_alive`)."""
+        return thread_alive(self.task_thread)
 
     def running(self) -> bool:
         """True while this state's task is live.
@@ -237,7 +261,7 @@ class AgentState:
         if not self.is_merging:
             return False
         thread = self.merge_thread
-        if thread is None or thread.ident is None or thread.is_alive():
+        if thread is None or thread_alive(thread):
             return True
         logger.warning(
             "Releasing orphaned merge claim on tab %s (task %s): thread %s "
@@ -254,9 +278,7 @@ class AgentState:
         Callers must hold :data:`STATE_LOCK` while acting on the
         result.
         """
-        return (
-            self.is_task_active or self.merge_in_progress() or self.thread_alive()
-        )
+        return self.running() or self.merge_in_progress()
 
 
 def register(state: AgentState) -> None:

@@ -11,44 +11,30 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {inlineDesignTokens} = require('./designTokens');
 const {
   makePage: buildPage,
   send,
   stubRaf,
-  MEDIA,
   sendEmptyWorkDir,
+  settle: tick,
 } = require('./simplify2_harness');
-const {makeRow, rowByTitle} = require('./history_helpers');
-
-// main.css with its design tokens inlined (jsdom resolves no var()), so
-// the "?" mark's computed display can be asserted.
-function loadTokenisedCss(win) {
-  const styleEl = win.document.createElement('style');
-  styleEl.textContent = inlineDesignTokens(
-    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-  );
-  win.document.head.appendChild(styleEl);
-}
+const {installTokenisedCss} = require('./designTokens');
+const {
+  makeRow,
+  rowByTitle,
+  answerHistory,
+  openChatsPanel,
+} = require('./history_helpers');
 
 function makePage() {
   return buildPage({
     beforeScripts: win => {
       stubRaf(win);
-      loadTokenisedCss(win);
+      // Tokens inlined (jsdom resolves no var()), so the "?" mark's
+      // computed display can be asserted.
+      installTokenisedCss(win, 'main.css');
     },
   });
-}
-
-/** Let main.js's end-of-tick history refetch coalescing settle. */
-function tick() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-function openSidebar(win) {
-  win.document.getElementById('sidebar').classList.add('open');
 }
 
 function statusMark(row) {
@@ -96,28 +82,24 @@ function assertAskingMark(win, row, where) {
 }
 
 function testAskingRowShowsQuestionMark() {
-  const {win} = makePage();
-  openSidebar(win);
+  const {win, posted} = makePage();
+  openChatsPanel(win);
   sendEmptyWorkDir(win);
-  send(win, {
-    type: 'history',
-    offset: 0,
-    sessions: [
-      makeRow({task_id: 1, title: 'running task', is_running: true}),
-      makeRow({
-        task_id: 2,
-        title: 'asking task',
-        is_running: true,
-        awaiting_answer: true,
-      }),
-      makeRow({
-        task_id: 3,
-        title: 'finished task',
-        awaiting_answer: true,
-        endTs: 1,
-      }),
-    ],
-  });
+  answerHistory(win, posted, [
+    makeRow({task_id: 1, title: 'running task', is_running: true}),
+    makeRow({
+      task_id: 2,
+      title: 'asking task',
+      is_running: true,
+      awaiting_answer: true,
+    }),
+    makeRow({
+      task_id: 3,
+      title: 'finished task',
+      awaiting_answer: true,
+      endTs: 1,
+    }),
+  ]);
   assertSpinner(rowByTitle(win, 'running task'), 'on a plain running row');
   const asking = rowByTitle(win, 'asking task');
   assertAskingMark(win, asking, 'on a waiting row');
@@ -135,34 +117,25 @@ function testAskingRowShowsQuestionMark() {
 
 async function testMarkFlipsWithTasksUpdated() {
   const {win, posted} = makePage();
-  openSidebar(win);
+  openChatsPanel(win);
   sendEmptyWorkDir(win);
-  send(win, {
-    type: 'history',
-    offset: 0,
-    sessions: [makeRow({task_id: 5, title: 'live task', is_running: true})],
-  });
+  answerHistory(win, posted, [
+    makeRow({task_id: 5, title: 'live task', is_running: true}),
+  ]);
   assertSpinner(rowByTitle(win, 'live task'), 'before the question');
 
   // The daemon's tasks_updated after the question opened: the client
   // refetches, and the row repaints with the "?".
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
-  let req = posted.find(m => m && m.type === 'getHistory');
-  assert.ok(req, 'tasks_updated refetches the history');
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req.generation,
-    sessions: [
-      makeRow({
-        task_id: 5,
-        title: 'live task',
-        is_running: true,
-        awaiting_answer: true,
-      }),
-    ],
-  });
+  answerHistory(win, posted, [
+    makeRow({
+      task_id: 5,
+      title: 'live task',
+      is_running: true,
+      awaiting_answer: true,
+    }),
+  ]);
   assertAskingMark(
     win,
     rowByTitle(win, 'live task'),
@@ -175,14 +148,9 @@ async function testMarkFlipsWithTasksUpdated() {
   await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
-  req = posted.find(m => m && m.type === 'getHistory');
-  assert.ok(req, "the answer's tasks_updated refetches the history");
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req.generation,
-    sessions: [makeRow({task_id: 5, title: 'live task', is_running: true})],
-  });
+  answerHistory(win, posted, [
+    makeRow({task_id: 5, title: 'live task', is_running: true}),
+  ]);
   assertSpinner(rowByTitle(win, 'live task'), 'after the answer');
   win.close();
   console.log(

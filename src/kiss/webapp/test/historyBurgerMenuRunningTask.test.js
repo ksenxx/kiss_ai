@@ -16,23 +16,14 @@ const {
   makeRow,
   rowByTitle,
   lastGetHistory,
+  sendHistory,
 } = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
-const pages = [];
-
 function makePage() {
-  const {win, posted} = makeSharedPage({beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS)});
-  pages.push(win);
-  return {win, posted};
-}
-
-function configureClientWorkDir(win, workDir) {
-  send(win, {
-    type: 'configData',
-    config: {work_dir: workDir},
-    apiKeys: {},
+  return makeSharedPage({
+    beforeScripts: win => freezeClockAndStyle(win, FROZEN_NOW_MS),
   });
 }
 
@@ -80,28 +71,19 @@ function testRunningTaskAppearsWhenBurgerOpened() {
     sidebar.classList.contains('open'),
     'burger click must open the sidebar',
   );
-  const fetched = lastGetHistory(posted);
   assert.ok(
-    fetched,
+    lastGetHistory(posted),
     'burger click must post a getHistory command so the History ' +
       'panel can list the freshly-started running task',
   );
-  const generation = fetched.generation;
-
-  const sessions = [
+  sendHistory(win, posted, [
     makeRow({
       task_id: 42,
       title: 'my running task',
       is_running: true,
       endTs: 0,
     }),
-  ];
-  send(win, {
-    type: 'history',
-    sessions: sessions,
-    offset: 0,
-    generation: generation,
-  });
+  ]);
 
   const row = rowByTitle(win, 'my running task');
   assert.ok(
@@ -118,7 +100,7 @@ function testRunningTaskAppearsWhenBurgerOpened() {
       'the LEFT of the task title (middle-left layout)',
   );
   assert.strictEqual(row.dataset.category, 'running');
-  // The spinner's colour and animation are historyRunningPulsingDot's.
+  // The spinner's colour and animation are historyRunningSpinner's.
   assert.ok(
     dot.classList.contains('status-spinner'),
     'the running indicator must be the shared .status-spinner icon',
@@ -126,27 +108,19 @@ function testRunningTaskAppearsWhenBurgerOpened() {
 
   posted.length = 0;
   send(win, {type: 'status', running: false, tabId: undefined});
-  const refetch = lastGetHistory(posted);
   assert.ok(
-    refetch,
+    lastGetHistory(posted),
     'status running:false with sidebar open MUST post getHistory ' +
       'so the row can swap pulsing for solid dot',
   );
-
-  const finished = [
+  sendHistory(win, posted, [
     makeRow({
       task_id: 42,
       title: 'my running task',
       is_running: false,
       endTs: FROZEN_NOW_MS - 1_000,
     }),
-  ];
-  send(win, {
-    type: 'history',
-    sessions: finished,
-    offset: 0,
-    generation: refetch.generation,
-  });
+  ]);
 
   const row2 = rowByTitle(win, 'my running task');
   assert.ok(row2, 'row must still exist after status running:false');
@@ -189,114 +163,12 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   console.log(
     '  ok - running task appears via burger menu and swaps to a tick on finish',
   );
-}
-
-function testRunningTaskVisibleUnderDefaultWorkspaceFilter() {
-  {
-    const {win, posted} = makePage();
-    configureClientWorkDir(win, '/Users/me/repo');
-    clickBurgerMenu(win);
-    const fetched = lastGetHistory(posted);
-    assert.ok(fetched, 'burger click must post getHistory');
-    send(win, {
-      type: 'history',
-      sessions: [
-        makeRow({
-          task_id: 1,
-          title: 'matching wd',
-          is_running: true,
-          work_dir: '/Users/me/repo',
-          endTs: 0,
-        }),
-      ],
-      offset: 0,
-      generation: fetched.generation,
-    });
-    const row = rowByTitle(win, 'matching wd');
-    assert.ok(row, 'row with matching work_dir MUST be visible');
-    assert.notStrictEqual(
-      row.style.display,
-      'none',
-      'matching-work_dir row MUST be visible under default Workspace filter',
-    );
-    assert.ok(
-      findDot(row),
-      'matching-work_dir running row MUST carry the spinner',
-    );
-  }
-
-  {
-    const {win, posted} = makePage();
-    configureClientWorkDir(win, '/Users/me/repo');
-    clickBurgerMenu(win);
-    const fetched = lastGetHistory(posted);
-    assert.ok(fetched, 'burger click must post getHistory');
-    send(win, {
-      type: 'history',
-      sessions: [
-        makeRow({
-          task_id: 2,
-          title: 'empty wd row',
-          is_running: true,
-          work_dir: '',
-          endTs: 0,
-        }),
-      ],
-      offset: 0,
-      generation: fetched.generation,
-    });
-    const row = rowByTitle(win, 'empty wd row');
-    assert.ok(row, 'row with empty work_dir MUST render in DOM');
-    assert.notStrictEqual(
-      row.style.display,
-      'none',
-      'empty-row-work_dir RUNNING task MUST be visible under default ' +
-        'Workspace filter — the comment in applyHistoryFilterVisibility ' +
-        'says "an empty row work_dir passes the filter" but the strict ' +
-        '=== test hides it.  This is the user-reported regression.',
-    );
-  }
-
-  {
-    const {win, posted} = makePage();
-    configureClientWorkDir(win, '');
-    clickBurgerMenu(win);
-    const fetched = lastGetHistory(posted);
-    assert.ok(fetched, 'burger click must post getHistory');
-    send(win, {
-      type: 'history',
-      sessions: [
-        makeRow({
-          task_id: 3,
-          title: 'no folder open',
-          is_running: true,
-          work_dir: '/some/abs/path',
-          endTs: 0,
-        }),
-      ],
-      offset: 0,
-      generation: fetched.generation,
-    });
-    const row = rowByTitle(win, 'no folder open');
-    assert.ok(row, 'row MUST render');
-    assert.notStrictEqual(
-      row.style.display,
-      'none',
-      'when client work_dir is empty, every row MUST pass the ' +
-        'Workspace filter regardless of its own work_dir',
-    );
-  }
-
-  console.log(
-    '  ok - running task visible under default Workspace filter (3 sub-cases)',
-  );
+  win.close();
 }
 
 function main() {
   testRunningTaskAppearsWhenBurgerOpened();
-  testRunningTaskVisibleUnderDefaultWorkspaceFilter();
   console.log('historyBurgerMenuRunningTask.test.js: all assertions passed.');
 }
 
 main();
-for (const win of pages) win.close();

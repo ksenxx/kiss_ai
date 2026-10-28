@@ -12,7 +12,6 @@ import logging
 import os
 import platform
 import re
-import socket
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -39,6 +38,7 @@ from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import (
     coerce_bool,
+    default_route_ip,
     finish,
     read_text_waiting_for_writer,
     substitute_prompt_args,
@@ -591,27 +591,6 @@ class SummarizerFinish:
 MAX_PROGRESS_CHARS = 60_000
 
 
-def _local_ip_address() -> str:
-    """Best-effort primary IP address of this machine.
-
-    Opens a UDP socket "connected" to a public address, which selects
-    the outbound interface without sending any packets (the numeric
-    destination also avoids DNS), and reads the socket's own address.
-    Returns ``"unknown"`` when the host has no route — deliberately
-    with no hostname-resolution fallback, which could stall on a
-    broken resolver or report loopback.
-
-    Returns:
-        The machine's primary IPv4 address, or ``"unknown"``.
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            return str(sock.getsockname()[0])
-    except OSError:
-        return "unknown"
-
-
 def _nonempty(value: str) -> str:
     """*value* stripped, or ``"unknown"`` when nothing remains.
 
@@ -642,7 +621,7 @@ def _host_settings() -> dict[str, str]:
     uname = platform.uname()
     return {
         "User id": _nonempty(user),
-        "IP address": _local_ip_address(),
+        "IP address": default_route_ip() or "unknown",
         "OS": f"{_nonempty(uname.system)} {_nonempty(uname.release)}",
         "Machine info": f"{_nonempty(uname.node)} ({_nonempty(uname.machine)})",
     }
@@ -1513,21 +1492,27 @@ class RelentlessAgent(Base):
                     and (exc.__cause__ is not None or not isinstance(exc, KISSError))
                 ) or executor.step_count <= 1:
                     error_result = finish(False, False, f"{type(exc).__name__}: {exc}")
-                    if self.printer:
-                        self.printer.print(
-                            error_result,
-                            type="result",
-                            step_count=executor.step_count,
-                            total_tokens=executor.total_tokens_used,
-                            cost=f"${executor.budget_used:.4f}",
-                            cost_usd=executor.budget_used,
-                        )
-                    return error_result
-                result = finish(
-                    False,
-                    True,
-                    self._summarize_failed_session(executor, session, exc),
-                )
+                    if summaries:
+                        # Terminal like any final-session finish: merged
+                        # with the prior sessions' summaries below.
+                        result = error_result
+                    else:
+                        if self.printer:
+                            self.printer.print(
+                                error_result,
+                                type="result",
+                                step_count=executor.step_count,
+                                total_tokens=executor.total_tokens_used,
+                                cost=f"${executor.budget_used:.4f}",
+                                cost_usd=executor.budget_used,
+                            )
+                        return error_result
+                else:
+                    result = finish(
+                        False,
+                        True,
+                        self._summarize_failed_session(executor, session, exc),
+                    )
             except BaseException:
                 # The stop can land inside the ``finally``'s own bank,
                 # before its atomic append: bank the session again
@@ -1712,9 +1697,7 @@ class RelentlessAgent(Base):
             fallback when summarization itself fails.
         """
         try:
-            digest = handoff_digest(
-                executor.messages, sorted(self._files_written()), recaps=executor.recaps
-            )
+            digest = handoff_digest(executor.messages, self._files_written())
             # The caller (``perform_task``'s failure handler) banked
             # the failed executor's spend into ``self.budget_used``
             # before calling here, so the remaining budget is a plain
@@ -1784,14 +1767,26 @@ class RelentlessAgent(Base):
         For single-session terminations, the inner Result event is already
         authoritative and this helper is not called.
 
+        The offsets are read and the event printed under
+        :data:`_OFFSET_PUBLISH_LOCK`, which every publisher of new
+        offsets (:func:`publish_usage_offsets`) also holds: the printer
+        adds its CURRENT offsets back inside ``print``, so a fold on
+        another thread moving them between this method's read and the
+        printer's add would over-state the result.
+
         Args:
             payload: Dict with ``success``, ``is_continue`` and ``summary``
                 keys.  Serialized to YAML as the event ``content``.
         """
         if self.printer is None:
             return
+        locked_call(_OFFSET_PUBLISH_LOCK, self._print_merged_result, payload)
+
+    def _print_merged_result(self, payload: dict[str, Any]) -> None:
+        """Print the merged ``result`` event (``_OFFSET_PUBLISH_LOCK`` held)."""
+        printer: Any = self.printer
         budget, tokens, steps = self._usage_net_of_printer_offsets()
-        self.printer.print(
+        printer.print(
             yaml.dump(payload, sort_keys=False),
             type="result",
             step_count=steps,
@@ -1870,7 +1865,9 @@ class RelentlessAgent(Base):
         values passed down are the snapshot MINUS the current offsets.
         The offsets are read, never mutated: an earlier design zeroed
         them around the print, and an asynchronously injected stop
-        could skip the restoration (round-4 finding 5).
+        could skip the restoration (round-4 finding 5).  The caller
+        holds :data:`_OFFSET_PUBLISH_LOCK`, so the three reads see one
+        published generation.
 
         Returns:
             The net ``(budget, tokens, steps)`` triple.
@@ -1962,7 +1959,14 @@ class RelentlessAgent(Base):
             # container's working directory, so relative paths and the
             # ``Work dir`` prompt line mean the same thing inside and out.
             # An attached ``container:<id>`` ignores both (see DockerManager).
-            with DockerManager(
+            from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX, ExecBridge
+
+            # ``exec:<url>``: the tools run on a remote environment through
+            # a local exec bridge instead of a Docker container (ExecBridge).
+            manager_class: Any = (
+                ExecBridge if self.docker_image.startswith(BRIDGE_PREFIX) else DockerManager
+            )
+            with manager_class(
                 self.docker_image,
                 workdir=self.work_dir,
                 volumes={self.work_dir: self.work_dir},

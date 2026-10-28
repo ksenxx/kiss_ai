@@ -21,7 +21,8 @@ restart, even after the IP-watchdog debounce was hardened:
     including link-local 169.254.0.0/16 (auto-assigned when DHCP
     drops out) and IPv4-mapped IPv6 (``::ffff:1.2.3.4``).  Either
     one could flap in and out across watchdog ticks and look like a
-    real IP change.  The fix filters both classes out.
+    real IP change.  The fix filters link-local addresses out and asks
+    the resolver for ``AF_INET`` only, which rules out the mapped ones.
 
 3.  ``_IP_CHANGE_DEBOUNCE_TICKS`` was 2 — a 60 s window is not
     enough to ride out a VPN-connect or Ethernet↔WiFi handover that
@@ -203,7 +204,7 @@ class TestConfirmedZeroStillRestarts(IsolatedAsyncioTestCase):
 
 
 class TestLinkLocalAndMappedIpsFiltered(unittest.TestCase):
-    """``_get_local_ips`` must drop link-local 169.254/16 and ::ffff: mappings.
+    """``_get_local_ips`` must drop link-local 169.254/16 and never see ::ffff: mappings.
 
     These flap in and out across DHCP renewals / dual-stack
     address-family oscillations and would otherwise look like real
@@ -243,22 +244,27 @@ class TestLinkLocalAndMappedIpsFiltered(unittest.TestCase):
         self.assertNotIn("169.254.10.5", ips)
 
     def test_ipv4_mapped_ipv6_excluded(self) -> None:
-        """An ``::ffff:1.2.3.4``-form address must not appear in the result."""
+        """Mapped ``::ffff:1.2.3.4`` addresses are excluded at the source.
+
+        The hostname lookup asks for ``AF_INET`` only, so the resolver
+        can never hand back an IPv6 (mapped or not) sockaddr; there is
+        no string filter for the ``::ffff:`` prefix any more.
+        """
+        families: list[object] = []
 
         def fake_getaddrinfo(
-            _host: str, _port: object, _family: object,
+            _host: str, _port: object, family: object,
         ) -> list[tuple[object, object, object, str, tuple[str, int]]]:
+            families.append(family)
             return [
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "",
                  ("10.0.0.7", 0)),
-                (socket.AF_INET, socket.SOCK_STREAM, 0, "",
-                 ("::ffff:10.0.0.7", 0)),
             ]
 
         setattr(socket, "getaddrinfo", fake_getaddrinfo)  # noqa: B010
         ips = _get_local_ips()
-        self.assertIn("10.0.0.7", ips)
-        self.assertNotIn("::ffff:10.0.0.7", ips)
+        self.assertEqual(ips, frozenset({"10.0.0.7"}))
+        self.assertEqual(families, [socket.AF_INET])
 
     def test_only_link_local_yields_empty_set(self) -> None:
         """If every discovered address is link-local, the result is empty.

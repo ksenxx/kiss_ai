@@ -59,6 +59,12 @@ def _talk_event(
     return event
 
 
+def _reset_shared_player() -> None:
+    """Discard the daemon's shared player so each test starts with a fresh talkId dedupe."""
+    with talk_player._shared_lock:
+        talk_player._shared_player = None
+
+
 class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
     """The daemon plays talk clips for headless local clients."""
 
@@ -71,7 +77,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         os.environ["KISS_SORCAR_PLAY_CMD"] = (
             f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
         )
-        talk_player.reset_shared_player_for_tests()
+        _reset_shared_player()
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         from kiss.server.web_server import _generate_self_signed_cert
@@ -94,7 +100,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
             os.environ.pop("KISS_SORCAR_PLAY_CMD", None)
         else:
             os.environ["KISS_SORCAR_PLAY_CMD"] = self.saved_play_cmd
-        talk_player.reset_shared_player_for_tests()
+        _reset_shared_player()
         if th._db_conn is not None:
             th._db_conn.close()
         restore_persistence(self.saved)

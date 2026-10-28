@@ -27,6 +27,7 @@ scans the third-party channel directory to tell channel names from paths.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import uuid
 import warnings
@@ -121,12 +122,136 @@ def _parent_after_a_run(repo: Path) -> ChatSorcarAgent:
     return parent
 
 
+# SEA scripts whose ``settings()`` picks a model (label -> source).
+PICKS_MODEL = {
+    "settings": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'claude-sonnet-4-5'}
+""",
+    "worker": """
+from kiss.agents.seas.base.base_sea import WorkerSea
+
+class Sea(WorkerSea):
+    def settings(self, settings):
+        return settings | {'model': 'claude-sonnet-4-5'}
+""",
+    # The SEA class defined under a condition the script evaluates
+    # at import time (true on every platform the suite runs on).
+    "conditional": """
+import os
+from kiss.agents.seas.base.base_sea import BaseSea
+
+if os.name in ('posix', 'nt'):
+    class Sea(BaseSea):
+        def settings(self, settings):
+            return settings | {'model': 'claude-sonnet-4-5'}
+""",
+}
+
+# SEA scripts that leave the model (and so the parent's endpoint) alone.
+LEAVES_INHERITANCE = {
+    "none": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': None}
+""",
+    # A SEA with no ``settings`` and a module-level ``model()``
+    # (an ordinary function, not a method of the SEA).
+    "legacy_getter": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def model() -> str:
+    return 'claude-sonnet-4-5'
+
+class Sea(BaseSea):
+    pass
+""",
+    "empty": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {}
+""",
+}
+
+# SEA scripts whose settings cannot be evaluated: (label, source, expected
+# error prefix with ``{canonical!r}`` standing for the script's resolved path).
+BROKEN = [
+    ("unparsable", "def settings(:\n", "Error: SEA {canonical!r} failed to import"),
+    (
+        "no_class",
+        "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
+        "Error: SEA {canonical!r} must define exactly one subclass "
+        "of BaseSea (kiss.agents.seas.base.base_sea); found none",
+    ),
+    (
+        "async",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    async def settings(self, settings):  # a coroutine, not a dict
+        return settings
+""",
+        "Error: settings() of SEA {canonical!r} must return a dict, got coroutine",
+    ),
+    (
+        "raising",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        raise RuntimeError('boom')
+""",
+        "Error: settings() of SEA {canonical!r} raised: RuntimeError: boom",
+    ),
+    (
+        "unknown_key",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'models': 'x'}
+""",
+        "Error: SEA {canonical!r}: settings()",
+    ),
+    (
+        "wrong_type",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 5}
+""",
+        "Error: SEA {canonical!r}: settings()",
+    ),
+]
+
+
+def _write_script(repo: Path, label: str, body: str) -> Path:
+    """Write *body* as ``scripts/<label>_sea.py`` under *repo* and return its path."""
+    scripts = repo / "scripts"
+    scripts.mkdir(exist_ok=True)
+    script = scripts / f"{label}_sea.py"
+    script.write_text(body)
+    return script
+
+
 def _dispatch(
     parent: Any,
     inherit: bool = True,
     model_name: str = "",
     budget: float | None = None,
-    options: RunOptions = RunOptions(),
+    options: RunOptions | None = None,
 ) -> daemon_client.TaskResult:
     """Run ``dispatch_result`` for ``sorcar_sea.py`` on *parent*'s repo."""
     result = dispatch_result(
@@ -139,7 +264,7 @@ def _dispatch(
         30.0,
         parent_agent=parent,
         inherit=inherit,
-        options=options,
+        options=options or RunOptions(),
     )
     assert isinstance(result, daemon_client.TaskResult), result
     return result
@@ -271,10 +396,9 @@ class Sea(BaseSea):
         assert _sent(daemon)["model"] == "claude-sonnet-4-5"
         assert _sent(daemon)["modelConfig"] is None
 
+    @pytest.mark.parametrize("label, body", PICKS_MODEL.items(), ids=list(PICKS_MODEL))
     def test_a_script_that_picks_its_model_gets_no_parent_model_config(
-        self,
-        env: IsolatedKissHome,
-        daemon: RecordingDaemon,
+        self, env: IsolatedKissHome, daemon: RecordingDaemon, label: str, body: str
     ) -> None:
         """The daemon applies the script's ``model`` setting without touching ``modelConfig``.
 
@@ -282,172 +406,88 @@ class Sea(BaseSea):
         script chooses the model: ``run_agent`` resolves the script's
         ``settings()`` (its ``model`` key) and hands them to
         ``dispatch_result``, where a ``model`` in them blocks the
-        ``model_config`` inheritance.  A script that names no model, or
-        sets it to ``None``, leaves the inheritance (so does a script
-        defining the removed ``model()`` getter, which is an ordinary
-        function now); a script whose settings cannot be evaluated is
-        an error before any dispatch.
+        ``model_config`` inheritance.
         """
         parent = _parent_after_a_run(env.repo)
         run_agent = make_run_agent_tool(str(env.repo), parent)
-        scripts = env.repo / "scripts"
-        scripts.mkdir()
-        picks_model = {
-            "settings": """
-from kiss.agents.seas.base.base_sea import BaseSea
+        script = _write_script(env.repo, label, body)
+        text = run_agent(task="say hi", agent=str(script), timeout="30")
+        assert yaml.safe_load(text)["success"] is True, text
+        assert _sent(daemon)["modelConfig"] is None
+        # The wire ``model`` is still the parent's; the daemon's
+        # override replaces it with the script's choice.
+        assert _sent(daemon)["model"] == PARENT_MODEL
 
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'claude-sonnet-4-5'}
-""",
-            "worker": (
-                """
-from kiss.agents.seas.base.base_sea import WorkerSea
+    @pytest.mark.parametrize(
+        "label, body", LEAVES_INHERITANCE.items(), ids=list(LEAVES_INHERITANCE)
+    )
+    def test_a_script_that_names_no_model_keeps_the_parent_model_config(
+        self, env: IsolatedKissHome, daemon: RecordingDaemon, label: str, body: str
+    ) -> None:
+        """A script that names no model, or sets it to ``None``, leaves the inheritance.
 
-class Sea(WorkerSea):
-    def settings(self, settings):
-        return settings | {'model': 'claude-sonnet-4-5'}
-"""
-            ),
-            # The SEA class defined under a condition the script evaluates
-            # at import time (true on every platform the suite runs on).
-            "conditional": """
-import os
-from kiss.agents.seas.base.base_sea import BaseSea
+        So does a script defining the removed ``model()`` getter, which
+        is an ordinary function now.
+        """
+        parent = _parent_after_a_run(env.repo)
+        run_agent = make_run_agent_tool(str(env.repo), parent)
+        script = _write_script(env.repo, label, body)
+        text = run_agent(task="say hi", agent=str(script), timeout="30")
+        assert yaml.safe_load(text)["success"] is True, text
+        assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
+        assert _sent(daemon)["model"] == PARENT_MODEL
 
-if os.name in ('posix', 'nt'):
-    class Sea(BaseSea):
-        def settings(self, settings):
-            return settings | {'model': 'claude-sonnet-4-5'}
-""",
-        }
-        for label, body in picks_model.items():
-            script = scripts / f"{label}_sea.py"
-            script.write_text(body)
+    @pytest.mark.parametrize("label, body, expected", BROKEN, ids=[b[0] for b in BROKEN])
+    def test_a_script_whose_settings_cannot_be_evaluated_dispatches_nothing(
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
+        label: str,
+        body: str,
+        expected: str,
+    ) -> None:
+        """A syntax error, no SEA class or a non-dict ``settings`` is a clean error.
+
+        A file that does not even compile "failed to import"; one that
+        runs but misdeclares its settings names the settings() problem.
+        The diagnostic names the script by its canonical path
+        (``resolve_sea_path``), which on macOS differs from the ``/var``
+        spelling of ``tmp_path``, and quotes it with ``!r`` (doubled
+        backslashes on Windows).
+        """
+        parent = _parent_after_a_run(env.repo)
+        run_agent = make_run_agent_tool(str(env.repo), parent)
+        script = _write_script(env.repo, label, body)
+        dispatched = len(daemon.run_commands)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             text = run_agent(task="say hi", agent=str(script), timeout="30")
-            assert yaml.safe_load(text)["success"] is True, (label, text)
-            assert _sent(daemon)["modelConfig"] is None, label
-            # The wire ``model`` is still the parent's; the daemon's
-            # override replaces it with the script's choice.
-            assert _sent(daemon)["model"] == PARENT_MODEL, label
-        leaves_inheritance = {
-            "none": """
-from kiss.agents.seas.base.base_sea import BaseSea
+            gc.collect()
+        # An ``async def settings`` coroutine is closed, not dropped for
+        # the GC to complain about ("was never awaited").
+        assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert text.startswith(expected.format(canonical=str(script.resolve()))), text
+        assert len(daemon.run_commands) == dispatched
 
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': None}
-""",
-            # A SEA with no ``settings`` and a module-level ``model()``
-            # (an ordinary function, not a method of the SEA).
-            "legacy_getter": """
-from kiss.agents.seas.base.base_sea import BaseSea
+    def test_an_explicit_model_wins_over_the_script_and_the_settings_argument_decides(
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
+    ) -> None:
+        """An explicit model wins over the script's; ``dispatch_result`` obeys ``settings``.
 
-def model() -> str:
-    return 'claude-sonnet-4-5'
-
-class Sea(BaseSea):
-    pass
-""",
-            "empty": """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {}
-""",
-        }
-        for label, body in leaves_inheritance.items():
-            script = scripts / f"{label}_sea.py"
-            script.write_text(body)
-            text = run_agent(task="say hi", agent=str(script), timeout="30")
-            assert yaml.safe_load(text)["success"] is True, (label, text)
-            assert _sent(daemon)["modelConfig"] == PARENT_CONFIG, label
-            assert _sent(daemon)["model"] == PARENT_MODEL, label
-        # An explicit model wins over the script's; when it is the
-        # parent's launch model the parent's endpoint still applies.
-        text = run_agent(
-            task="say hi",
-            agent=str(scripts / "settings_sea.py"),
-            model=PARENT_MODEL,
-            timeout="30",
-        )
+        When the explicit model is the parent's launch model the
+        parent's endpoint still applies.
+        """
+        parent = _parent_after_a_run(env.repo)
+        run_agent = make_run_agent_tool(str(env.repo), parent)
+        script = _write_script(env.repo, "settings", PICKS_MODEL["settings"])
+        text = run_agent(task="say hi", agent=str(script), model=PARENT_MODEL, timeout="30")
         assert yaml.safe_load(text)["success"] is True, text
         assert _sent(daemon)["model"] == PARENT_MODEL
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
         assert _sent(daemon)["provenance"]["model"] == "explicit"
         assert _sent(daemon)["provenance"]["timeout"] == "explicit"
-        # A script whose settings cannot be evaluated — a syntax error,
-        # no SEA class (module-level getters of the old contract), a
-        # ``settings`` method that does not return a dict — is a clean
-        # error and dispatches nothing.
-        broken = {
-            "unparsable": "def settings(:\n",
-            "no_class": "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
-            "async": """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    async def settings(self, settings):  # a coroutine, not a dict
-        return settings
-""",
-            "raising": """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        raise RuntimeError('boom')
-""",
-            "unknown_key": """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'models': 'x'}
-""",
-            "wrong_type": """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 5}
-""",
-        }
-        dispatched = len(daemon.run_commands)
-        for label, body in broken.items():
-            script = scripts / f"{label}_sea.py"
-            script.write_text(body)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                text = run_agent(task="say hi", agent=str(script), timeout="30")
-                gc.collect()
-            # An ``async def settings`` coroutine is closed, not dropped for
-            # the GC to complain about ("was never awaited").
-            assert not [w for w in caught if issubclass(w.category, RuntimeWarning)], label
-            # A file that does not even compile "failed to import";
-            # one that runs but misdeclares its settings names the
-            # settings() problem.  The diagnostic names the script by
-            # its canonical path (``resolve_sea_path``), which on
-            # macOS differs from the ``/var`` spelling of ``tmp_path``, and
-            # quotes it with ``!r`` (doubled backslashes on Windows).
-            canonical = str(script.resolve())
-            if label == "unparsable":
-                expected = f"Error: SEA {canonical!r} failed to import"
-            elif label == "no_class":
-                expected = (
-                    f"Error: SEA {canonical!r} must define exactly one subclass "
-                    "of BaseSea (kiss.agents.seas.base.base_sea); found none"
-                )
-            elif label == "async":
-                expected = (
-                    f"Error: settings() of SEA {canonical!r} must return a dict, got coroutine"
-                )
-            elif label == "raising":
-                expected = f"Error: settings() of SEA {canonical!r} raised: RuntimeError: boom"
-            else:
-                expected = f"Error: SEA {canonical!r}: settings()"
-            assert text.startswith(expected), (label, text)
-            assert len(daemon.run_commands) == dispatched, label
         # ``dispatch_result`` itself: the ``settings`` argument decides.
         _dispatch(parent)
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
@@ -765,13 +805,15 @@ class TestFullRunInheritance:
             parent = _run_parent(env, server)
         finally:
             server.stop()
-        (call,) = daemon.run_commands
-        assert parent._wt_work_dir is not None
-        worktree_dir = Path(call["workDir"])
-        assert worktree_dir == parent._wt_work_dir
-        assert worktree_dir != env.repo.resolve() and worktree_dir != env.repo
-        assert ".kiss-worktrees" in worktree_dir.parts
-        parent.discard()
+        try:
+            (call,) = daemon.run_commands
+            assert parent._wt_work_dir is not None
+            worktree_dir = Path(call["workDir"])
+            assert worktree_dir == parent._wt_work_dir
+            assert worktree_dir != env.repo.resolve() and worktree_dir != env.repo
+            assert ".kiss-worktrees" in worktree_dir.parts
+        finally:
+            parent.discard()
 
 
 @pytest.mark.slow
@@ -790,25 +832,27 @@ def test_parent_container_is_attached_by_the_sub_task(
 
     from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX, DockerManager
 
-    client = docker.from_env()
-    container = client.containers.run(
-        "python:3.11-slim",
-        command="sleep infinity",
-        detach=True,
-        name=f"kiss-inherit-{uuid.uuid4().hex[:8]}",
-    )
-    container_id = str(container.id)
-    try:
-        parent = _parent_after_a_run(env.repo)
-        with DockerManager(ATTACH_PREFIX + container_id) as manager:
-            parent.docker_manager = manager
-            assert manager.container is not None
+    # ``closing`` releases the client's connection pool even when the
+    # container fails to start.
+    with contextlib.closing(docker.from_env()) as client:
+        container = client.containers.run(
+            "python:3.11-slim",
+            command="sleep infinity",
+            detach=True,
+            name=f"kiss-inherit-{uuid.uuid4().hex[:8]}",
+        )
+        container_id = str(container.id)
+        try:
+            parent = _parent_after_a_run(env.repo)
+            with DockerManager(ATTACH_PREFIX + container_id) as manager:
+                parent.docker_manager = manager
+                assert manager.container is not None
+                _dispatch(parent)
+                assert _sent(daemon)["dockerImage"] == ATTACH_PREFIX + container_id
+            # Explicit ``docker_image`` is not a tool argument: the only way a
+            # sub-task reaches a container is through its parent.
+            parent.docker_manager = None
             _dispatch(parent)
-            assert _sent(daemon)["dockerImage"] == ATTACH_PREFIX + container_id
-        # Explicit ``docker_image`` is not a tool argument: the only way a
-        # sub-task reaches a container is through its parent.
-        parent.docker_manager = None
-        _dispatch(parent)
-        assert _sent(daemon)["dockerImage"] == ""
-    finally:
-        container.remove(force=True)
+            assert _sent(daemon)["dockerImage"] == ""
+        finally:
+            container.remove(force=True)

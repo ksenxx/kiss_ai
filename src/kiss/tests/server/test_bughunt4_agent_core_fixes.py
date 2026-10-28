@@ -55,6 +55,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, auto_commit_changes
 from kiss.core.models.model_info import model as _model_factory
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.conftest import run_git
 
 
@@ -424,7 +425,7 @@ class TestF12DeleteBranchFailureSurfaced(_TempDbTestBase):
             wt_dir=Path(self.tmpdir) / "gone",
             baseline_commit=None,
         )
-        result, stash_warning, cleanup_warning = agent._do_merge(wt)
+        result, _resolved, stash_warning, cleanup_warning = agent._do_merge(wt)
 
         assert result == MergeResult.SUCCESS
         assert stash_warning == ""
@@ -442,13 +443,13 @@ class TestF12DeleteBranchFailureSurfaced(_TempDbTestBase):
         run_git(holder, "commit", "-m", "agent work")
 
         agent: Any = ChatSorcarAgent("f12b")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch="kiss/wt-test2",
             original_branch="main",
             wt_dir=Path(self.tmpdir) / "gone2",
             baseline_commit=None,
-        )
+        ))
         msg = agent.merge()
         assert "Successfully merged" in msg
         assert "could not be deleted" in msg

@@ -27,6 +27,7 @@ const {
   activeFrameDoc,
   stubMonaco,
 } = require('./simplify2_harness.js');
+const {contentTabs} = require('./subagent_tab_helpers');
 
 function pageWithMonaco() {
   let created;
@@ -36,10 +37,6 @@ function pageWithMonaco() {
     },
   });
   return Object.assign(page, {created});
-}
-
-function contentTabs(win) {
-  return win._testApi.openTabs().filter(t => t.isContentTab);
 }
 
 function closeActiveContentTab(win) {

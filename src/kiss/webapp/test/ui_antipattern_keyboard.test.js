@@ -13,7 +13,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {waitFor} = require('./simplify2_harness');
+const {recordTimers, fireTimers} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 const TS = 1767225600000;
@@ -62,8 +62,10 @@ async function main() {
     win.close();
   });
 
-  await test('Escape closes an open tooltip; hover keeps its 400 ms delay', async () => {
+  await test('Escape closes an open tooltip; hover keeps its 400 ms delay', () => {
     const {win} = h.makePage();
+    // Cancellation-aware: a 400 ms delay main.js clears never fires.
+    const timers = recordTimers(win, 400);
     const tip = h.byId(win, 'custom-tooltip');
     const btn = h.byId(win, 'menu-btn');
     focusEvent(win, btn, 'focusin');
@@ -76,10 +78,14 @@ async function main() {
       !tip.classList.contains('visible'),
       'hover does not show at once',
     );
-    await waitFor(
-      () => tip.classList.contains('visible'),
-      'hover shows after the delay',
+    const hover = timers.filter(t => !t.cleared);
+    assert.strictEqual(
+      hover.length,
+      1,
+      'the hover armed one live 400 ms delay',
     );
+    fireTimers(hover);
+    assert.ok(tip.classList.contains('visible'), 'hover shows after the delay');
     btn.dispatchEvent(new win.MouseEvent('mouseout', {bubbles: true}));
     assert.ok(!tip.classList.contains('visible'));
     win.close();

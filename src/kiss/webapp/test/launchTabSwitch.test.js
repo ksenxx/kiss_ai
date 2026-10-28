@@ -52,22 +52,10 @@ function tabIds(win) {
   return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
-// A real pick by the user: a tab on the group strip is clicked there; a
-// chat is picked in the Chats panel.  Either way the user's finger lands
+// A real pick by the user: a chat is picked in the Chats panel (the
+// group strip never lists another chat's tab).  The user's finger lands
 // first (pointerdown), which is what ends a launch.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  if (el) {
-    el.dispatchEvent(new win.MouseEvent('pointerdown', {bubbles: true}));
-    el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    return;
-  }
-  assert.ok(
-    tabIds(win).includes(tabId),
-    `tab ${tabId} must exist in the tab bar`,
-  );
   win.document.dispatchEvent(
     new win.MouseEvent('pointerdown', {bubbles: true}),
   );

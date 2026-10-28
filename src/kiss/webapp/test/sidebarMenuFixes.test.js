@@ -27,6 +27,7 @@ const {
   makePage: makeChatPage,
   stubRaf,
   fakeMatchMedia,
+  stubClipboard,
 } = require('./simplify2_harness');
 const {
   send,
@@ -47,24 +48,17 @@ const {
   openExplorer,
   explorerRow,
   openScm,
+  pinWorkspace,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
 
 function makePage() {
-  const copied = [];
+  let copied;
   function beforeScripts(win) {
     stubRaf(win);
     fakeMatchMedia(win, true);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      value: {
-        writeText: text => {
-          copied.push(text);
-          return Promise.resolve();
-        },
-      },
-      configurable: true,
-    });
+    copied = stubClipboard(win).writes;
     // Native dialogs are gone from main.js; any call is a regression.
     win.prompt = () => {
       throw new Error('window.prompt must not be called');
@@ -97,10 +91,6 @@ function answerPrompt(win, id, value) {
   const {input} = promptToast(win, id);
   input.value = value;
   key(win, input, 'Enter');
-}
-
-function pinWorkspace(win) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
 }
 
 async function main() {

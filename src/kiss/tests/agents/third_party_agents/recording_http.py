@@ -191,7 +191,8 @@ class JsonWebhookServer(RecordingServer):
     Stands in for JSON endpoints (group-robot webhooks, typing
     indicators, bot APIs) whose reply the test fixes in advance.  Each
     request is recorded as ``{"method", "path", "query", "headers",
-    "json"}`` (``query`` is ``parse_qs`` of the URL query, ``json`` the
+    "json"}`` (``query`` is ``parse_qs`` of the URL query with blank
+    values kept, so ``?cursor=`` is visible; ``json`` the
     decoded body: ``{}`` when empty, ``None`` when malformed); a test
     changes ``response_status`` / ``response_body`` before the request to
     simulate an API error.
@@ -223,13 +224,14 @@ class RecordingHandler(BaseHTTPRequestHandler):
         """Append this request (method, path, query, authorization, *body*, *extra*).
 
         ``path`` is the URL path without the query string; ``query`` is the
-        parsed query (``parse_qs``).  Returns the recorded entry.
+        parsed query (``parse_qs``, blank values kept).  Returns the
+        recorded entry.
         """
         split = urlsplit(self.path)
         entry: dict[str, Any] = {
             "method": self.command,
             "path": split.path,
-            "query": parse_qs(split.query),
+            "query": parse_qs(split.query, keep_blank_values=True),
             "authorization": self.headers.get("Authorization", ""),
             "body": body,
             **extra,
@@ -278,7 +280,7 @@ class JsonWebhookHandler(RecordingHandler):
         entry = {
             "method": self.command,
             "path": split.path,
-            "query": parse_qs(split.query),
+            "query": parse_qs(split.query, keep_blank_values=True),
             "headers": dict(self.headers),
             "json": self._read_body(),
         }

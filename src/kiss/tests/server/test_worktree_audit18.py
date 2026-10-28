@@ -79,6 +79,7 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +154,7 @@ def _make_wt_with_commit(
         original_branch="main",
         wt_dir=wt_dir,
     )
-    agent._wt = wt
+    seed_worktree(agent, wt)
     return wt
 
 

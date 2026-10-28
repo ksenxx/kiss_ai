@@ -35,6 +35,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import ClientConnection
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.agents.sorcar.sea_apply import SETTING_FIELDS
 from kiss.core import tool_interrupt
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
@@ -79,7 +80,19 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     without the terminal status the task may still be touching the
     workspace.  Callers that report the timeout onward — the
     ``run_agent`` dispatch — must not claim the task was stopped.
+
+    Attributes:
+        result: The task's :class:`TaskResult` with the spend reported
+            so far (its ``usage_info`` / ``result`` events), all-zero
+            when none arrived.  The task may still be spending on the
+            daemon, but what it already reported is charged to the
+            caller like every other abort of :func:`run`.
     """
+
+    def __init__(self, message: str, result: TaskResult) -> None:
+        super().__init__(message)
+        self.result = result
+
 
 class CancelledError(Exception):
     """The caller's *cancel* event was set while :func:`run` waited.
@@ -103,6 +116,19 @@ class CancelledError(Exception):
         super().__init__(message)
         self.result = result
         self.confirmed = confirmed
+
+
+class RunRefusedError(Exception):
+    """The daemon turned the ``run`` down, so no task was started.
+
+    Raised by :func:`run` when the daemon answers the ``run`` command
+    with an ``error`` event of ``code: "prompt_refused"`` (the
+    daemon's ``_refuse_run``: a self-update being installed is the
+    case an API client can hit).  The message is the daemon's own
+    text.  Nothing ran and nothing was spent, so the wait ends at once
+    instead of lasting the whole *timeout* (forever with
+    ``timeout=None``), and no ``stop`` is cascaded to the tab.
+    """
 
 
 class StoppedOnTimeoutError(TimeoutError):
@@ -131,6 +157,12 @@ class StoppedOnTimeoutError(TimeoutError):
         super().__init__(message)
         self.result = result
 
+
+# Aborts of :func:`run` that cascade no ``stop`` to the dispatched task:
+# a timeout's contract is "the task keeps running" (a stop-on-timeout
+# or cancel already sent its stop inside the read loop), and a refused
+# run started no task at all.
+_NO_STOP_CASCADE = (TimeoutError, CancelledError, RunRefusedError)
 
 _TOOL_CALL_WAKE_SECONDS = 0.5
 """Socket read wake-up interval while :func:`run` serves a tool call or a *cancel* event.
@@ -553,32 +585,35 @@ def run_command(
     Returns:
         The command dict.
     """
-    cmd = {
+    settings = {
+        "work_dir": work_dir,
+        "model": model,
+        "chat_id": chat_id,
+        "max_budget": max_budget,
+        "model_config": model_config,
+        "use_web_tools": use_web_tools,
+        "auto_classify": auto_classify,
+        "use_memory": use_memory,
+        "tool_profile": tool_profile,
+        "docker_image": docker_image,
+    }
+    cmd: dict[str, Any] = {
         "type": "run",
         "prompt": prompt,
         "tabId": tab_id,
         "taskId": run_token,
-        "chatId": chat_id,
-        "workDir": work_dir,
+        **{SETTING_FIELDS[key]: value for key, value in settings.items()},
         "tabScopeWorkDir": scope_work_dir,
         "parentTaskId": parent_task_id,
         "parentTabId": parent_tab_id,
         "parentReviewer": parent_reviewer,
         "sideChannel": side_channel,
         "cronJob": cron_job,
-        "model": model,
         "systemPrompt": system_prompt,
         "seaPath": sea_path,
-        "maxBudget": max_budget,
-        "modelConfig": model_config,
-        "useWebTools": use_web_tools,
-        "classifyTasks": auto_classify,
-        "useMemory": use_memory,
         "isParallel": is_parallel,
         "appendToSystemPrompt": add_to_system_prompt,
         "appendToPrompt": add_to_prompt,
-        "toolProfile": tool_profile,
-        "dockerImage": docker_image,
         "inheritTools": inherit_tools,
         "isolatedRepos": dict(isolated_repos or {}),
         "workspace": workspace,
@@ -1044,6 +1079,11 @@ def run(
         StoppedOnTimeoutError: When *stop_on_timeout* is true and the
             daemon confirmed the stop; its ``result`` carries the
             stopped task's spend.  A subclass of ``TimeoutError``.
+        RunRefusedError: When the daemon refuses the ``run`` (an
+            ``error`` event with ``code: "prompt_refused"``, e.g. while
+            a self-update is being installed): no task was started, so
+            the wait ends at once with the daemon's reason instead of
+            lasting the whole *timeout*.
 
     Every other abort of the wait — most importantly the
     ``KeyboardInterrupt`` injected when the CALLING task is stopped
@@ -1194,7 +1234,7 @@ def run(
                                 seen.task_result(),
                                 confirmed=False,
                             )
-                        raise StopUnconfirmedTimeoutError(timeout_msg)
+                        raise StopUnconfirmedTimeoutError(timeout_msg, seen.task_result())
                     raise TimeoutError(timeout_msg)
                 # Capped like the no-deadline wait: an injected abort
                 # (the calling task's Stop) cannot land inside ``recv``,
@@ -1218,6 +1258,14 @@ def run(
             if not isinstance(event, dict) or event.get("tabId") != tab_id:
                 continue
             etype = event.get("type")
+            if etype == "error" and event.get("code") == "prompt_refused":
+                # The daemon's ``_refuse_run``: a ``status running=false``
+                # (which the branch below ignores, nothing had started)
+                # followed by this frame.  No task exists to wait for.
+                raise RunRefusedError(
+                    f"the sorcar daemon refused the task: "
+                    f"{str(event.get('text') or '').strip() or 'refused'}"
+                )
             if etype == "clear":
                 seen.chat_id = str(event.get("chat_id", "") or "") or seen.chat_id
             elif etype != "status" and event.get("taskId"):
@@ -1280,7 +1328,7 @@ def run(
                     return seen.task_result()
     except BaseException as exc:
         aborted = exc
-        if ws is not None and not isinstance(exc, (TimeoutError, CancelledError)):
+        if ws is not None and not isinstance(exc, _NO_STOP_CASCADE):
             # The dispatched task is stopped below, but whatever it
             # already spent stays spent: hand the caller the latest
             # totals so it can still charge them (``run_agent`` folds
@@ -1290,20 +1338,13 @@ def run(
     finally:
         # Nothing to cascade or close when the connect itself failed:
         # there is no task and no tab on the daemon's side.
-        if (
-            ws is not None
-            and aborted is not None
-            and not isinstance(aborted, (TimeoutError, CancelledError))
-        ):
+        if ws is not None and aborted is not None and not isinstance(aborted, _NO_STOP_CASCADE):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
-            # it the orphan keeps running invisibly.  A TimeoutError
-            # is excluded on purpose: its
-            # documented contract is "the task keeps running", and a
-            # ``stop_on_timeout`` timeout or a *cancel* already sent its
-            # stop (and awaited confirmation) inside the read loop.
-            # Best-effort, like the closeTab below.
+            # it the orphan keeps running invisibly (the exclusions are
+            # explained at ``_NO_STOP_CASCADE``).  Best-effort, like the
+            # closeTab below.
             # ``taskId`` carries this run's token so the daemon
             # rejects the stop if the tab was already reused by a
             # newer run (see ``_stop_task``'s run_token guard).

@@ -11,71 +11,33 @@
 // loaded.  Runs with: node test/historyChatHeaderStatus.test.js
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {
   makePage: makeChatPage,
   send,
-  MEDIA,
   ofType,
   sendEmptyWorkDir,
+  settle: tick,
 } = require('./simplify2_harness');
-const {inlineDesignTokens} = require('./designTokens');
+const {installTokenisedCss} = require('./designTokens');
+const {makeRow: helperMakeRow, sendHistory} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({
     bodyClass: 'remote-chat',
-    beforeScripts(win) {
-      const styleEl = win.document.createElement('style');
-      styleEl.textContent = inlineDesignTokens(
-        fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
-      );
-      win.document.head.appendChild(styleEl);
-    },
+    beforeScripts: win => installTokenisedCss(win, 'main.css'),
   });
-}
-
-/** Let main.js's end-of-tick history refetch coalescing settle. */
-function tick() {
-  return new Promise(resolve => setTimeout(resolve, 0));
 }
 
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
 }
 
+/** A row titled after its task id that is still open (`endTs: 0`). */
 function makeRow(overrides) {
-  return Object.assign(
-    {
-      id: 'chat-' + overrides.task_id,
-      task_id: overrides.task_id,
-      title: 'task ' + overrides.task_id,
-      timestamp: 1_700_000_000,
-      preview: 'task ' + overrides.task_id,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      awaiting_answer: false,
-      tokens: 1,
-      cost: 0,
-      steps: 1,
-      is_favorite: false,
-      work_dir: '',
-      startTs: 1_700_000_000_000,
-      endTs: 0,
-    },
-    overrides,
-  );
-}
-
-/** Reply to the latest getHistory request (or the first load). */
-function sendHistory(win, posted, sessions, offset) {
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    offset: offset || 0,
-    generation: req ? req.generation : undefined,
-    sessions,
+  return helperMakeRow({
+    title: 'task ' + overrides.task_id,
+    endTs: 0,
+    ...overrides,
   });
 }
 
@@ -507,7 +469,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
-  let resumes = ofType(posted, 'resumeSession');
+  const resumes = ofType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the chat is resumed once');
   assert.strictEqual(resumes[0].id, 'A', 'at chat A');
   assert.strictEqual(resumes[0].taskId, 2, 'at its last task');
@@ -575,36 +537,8 @@ function testChevronFoldsAndHeaderOpensLastTask() {
     a.classList.contains('collapsed'),
     'and leaves the panel as it was',
   );
-
-  // Clicking the icon in the header behaves like the header.
-  openSidebar(win);
-  posted.length = 0;
-  sendHistory(win, posted, [
-    makeRow({
-      id: 'C',
-      task_id: 9,
-      is_running: true,
-      has_events: true,
-      startTs: 1_700_000_950_000,
-    }),
-  ]);
-  const c = group(win, 'C');
-  assert.ok(
-    c.classList.contains('collapsed'),
-    'a running chat starts folded too',
-  );
-  posted.length = 0;
-  headerMark(win, 'C').click();
-  assert.ok(
-    c.classList.contains('collapsed'),
-    'the icon leaves the panel folded',
-  );
-  resumes = ofType(posted, 'resumeSession');
-  assert.strictEqual(resumes.length, 1, 'and opens the running chat');
-  assert.strictEqual(resumes[0].id, 'C');
-  assert.strictEqual(resumes[0].taskId, 9);
-  assert.notStrictEqual(win.kissActiveTabId(), chatATab, 'in a fresh tab');
-  assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
+  // (The icon in the header behaving like the header is pinned by
+  // testHeaderShowsLastTaskIcon.)
   win.close();
   console.log(
     '  ok - the chevron folds the chat panel; the header opens its last task',

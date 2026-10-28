@@ -179,7 +179,11 @@ class StandInModelServer:
     completion call and returns the response body to send back, so a
     test can script exactly what each agent does (finish immediately,
     run a shell command, block until the test releases it, ...).
+    ``handler_class`` may be overridden by a subclass that needs to see
+    the raw request (headers, scripted HTTP failures).
     """
+
+    handler_class: type[BaseHTTPRequestHandler]
 
     def __init__(
         self, responder: Callable[[dict[str, Any]], dict[str, Any]]
@@ -191,7 +195,7 @@ class StandInModelServer:
                 chat-completions response body to return.
         """
         self.responder = responder
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _StandInHandler)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), self.handler_class)
         server.responder = responder  # type: ignore[attr-defined]
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -241,6 +245,9 @@ class _StandInHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         """Silence the default stderr access log."""
+
+
+StandInModelServer.handler_class = _StandInHandler
 
 
 def request_text(request: dict[str, Any]) -> str:

@@ -37,7 +37,10 @@ const path = require('path');
 const {spawnSync} = require('child_process');
 
 const RUNNER = path.join(__dirname, 'run-all.js');
-const SHORT_TIMEOUT_MS = 2000;
+// Long enough for the scratch suite to start node, spawn its `sleep`
+// grandchild and write the pid file on a loaded host; the runner's real
+// cap is its own business (makeScratchRunner patches only this value).
+const SHORT_TIMEOUT_MS = 1000;
 
 // prctl(PR_SET_CHILD_SUBREAPER) is a Linux system call: on macOS and
 // Windows the helper below cannot adopt the suites' orphans, so the
@@ -50,7 +53,10 @@ if (process.platform !== 'linux') {
 }
 
 // Runs `node <runner>` as a child subreaper.  `mode` "sigint" sends the
-// runner SIGINT once the suite's pid file exists.  After the runner has
+// runner SIGINT once the suite's pid file exists; if it has not
+// appeared after 10 s the runner is still interrupted (so it kills its
+// suites' groups), killed if it lingers, and the status is
+// "no-pid-file".  After the runner has
 // exited (or 30 s passed, in which case it is SIGKILLed and status is
 // "hung"), every pid in the pid file is waited for: "not-ours" means
 // its parent (the runner) reaped it; "signal N"/"exit N" is how the
@@ -62,9 +68,24 @@ node, runner, mode, pid_file, result_file = sys.argv[1:6]
 PR_SET_CHILD_SUBREAPER = 36
 ctypes.CDLL(None).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
 proc = subprocess.Popen([node, runner])
+def pid_file_written():
+    return os.path.exists(pid_file) and os.path.getsize(pid_file) > 0
+
 if mode == "sigint":
-    while not (os.path.exists(pid_file) and os.path.getsize(pid_file) > 0):
+    for _ in range(200):
+        if pid_file_written():
+            break
         time.sleep(0.05)
+    if not pid_file_written():
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        with open(result_file, "w") as f:
+            json.dump({"status": "no-pid-file", "fates": {}}, f)
+        sys.exit(0)
     proc.send_signal(signal.SIGINT)
 try:
     status = proc.wait(timeout=30)

@@ -57,6 +57,7 @@ import time
 import unittest
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -213,6 +214,21 @@ def posix_only(reason: str) -> pytest.MarkDecorator:
 def is_root() -> bool:
     """Return whether the test process runs as root (never on Windows)."""
     return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def seed_worktree(agent: Any, wt: Any) -> None:
+    """Make *wt* the only pending worktree of the :class:`SorcarAgent` *agent* (``None``: none).
+
+    Production fills ``agent._wts`` through ``create_worktree``; tests of
+    the merge / finalize paths seed one pending worktree directly.
+
+    Args:
+        agent: A ``SorcarAgent`` (or subclass) instance.
+        wt: The :class:`~kiss.agents.sorcar.git_worktree.GitWorktree`, or ``None``.
+    """
+    from kiss.agents.sorcar.git_worktree import _repo_key
+
+    agent._wts = {} if wt is None else {_repo_key(wt): wt}
 
 
 def find_free_port() -> int:

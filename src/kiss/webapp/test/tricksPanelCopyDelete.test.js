@@ -17,6 +17,8 @@ const {
   send,
   click,
   typeInto: input,
+  stubClipboard,
+  settle: flush,
 } = require('./simplify2_harness');
 
 function rows(doc) {
@@ -29,23 +31,10 @@ function texts(doc) {
   );
 }
 
-function flush() {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 async function runPanel() {
   const {win, posted} = makePage();
   const doc = win.document;
-  const clipboardWrites = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: text => {
-        clipboardWrites.push(String(text));
-        return Promise.resolve();
-      },
-    },
-  });
+  const {writes: clipboardWrites} = stubClipboard(win);
   win.__TRICKS__ = ['Mine one', 'Mine two', 'Bundled alpha', 'Bundled beta'];
   win.__MY_TRICKS_COUNT__ = 2;
 
@@ -248,6 +237,7 @@ async function runPanel() {
   send(win, {type: 'tricksData', tricks: ['Only bundled'], userCount: 0});
 
   // --- a page loaded without the count global shows no delete buttons
+  // and no pencils (every row is bundled), only Copy
   const bare = makePage();
   bare.win.__TRICKS__ = ['a', 'b'];
   bare.win.document.getElementById('tricks-btn').click();
@@ -257,6 +247,7 @@ async function runPanel() {
     bareList.querySelectorAll('.sidebar-item-delete').length,
     0,
   );
+  assert.strictEqual(bareList.querySelectorAll('.sidebar-item-edit').length, 0);
 
   // --- no clipboard API: the copy button falls back to execCommand
   Object.defineProperty(win.navigator, 'clipboard', {

@@ -43,6 +43,7 @@ from typing import Any
 
 import requests
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Attachment,
@@ -51,6 +52,7 @@ from kiss.core.models.model import (
     TokenCallback,
     flatten_content_to_text,
 )
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +169,11 @@ class DecisionsModel(Model):
             model_config: Optional settings.  ``"questions"`` (a
                 ``{name: question}`` mapping built with :func:`noul`,
                 :func:`choice`, :func:`score`) is the question set
-                :meth:`generate` asks; ``"timeout"`` is the HTTP timeout in
-                seconds (default 60); ``"extra_headers"`` (``{name: value}``,
+                :meth:`generate` asks; ``"timeout"`` is the HTTP read
+                timeout in seconds (default 60; connecting is bounded by
+                :data:`~kiss.core.models.stream_abort.CONNECT_TIMEOUT`
+                so an unreachable endpoint fails in seconds, as with the
+                other adapters); ``"extra_headers"`` (``{name: value}``,
                 as produced by ``model_info.custom_model_config`` for a
                 ``MY_MODELS.json`` endpoint) is sent on every request.
             token_callback: Called once with the JSON answers text by
@@ -208,7 +213,15 @@ class DecisionsModel(Model):
         Raises:
             KISSError: On an unknown question type, a non-2xx response, an
                 unreachable endpoint, or a response without ``answers``.
+            KeyboardInterrupt: The user pressed Stop before the request
+                was sent.  A Stop that lands during the POST (a plain
+                blocking call with no abort watchdog) is left to the
+                caller: the completed answer and its paid usage are
+                returned as usual, and the agent loop honours the Stop
+                at its next tool call.
         """
+        if stop_signal.stop_requested():
+            raise stop_error()
         if not questions:
             raise KISSError("decide() needs at least one question")
         for name, question in questions.items():
@@ -225,7 +238,10 @@ class DecisionsModel(Model):
         }
         try:
             response = self._session.post(
-                self.endpoint_url, json=body, headers=headers, timeout=self.timeout
+                self.endpoint_url,
+                json=body,
+                headers=headers,
+                timeout=(CONNECT_TIMEOUT, self.timeout),
             )
         except requests.RequestException as e:
             raise KISSError(f"Decisions request to {self.endpoint_url} failed: {e}") from e

@@ -125,10 +125,11 @@ def test_routine_turns_run_at_the_configured_effort(monkeypatch: pytest.MonkeyPa
         agent = _run(monkeypatch, url, len(_SCRIPT), printer)
     steps = [r for r in requests if r.get("stream")]
     assert len(steps) == 4
-    efforts = [(r.get("output_config") or {}).get("effort") for r in steps]
+    efforts = [r["output_config"]["effort"] for r in steps]
     # Step 2 follows the summary, step 4 the refused note; steps 1 and 3
-    # (the first turn, the turn after a plain note) keep the model's effort.
-    assert efforts == [None, "low", None, "low"]
+    # (the first turn, the turn after a plain note) keep the model's own
+    # effort, the catalog ``thinking`` level of the base entry.
+    assert efforts == ["high", "low", "high", "low"]
     calls = [e for e in printer.events if e["type"] == "llm_call"]
     assert [(c["routine"], c["effort"]) for c in calls] == [
         (False, ""), (True, "low"), (False, ""), (True, "low"),
@@ -142,7 +143,7 @@ def test_no_override_without_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     with anthropic_server.serve(_SCRIPT) as (url, requests):
         _run(monkeypatch, url, len(_SCRIPT), printer)
     steps = [r for r in requests if r.get("stream")]
-    assert all("output_config" not in r for r in steps), steps
+    assert [r["output_config"]["effort"] for r in steps] == ["high"] * 4, steps
     calls = [e for e in printer.events if e["type"] == "llm_call"]
     # The routine turns are still marked, so cost_report can measure them.
     assert [c["routine"] for c in calls] == [False, True, False, True]

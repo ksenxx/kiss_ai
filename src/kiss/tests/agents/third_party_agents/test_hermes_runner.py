@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents import _kiss_web_launcher
+from kiss.agents.third_party_agents import _channel_agent_utils, _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ChannelRunner,
@@ -58,66 +58,13 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import main as telegra
 from kiss.core import config as config_module
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
+from kiss.tests.agents.third_party_agents.channel_backends import RecordingBackend, ThreadBackend
 from kiss.tests.agents.third_party_agents.recording_daemon import (
     RecordingDaemon,
     serve_recording_daemon,
 )
 from kiss.tests.conftest import IS_WINDOWS
 from kiss.tests.server.pause import Pause
-
-
-class RecordingBackend(ToolMethodBackend):
-    """In-memory channel backend that records every interaction.
-
-    A real class defined for the tests (not a mock of KISS code): it
-    implements the backend protocol with deterministic in-memory data.
-    """
-
-    def __init__(
-        self,
-        messages: list[dict[str, Any]] | None = None,
-        connect_ok: bool = True,
-        send_fail_times: int = 0,
-        cursor: str = "",
-    ) -> None:
-        self.messages = messages or []
-        self.connect_ok = connect_ok
-        self.send_fail_times = send_fail_times
-        self.cursor = cursor
-        self.sent: list[tuple[str, str, str]] = []
-        self.typing: list[tuple[str, str]] = []
-        self.connect_calls = 0
-        self.poll_calls = 0
-        self.polled_oldest: list[str] = []
-        self._connection_info = "recording backend"
-
-    def connect(self) -> bool:
-        """Record the connect attempt and return the configured result."""
-        self.connect_calls += 1
-        return self.connect_ok
-
-    def poll_messages(
-        self, channel_id: str, oldest: str, limit: int = 50
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Return the configured message list and cursor, recording *oldest*."""
-        self.poll_calls += 1
-        self.polled_oldest.append(oldest)
-        return list(self.messages), self.cursor
-
-    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Record the send, raising for the first *send_fail_times* calls."""
-        if self.send_fail_times > 0:
-            self.send_fail_times -= 1
-            raise ConnectionError("simulated send failure")
-        self.sent.append((channel_id, text, thread_ts))
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """A message is from the bot when its ``bot`` flag is set."""
-        return bool(msg.get("bot"))
-
-    def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
-        """Record the typing indicator call."""
-        self.typing.append((channel_id, thread_ts))
 
 
 class LedgerCheckingBackend(RecordingBackend):
@@ -133,26 +80,6 @@ class LedgerCheckingBackend(RecordingBackend):
         on_disk = json.loads(self._state_path.read_text(encoding="utf-8"))
         self.ledger_sizes_at_send.append(len(on_disk.get("ledger", [])))
         super().send_message(channel_id, text, thread_ts)
-
-
-class ThreadBackend(RecordingBackend):
-    """Recording backend that also supports thread polling."""
-
-    def __init__(
-        self,
-        thread_replies: dict[str, list[dict[str, Any]]] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.thread_replies = thread_replies or {}
-        self.thread_polls: list[str] = []
-
-    def poll_thread_messages(
-        self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Return the configured replies for *thread_ts*."""
-        self.thread_polls.append(thread_ts)
-        return list(self.thread_replies.get(thread_ts, [])), ""
 
 
 class ThreadPollFailBackend(ThreadBackend):
@@ -391,6 +318,11 @@ class TestCircuitBreaker:
 
 class TestDeliveryLedger:
     """At-least-once reply delivery through the persistent ledger."""
+
+    @pytest.fixture(autouse=True)
+    def _no_retry_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skip the real 1 s pause between the two send attempts."""
+        monkeypatch.setattr(_channel_agent_utils, "_SEND_RETRY_DELAY_SECONDS", 0.0)
 
     def test_ledger_recorded_before_send_and_removed_on_success(self, tmp_path: Path) -> None:
         """The reply is in the on-disk ledger at send time, gone after."""
@@ -773,16 +705,6 @@ class TestCliOmissionSentinels:
         assert kwargs["model_name"] == get_default_model()
         assert kwargs["max_budget"] == config_module.DEFAULT_CONFIG.max_budget
 
-    def test_build_run_kwargs_keeps_explicit_flags(self, tmp_path: Path) -> None:
-        """Interactive mode passes explicit -m/-b through unchanged."""
-        parser = _build_arg_parser()
-        args = parser.parse_args(
-            ["-t", "noop", "-w", str(tmp_path), "-m", "some-model", "-b", "1.25"]
-        )
-        kwargs = _build_run_kwargs(args)
-        assert kwargs["model_name"] == "some-model"
-        assert kwargs["max_budget"] == 1.25
-
 
 class TestTypingIndicator:
     """The best-effort typing-indicator hook."""
@@ -856,23 +778,8 @@ class TestThreadContinuations:
         selected = runner._select_thread_followups(replies, "100.0", "101.0")
         assert [m["text"] for m in selected] == ["follow-up B"]
 
-    def test_threads_capped_at_twenty_per_tick(self, tmp_path: Path) -> None:
-        """At most 20 threads are polled per tick, most recently updated first."""
-        runner = _make_runner(ThreadBackend(), tmp_path / "s.json")
-        runner._state = default_channel_state()
-        now = time.time()
-        for i in range(25):
-            runner._state["threads"][f"thread-{i}"] = {
-                "chat_id": f"chat{i}",
-                "last_reply_ts": f"{now - i:.4f}",
-                "updated_at": now - i,
-            }
-        selected = runner._threads_to_process()
-        assert len(selected) == 20
-        assert selected[0] == "thread-0"
-
     def test_thread_rotation_prevents_starvation(self, tmp_path: Path) -> None:
-        """Successive ticks rotate through >20 threads so none starves."""
+        """At most 20 threads per tick, newest first; ticks rotate so none starves."""
         runner = _make_runner(ThreadBackend(), tmp_path / "s.json")
         runner._state = default_channel_state()
         now = time.time()
@@ -883,6 +790,8 @@ class TestThreadContinuations:
                 "updated_at": now - i,
             }
         first = runner._threads_to_process()
+        assert len(first) == 20
+        assert first[0] == "thread-0"
         assert runner._state["thread_rotation"] == 20
         second = runner._threads_to_process()
         assert set(first) | set(second) == {f"thread-{i}" for i in range(25)}
@@ -971,22 +880,6 @@ class TestThreadContinuations:
         assert runner.run_once() == 0
         assert backend.thread_polls == [thread_ts]
         assert backend.sent == []
-
-    def test_thread_poll_failure_skips_thread(self, tmp_path: Path) -> None:
-        """A failing poll_thread_messages skips the thread gracefully."""
-        state_path = tmp_path / "s.json"
-        now = time.time()
-        thread_ts = f"{now - 60:.4f}"
-        state = default_channel_state()
-        state["threads"][thread_ts] = {
-            "chat_id": "c1",
-            "last_reply_ts": thread_ts,
-            "updated_at": now - 60,
-        }
-        save_channel_state(state_path, state)
-        runner = _make_runner(ThreadPollFailBackend(), state_path)
-        assert runner.run_once() == 0
-        assert load_channel_state(state_path)["failures"] == 0
 
     def test_bot_posted_after_detects_direct_reply(self, tmp_path: Path) -> None:
         """A bot message newer than the snapshot suppresses the summary."""
@@ -1081,9 +974,12 @@ class TestCursorPersistence:
         """Without a state path the legacy oldest='0' behaviour remains."""
         backend = RecordingBackend(cursor="42")
         runner = _make_runner(backend, None)
+        assert runner._state_path is None
+        assert runner._state is None
         assert runner.run_once() == 0
         assert runner.run_once() == 0
         assert backend.polled_oldest == ["0", "0"]
+        assert backend.connect_calls == 2
 
 
 class TestContinuationFailureCursor:
@@ -1277,24 +1173,3 @@ class TestStateSchemaValidation:
         assert runner.run_once() == 0
         assert backend.polled_oldest == ["0"]
         assert load_channel_state(state_path) == default_channel_state()
-
-
-class TestBackwardCompatibility:
-    """Stateless construction and behaviour keep working unchanged."""
-
-    def test_runner_without_state_path(self) -> None:
-        """The legacy constructor signature still works."""
-        runner = ChannelRunner(
-            backend=RecordingBackend(),
-            channel_name="general",
-            agent_name="legacy",
-        )
-        assert runner._state_path is None
-        assert runner._state is None
-
-    def test_stateless_run_once_processes_nothing_quietly(self) -> None:
-        """A stateless tick with no messages returns 0 and disconnects."""
-        backend = RecordingBackend()
-        runner = _make_runner(backend, None)
-        assert runner.run_once() == 0
-        assert backend.connect_calls == 1

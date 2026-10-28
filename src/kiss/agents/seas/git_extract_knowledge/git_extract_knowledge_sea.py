@@ -218,6 +218,9 @@ manifest (`[project.scripts]`, `bin`, `Makefile` targets), never from habit; a c
 - Describe the code as it is today; a removed behaviour is not current.
 - Never edit, commit or push in the repository; the memory is the only output.
 - Plain, specific prose. No filler, no marketing, no emoji.
+- When the `summary` tool exists, call it every ten steps: when a tool result's `Steps:` \
+footer ends in 9, make the next call `summary`; otherwise the 10th, 20th, ... call is \
+refused and must be repeated.
 - The final `finish` summary is HTML (`<h3>`, `<p>`, `<ul>`), never Markdown.
 
 

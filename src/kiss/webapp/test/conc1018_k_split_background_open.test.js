@@ -16,13 +16,7 @@
 // open only adds a row (the shown file stays).
 
 const assert = require('assert');
-const {makePage, send, fakeMatchMedia} = require('./simplify2_harness');
-
-function stubDesktop(win) {
-  win.Element.prototype.setPointerCapture = function () {};
-  win.Element.prototype.releasePointerCapture = function () {};
-  fakeMatchMedia(win, true);
-}
+const {makePage, send, stubDesktop} = require('./simplify2_harness');
 
 function makeSplitPage() {
   const {win} = makePage({

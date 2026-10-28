@@ -4,15 +4,13 @@
 # add your name here
 """Bug-hunt 2: writes addressed to a DELETED task must not hit another task.
 
-``_resolve_task_id`` falls back to ``_most_recent_task_id(db, task)``
-whenever the given ``task_id`` does not resolve to a row.  That
-fallback exists for LEGACY callers whose ``task_id`` is malformed (an
-old integer id, a non-UUID string) — see
-``test_review_round4_bugs.py``.  But the fallback also fired when the
-caller supplied a perfectly well-formed ``uuid4().hex`` id whose row
-no longer exists (a stale id from a finished tab, or a row dropped by
-external DB maintenance).  Because those callers pass ``task=None``, the fallback
-resolved to the MOST RECENT row overall — an unrelated task — so:
+``_resolve_task_id`` used to fall back to the most recent row of the
+``task`` text whenever the given ``task_id`` did not resolve to a row.
+That fallback also fired when the caller supplied a perfectly
+well-formed ``uuid4().hex`` id whose row no longer exists (a stale id
+from a finished tab, or a row dropped by external DB maintenance).
+Because those callers passed no task text, the fallback resolved to
+the MOST RECENT row overall — an unrelated task — so:
 
 * ``_save_task_result(result, task_id=<deleted>)`` (invoked from
   ``ChatSorcarAgent.run``'s cleanup ``finally``) clobbered the
@@ -23,10 +21,10 @@ resolved to the MOST RECENT row overall — an unrelated task — so:
   fire-and-forget ``followup_suggestion`` thread) appended event rows
   into the unrelated task's replay stream.
 
-The fix: when ``task_id`` is shaped like a canonical
-``task_history.id`` (``is_task_history_id``) but no row exists, the
-write is dropped (``_resolve_task_id`` returns ``None``) instead of
-being redirected.  The legacy malformed-id fallback is preserved.
+The fix: when no row with id ``task_id`` exists (or ``task_id`` is not
+shaped like a canonical ``task_history.id``, see
+``is_task_history_id``), the write is dropped (``_resolve_task_id``
+returns ``None``) instead of being redirected; the fallback is gone.
 
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.
@@ -146,15 +144,16 @@ class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
         _add_task("some task")
         missing = "0123456789abcdef0123456789abcdef"
         with th._rw_lock.read_lock():
-            resolved = _resolve_task_id(th._get_db(), missing, None)
+            resolved = _resolve_task_id(th._get_db(), missing)
         assert resolved is None
 
-    def test_legacy_malformed_id_fallback_preserved(self) -> None:
-        real_id, _ = _add_task("legacy task")
+    def test_malformed_or_absent_id_resolves_to_nothing(self) -> None:
+        _add_task("legacy task")
         with th._rw_lock.read_lock():
             db = th._get_db()
-            assert _resolve_task_id(db, "not-a-uuid", "legacy task") == real_id
-            assert _resolve_task_id(db, None, None) == real_id
+            assert _resolve_task_id(db, "not-a-uuid") is None
+            assert _resolve_task_id(db, None) is None
+            assert _resolve_task_id(db, "") is None
 
 
 class TestCorruptNumericColumnsDoNotCrashHistory(_TempDbTestBase):

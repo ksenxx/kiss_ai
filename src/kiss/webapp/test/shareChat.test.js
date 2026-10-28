@@ -40,7 +40,23 @@ function makePage(opts) {
     extraScripts:
       opts && opts.highlight ? ['highlight.min.js', 'marked.min.js'] : [],
     sourceUrl: 'share-main.js',
+    mainSource: opts && opts.mainSource,
   });
+}
+
+// The export size limit main.js enforces (56 MiB, the transport frame
+// limit) and the one the oversized-transcript test lowers it to, so that
+// test need not build and serialize a 57-MiB panel.
+const SHARE_LIMIT_DECL = 'const SHARE_MAX_HTML_JSON_BYTES = 56 * 1024 * 1024;';
+const SMALL_SHARE_LIMIT = 64 * 1024;
+
+/** main.js with SHARE_MAX_HTML_JSON_BYTES lowered to SMALL_SHARE_LIMIT. */
+function lowerShareLimit(src) {
+  assert.ok(src.includes(SHARE_LIMIT_DECL), 'the share limit declaration');
+  return src.replace(
+    SHARE_LIMIT_DECL,
+    `const SHARE_MAX_HTML_JSON_BYTES = ${SMALL_SHARE_LIMIT};`,
+  );
 }
 
 /**
@@ -993,15 +1009,15 @@ async function run() {
   });
 
   await test('an oversized transcript is refused with a visible error', () => {
-    const wv = makePage();
+    const wv = makePage({mainSource: lowerShareLimit});
     const win = wv.win;
     const TAB = runSmallTask(wv, 'chat-huge', 'task-huge');
-    // Bigger than SHARE_MAX_HTML_JSON_BYTES (56 MiB) on its own: the
-    // panel is open while the task streams, so its text is serialized
-    // once (a collapsed panel repeats it in the collapse preview).
+    // Bigger than SHARE_MAX_HTML_JSON_BYTES on its own: the panel is
+    // open while the task streams, so its text is serialized once (a
+    // collapsed panel repeats it in the collapse preview).
     send(win, {
       type: 'tool_result',
-      content: 'x'.repeat(57 * 1024 * 1024),
+      content: 'x'.repeat(SMALL_SHARE_LIMIT + 1024),
       tool_name: 'Bash',
       tabId: TAB,
       taskId: 'task-huge',

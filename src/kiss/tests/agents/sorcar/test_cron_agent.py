@@ -21,6 +21,8 @@ in ``test_cron_concurrent_runs``).
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -380,6 +382,136 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
             cron_agent._cron_dir().chmod(0o700)
 
 
+def test_jobs_follow_the_daemon_between_brand_homes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A daemon started from another home than the last one adopts that home's jobs.
+
+    ``~/.kiss`` and ``~/.s10s`` are two stores and only the running
+    daemon's ticks: the 2026-10-05 and 2026-10-25 brand flips orphaned
+    every job of the other store.  The start-up hand-over records the
+    daemon's home in ``~/.kiss-web-home`` and copies the previous home's
+    jobs this store lacks, by name, with a fresh next run.
+    """
+    names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
+    (former,) = cron_agent.FORMER_DEFAULT_NAMES
+    # A KISS_HOME outside $HOME (this test session's) is nobody's brand
+    # home: no marker, no hand-over.
+    assert kiss_home().parent != Path.home()
+    assert cron_agent.adopt_previous_home_jobs() == []
+    assert not (kiss_home().parent / ".kiss-web-home").exists()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
+    marker = tmp_path / ".kiss-web-home"
+    kiss, s10s = tmp_path / ".kiss", tmp_path / ".s10s"
+    # First start ever, then a restart from the same home: nothing to adopt.
+    monkeypatch.setenv("KISS_HOME", str(kiss))
+    assert cron_agent.adopt_previous_home_jobs() == []
+    assert marker.read_text() == f"{kiss}\n"
+    assert cron_agent.adopt_previous_home_jobs() == []
+    # A brand install moves the daemon to ~/.s10s while ~/.kiss never
+    # had a store: the marker moves on and nothing is adopted.
+    monkeypatch.setenv("KISS_HOME", str(s10s))
+    assert cron_agent.adopt_previous_home_jobs() == []
+    assert marker.read_text() == f"{s10s}\n"
+    # The user schedules their jobs in ~/.s10s: a daily one, a paused
+    # interval one, the recommendations default under its former name,
+    # a pending one-shot and a one-shot that has run.
+    readme = _create(cron_job(
+        "create", name="Daily README update", prompt="update the READMEs",
+        schedule="0 4 * * *", deliver="none",
+    ))
+    tests = _create(cron_job(
+        "create", name="Run the tests", command="pytest -q", schedule="every 2h",
+    ))
+    cron_job("pause", job_id=tests["id"])
+    _create(cron_job("create", name=former, prompt="/recommendations now", schedule="0 */6 * * *"))
+    once = _create(cron_job(
+        "create", name="once", prompt="say hi", schedule="2027-03-01T09:00:00",
+    ))
+    done = _create(cron_job("create", name="done", prompt="said hi", schedule="30m"))
+    _set_job_fields(done["id"], enabled=False, next_run_at=None, last_status="ok")
+    _set_job_fields(readme["id"], failure_streak=3, last_status="error")
+    # Meanwhile an rsorcar deploy moves the daemon back to ~/.kiss, whose
+    # store has its own recommendations job (current name) and a job
+    # that happens to share the README job's id.
+    monkeypatch.setenv("KISS_HOME", str(kiss))
+    mine = _create(cron_job(
+        "create", name=names[0], prompt="/recommendations now", schedule="0 */6 * * *",
+    ))
+    _set_job_fields(mine["id"], id=readme["id"])
+    now = _ts(2027, 6, 1, 12, 0)
+    with caplog.at_level("INFO", logger=cron_agent.__name__):
+        assert cron_agent.adopt_previous_home_jobs(now=now) == [
+            "Daily README update", "Run the tests", "once", "done",
+        ]
+    assert f"adopted 4 job(s) from the previous home {s10s}" in caplog.text
+    assert marker.read_text() == f"{kiss}\n"
+    kept, adopted_readme, adopted_tests, adopted_once, adopted_done = load_jobs()
+    assert kept["id"] == readme["id"] and kept["name"] == names[0]
+    assert adopted_readme["id"] != readme["id"] and len(adopted_readme["id"]) == 8
+    assert adopted_readme["prompt"] == "update the READMEs"
+    assert adopted_readme["next_run_at"] == _ts(2027, 6, 2, 4, 0)
+    assert adopted_readme["failure_streak"] == 0 and adopted_readme["last_status"] == "error"
+    assert adopted_tests["id"] == tests["id"] and adopted_tests["enabled"] is False
+    assert adopted_tests["command"] == "pytest -q"
+    assert adopted_tests["next_run_at"] == now + 2 * 3600
+    # A one-shot keeps its deadline; one that ran stays finished: it
+    # cannot be resumed and does not stand in the way of a new job under
+    # its name.  The ~/.s10s store itself is untouched.
+    assert adopted_once["id"] == once["id"]
+    assert adopted_once["next_run_at"] == _ts(2027, 3, 1, 9, 0) and adopted_once["enabled"]
+    assert adopted_done["next_run_at"] is None and adopted_done["enabled"] is False
+    assert "already ran" in cron_job("resume", job_id=adopted_done["id"])
+    again = _create(cron_job("create", name="done", prompt="say hi again", schedule="1h"))
+    assert again["id"] != adopted_done["id"]
+    monkeypatch.setenv("KISS_HOME", str(s10s))
+    assert len(load_jobs()) == 5
+    # Flipping back: ~/.s10s has every ~/.kiss job by name already, and a
+    # damaged store of its own on a later flip is left as it is (the
+    # marker still moves on), with a warning instead of a start-up error.
+    assert cron_agent.adopt_previous_home_jobs(now=now) == []
+    assert len(load_jobs()) == 5
+    monkeypatch.setenv("KISS_HOME", str(kiss))
+    assert cron_agent.adopt_previous_home_jobs(now=now) == []
+    monkeypatch.setenv("KISS_HOME", str(s10s))
+    cron_agent._jobs_path().write_text("{not a list")
+    with caplog.at_level("WARNING", logger=cron_agent.__name__):
+        assert cron_agent.adopt_previous_home_jobs(now=now) == []
+    assert "could not adopt the cron jobs of the previous home" in caplog.text
+    assert cron_agent._jobs_path().read_text() == "{not a list"
+    assert marker.read_text() == f"{s10s}\n"
+
+
+def test_cli_daemon_adopts_previous_home_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``kiss-cron --daemon`` hands over the previous home's jobs like kiss-web does."""
+    kiss, s10s = tmp_path / ".kiss", tmp_path / ".s10s"
+    monkeypatch.setenv("KISS_HOME", str(s10s))
+    _create(cron_job("create", name="Run the tests", command="pytest -q", schedule="every 2h"))
+    (tmp_path / ".kiss-web-home").write_text(f"{s10s}\n")
+    env = {
+        **os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "KISS_HOME": str(kiss),
+    }
+    daemon = subprocess.Popen(
+        [sys.executable, "-m", "kiss.agents.sorcar.cron_agent", "--daemon", "--interval", "999"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        monkeypatch.setenv("KISS_HOME", str(kiss))
+        deadline = time.monotonic() + 60
+        while not load_jobs() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        (adopted,) = load_jobs()
+        assert adopted["name"] == "Run the tests" and adopted["command"] == "pytest -q"
+        assert (tmp_path / ".kiss-web-home").read_text() == f"{kiss}\n"
+    finally:
+        daemon.terminate()
+        _, stderr = daemon.communicate(timeout=30)
+    assert f"adopted 1 job(s) from the previous home {s10s}: Run the tests" in stderr
+
+
 def test_in_chat_prompt_job_is_submitted_as_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -435,7 +567,9 @@ def test_in_chat_prompt_job_is_submitted_as_typed(
     assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
         "error", "Error: daemon down",
     )
-    outcome["raise"] = daemon_client.StopUnconfirmedTimeoutError("no confirmation")
+    outcome["raise"] = daemon_client.StopUnconfirmedTimeoutError(
+        "no confirmation", daemon_client.TaskResult("", False, 0.0, 0, 0),
+    )
     with pytest.raises(TimeoutError, match="MAY STILL BE RUNNING"):
         cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0)
     assert captured[-1]["max_budget"] == 0.5
@@ -998,7 +1132,7 @@ def test_cli_usage_exits_without_args(
     monkeypatch.setattr(sys, "argv", ["kiss-cron"])
     with pytest.raises(SystemExit):
         main()
-    assert "Usage: kiss-cron" in capsys.readouterr().out
+    assert "usage: kiss-cron" in capsys.readouterr().out
 
 
 def test_cli_create_list_tick_manage(

@@ -19,18 +19,16 @@ const assert = require('assert');
 const {
   makePage,
   send,
-  waitFor,
-  captureTimers,
+  recordTimers,
+  fireTimers,
+  queueRaf,
 } = require('./simplify2_harness');
 
 // main.js showSpinner() arms the wait spinner 250 ms after a transcript
-// event; a negative "the spinner was not re-armed" check looks for that
-// timer instead of outwaiting it.
+// event; the test records that timer (cancellation aware) and fires it
+// by hand instead of outwaiting it, and a negative "the spinner was not
+// re-armed" check looks for a new timer.
 const SPINNER_DELAY_MS = 250;
-
-function spinnerTimers(timers) {
-  return timers.filter(t => t.ms === SPINNER_DELAY_MS).length;
-}
 
 function startRunningTask(win, posted, taskId) {
   const tabId = posted.find(m => m.type === 'ready').tabId;
@@ -42,23 +40,26 @@ function startRunningTask(win, posted, taskId) {
   return tabId;
 }
 
-async function testVoiceMessagesDoNotDisturbTranscript() {
+function testVoiceMessagesDoNotDisturbTranscript() {
   const {win, posted} = makePage();
+  const timers = recordTimers(win, SPINNER_DELAY_MS);
   const tabId = startRunningTask(win, posted, '123');
   const O = win.document.getElementById('output');
   const spinner = win.document.getElementById('wait-spinner');
   assert.ok(spinner, 'wait spinner missing from the page');
-
-  // Let the pending spinner timer from the real transcript fire (the
-  // spinner comes on), then force the spinner off, as if the user were
-  // reading quietly.
-  await waitFor(
-    () => spinner.classList.contains('active'),
+  // Fire the live spinner timer the real transcript armed (the spinner
+  // comes on), then force the spinner off, as if the user were reading
+  // quietly.
+  assert.ok(
+    timers.some(t => !t.cleared),
     'the running task never armed the wait spinner',
   );
+  assert.ok(!spinner.classList.contains('active'), 'not active before its delay');
+  fireTimers(timers);
+  assert.ok(spinner.classList.contains('active'), 'the spinner comes on after 250 ms');
   spinner.classList.remove('active');
+  const armed = timers.length;
   const transcriptBefore = O.innerHTML;
-  const timers = captureTimers(win);
 
   for (const msg of [
     {type: 'voiceWake', roundId: 1},
@@ -75,20 +76,28 @@ async function testVoiceMessagesDoNotDisturbTranscript() {
     'non-transcript host messages must not touch the transcript',
   );
   assert.strictEqual(
-    spinnerTimers(timers),
-    0,
+    timers.length,
+    armed,
     'non-transcript host messages must not re-arm the wait spinner',
   );
   assert.ok(!spinner.classList.contains('active'));
 
   // Transcript-bearing types still render through the same branch, and
-  // do arm the spinner (the capture above sees the timer).
-  send(win, {type: 'system_output', text: 'more output\n', tabId, taskId: '123'});
+  // do arm the spinner (one new live timer).
+  send(win, {
+    type: 'system_output',
+    text: 'more output\n',
+    tabId,
+    taskId: '123',
+  });
   assert.ok(
     O.textContent.includes('more output'),
     'whitelisted transcript types must keep rendering',
   );
-  assert.strictEqual(spinnerTimers(timers), 1, 'transcript output re-arms it');
+  const rearmed = timers.slice(armed).filter(t => !t.cleared);
+  assert.strictEqual(rearmed.length, 1, 'transcript output re-arms it');
+  fireTimers(rearmed);
+  assert.ok(spinner.classList.contains('active'), 'and it comes on again');
   win.close();
   console.log('  ok - voice/unknown messages bypass the transcript pipeline');
 }
@@ -98,22 +107,8 @@ function testBashFlushFrameCancelled() {
   const tabId = startRunningTask(win, posted, '123');
 
   // Deterministic rAF: callbacks run only when the test says so.
-  const scheduled = new Map();
-  let nextRaf = 1;
-  win.requestAnimationFrame = cb => {
-    const id = nextRaf++;
-    scheduled.set(id, cb);
-    return id;
-  };
-  win.cancelAnimationFrame = id => {
-    scheduled.delete(id);
-  };
-  const runRafs = () => {
-    for (const [id, cb] of Array.from(scheduled)) {
-      scheduled.delete(id);
-      cb();
-    }
-  };
+  const {frames, run: runRafs} = queueRaf(win);
+  const pending = () => frames.map(f => f.id);
 
   send(win, {
     type: 'tool_call',
@@ -125,16 +120,14 @@ function testBashFlushFrameCancelled() {
   runRafs();
 
   // A buffered chunk leaves a flush frame pending...
-  const before = new Set(scheduled.keys());
+  const before = new Set(pending());
   send(win, {type: 'system_output', text: 'two', tabId, taskId: '123'});
-  const chunkFrames = Array.from(scheduled.keys()).filter(
-    id => !before.has(id),
-  );
+  const chunkFrames = pending().filter(id => !before.has(id));
   assert.ok(chunkFrames.length > 0, 'chunk must schedule a flush frame');
 
   // ...which the panel-closing tool_result must cancel, not orphan.
   send(win, {type: 'tool_result', content: 'done', tabId, taskId: '123'});
-  const leaked = chunkFrames.filter(id => scheduled.has(id));
+  const leaked = chunkFrames.filter(id => pending().includes(id));
   assert.deepStrictEqual(
     leaked,
     [],
@@ -143,9 +136,7 @@ function testBashFlushFrameCancelled() {
 
   // The buffered text was flushed synchronously exactly once.
   const panels = win.document.querySelectorAll('.bash-panel-content');
-  const withTwo = Array.from(panels).filter(p =>
-    p.textContent.includes('two'),
-  );
+  const withTwo = Array.from(panels).filter(p => p.textContent.includes('two'));
   assert.strictEqual(withTwo.length, 1, 'buffered chunk must render once');
   assert.ok(
     withTwo[0].textContent.split('two').length === 2,
@@ -161,11 +152,9 @@ function testBashFlushFrameCancelled() {
     taskId: '123',
   });
   runRafs();
-  const before2 = new Set(scheduled.keys());
+  const before2 = new Set(pending());
   send(win, {type: 'system_output', text: 'four', tabId, taskId: '123'});
-  const chunkFrames2 = Array.from(scheduled.keys()).filter(
-    id => !before2.has(id),
-  );
+  const chunkFrames2 = pending().filter(id => !before2.has(id));
   assert.ok(chunkFrames2.length > 0, 'second chunk must schedule a frame');
   send(win, {
     type: 'tool_call',
@@ -174,7 +163,7 @@ function testBashFlushFrameCancelled() {
     tabId,
     taskId: '123',
   });
-  const leaked2 = chunkFrames2.filter(id => scheduled.has(id));
+  const leaked2 = chunkFrames2.filter(id => pending().includes(id));
   assert.deepStrictEqual(
     leaked2,
     [],
@@ -185,14 +174,7 @@ function testBashFlushFrameCancelled() {
   console.log('  ok - closing a bash panel cancels its pending flush frame');
 }
 
-async function main() {
-  await testVoiceMessagesDoNotDisturbTranscript();
-  testBashFlushFrameCancelled();
-  console.log('rr_area_hi_stream_events: all tests passed');
-  process.exit(0);
-}
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+testVoiceMessagesDoNotDisturbTranscript();
+testBashFlushFrameCancelled();
+console.log('rr_area_hi_stream_events: all tests passed');
+process.exit(0);

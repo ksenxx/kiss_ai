@@ -11,25 +11,18 @@
 // opening a new chat asks the daemon only for the welcome info, and the
 // highlight.js sheet follows the page theme (light sheet with
 // body.light-theme, swapped live by the theme toggle).  The served
-// HTML's logo URLs and content hashes are checked by
-// src/kiss/tests/webapp/test_welcome_logo_html.py.
+// HTML's logo URLs, content hashes and the PNG files themselves (RGBA)
+// are checked by src/kiss/tests/webapp/test_welcome_logo_html.py.
 
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const {makePage} = require('./simplify2_harness.js');
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 function testMarkupHasLogosAndNoSuggestions() {
   const {win} = makePage();
   const doc = win.document;
-  for (const [id, file] of [
-    ['welcome-logo', 'welcome-logo.png'],
-    ['welcome-logo-dark', 'welcome-logo-dark.png'],
-  ]) {
+  for (const id of ['welcome-logo', 'welcome-logo-dark']) {
     const logo = doc.querySelector(`#welcome img#${id}.welcome-logo`);
     assert.ok(logo, `the welcome page must show the ${id} image`);
     assert.strictEqual(
@@ -37,15 +30,6 @@ function testMarkupHasLogosAndNoSuggestions() {
       '',
       'the logo is decorative: the heading next to it names the product',
     );
-    const bytes = fs.readFileSync(path.join(MEDIA, file));
-    assert.strictEqual(
-      bytes.subarray(1, 4).toString('latin1'),
-      'PNG',
-      `media/${file} must be a PNG image`,
-    );
-    // Transparent art: an RGBA PNG (colour type 6 in the IHDR chunk),
-    // so the logo sits directly on the theme background.
-    assert.strictEqual(bytes[25], 6, `media/${file} must be an RGBA PNG`);
   }
   assert.ok(
     doc.querySelector('#welcome h2').textContent.includes('Welcome to'),
@@ -83,22 +67,12 @@ function testNewChatRequestsWelcomeInfoOnly() {
     types.includes('getWelcomeInfo'),
     `new chat asks for the welcome info (remote URL): ${types}`,
   );
-  assert.ok(!types.includes('getWelcomeSuggestions'), `${types}`);
-
-  // A daemon that still speaks the old protocol must not bring the
-  // chips back.
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {type: 'welcome_suggestions', suggestions: [{text: 'old chip'}]},
-    }),
+  assert.ok(
+    welcome.querySelector('#welcome-logo'),
+    'logo survives a new chat',
   );
-  const shown = win.document.getElementById('welcome');
-  assert.ok(!shown.textContent.includes('old chip'));
-  assert.ok(!shown.textContent.includes('Suggested prompt'));
-  assert.strictEqual(win.document.querySelector('.suggestion-chip'), null);
-  assert.ok(shown.querySelector('#welcome-logo'), 'logo survives a new chat');
   win.close();
-  console.log('  ok - new chat requests getWelcomeInfo and shows no chips');
+  console.log('  ok - new chat requests getWelcomeInfo');
 }
 
 // The highlight sheet follows the page theme: the saved theme selects

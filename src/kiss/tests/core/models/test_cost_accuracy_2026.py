@@ -607,6 +607,123 @@ class TestGpt61SolPricing:
         assert alias == pytest.approx(expected)
 
 
+class TestGpt61TerraPricing:
+    """gpt-6.1-terra $1/$0.05/$1.25 (30m) + $2.50 (12h)/$5 -> $2/$0.10/$2.50
+    + $5/$7.50 above 272k prompt tokens; cached input is 5% of input
+    (https://developers.openai.com/api/docs/models/gpt-6.1-terra, "Cached
+    input tokens are priced at 5% of the uncached input token rate ...
+    Prompts with more than 272K input tokens are priced at 2x input and
+    cache rates and 1.5x output for the full request").
+
+    Regression (2026-10-27): the direct entries added by the 2026-10-26
+    catalog refresh derived cache reads at the generic GPT-6 0.10x
+    ($0.10, twice the published $0.05) and had no long-context tier, so a
+    300K-token prompt was billed $0.30 instead of $0.60.  Only
+    ``gpt-6.1-sol`` had been special-cased.
+    """
+
+    _NAMES = (
+        "gpt-6.1-terra",
+        "gpt-6.1-terra-low",
+        "gpt-6.1-terra-medium",
+        "gpt-6.1-terra-high",
+        "gpt-6.1-terra-xhigh",
+        "openrouter/openai/gpt-6.1-terra",
+        "openrouter/openai/gpt-6.1-terra-xhigh",
+        "openrouter/~openai/gpt-terra-latest",
+    )
+
+    @pytest.mark.parametrize("name", _NAMES)
+    def test_catalog_rates(self, name: str):
+        info = MODEL_INFO[name]
+        assert info.input_price_per_1M == pytest.approx(1.0)
+        assert info.output_price_per_1M == pytest.approx(5.0)
+        assert info.cache_read_price_per_1M == pytest.approx(0.05)
+        assert info.cache_write_price_per_1M == pytest.approx(1.25)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(2.50)
+
+    def test_matches_sol_discount(self):
+        """The whole GPT-6.1 family reads cache at 5%, not just Sol."""
+        for name in ("gpt-6.1-sol", "gpt-6.1-terra"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(
+                info.input_price_per_1M * 0.05
+            ), name
+
+    def test_short_context(self):
+        cost = calculate_cost("gpt-6.1-terra", 100_000, 10_000, 100_000, 50_000, 20_000)
+        expected = (
+            100_000 * 1.0 + 100_000 * 0.05 + 50_000 * 1.25 + 20_000 * 2.5 + 10_000 * 5.0
+        ) / 1e6
+        assert cost == pytest.approx(expected)
+        # 200K cached tokens (below the 272K tier): $0.05/MTok, not $0.10.
+        assert calculate_cost("gpt-6.1-terra", 0, 0, 200_000, 0) == pytest.approx(0.01)
+
+    @pytest.mark.parametrize("name", _NAMES)
+    def test_long_context_uplift(self, name: str):
+        cost = calculate_cost(name, 100_000, 10_000, 150_000, 50_000, 20_000)
+        expected = (
+            100_000 * 2.0 + 150_000 * 0.10 + 50_000 * 2.5 + 20_000 * 5.0 + 10_000 * 7.5
+        ) / 1e6
+        assert cost == pytest.approx(expected), name
+
+    def test_uplift_threshold_is_exclusive(self):
+        at = calculate_cost("gpt-6.1-terra", 272_000, 1_000)
+        assert at == pytest.approx((272_000 * 1.0 + 1_000 * 5.0) / 1e6)
+        over = calculate_cost("gpt-6.1-terra", 272_001, 1_000)
+        assert over == pytest.approx((272_001 * 2.0 + 1_000 * 7.5) / 1e6)
+
+
+class TestDirectGpt56AndGpt6RulesMatchOpenRouterTwins:
+    """Direct GPT-5.6 / GPT-6 entries derive their cache rates and long-context
+    tier from name patterns in ``model_info`` while their ``openrouter/openai/``
+    twins carry OpenRouter's published ``input_cache_read`` /
+    ``input_cache_write``, which pass OpenAI's own rates through unchanged.
+    Whenever both sides agree on the base prices, the derived rates must equal
+    the published ones; a new snapshot whose name misses a pattern (the
+    2026-10-27 gpt-6.1-terra case) is caught here instead of being billed at
+    the wrong discount.
+    """
+
+    @staticmethod
+    def _pairs() -> list[tuple[str, str]]:
+        pairs = []
+        for name, info in MODEL_INFO.items():
+            if "/" in name or not name.startswith(("gpt-5.6", "gpt-6")):
+                continue
+            if "-pro" in name or not info.is_generation_supported:
+                continue
+            twin = MODEL_INFO.get(f"openrouter/openai/{name}")
+            if twin is None or twin.cache_read_price_per_1M is None:
+                continue
+            if twin.input_price_per_1M != pytest.approx(info.input_price_per_1M):
+                continue
+            pairs.append((name, f"openrouter/openai/{name}"))
+        return pairs
+
+    def test_pairs_exist(self):
+        names = {n for n, _ in self._pairs()}
+        assert {"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-5.6-sol"} <= names
+
+    def test_cache_read_and_write_rates_match(self):
+        for name, twin_name in self._pairs():
+            info, twin = MODEL_INFO[name], MODEL_INFO[twin_name]
+            assert info.cache_read_price_per_1M == pytest.approx(
+                twin.cache_read_price_per_1M
+            ), name
+            if twin.cache_write_price_per_1M is not None:
+                assert info.cache_write_price_per_1M == pytest.approx(
+                    twin.cache_write_price_per_1M
+                ), name
+
+    def test_long_context_tier_matches(self):
+        for name, twin_name in self._pairs():
+            assert model_info._long_context_uplift(name) == model_info._long_context_uplift(
+                twin_name
+            ), name
+            assert model_info._long_context_uplift(name) == (272_000, 2.0, 1.5), name
+
+
 class TestGptProLongContextTier:
     """gpt-5.5-pro and gpt-5.4-pro bill $30/$180 below 272k prompt tokens
     and $60/$270 above (https://developers.openai.com/api/docs/pricing).

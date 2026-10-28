@@ -1,0 +1,296 @@
+{
+  "runs": [
+    [
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "let me look",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_delta",
+        "text": "Reading the file.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_end",
+        "text": "Reading the file.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Read",
+        "path": "src/one.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "one",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "now the second",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Read",
+        "path": "src/two.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "two",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_delta",
+        "text": "Both read.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_end",
+        "text": "Both read.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Write",
+        "path": "src/three.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "written",
+        "ts": 1767225600000
+      },
+      {
+        "type": "usage_info",
+        "text": "Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00",
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "total_steps": 7,
+        "ts": 1767225600000
+      },
+      {
+        "type": "result",
+        "text": "summary: Done.\nsuccess: true\n",
+        "summary": "Done.",
+        "success": true,
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "step_count": 7,
+        "ts": 1767225600000
+      }
+    ],
+    [
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "fanning out",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "run_parallel",
+        "extras": {
+          "tasks": "[\"sub 1\"]"
+        },
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "sub done",
+        "ts": 1767225600000
+      },
+      {
+        "type": "usage_info",
+        "text": "Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00",
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "total_steps": 7,
+        "ts": 1767225600000
+      },
+      {
+        "type": "result",
+        "text": "summary: Done.\nsuccess: true\n",
+        "summary": "Done.",
+        "success": true,
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "step_count": 7,
+        "ts": 1767225600000
+      }
+    ]
+  ],
+  "recorded": [
+    [
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "let me look",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_delta",
+        "text": "Reading the file.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_end",
+        "text": "Reading the file.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Read",
+        "path": "src/one.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "one",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "now the second",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Read",
+        "path": "src/two.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "two",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_delta",
+        "text": "Both read.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_end",
+        "text": "Both read.",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "Write",
+        "path": "src/three.py",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "written",
+        "ts": 1767225600000
+      },
+      {
+        "type": "usage_info",
+        "text": "Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00",
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "total_steps": 7,
+        "ts": 1767225600000
+      },
+      {
+        "type": "result",
+        "text": "summary: Done.\nsuccess: true\n",
+        "summary": "Done.",
+        "success": true,
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "step_count": 7,
+        "ts": 1767225600000
+      }
+    ],
+    [
+      {
+        "type": "thinking_start",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "fanning out",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_end",
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_call",
+        "name": "run_parallel",
+        "extras": {
+          "tasks": "[\"sub 1\"]"
+        },
+        "ts": 1767225600000
+      },
+      {
+        "type": "tool_result",
+        "content": "sub done",
+        "ts": 1767225600000
+      },
+      {
+        "type": "usage_info",
+        "text": "Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00",
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "total_steps": 7,
+        "ts": 1767225600000
+      },
+      {
+        "type": "result",
+        "text": "summary: Done.\nsuccess: true\n",
+        "summary": "Done.",
+        "success": true,
+        "total_tokens": 12345,
+        "cost": "$0.42",
+        "step_count": 7,
+        "ts": 1767225600000
+      }
+    ]
+  ]
+}

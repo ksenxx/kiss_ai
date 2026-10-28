@@ -18,6 +18,7 @@ const {
   historyRows,
   visibleTitles,
   sendHistory,
+  finishedSession: session,
 } = require('./history_helpers');
 const {send} = harness;
 
@@ -28,29 +29,6 @@ function markRemoteChat(win) {
 /** The webapp (remote-chat) page over the harness's recording transport. */
 function makePage() {
   return harness.makePage({beforeScripts: markRemoteChat});
-}
-
-function session(id, title, extra) {
-  return Object.assign(
-    {
-      id: 'chat-' + id,
-      task_id: 'task-' + id,
-      title,
-      timestamp: 1_700_000_000 + id * 100,
-      preview: title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: '',
-      startTs: (1_700_000_000 + id * 100) * 1000,
-      endTs: (1_700_000_000 + id * 100) * 1000 + 10_000,
-    },
-    extra || {},
-  );
 }
 
 const SESSIONS = [

@@ -15,12 +15,18 @@
 // pin down the whole running-state contract of the composer in one place.
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makePage, send, stubRaf, recordTimers} = require('./simplify2_harness');
 
 const pages = [];
 
+function prepare(win) {
+  stubRaf(win);
+  // requestGhost()'s 300 ms debounce is recorded, never waited for.
+  win.ghostTimers = recordTimers(win, 300);
+}
+
 function openPage() {
-  const page = makePage({beforeScripts: stubRaf});
+  const page = makePage({beforeScripts: prepare});
   pages.push(page.win);
   return page;
 }
@@ -80,9 +86,12 @@ function startRunning(win) {
   return tabId;
 }
 
-// Wait past requestGhost()'s 300 ms debounce.
-function afterDebounce(win) {
-  return new Promise(resolve => win.setTimeout(resolve, 450));
+// Fire requestGhost()'s debounce timer (the latest one armed, which
+// must still be pending) instead of waiting it out.
+function fireDebounce(win) {
+  const timer = win.ghostTimers[win.ghostTimers.length - 1];
+  assert.ok(timer && !timer.cleared, 'typing must arm the ghost debounce timer');
+  timer.fn();
 }
 
 const COMPLETIONS = [
@@ -90,12 +99,12 @@ const COMPLETIONS = [
   {type: 'trick', text: 'fix the parser then commit'},
 ];
 
-async function testTypingWhileRunningRequestsCompletion() {
+function testTypingWhileRunningRequestsCompletion() {
   const {win, posted} = openPage();
   const tabId = startRunning(win);
   posted.length = 0;
   typeText(win, 'fix');
-  await afterDebounce(win);
+  fireDebounce(win);
   const cmd = posted.find(p => p && p.type === 'complete');
   assert.ok(cmd, 'typing during a run must dispatch a ``complete`` command');
   assert.strictEqual(cmd.query, 'fix');
@@ -176,7 +185,7 @@ function testAtMentionPickerWhileRunning() {
   );
 }
 
-async function testCompletionSurvivesRunEndingMidDraft() {
+function testCompletionSurvivesRunEndingMidDraft() {
   // The gates used to make the composer's help depend on run state; now
   // the same draft gets the same help whether the run ends or not.
   const {win, posted} = openPage();
@@ -184,7 +193,7 @@ async function testCompletionSurvivesRunEndingMidDraft() {
   posted.length = 0;
   typeText(win, 'fix');
   send(win, {type: 'status', running: false, tabId});
-  await afterDebounce(win);
+  fireDebounce(win);
   assert.ok(
     posted.find(p => p && p.type === 'complete'),
     'the completion scheduled during the run must still be sent',

@@ -31,14 +31,14 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
-from kiss.agents.sorcar.chat_summary import upsert_chat_summary
+from kiss.agents.sorcar.chat_summary import NOT_SUBAGENT, launch_ms, upsert_chat_summary
 from kiss.agents.sorcar.history_columns import (
     ADDED_SUMMARY_COLUMNS,
     ADDED_TASK_COLUMNS,
@@ -48,7 +48,7 @@ from kiss.agents.sorcar.history_columns import (
     complete_rows,
     missing_columns,
 )
-from kiss.agents.sorcar.task_metadata import classify_task_tags, trajectory_has_secret
+from kiss.agents.sorcar.task_metadata import write_task_tags
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model_info import _strip_provider_prefix
@@ -469,12 +469,7 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
     _chat_context_cache_gen += 1
 
 
-def _default_kiss_dir() -> Path:
-    """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
-    return kiss_home()
-
-
-_KISS_DIR = _default_kiss_dir()
+_KISS_DIR = kiss_home()
 _DB_PATH = _KISS_DIR / "history.db"
 
 
@@ -622,7 +617,8 @@ def _owner_is_alive(token: str) -> bool:
     """
     if not token:
         return False
-    if _owner_state is not None and _owner_state[1] == token:
+    state = _owner_state  # one read: another thread may reset the global
+    if state is not None and state[1] == token:
         return True
     marker = _owner_dir() / f"{token}.lock"
     try:
@@ -689,7 +685,9 @@ def _safe_str(value: object, default: str = "") -> str:
     ``_dumps_extra``'s ``ValueError`` handler — which blanked the
     whole history sidebar over one corrupt row.  BLOBs are decoded as
     UTF-8 with replacement so the result is always JSON-serialisable;
-    other non-string scalars go through ``str()``.
+    other non-string scalars go through ``str()``.  A non-finite float
+    or a ``__str__`` that raises yields *default* so one bad field in a
+    ``_save_task_extra`` payload never aborts the whole UPDATE.
     """
     if value is None:
         return default
@@ -697,7 +695,12 @@ def _safe_str(value: object, default: str = "") -> str:
         return value
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).decode("utf-8", errors="replace")
-    return str(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
+    try:
+        return str(value)
+    except Exception:
+        return default
 
 
 def _sanitize_non_finite(value: object) -> object:
@@ -717,7 +720,7 @@ def _dumps_extra(extra: dict[str, object]) -> str:
     Non-finite floats anywhere in the payload are replaced with
     ``None`` — plain ``json.dumps`` would serialise them as the bare
     ``NaN``/``Infinity`` tokens, which SQLite's ``json_valid`` (used by
-    ``_HISTORY_NOT_SUBAGENT``) rejects.
+    ``NOT_SUBAGENT``) rejects.
 
     Args:
         extra: Metadata dict to serialise.
@@ -1185,8 +1188,6 @@ _HISTORY_SELECT = (
     "FROM task_history "
 )
 
-_HISTORY_NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
-
 # Row shape shared by the composer-history queries
 # (``_prefix_match_tasks``, ``_load_input_history``): task_history rows
 # are UNIONed with ``steer_inputs`` rows, whose ``rid`` is 0 so a
@@ -1214,7 +1215,7 @@ def _coerce_parent_task_id(value: object) -> str:
 
     Accepts only a 32-char lowercase-hex UUID string.  Any other
     shape (None, empty, int, list, dict, non-UUID string) maps to the
-    empty-string sentinel that ``_HISTORY_NOT_SUBAGENT`` treats as
+    empty-string sentinel that ``NOT_SUBAGENT`` treats as
     "not a sub-agent" — preventing garbage parent ids from being
     silently persisted as text that never matches any real UUID.
     """
@@ -1274,14 +1275,10 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["cost"] = _safe_float(row["cost"], 0.0)
         payload["steps"] = _safe_int(row["steps"], 0)
         payload["is_parallel"] = bool(row["is_parallel"])
-        # Fall back to the row's insertion timestamp — the same
-        # fallback the history sidebar applies (_safe_start_ms in
-        # server.py) — so replay synthesis (task_settings events) and
-        # the sidebar agree on when a legacy task started.
-        start_ms = _safe_int(row["start_ts"], 0)
-        if start_ms <= 0:
-            start_ms = int(_safe_float(row["timestamp"], 0.0) * 1000)
-        payload["startTs"] = start_ms
+        # The same fallback to the insertion timestamp the history
+        # sidebar applies, so replay synthesis (task_settings events)
+        # and the sidebar agree on when a legacy task started.
+        payload["startTs"] = launch_ms(row["start_ts"], row["timestamp"])
         payload["endTs"] = _safe_int(row["end_ts"], 0)
         payload["max_budget"] = _safe_float(row["max_budget"], 0.0)
         payload["is_favorite"] = bool(row["is_favorite"])
@@ -2180,28 +2177,6 @@ def _open_db_connection(current_path: str) -> _LockedConnection:
     return conn
 
 
-def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> str | None:
-    """Return the row id of the most recent run of *task*, or the latest row.
-
-    Uses the total order ``(timestamp, rowid)`` — the ``rowid`` tiebreak keeps
-    rows with equal timestamps (coarse clock ticks, imported databases)
-    resolving to the genuinely latest insert, consistent with
-    :func:`_load_latest_chat_events_by_chat_id`.
-    """
-    if task is not None:
-        row = db.execute(
-            "SELECT id FROM task_history WHERE task = ? "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-            (task,),
-        ).fetchone()
-    else:
-        row = db.execute(
-            "SELECT id FROM task_history "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT 1"
-        ).fetchone()
-    return str(row["id"]) if row else None
-
-
 def _add_task(
     task: str,
     chat_id: str = "",
@@ -2241,6 +2216,9 @@ def _add_task(
         1 if parent_task_id and isinstance(sub, dict)
         and sub.get("side_channel") else 0
     )
+    # Minting the marker is file I/O (first call per home); keep it out
+    # of the write lock.
+    owner = _process_owner_token()
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = _allocate_chat_id()
@@ -2266,7 +2244,7 @@ def _add_task(
                 1 if payload.get("is_favorite") else 0,
                 parent_task_id,
                 _safe_float(payload.get("max_budget"), 0.0),
-                _process_owner_token(),
+                owner,
                 is_side_channel,
                 _safe_str(payload.get("sea", "") or ""),
                 1 if payload.get("is_cron") else 0,
@@ -2392,7 +2370,7 @@ def _load_history(
         order_sql, order_params = _history_order_sql(running_task_ids)
         sql = (
             _HISTORY_SELECT
-            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + f"WHERE {NOT_SUBAGENT} "
             + query_sql
             + tag_sql
             + work_dir_sql
@@ -2436,15 +2414,15 @@ def _chat_first_tasks(chat_ids: list[str]) -> dict[str, str]:
     db = _get_db()
     with _rw_lock.read_lock():
         placeholders = ",".join("?" * len(ids))
-        # _HISTORY_NOT_SUBAGENT is unqualified, so it binds to t2
+        # NOT_SUBAGENT is unqualified, so it binds to t2
         # inside the subquery (innermost scope) and to t outside.
         rows = db.execute(
             "SELECT chat_id, substr(task, 1, 1000) AS task "
             "FROM task_history t "
-            f"WHERE chat_id IN ({placeholders}) AND {_HISTORY_NOT_SUBAGENT} "
+            f"WHERE chat_id IN ({placeholders}) AND {NOT_SUBAGENT} "
             "AND rowid = (SELECT t2.rowid FROM task_history t2 "
             "WHERE t2.chat_id = t.chat_id "
-            f"AND {_HISTORY_NOT_SUBAGENT} "
+            f"AND {NOT_SUBAGENT} "
             "ORDER BY t2.timestamp ASC, t2.rowid ASC LIMIT 1)",
             ids,
         ).fetchall()
@@ -2468,7 +2446,7 @@ def _history_date_range() -> tuple[float | None, float | None]:
     with _rw_lock.read_lock():
         row = db.execute(
             f"SELECT MIN({_HISTORY_DONE_SQL}) AS mn, MAX({_HISTORY_DONE_SQL}) AS mx "
-            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT}"
+            f"FROM task_history WHERE {NOT_SUBAGENT}"
         ).fetchone()
     if row is None or row["mn"] is None or row["mx"] is None:
         return (None, None)
@@ -2663,7 +2641,7 @@ def user_tasks_since(since: float) -> list[dict[str, object]]:
     with _rw_lock.read_lock():
         rows = db.execute(
             "SELECT task, work_dir, timestamp, model, sea, success, result "
-            "FROM task_history WHERE timestamp >= ? AND parent_task_id = '' "
+            f"FROM task_history WHERE timestamp >= ? AND {NOT_SUBAGENT} "
             "AND is_side_channel = 0 ORDER BY timestamp DESC",
             (float(since),),
         ).fetchall()
@@ -2679,6 +2657,37 @@ def user_tasks_since(since: float) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+# Collapse the union to one row per distinct text, most recent first.
+_INPUT_TEXTS_RECENT_TAIL = (
+    "GROUP BY task ORDER BY MAX(timestamp) DESC, MAX(rid) DESC LIMIT ?"
+)
+
+
+def _input_texts_sql(
+    columns: str, task_where: str, steer_where: str, tail: str,
+) -> str:
+    """Build the query over every text the user typed into the composer.
+
+    Unions the listable ``task_history`` rows with the ``steer_inputs``
+    table (both exposed as ``task, timestamp, rid``) so the callers
+    only differ in their filters and in what they do with the rows.
+
+    Args:
+        columns: Column list of the outer ``SELECT``.
+        task_where: ``WHERE`` predicate on the ``task_history`` side.
+        steer_where: ``WHERE`` predicate on the ``steer_inputs`` side
+            (``""`` for none).
+        tail: Clauses appended after the union (``GROUP BY`` ...).
+    """
+    steer = "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
+    if steer_where:
+        steer += f" WHERE {steer_where}"
+    return (
+        f"SELECT {columns} FROM ({_INPUT_TEXTS_SELECT}WHERE {task_where} "
+        f"UNION ALL {steer}) {tail}"
+    )
 
 
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
@@ -2704,15 +2713,12 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
         pattern = escaped + "*"
         rows = db.execute(
-            "SELECT task FROM ("
-            + _INPUT_TEXTS_SELECT
-            + f"WHERE task GLOB ? AND LENGTH(task) > ? "
-            f"AND {_HISTORY_NOT_SUBAGENT} "
-            "UNION ALL "
-            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs "
-            "WHERE text GLOB ? AND LENGTH(text) > ?"
-            ") GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC LIMIT ?",
+            _input_texts_sql(
+                "task",
+                f"task GLOB ? AND LENGTH(task) > ? AND {NOT_SUBAGENT}",
+                "text GLOB ? AND LENGTH(text) > ?",
+                _INPUT_TEXTS_RECENT_TAIL,
+            ),
             (pattern, len(query), pattern, len(query), limit),
         ).fetchall()
     return [row["task"] for row in rows]
@@ -2733,14 +2739,7 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
     db = _get_db()
     with _rw_lock.read_lock():
         rows = db.execute(
-            "SELECT task FROM ("
-            + _INPUT_TEXTS_SELECT
-            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
-            "UNION ALL "
-            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
-            ") GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC "
-            "LIMIT ?",
+            _input_texts_sql("task", NOT_SUBAGENT, "", _INPUT_TEXTS_RECENT_TAIL),
             (int(limit),),
         ).fetchall()
     return [row["task"] for row in rows]
@@ -2770,12 +2769,12 @@ def _load_slash_command_usage() -> dict[str, tuple[int, float]]:
     db = _get_db()
     with _rw_lock.read_lock():
         rows = db.execute(
-            "SELECT task, timestamp FROM ("
-            + _INPUT_TEXTS_SELECT
-            + f"WHERE task GLOB '/*' AND {_HISTORY_NOT_SUBAGENT} "
-            "UNION ALL "
-            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs "
-            "WHERE text GLOB '/*')"
+            _input_texts_sql(
+                "task, timestamp",
+                f"task GLOB '/*' AND {NOT_SUBAGENT}",
+                "text GLOB '/*'",
+                "",
+            ),
         ).fetchall()
     usage: dict[str, tuple[int, float]] = {}
     for row in rows:
@@ -2802,17 +2801,38 @@ def _record_steer_input(text: str) -> None:
     """
     if not text.strip():
         return
-    db = _get_db()
     now = time.time()
+    _capped_upsert(
+        "steer_inputs", "text", text, _MAX_STEER_INPUTS, "timestamp ASC",
+        "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
+        "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
+        (text, now, now),
+    )
+
+
+def _capped_upsert(
+    table: str, key_col: str, key: str, cap: int, evict_order: str,
+    upsert_sql: str, params: tuple[object, ...],
+) -> None:
+    """Run *upsert_sql* against the capped *table* in one write transaction.
+
+    Evicts rows first when *key* is new and the table is at *cap* (see
+    :func:`_evict_for_new_key`), inside the same ``BEGIN IMMEDIATE``
+    transaction as the upsert.
+
+    Args:
+        table: Table name (a literal from this module).
+        key_col: The table's unique text column.
+        key: The value about to be upserted.
+        cap: Maximum number of rows the table may hold.
+        evict_order: ``ORDER BY`` clause selecting the rows to evict first.
+        upsert_sql: The ``INSERT ... ON CONFLICT`` statement.
+        params: Its bound parameters.
+    """
+    db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        _evict_for_new_key(
-            db, "steer_inputs", "text", text, _MAX_STEER_INPUTS, "timestamp ASC",
-        )
-        db.execute(
-            "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
-            "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
-            (text, now, now),
-        )
+        _evict_for_new_key(db, table, key_col, key, cap, evict_order)
+        db.execute(upsert_sql, params)
 
 
 def _evict_for_new_key(
@@ -2855,28 +2875,23 @@ def _evict_for_new_key(
 def _resolve_task_id(
     db: sqlite3.Connection,
     task_id: str | None,
-    task: str | None,
 ) -> str | None:
-    """Resolve a stable row id, falling back to the most recent task.
+    """Return *task_id* when it names an existing ``task_history`` row.
 
     Args:
         db: Active database connection.
-        task_id: Explicit row id when available.
-        task: Fallback task description for legacy callers.
+        task_id: Row id to check.
 
     Returns:
-        The resolved row id, or ``None`` if not found.
+        The row id, or ``None`` when *task_id* is not a history id or
+        names no row.
     """
-    if isinstance(task_id, str) and task_id != "":
-        if not is_task_history_id(task_id):
-            return _most_recent_task_id(db, task)
-        row = db.execute(
-            "SELECT id FROM task_history WHERE id = ?", (task_id,)
-        ).fetchone()
-        if row is not None:
-            return str(row["id"])
+    if not is_task_history_id(task_id):
         return None
-    return _most_recent_task_id(db, task)
+    row = db.execute(
+        "SELECT id FROM task_history WHERE id = ?", (task_id,)
+    ).fetchone()
+    return str(row["id"]) if row is not None else None
 
 
 def _log_orphaned_task_forensics(
@@ -3208,14 +3223,31 @@ def _recover_orphaned_tasks(
         params.append(float(created_before))
     sidecar = _final_results_path(str(_DB_PATH))
     journalled = _load_final_results(sidecar)
-    with _rw_lock.write_lock(), _immediate_txn(db):
+    with _rw_lock.read_lock():
         candidates = db.execute(select_sql, params).fetchall()
-        dead_rows = [
-            (int(row["rid"]), str(row["id"] or ""))
-            for row in candidates
-            if str(row["id"] or "") not in active_ids
-            and not _owner_is_alive(row["owner"] or "")
-        ]
+    # The liveness probes touch the filesystem (flock per marker), so
+    # they run outside the write transaction; the transaction below
+    # re-checks that each row still carries the sentinel.
+    probed = [
+        (int(row["rid"]), str(row["id"] or ""))
+        for row in candidates
+        if str(row["id"] or "") not in active_ids
+        and not _owner_is_alive(row["owner"] or "")
+    ]
+    if not probed:
+        _prune_final_results_journal(sidecar)
+        return 0
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        placeholders = ",".join(["?"] * len(probed))
+        still_sentinel = {
+            int(row["rid"])
+            for row in db.execute(
+                "SELECT rowid AS rid FROM task_history "
+                f"WHERE rowid IN ({placeholders}) AND result = ?",
+                [*[rid for rid, _tid in probed], "Agent Failed Abruptly"],
+            ).fetchall()
+        }
+        dead_rows = [(rid, tid) for rid, tid in probed if rid in still_sentinel]
         # A dead row whose final result survives in the sidecar journal
         # was NOT killed mid-task: its result was saved to the database
         # but the committed pages were later lost (e.g. the 2026-09-12
@@ -3337,7 +3369,6 @@ _UPDATABLE_COLUMNS = frozenset({"result", "success"})
 def _update_task_columns(
     values: dict[str, object],
     task_id: str | None,
-    task: str | None,
 ) -> str | None:
     """Write *values* into the resolved ``task_history`` row in one UPDATE.
 
@@ -3350,8 +3381,7 @@ def _update_task_columns(
             into the SQL, so each must be one of
             :data:`_UPDATABLE_COLUMNS`; anything else raises
             ``ValueError``.
-        task_id: Stable row id to update when available.
-        task: Fallback task description string for legacy callers.
+        task_id: Stable row id to update.
 
     Returns:
         The updated row's ``chat_id`` (possibly ``""``), or ``None``
@@ -3369,7 +3399,7 @@ def _update_task_columns(
     _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        resolved = _resolve_task_id(db, task_id, task)
+        resolved = _resolve_task_id(db, task_id)
         if resolved is None:
             return None
         sets = ", ".join(f"{column} = ?" for column in values)
@@ -3386,7 +3416,6 @@ def _update_task_columns(
 def _save_task_result(
     result: str,
     task_id: str | None = None,
-    task: str | None = None,
     *,
     success: bool | None = None,
 ) -> None:
@@ -3400,8 +3429,7 @@ def _save_task_result(
 
     Args:
         result: The task result text to store in the history entry.
-        task_id: Stable row id to update when available.
-        task: Fallback task description string for legacy callers.
+        task_id: Stable row id to update.
         success: The ``success`` key of the agent's ``finish()`` result
             when the run returned one; ``False`` makes the history
             sidebar show the task as failed (see
@@ -3411,7 +3439,7 @@ def _save_task_result(
     values: dict[str, object] = {"result": result}
     if success is not None:
         values["success"] = int(success)
-    affected_chat_id = _update_task_columns(values, task_id, task)
+    affected_chat_id = _update_task_columns(values, task_id)
     if affected_chat_id is None:
         return
     if is_task_history_id(task_id):
@@ -3556,26 +3584,40 @@ def _add_late_task_usage(
     return updated, ""
 
 
-_EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
-    "model": ("model", str, ""),
-    "work_dir": ("work_dir", str, ""),
-    "version": ("version", str, ""),
-    "tokens": ("tokens", int, 0),
-    "cost": ("cost", float, 0.0),
-    "steps": ("steps", int, 0),
-    "is_parallel": ("is_parallel", lambda v: 1 if v else 0, 0),
-    "startTs": ("start_ts", int, 0),
-    "endTs": ("end_ts", int, 0),
-    "max_budget": ("max_budget", float, 0.0),
-    "sea": ("sea", str, ""),
-    "is_cron": ("is_cron", lambda v: 1 if v else 0, 0),
+def _flag_int(value: object) -> int:
+    """Coerce a truthy flag to ``1``/``0`` for an INTEGER column.
+
+    Non-finite floats (NaN/Inf) are truthy but store ``0``, matching
+    the numeric coercers.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    try:
+        return 1 if value else 0
+    except Exception:
+        return 0
+
+
+# ``extra`` key -> (task_history column, coercion to the column's type).
+_EXTRA_COL_MAP: dict[str, tuple[str, Callable[[object], object]]] = {
+    "model": ("model", _safe_str),
+    "work_dir": ("work_dir", _safe_str),
+    "version": ("version", _safe_str),
+    "tokens": ("tokens", _safe_int),
+    "cost": ("cost", _safe_float),
+    "steps": ("steps", _safe_int),
+    "is_parallel": ("is_parallel", _flag_int),
+    "startTs": ("start_ts", _safe_int),
+    "endTs": ("end_ts", _safe_int),
+    "max_budget": ("max_budget", _safe_float),
+    "sea": ("sea", _safe_str),
+    "is_cron": ("is_cron", _flag_int),
 }
 
 
 def _save_task_extra(
     extra: dict[str, object],
     task_id: str | None = None,
-    task: str | None = None,
 ) -> None:
     """Save extra metadata for a task into typed columns.
 
@@ -3591,13 +3633,12 @@ def _save_task_extra(
 
     Args:
         extra: Dictionary of metadata to persist.
-        task_id: Stable row id to update when available.
-        task: Fallback task description string for legacy callers.
+        task_id: Stable row id to update.
     """
     _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        resolved = _resolve_task_id(db, task_id, task)
+        resolved = _resolve_task_id(db, task_id)
         if resolved is None:
             return
         pairs: list[tuple[str, object]] = []
@@ -3615,24 +3656,8 @@ def _save_task_extra(
             mapping = _EXTRA_COL_MAP.get(k)
             if mapping is None:
                 continue
-            col, cast, default = mapping
-            try:
-                if v is None or v == "":
-                    val: object = default
-                elif isinstance(v, float) and not math.isfinite(v):
-                    val = default
-                else:
-                    result = cast(v)  # type: ignore[operator]
-                    if (
-                        isinstance(result, float)
-                        and not math.isfinite(result)
-                    ):
-                        val = default
-                    else:
-                        val = result
-            except Exception:
-                val = default
-            pairs.append((f"{col} = ?", val))
+            col, coerce = mapping
+            pairs.append((f"{col} = ?", coerce(v)))
         if "cost" in extra:
             pairs.append(("model_costs = ?", _own_model_costs(db, resolved)))
         if not pairs:
@@ -3703,13 +3728,7 @@ def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
     ).fetchone()
     if row is None:
         return
-    tags = classify_task_tags(
-        _safe_str(row["task"]),
-        is_subagent=bool(row["parent_task_id"]),
-        failed=_is_failed_result(_safe_str(row["result"]), row["success"]),
-        has_secret=trajectory_has_secret(db, task_id, row["task"], row["result"]),
-    )
-    db.execute("UPDATE task_history SET tags = ? WHERE id = ?", (",".join(tags), task_id))
+    write_task_tags(db, task_id, row)
     if not row["parent_task_id"] and row["chat_id"]:
         upsert_chat_summary(db, _safe_str(row["chat_id"]))
 
@@ -3746,6 +3765,31 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
         }
         for r in rows
     }
+
+
+def task_start_ms(task_id: str) -> int:
+    """Return when task *task_id* started, in epoch milliseconds. Thread-safe.
+
+    The row's ``start_ts``, or its insertion ``timestamp`` for a legacy
+    row (:func:`launch_ms`).  Every run — each ``<task>`` block of a
+    sequential submission, each ``run_parallel`` child — allocates its
+    own row with its own start, so this dates the run itself.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+
+    Returns:
+        The launch instant, or 0 when the row is missing or carries no
+        usable time.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT start_ts, timestamp FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    if row is None:
+        return 0
+    return launch_ms(row["start_ts"], row["timestamp"])
 
 
 def _set_chat_summary(chat_id: str, summary: str) -> bool:
@@ -4324,7 +4368,7 @@ _JOURNAL_APPEND_TIMEOUT_S = _JOURNAL_LOCK_TIMEOUT_S * 6
 
 @contextmanager
 def _journal_file_lock(
-    sidecar: str, timeout: float | None = _JOURNAL_LOCK_TIMEOUT_S,
+    sidecar: str, timeout: float = _JOURNAL_LOCK_TIMEOUT_S,
 ) -> Iterator[bool]:
     """Hold an inter-process lock on *sidecar* for the whole block.
 
@@ -4343,8 +4387,7 @@ def _journal_file_lock(
 
     Args:
         sidecar: Path of the journal file being appended or replayed.
-        timeout: Longest wait for a peer's lock; ``None`` waits for as
-            long as the peer holds it.
+        timeout: Longest wait for a peer's lock, in seconds.
 
     Yields:
         ``True`` with the lock held for the duration of the block.
@@ -4959,9 +5002,7 @@ def _queue_chat_event(
     except BaseException:
         _unreserve_pending(task_id)
         raise
-    t = _event_writer_thread
-    if t is None or not t.is_alive():
-        _start_event_writer()
+    _start_event_writer()
 
 
 @locked(_pending_cond)
@@ -5121,7 +5162,6 @@ atexit.register(_drain_events_at_exit)
 def _append_chat_event(
     event: dict[str, object],
     task_id: str | None = None,
-    task: str | None = None,
     origin_db_path: str | None = None,
 ) -> None:
     """Append a single event to the saved chat events for a task.
@@ -5132,8 +5172,7 @@ def _append_chat_event(
 
     Args:
         event: The event dict to append.
-        task_id: Stable row id to update when available.
-        task: Fallback task description string for legacy callers.
+        task_id: Stable row id to update.
         origin_db_path: Database path *task_id* was resolved against
             (see :func:`_queue_chat_event`).  Late asynchronous
             callers pass the path captured when the task completed
@@ -5145,7 +5184,7 @@ def _append_chat_event(
         return
     db = _get_db()
     with _rw_lock.read_lock():
-        resolved = _resolve_task_id(db, task_id, task)
+        resolved = _resolve_task_id(db, task_id)
     if resolved is None:
         return
     _queue_chat_event(event, resolved, origin_db_path)
@@ -5200,32 +5239,15 @@ def _task_has_transcript_events(task_id: str) -> bool:
     return len(rows) >= 3
 
 
-def _fetch_events_for_task_id(
-    db: sqlite3.Connection, task_id: str,
-) -> list[dict[str, object]]:
-    """Load and decode the event rows for *task_id* in seq order.
-
-    :func:`_select_event_rows` followed by :func:`_decode_event_rows`;
-    callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``)
-    when invoking this helper.  The transcript loaders of this module
-    call the two halves themselves so that only the SELECT runs under
-    the lock: the lock is writer-preferring, so a decode held under it
-    would stall every write in the process for its duration.
-
-    Args:
-        db: Active database connection.
-        task_id: Primary key of the ``task_history`` row.
-
-    Returns:
-        List of event dicts with ``_timestamp`` injected.
-    """
-    return _decode_event_rows(_select_event_rows(db, task_id))
-
-
 def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
     """Return the raw event rows of *task_id* in seq order, oversized rows clipped.
 
-    Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``).
+    Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``);
+    every transcript loader (this module's and
+    :func:`task_digest.load_task`) runs only this SELECT under the lock
+    and calls :func:`_decode_event_rows` outside it, because the lock is
+    writer-preferring and a decode held under it would stall every
+    write in the process for its duration.
     Rows longer than :data:`MAX_EVENT_ROW_CHARS` (tool output recorded
     before the per-call cap, up to 100 MB each) are never transferred
     to Python: SQLite returns only their ``type`` and the first
@@ -5296,7 +5318,7 @@ def _decode_event_rows(event_rows: list[sqlite3.Row]) -> list[dict[str, object]]
 
 
 #: An event row longer than this is clipped by SQLite instead of being
-#: loaded (see :func:`_fetch_events_for_task_id`).  Generous enough
+#: loaded (see :func:`_select_event_rows`).  Generous enough
 #: for a ``tool_result`` carrying a few embedded screenshots.
 MAX_EVENT_ROW_CHARS = 4 * 1024 * 1024
 #: How much of an oversized row's ``text`` survives.
@@ -5341,30 +5363,12 @@ def _clipped_event_row(
     }
 
 
-def _select_session_rows(
-    db: sqlite3.Connection, row: sqlite3.Row, with_events: bool,
-) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
-    """Pair a ``_HISTORY_SELECT`` *row* with its raw event rows.
-
-    The locked half of every transcript loader: callers hold
-    ``_rw_lock.read_lock()`` and hand the pair to
-    :func:`_events_session_dict` after leaving it.
-
-    Args:
-        db: Active database connection.
-        row: A ``task_history`` row from ``_HISTORY_SELECT``.
-        with_events: ``False`` fetches no event rows: the caller
-            wants the row's metadata only (a deferred replay).
-    """
-    return row, _select_event_rows(db, str(row["id"])) if with_events else []
-
-
 def _events_session_dict(
     row: sqlite3.Row, event_rows: list[sqlite3.Row],
 ) -> dict[str, object]:
     """Build the replay-session dict shared by every chat-events loader.
 
-    Decodes the event rows of :func:`_select_session_rows` and needs
+    Decodes the event rows of :func:`_select_event_rows` and needs
     no lock: the loaders call it after leaving ``_rw_lock.read_lock()``
     so the JSON work of a large transcript never blocks the writer.
 
@@ -5414,8 +5418,8 @@ def _load_events_session_row(
         row = db.execute(_HISTORY_SELECT + where_sql, params).fetchone()
         if row is None:
             return None
-        session_rows = _select_session_rows(db, row, with_events)
-    return _events_session_dict(*session_rows)
+        event_rows = _select_event_rows(db, str(row["id"])) if with_events else []
+    return _events_session_dict(row, event_rows)
 
 
 def _load_latest_chat_events_by_chat_id(
@@ -5449,7 +5453,7 @@ def _load_latest_chat_events_by_chat_id(
     if not chat_id:
         return None
     return _load_events_session_row(
-        f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+        f"WHERE chat_id = ? AND {NOT_SUBAGENT} "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         (chat_id,),
         with_events,
@@ -5523,14 +5527,14 @@ def _load_all_chat_events_by_chat_id(
     with _rw_lock.read_lock():
         rows = db.execute(
             _HISTORY_SELECT
-            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            + f"WHERE chat_id = ? AND {NOT_SUBAGENT} "
             "ORDER BY timestamp DESC, rowid DESC",
             (chat_id,),
         ).fetchall()
     for row in rows:
         with _rw_lock.read_lock():
-            session_rows = _select_session_rows(db, row, True)
-        entry = _events_session_dict(*session_rows)
+            event_rows = _select_event_rows(db, str(row["id"]))
+        entry = _events_session_dict(row, event_rows)
         if budget is not None:
             budget -= len(json.dumps(entry).encode("utf-8"))
             if budget < 0:
@@ -5583,8 +5587,11 @@ def _load_subagent_rows_by_parent_task_id(
             + "WHERE parent_task_id = ? ORDER BY rowid ASC",
             (parent_task_id,),
         ).fetchall()
-        sessions = [_select_session_rows(db, r, with_events) for r in rows]
-    return [_events_session_dict(*session_rows) for session_rows in sessions]
+        sessions = [
+            (r, _select_event_rows(db, str(r["id"])) if with_events else [])
+            for r in rows
+        ]
+    return [_events_session_dict(r, event_rows) for r, event_rows in sessions]
 
 
 def _get_adjacent_task_by_chat_id(
@@ -5624,16 +5631,16 @@ def _get_adjacent_task_by_chat_id(
             _HISTORY_SELECT
             + "WHERE chat_id = ? "
             f"AND (timestamp {cmp} ? OR (timestamp = ? AND rowid {cmp} ?)) "
-            f"AND {_HISTORY_NOT_SUBAGENT} "
+            f"AND {NOT_SUBAGENT} "
             f"ORDER BY timestamp {order}, rowid {order} LIMIT 1",
             (chat_id, ts, ts, cur_rowid),
         ).fetchone()
         if not adj:
             return None
-        session_rows = _select_session_rows(db, adj, True)
+        event_rows = _select_event_rows(db, str(adj["id"]))
     # The synthesized extra lets the replay reply builder attach
     # a task_settings event for rows that predate the event.
-    return _events_session_dict(*session_rows)
+    return _events_session_dict(adj, event_rows)
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
@@ -5642,7 +5649,7 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     Sub-agent rows (those with a non-empty ``parent_task_id`` column —
     set on the task row of every run submitted with ``parentTaskId``,
     a ``run_agent`` sub-task) are filtered out via the shared
-    ``_HISTORY_NOT_SUBAGENT`` SQL predicate.  Sub-agent
+    ``NOT_SUBAGENT`` SQL predicate.  Sub-agent
     tasks/results are an internal implementation detail of the
     parent's ``run_parallel`` tool call; surfacing them in the chat
     context would (a) pollute the LLM's "Previous tasks and results"
@@ -5665,11 +5672,11 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         rows = db.execute(
             "SELECT task, result FROM task_history "
-            f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            f"WHERE chat_id = ? AND {NOT_SUBAGENT} "
             "ORDER BY timestamp ASC, rowid ASC",
             (chat_id,),
         ).fetchall()
-        return [{"task": r["task"], "result": r["result"]} for r in rows]
+    return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
 def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
@@ -5698,10 +5705,10 @@ def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
     if not task_id:
         return []
     db = _get_db()
+    rows: list[sqlite3.Row] = []
+    seen: set[str] = set()
+    current = task_id
     with _rw_lock.read_lock():
-        entries: list[_HistoryEntry] = []
-        seen: set[str] = set()
-        current = task_id
         while current and current not in seen:
             seen.add(current)
             row = db.execute(
@@ -5711,10 +5718,9 @@ def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
             ).fetchone()
             if row is None:
                 break
-            entries.append({"task": row["task"], "result": row["result"]})
+            rows.append(row)
             current = _safe_str(row["parent_task_id"])
-        entries.reverse()
-        return entries
+    return [{"task": r["task"], "result": r["result"]} for r in reversed(rows)]
 
 
 def _load_chat_context_text(chat_id: str) -> str:
@@ -5848,17 +5854,13 @@ def _record_file_usage(path: str) -> None:
     path at the cap evicts the least recently used one first (see
     :func:`_evict_for_new_key`).
     """
-    db = _get_db()
     now = time.time()
-    with _rw_lock.write_lock(), _immediate_txn(db):
-        _evict_for_new_key(
-            db, "file_usage", "path", path, _MAX_FILE_USAGE_ENTRIES, "last_used ASC",
-        )
-        db.execute(
-            "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
-            "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
-            (path, now, now),
-        )
+    _capped_upsert(
+        "file_usage", "path", path, _MAX_FILE_USAGE_ENTRIES, "last_used ASC",
+        "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
+        "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
+        (path, now, now),
+    )
 
 
 def _record_frequent_task(task: str) -> None:
@@ -5878,17 +5880,11 @@ def _record_frequent_task(task: str) -> None:
     """
     if not task:
         return
-    db = _get_db()
     now = time.time()
-    with _rw_lock.write_lock(), _immediate_txn(db):
-        _evict_for_new_key(
-            db, "frequent_tasks", "task", task, _MAX_FREQUENT_TASKS,
-            "count ASC, timestamp ASC",
-        )
-        db.execute(
-            "INSERT INTO frequent_tasks (task, count, timestamp) "
-            "VALUES (?, 1, ?) "
-            "ON CONFLICT(task) DO UPDATE SET "
-            "count = count + 1, timestamp = ?",
-            (task, now, now),
-        )
+    _capped_upsert(
+        "frequent_tasks", "task", task, _MAX_FREQUENT_TASKS,
+        "count ASC, timestamp ASC",
+        "INSERT INTO frequent_tasks (task, count, timestamp) VALUES (?, 1, ?) "
+        "ON CONFLICT(task) DO UPDATE SET count = count + 1, timestamp = ?",
+        (task, now, now),
+    )

@@ -1,12 +1,19 @@
 /*
- * Brand skin.  Loaded after main.css, so rules here override the stock
- * KISS Sorcar look.
+ * Brand skin.  Loaded as the LAST stylesheet of the chat page (after
+ * main.css, remote-codex.css and the inlined palettes) and inlined after
+ * main.css on the share pages, so rules here override the stock KISS
+ * Sorcar look.
  *
  * The stock build ships this file empty.  A custom distribution (see
  * brand.json for the name strings) replaces it to re-skin the UI, e.g.
  *
- *   :root { --accent: #14b8a6; }
+ *   :root, body.remote-chat { --accent: #14b8a6; }
  *   #welcome h2::before { content: url("kiss-icon.svg"); display: block; }
+ *
+ * Palette tokens (--accent, --bg, --fg, ...) must be set on BOTH :root
+ * and body.remote-chat: the chat page carries body.remote-chat, where
+ * remote-codex.css re-derives every token from the theme palette, so a
+ * :root value alone is shadowed there (it reaches only the share page).
  *
  * Relative url() values resolve next to this file in both hosts.
  */

@@ -35,12 +35,13 @@ SYSTEM_PROMPT = """\
 ## Writing protocol (write)
 
 All text you produce for the user, in a file or in the final answer, must
-read as if a careful person wrote it.
+read as if a careful human wrote it naturally.
 
 ### Audience and register
 
-- Write for a general reader: intelligent, but new to the subject. Define each
+- Write in layman's term for a general reader: intelligent, but new to the subject. Define each
   technical term at first use, or use a plain word.
+- The text must be such that it reads as if written by a human naturally.
 - Professional American English: American spelling (color, organize, analyze), the
   serial comma, double quotation marks with periods and commas inside them.
 - Be concise. Short words, short sentences, one idea per paragraph. Cut every sentence
@@ -160,6 +161,6 @@ class WriteSea(BaseSea):
         ``timeout`` tells a ``run_agent`` call how long to block for the run
         before returning its ``agent_job`` id and letting it finish detached.
         """
-        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS}
+        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS, "model": "bestrouter"}
 
 

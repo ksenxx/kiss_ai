@@ -49,6 +49,11 @@ from kiss.tests.conftest import posix_only
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
 
+def _checked_out(repo: Path) -> set[str]:
+    """The branches checked out in any worktree of *repo* (the sweep's in-use set)."""
+    return {branch for _wt_dir, branch in GitWorktreeOps.registered_worktrees(repo)}
+
+
 def _run(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a git command in *cwd*, raising on failure."""
     return subprocess.run(
@@ -148,9 +153,7 @@ class RemoveTakesRepoLockTest(unittest.TestCase):
         """A vanished worktree directory still gets unregistered."""
         shutil.rmtree(self.wt_dir)
         GitWorktreeOps.remove(self.repo, self.wt_dir)
-        self.assertNotIn(
-            "kiss/wt-a", GitWorktreeOps.checked_out_branches(self.repo),
-        )
+        self.assertNotIn("kiss/wt-a", _checked_out(self.repo))
 
     def test_remove_falls_back_to_rmtree_for_a_corrupt_worktree(self) -> None:
         """A worktree git refuses to remove is deleted directly."""
@@ -243,9 +246,7 @@ class GitOutputParsingTest(unittest.TestCase):
         self.assertEqual(
             {b for _d, b in pairs}, {"main", "kiss/wt-a"},
         )
-        self.assertEqual(
-            GitWorktreeOps.checked_out_branches(repo), {"main", "kiss/wt-a"},
-        )
+        self.assertEqual(_checked_out(repo), {"main", "kiss/wt-a"})
 
     def test_multiline_config_values_do_not_forge_branch_names(self) -> None:
         """A multi-line ``branch.*`` value yields no bogus section name."""
@@ -269,9 +270,7 @@ class GitOutputParsingTest(unittest.TestCase):
         head = _run("rev-parse", "HEAD", cwd=repo).stdout.strip()
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-d"
         _run("worktree", "add", "--detach", str(wt_dir), head, cwd=repo)
-        self.assertEqual(
-            GitWorktreeOps.checked_out_branches(repo), {"main"},
-        )
+        self.assertEqual(_checked_out(repo), {"main"})
 
 
 class FailedCherryPickCleanupTest(unittest.TestCase):

@@ -15,7 +15,7 @@
 //   2. The clicked task's events are NOT loaded in the open tab -> the tab is
 //      replayed at that task via resumeSession({id, taskId, tabId}).
 //   3. The clicked task IS the tab's own task -> scroll back to it, and no
-//      resumeSession is issued (parity with historyClickSwitchExistingChat).
+//      resumeSession is issued (parity with historyClickNoInputCopy).
 
 'use strict';
 
@@ -29,8 +29,10 @@ const {
 } = require('./simplify2_harness');
 const {historyRows, makeRow} = require('./history_helpers');
 
+// The open chats: the group strip renders only the chat on screen, so a
+// DOM count of `.chat-tab` is 1 whatever the number of open chats.
 function chatTabs(win) {
-  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
+  return win._testApi.openTabs().filter(t => !t.isContentTab);
 }
 
 /** The active tab's label: it names the task the reader is looking at. */

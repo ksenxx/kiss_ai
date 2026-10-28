@@ -14,8 +14,20 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {captureTimers} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
+
+/**
+ * Fire the 100 / 300 ms retries focusInputWithRetry armed (captured by
+ * simplify2_harness.captureTimers) without waiting for them; returns
+ * how many were armed.
+ */
+function fireFocusRetries(timers) {
+  const retries = timers.filter(t => t.ms === 100 || t.ms === 300);
+  for (const t of retries) t.cb();
+  return retries.length;
+}
 
 function startTask(win, tabId) {
   h.send(win, {type: 'status', running: true, tabId, startTs: Date.now()});
@@ -69,6 +81,7 @@ async function main() {
   await test('autocommit result does not steal focus from another text field', async () => {
     const {win} = h.makePage();
     const search = focusTricksSearch(win);
+    const timers = captureTimers(win);
     h.send(win, {
       type: 'autocommit_done',
       tabId: win._testApi.getActiveTabId(),
@@ -76,7 +89,7 @@ async function main() {
       manual: true,
       message: 'nothing to commit',
     });
-    await h.sleep(350);
+    fireFocusRetries(timers);
     assert.strictEqual(
       win.document.activeElement,
       search,
@@ -105,6 +118,7 @@ async function main() {
     // drop-down and starts typing a path into the folder picker must
     // keep the caret (the 100 / 300 ms retries used to take it).
     const {win} = h.makePage();
+    const timers = captureTimers(win);
     h.send(win, {type: 'focusInput'});
     assert.strictEqual(win.document.activeElement, h.byId(win, 'task-input'), 'precondition');
     const select = h.byId(win, 'chat-workdir');
@@ -114,7 +128,7 @@ async function main() {
     assert.ok(box, 'the folder picker opened');
     box.focus();
     assert.strictEqual(win.document.activeElement, box, 'precondition');
-    await h.sleep(350);
+    assert.strictEqual(fireFocusRetries(timers), 2, 'the forced request armed its two retries');
     assert.strictEqual(
       win.document.activeElement,
       box,

@@ -24,6 +24,7 @@ const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {send, snapshotEntry} = harness;
 const {tabEl} = require('./subagent_tab_helpers');
+const {makeRunner} = require('./ui_antipattern_harness');
 
 // The web server injects class="remote-chat" into the body before any
 // script runs (BODY_CLASS_ATTR in web_server.py): the served page.
@@ -473,6 +474,11 @@ function testTabListExposesTabSemantics() {
   assert.strictEqual(sub.getAttribute('role'), 'tab');
   assert.strictEqual(parent.getAttribute('aria-selected'), 'true');
   assert.strictEqual(sub.getAttribute('aria-selected'), 'false');
+  const subName = sub.getAttribute('aria-label') || '';
+  assert.ok(
+    subName.indexOf('sub-agent sub-1') !== -1,
+    `a sub-agent tab must expose its title as accessible name, got "${subName}"`,
+  );
 
   sub.click();
   assert.strictEqual(
@@ -525,73 +531,6 @@ function testRenamedTabKeepsAccessibleNameInSync() {
     t1.getAttribute('aria-label'),
     'fix the login bug',
     'the accessible name must stay in sync with the renamed title',
-  );
-}
-
-function testSubagentTabsGetTabSemantics() {
-  // Sub-agent tabs live in the same tablist and must carry the same
-  // tab semantics: role=tab, accessible name, aria-selected, and
-  // participation in the roving tabindex.
-  const {win} = makePage();
-  send(win, {
-    type: 'tabs_state',
-    tabs: [snapshotEntry('parent', 'parent chat', 'chat-A')],
-  });
-  tabEl(win, 'parent').click();
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: 'sub-1',
-    parent_tab_id: 'parent',
-    description: 'index the codebase',
-    task_id: 'task-sub-1',
-    taskIndex: 0,
-    isSubagentTab: true,
-  });
-
-  const sub = tabEl(win, 'sub-1');
-  assert.ok(sub, 'sub-agent tab must render in the tab bar');
-  assert.ok(
-    sub.classList.contains('subagent-tab'),
-    'sanity: the rendered tab is the sub-agent tab',
-  );
-  assert.strictEqual(
-    sub.getAttribute('role'),
-    'tab',
-    'a sub-agent tab must be a tab for assistive tech',
-  );
-  const name = sub.getAttribute('aria-label') || '';
-  assert.ok(
-    name.indexOf('index the codebase') !== -1,
-    `a sub-agent tab must expose its title as accessible name, got "${name}"`,
-  );
-  assert.strictEqual(
-    sub.getAttribute('aria-selected'),
-    'false',
-    'a background sub-agent tab must announce as not selected',
-  );
-  assert.strictEqual(
-    sub.getAttribute('tabindex'),
-    '-1',
-    'a background sub-agent tab must participate in the roving tabindex',
-  );
-
-  // Arrow navigation along the group strip reaches it from the parent
-  // chat's strip entry, Enter activates it.
-  pressKey(
-    win,
-    win.document.querySelector('#tab-list .chat-tab[data-tab-id="parent"]'),
-    'ArrowRight',
-  );
-  assert.strictEqual(
-    win.document.activeElement.dataset.tabId,
-    'sub-1',
-    'ArrowRight must move focus onto the sub-agent tab',
-  );
-  pressKey(win, win.document.activeElement, 'Enter');
-  assert.strictEqual(
-    activeTabId(win),
-    'sub-1',
-    'Enter must activate the sub-agent tab like a click',
   );
 }
 
@@ -651,7 +590,8 @@ function testRemoteControlOrderAndThemeAccessibility() {
   );
 }
 
-const tests = [
+const {test, report} = makeRunner();
+for (const t of [
   testAddTabControlIsAccessibleButton,
   testSettingsControlIsAccessibleButton,
   testChatTabIsKeyboardActivatable,
@@ -660,26 +600,11 @@ const tests = [
   testCloseControlIsAccessibleAndDoesNotSwitchTabs,
   testTabListExposesTabSemantics,
   testRenamedTabKeepsAccessibleNameInSync,
-  testSubagentTabsGetTabSemantics,
   testRemoteControlOrderAndThemeAccessibility,
-];
-
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
+]) {
+  test(t.name, t);
 }
-if (failures > 0) {
-  console.error(`${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log(`All ${tests.length} tabBarAccessibility tests passed`);
+report('tabBarAccessibility');
 // The page leaves reconnect timers behind in JSDOM;
 // exit explicitly like the other suites so the process never hangs.
 process.exit(0);

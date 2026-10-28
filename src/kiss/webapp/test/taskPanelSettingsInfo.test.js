@@ -34,6 +34,7 @@ const {
   makePage: makeHarnessPage,
   send,
   clickTab,
+  click,
   stubRaf,
   loadMainCss,
   readyTabId,
@@ -45,15 +46,6 @@ function makePage() {
     sourceUrl: 'taskinfo-main.js',
     beforeScripts: stubRaf,
   });
-}
-
-function click(el) {
-  el.dispatchEvent(
-    new el.ownerDocument.defaultView.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
 }
 
 const DASH = '\u2014';
@@ -452,7 +444,7 @@ test('share export gives every task panel its own settings info', () => {
     taskId: 'task-b',
     ts: now,
   });
-  click(win.document.getElementById('share-btn'));
+  click(win, win.document.getElementById('share-btn'));
   const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
   assert.ok(req, 'share click must request the chat tasks');
   send(win, {
@@ -559,7 +551,7 @@ test('a saved page lists every Task Info row for every task', () => {
   assert.strictEqual(statusText('status-budget'), 'Cost: $0.42');
   assert.strictEqual(statusText('status-steps'), 'Steps: 7');
   assert.strictEqual(statusText('meta-machine'), 'box-a');
-  click(doc.getElementById('share-btn'));
+  click(win, doc.getElementById('share-btn'));
   const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
   // The status bar's spans are lent to a neighbouring task the reader
   // scrolls onto: the saved page must report the tab's OWN figures.
@@ -739,7 +731,7 @@ test('share markup: the info block follows the task text', () => {
   const TAB = readyTabId(wv.posted);
   send(win, {type: 'clear', chat_id: 'chat-1', tabId: TAB});
   send(win, {type: 'setTaskText', text: 'a task', tabId: TAB});
-  click(win.document.getElementById('share-btn'));
+  click(win, win.document.getElementById('share-btn'));
   const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
   send(win, {
     type: 'share_tasks',

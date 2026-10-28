@@ -45,32 +45,13 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-const {send, clickTab} = harness;
+const {send, clickTab, fakeGeometry, wheel, getAdjacent} = harness;
 
 function makePage() {
   const page = harness.makePage();
   page.win._testApi.endLaunch();
   page.win._testApi.hideWelcome();
   return page;
-}
-
-function fakeGeometry(el) {
-  Object.defineProperty(el, 'scrollWidth', {value: 2000, configurable: true});
-  Object.defineProperty(el, 'clientWidth', {value: 400, configurable: true});
-  Object.defineProperty(el, 'scrollHeight', {value: 3000, configurable: true});
-  Object.defineProperty(el, 'clientHeight', {value: 500, configurable: true});
-}
-
-function wheel(win, O, deltaY, n) {
-  for (let i = 0; i < n; i++) {
-    O.dispatchEvent(
-      new win.WheelEvent('wheel', {deltaY, bubbles: true, cancelable: true}),
-    );
-  }
-}
-
-function getAdjacent(posted) {
-  return posted.filter(m => m.type === 'getAdjacentTask');
 }
 
 function statusRow(win) {
@@ -89,7 +70,7 @@ const TS = 1767225600000;
 function setupWithHistoryTask(win, posted) {
   const tabId = harness.readyTabId(posted);
   const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  fakeGeometry(O, {sh: 3000, ch: 500});
   send(win, {
     type: 'task_events',
     tabId,

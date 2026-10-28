@@ -28,7 +28,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {subagentTabEls} = require('./subagent_tab_helpers');
+const {subagentTabEls, spawnSubagent} = require('./subagent_tab_helpers');
 
 const {send, readyTabId} = harness;
 
@@ -65,19 +65,10 @@ function runningParentWithAsk() {
 }
 
 function testLiveAskChildClosesOnDone() {
-  const {win, posted, parentId} = runningParentWithAsk();
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: CHILD,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === CHILD);
-  assert.ok(resume, 'new_tab must make the page resume the child');
-  const subTabId = resume.tabId;
+  const page = runningParentWithAsk();
+  const {win, posted, parentId} = page;
+  // An ask child has no index in a fan-out, so its tab is not numbered.
+  const subTabId = spawnSubagent(page, parentId, CHILD, QUESTION, undefined);
   assert.strictEqual(
     subTabId,
     parentId + '__sub_' + CHILD,
@@ -88,15 +79,6 @@ function testLiveAskChildClosesOnDone() {
     1,
     'the answering child gets one nested tab while it runs',
   );
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: QUESTION,
-    task_id: CHILD,
-    isSubagentTab: true,
-    isDone: false,
-  });
   send(win, {type: 'status', running: true, tabId: subTabId, startTs: Date.now()});
   assert.strictEqual(subagentTabEls(win).length, 1, 'still one tab');
 

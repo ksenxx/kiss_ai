@@ -23,9 +23,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+import docker
 import pytest
 
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.coding import coding_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
@@ -36,9 +38,7 @@ MODEL = "gpt-5.6-luna"
 
 
 def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
-    """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
-    from kiss.agents.seas.coding import coding_sea
-
+    """Every LLM call is counted; the tool hook logs calls and answers human-only tools."""
     # The hook ends the trial when its container is gone, so the test needs a
     # live one; without a Docker daemon the liveness check is skipped.
     live = _live_container("python:3.11-slim", "true")
@@ -57,7 +57,14 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
             )
         )
         harness = coding_sea.ContainerHarness(str(config))
-        for expected in range(1, 202):
+        for expected in range(1, 4):
+            assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
+                {"role": "user", "content": "x"}
+            ]
+            assert harness.turns == expected
+        # no turn cap: the calls around the old 200-turn limit go through like any other
+        harness.turns = 199
+        for expected in (200, 201, 202):
             assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
                 {"role": "user", "content": "x"}
             ]
@@ -78,12 +85,21 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != ALLOW
     settings = resolve_settings(harness.settings())
     assert settings["docker_image"] == f"container:{container_name}"
-    # The trial adds no tools of its own (the container's shell is the
-    # toolset); neither the module nor the harness, whose methods the
-    # generated trial SEA delegates to, carries a removed name.
+    # The trial's toolset is the built-ins without ``decide`` (a text
+    # classifier, not an oracle for the task's domain) plus the checkpoint
+    # tools; neither the module nor the harness carries a removed name.
     assert not hasattr(coding_sea, "add_to_tools")
     assert_no_removed_getters(coding_sea)
-    assert not hasattr(harness, "if_append_basic_tools") and not hasattr(harness, "tools")
+    assert not hasattr(harness, "if_append_basic_tools")
+
+    def decide(state: str, questions: str) -> str:
+        return ""
+
+    def Bash(command: str) -> str:  # noqa: N802
+        return ""
+
+    assert [t.__name__ for t in harness.tools([Bash, decide])] == [
+        "Bash", "checkpoint", "rollback"]
     # The bundled ``coding`` SEA itself is a hidden worker: it is a factory
     # of trial SEAs, never a slash command of its own.
     assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
@@ -96,7 +112,9 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
         json.loads(line)
         for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
     ]
-    assert [e["event"] for e in events].count("llm_call") == 202 + (live is not None)
+    assert [e["event"] for e in events].count("llm_call") == 7 + (live is not None)
+    turns = [e["turn"] for e in events if e["event"] == "llm_call"]
+    assert turns[:7] == [1, 2, 3, 200, 201, 202, 203]
     tool_events = [e for e in events if e["event"] == "tool_call"]
     assert [e["blocked"] for e in tool_events] == [False, True, True, True]
 
@@ -107,8 +125,6 @@ def test_append_to_last_tool_result_handles_every_message_shape() -> None:
 
     It is never appended to prompts or assistant turns.
     """
-    from kiss.agents.seas.coding import coding_sea
-
     anthropic: dict[str, Any] = {
         "role": "user",
         "content": [{"type": "tool_result", "tool_use_id": "t", "content": "out"}],
@@ -180,13 +196,11 @@ def test_changed_definitions_and_test_paths() -> None:
         assert test_context.is_test_path(path), path
     for path in ("django/db/models/fields.py", "src/contest.py", "latest/run.py"):
         assert not test_context.is_test_path(path), path
-    assert test_context.find_referencing_tests("c", "/w", [], "/w/a.py") == []
+    assert test_context.find_referencing_tests(lambda _: None, "/w", [], "/w/a.py") == []
 
 
 def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
     """Editing an existing source file appends the tests that mention the changed definitions."""
-    from kiss.agents.seas.coding import coding_sea
-
     setup = (
         "mkdir -p /repo/pkg /repo/tests && cd /repo && "
         "printf 'class Field:\\n    def check(self):\\n        return 1\\n' > pkg/fields.py && "
@@ -284,8 +298,6 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
 
 def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     """Destructive commands are blocked, install timeouts lifted, the gate answers one finish."""
-    from kiss.agents.seas.coding import coding_sea
-
     def harness(**extra: object) -> coding_sea.ContainerHarness:
         config = tmp_path / f"config-{len(extra)}.json"
         config.write_text(json.dumps({
@@ -308,6 +320,23 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     )
     for command in ("kill -9 1234", "rm -rf /app/build", "rm -rf /apps", "rm -rf /tmp/x"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
+    # a foreground sleep of SLEEP_POLL_SECONDS or more is a poll: refused in favour
+    # of bash_job; short sleeps, python's time.sleep and a background job's own
+    # sleeps are not
+    for command, seconds in (("(make &); sleep 100; tail -3 build.log", "100"),
+                             ("cd /tmp && sleep 60; grep BEST c.log", "60"),
+                             ("while true; do sleep 10; done", "10"),
+                             ("[ -f x ] && sleep 30s", "30")):
+        verdict = plain.on_tool_call("Bash", {"command": command})
+        assert verdict == refuse(coding_sea.SLEEP_VERDICT.format(seconds=seconds)), command
+    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "sleep 20"]'}) == \
+        refuse(coding_sea.SLEEP_VERDICT.format(seconds="20"))
+    for command in ("sleep 2; cat log", "python3 -c 'import time; time.sleep(100)'",
+                    "grep sleep 100 notes.txt", "./sleep 100",
+                    "nohup sh -c 'sleep 1; sleep 301' >/dev/null 2>&1 &",
+                    "cat > run.sh <<'EOF'\n#!/bin/sh\nsleep 100\nEOF"):
+        assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
+    assert plain.on_tool_call("Bash", {"command": "sleep 100; make", "background": True}) == ALLOW
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
     assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900
@@ -317,6 +346,26 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900
     args = {"command": "ls -la", "timeout_seconds": 30}
     assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 30
+    # a Bash call without a timeout gets the trial's default, not the tool's 30 s
+    args = {"command": "pytest -q"}
+    assert plain.on_tool_call("Bash", args) == ALLOW
+    assert args["timeout_seconds"] == coding_sea.DEFAULT_SHELL_TIMEOUT
+    # a here-document that creates a file passes (no container here: nothing
+    # exists, so every target is new); a target the shell resolves at run time
+    # is refused as a possible rewrite; the live-container test covers an
+    # existing target.  A multi-line sed -i or a Python rewrite is refused.
+    for command in ("cat > /app/x.py <<'EOF'\nprint(1)\nEOF", "cat <<EOF | tee /app/x\nhi\nEOF",
+                    "ls\ncat <<EOF >> /app/log\nline\nEOF",
+                    "python3 - <<'EOF'\nprint(open('/app/x').read())\nEOF",
+                    "cat <<EOF\nhello\nEOF", "grep -c '<<' /app/x.py > /dev/null",
+                    "cmd 2>&1 | head"):
+        assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
+    assert plain.on_tool_call("run_commands_parallel",
+                              {"commands": '["ls", "cat > /app/x <<EOF\\nx\\nEOF"]'}) == ALLOW
+    dynamic = plain.on_tool_call("Bash", {"command": "cat > \"$OUT\" <<EOF\nx\nEOF"})
+    assert dynamic == refuse(coding_sea.HEREDOC_VERDICT.format(path='"$OUT"'))
+    sed = plain.on_tool_call("Bash", {"command": "sed -i 's/a/b\\nc/' /app/x.py"})
+    assert not sed.allowed and "Edit(" in sed.text
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
     assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900
@@ -338,26 +387,56 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("finish", {}) == ALLOW
     gated = harness(finish_gate=True)
     assert gated.on_tool_call("finish", {"success": False}) == ALLOW
-    # an implicit (text-only) finish is vetoed once, without spending the gate
-    assert gated.on_tool_call("finish", {}) == refuse(coding_sea.FINISH_GATE_VERDICT)
+    # an implicit (text-only) finish is vetoed once; the second is logged and let go
+    veto = refuse(coding_sea.IMPLICIT_FINISH_VERDICT)
+    assert gated.on_tool_call("finish", {}) == veto
     assert gated.on_tool_call("finish", {}) == ALLOW
-    gate = refuse(coding_sea.FINISH_GATE_VERDICT)
-    assert gated.on_tool_call("finish", {"success": "true"}) == gate
+    assert coding_sea.ended_unchecked(tmp_path / "trajectory.jsonl")
+    # no clock: a success claim is checked at once.  No container here, so the
+    # agent's verifier is "missing": refused up to MAX_VERIFIER_REFUSALS
+    # times, then the run is let go, as a finish no check vouched for
+    missing = refuse(coding_sea.VERIFIER_MISSING_VERDICT.format(path=coding_sea.VERIFIER_PATH))
+    assert gated.on_tool_call("finish", {"success": "true"}) == missing
+    for _ in range(coding_sea.MAX_VERIFIER_REFUSALS - 1):
+        assert gated.on_tool_call("finish", {"success": True}) == missing
+    trajectory = tmp_path / "trajectory.jsonl"
+    before = trajectory.stat().st_size
+    assert not coding_sea.ended_unchecked(trajectory, before)
     assert gated.on_tool_call("finish", {"success": True}) == ALLOW
     assert gated.on_tool_call("finish", {}) == ALLOW
+    assert coding_sea.ended_unchecked(trajectory, before)
+    unverified = [e for e in coding_sea.trajectory_events(trajectory, before)
+                  if e["event"] == "unverified_finish"]
+    assert [e["refusals"] for e in unverified] == [3]
     gated2 = harness(finish_gate=True, workdir="/testbed")
-    assert gated2.on_tool_call("finish", {"success": True}) == gate
-    assert gated2.on_tool_call("finish", {"success": True}) == ALLOW
+    assert gated2.on_tool_call("finish", {"success": True}) == missing
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == refuse(blocked)
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == ALLOW
+    # the ledger gate: an edit under the workdir is refused (twice at most) until
+    # the ledger exists; the ledger and verifier themselves live outside it
+    ledger = refuse(coding_sea.LEDGER_VERDICT.format(workdir="/testbed",
+                                                      ledger=coding_sea.LEDGER_PATH))
+    assert gated2.on_tool_call("Write", {"file_path": coding_sea.LEDGER_PATH, "content": "x"}) \
+        == ALLOW
+    assert gated2.on_tool_call("Edit", {"file_path": "/testbed/a.py", "old_string": "a",
+                                        "new_string": "b"}) == ledger
+    assert gated2.on_tool_call("Write", {"file_path": "b.py", "content": ""}) == ledger
+    assert gated2.on_tool_call("Write", {"file_path": "/testbed/c.py", "content": ""}) == ALLOW
+    assert gated2.on_tool_call("Write", {"file_path": 7, "content": ""}) == ALLOW
+    assert plain.on_tool_call("Write", {"file_path": "/app/x", "content": ""}) == ALLOW  # no gate
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
     gate_events = [e for e in events
                    if e.get("tool") == "finish" and e["args"] == {"success": True}]
-    assert [e["blocked"] for e in gate_events] == [False, False, True, False]
+    assert [e["blocked"] for e in gate_events] == [False, True, True, False, True]
+    assert [e["result"] for e in events if e["event"] == "verifier"] == ["missing"] * 4
+    assert [e["turn"] for e in events if e["event"] == "implicit_finish"] == [0, 0]
     # the prompt carries the environment rule and no benchmark-specific wording; the trial
     # config takes the gate from the environment
     prompt = plain.system_prompt()
     assert "Leave the environment as the task expects to find it" in prompt
+    assert coding_sea.VERIFIER_PATH in prompt and coding_sea.LEDGER_PATH in prompt
+    assert "bash_job" in prompt and "nohup" not in prompt and "minutes in" not in prompt
+    assert f"defaults to {coding_sea.DEFAULT_SHELL_TIMEOUT}" in prompt
     assert "byte for byte" not in prompt
     assert "checker" not in prompt.lower()
     assert "no internet" not in prompt.lower()
@@ -375,8 +454,6 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     the config's prompt, the harness's system prompt as a replacement,
     both hooks, no tools hook).
     """
-    from kiss.agents.seas.coding import coding_sea
-
     trial = {"container": "kiss-test-trial", "workdir": "/app", "prompt": "p", "model": MODEL}
     sea_path = coding_sea.write_trial_sea(tmp_path / "sea-trial", trial)
     config = json.loads((tmp_path / "sea-trial" / "config.json").read_text())
@@ -417,10 +494,13 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert harness.turns == 1
     trajectory = (tmp_path / "sea-trial" / "trajectory.jsonl").read_text().splitlines()
     events = [json.loads(line) for line in trajectory]
+    # the first model call records the shell the checks will run with (no
+    # container here: no path, no digest) before the call itself
     assert [e["event"] for e in events if e["event"] != "container_gone"] == [
-        "tool_call", "llm_call",
+        "tool_call", "shell_baseline", "llm_call",
     ]
-    assert events[1]["turn"] == 1
+    assert events[1] == {**events[1], "turn": 1, "path": "bash", "sha256": None}
+    assert events[2]["turn"] == 1
     assert sea.system_prompt("ASSEMBLED") == harness.system_prompt()
     assert "ASSEMBLED" not in sea.system_prompt("ASSEMBLED")
 
@@ -429,8 +509,23 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     run = sea_commands.evaluate_sea([loaded], "label", "task-1")
     assert run.prompt == "p"
     assert run.settings == resolved
-    # ``tools`` is not overridden: the staged tools hook is the identity.
-    assert run.tools_hook([print]) == [print]
+    # ``tools`` adds the harness's checkpoint tools to the built-ins and drops
+    # ``summary`` and ``decide``; with no ``summary`` tool the root layer's
+    # ten-step summary cadence never refuses a call.
+    def summary(description: str) -> str:
+        return description
+
+    def decide(state: str, questions: str) -> str:
+        return state
+
+    assert [t.__name__ for t in run.tools_hook([print, summary, decide])] == [
+        "print", "checkpoint", "rollback",
+    ]
+    assert loaded.has_summary_tool is False
+    for _ in range(10):
+        BaseSea.llm_call_hook(loaded, [])
+    assert loaded.step == 10 and loaded.summary_due is False
+    assert BaseSea.tool_call_hook(loaded, "Bash", {"command": "ls"}) == ALLOW
     assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()
     assert run.tool_call_hook("ask_user_question", {"question": "?"}) != ALLOW
     assert run.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
@@ -438,8 +533,6 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
 
 def _docker_client() -> Any:
     """A Docker client that answered a ping, or ``None`` when no daemon is reachable."""
-    import docker
-
     try:
         client = docker.from_env()
         client.ping()
@@ -449,9 +542,18 @@ def _docker_client() -> Any:
 
 
 def _live_container(image: str, setup: str) -> Any:
-    """A running container of *image* after *setup* ran in it, or ``None`` without Docker."""
+    """A running container of *image* after *setup* ran in it, or ``None`` without Docker.
+
+    ``None`` also when *image* is not pulled yet: ``containers.run`` would
+    pull it with no deadline, and these tests skip rather than wait on
+    the network.
+    """
     client = _docker_client()
     if client is None:
+        return None
+    try:
+        client.images.get(image)
+    except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
         return None
     live = client.containers.run(image, "sleep infinity", detach=True)
     try:
@@ -483,8 +585,6 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
     the agent edits with Edit/Write are its own and are not reported; each
     changed file is reported once.
     """
-    from kiss.agents.seas.coding import coding_sea
-
     live = _live_container(
         "python:3.11-slim",
         "mkdir -p /app/sub && printf 'a,b\\n1,2\\n' > /app/data.csv && echo x > /app/sub/keep.txt "
@@ -622,8 +722,6 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
 
 def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
     """A dead container or the root workdir disables the notes without disturbing the run."""
-    from kiss.agents.seas.coding import coding_sea
-
     # Only a reachable daemon can report the container as gone; when the
     # daemon itself is down the liveness check treats that as a transient
     # hiccup and lets the trial go on (see ``ContainerHarness.container_alive``).

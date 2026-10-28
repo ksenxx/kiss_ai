@@ -22,8 +22,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 function valueOf(win, id) {
   return win.document.getElementById(id).value;
@@ -92,22 +92,23 @@ function testReopenedPanelShowsTheServerValueNotTheOldEdit() {
       'value this window typed in the previous session',
   );
 
-  // ...and closing it must save the server value back unchanged rather
-  // than resurrecting the stale edit.
+  // ...and closing it must not resurrect the stale edit: nothing was
+  // touched in this session, so nothing is sent (the daemon keeps what
+  // it holds).
   const before = posted.length;
   closeSettings(win);
   const save = posted
     .slice(before)
     .filter(m => m && m.type === 'saveConfig')
     .pop();
-  assert.ok(save, 'closing a populated panel must save the form');
   assert.strictEqual(
-    save.config.custom_endpoint,
-    'https://server.example/v1',
-    'the repainted server value is what gets saved back',
+    save,
+    undefined,
+    'closing an untouched reopened panel must not save the previous ' +
+      "session's edit",
   );
   win.close();
-  console.log('  ok - a reopened panel shows and re-saves the server value');
+  console.log('  ok - a reopened panel shows the server value and saves nothing');
 }
 
 // The run toggles are seeded by configData for every session, so a mark

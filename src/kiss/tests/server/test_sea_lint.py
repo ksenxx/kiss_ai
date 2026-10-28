@@ -116,6 +116,26 @@ def test_renamed_and_removed_keys_are_fixable_and_fix_rewrites_them(tmp_path: Pa
     }
 
 
+def test_fix_skips_a_script_it_cannot_parse_and_fixes_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``lint_all(fix=True)`` reports an unparsable or unreadable script as broken and goes on."""
+    unparsable = write_sea(tmp_path, DESCRIPTION + "\n    def settings(self, settings:\n", "bad")
+    missing = tmp_path / "gone" / "gone_sea.py"
+    fixable = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + "\n    def settings(self, settings):\n        return {'classify_tasks': False}\n",
+        "good",
+    )
+    findings = lint_all([unparsable, missing, fixable], fix=True)
+    assert [(f.path, f.code) for f in findings] == [(unparsable, "broken"), (missing, "broken")]
+    assert findings[0].message.startswith("cannot parse: ")
+    assert findings[1].message.startswith("cannot parse: ")
+    assert capsys.readouterr().out == f"fixed {fixable}:9: 'classify_tasks' -> 'auto_classify'\n"
+    assert "'auto_classify': False" in fixable.read_text(encoding="utf-8")
+
+
 def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Path) -> None:
     """The codemod edits byte-accurately and only where a string names a settings key."""
     path = write_sea(

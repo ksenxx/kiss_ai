@@ -1220,6 +1220,10 @@
       // back (`replay_deferred`); cleared by the replay the first
       // activation requests (requestDeferredReplay).
       replayPending: null,
+      // The task id ('' = the chat's latest task) of a replay the page
+      // asked for (requestReplay), until that replay arrives: it lands
+      // afresh instead of keeping the reading position.
+      replayRequested: null,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
@@ -1392,6 +1396,20 @@
     );
   }
 
+  /** True when *ancestorId* is on the parentTabId chain of an open tab. */
+  function hasAncestorTab(tab, ancestorId) {
+    for (let up = getTab(tab.parentTabId); up; up = getTab(up.parentTabId)) {
+      if (up.id === ancestorId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Move a sub-agent tab right after its parent's whole subtree, so a
+   * nested sub-agent (a run_parallel inside a sub-agent) keeps its own
+   * block contiguous and the placement is idempotent: reconcileTabs
+   * re-places every sub-agent tab on every registry snapshot.
+   */
   function placeSubagentTabAfterParent(subTab, parentId) {
     const curIdx = tabs.indexOf(subTab);
     if (curIdx >= 0) tabs.splice(curIdx, 1);
@@ -1403,7 +1421,7 @@
       return;
     }
     let insertAt = parentIdx + 1;
-    while (insertAt < tabs.length && tabs[insertAt].parentTabId === parentId) {
+    while (insertAt < tabs.length && hasAncestorTab(tabs[insertAt], parentId)) {
       insertAt += 1;
     }
     tabs.splice(insertAt, 0, subTab);
@@ -1455,6 +1473,9 @@
     if (!s) return Boolean(p.trim());
     return /^[A-Za-z]:$/.test(s);
   }
+
+  const WORK_DIR_ROOT_REFUSED =
+    'A file-system root cannot be the working directory; pick a folder.';
 
   /**
    * The directory a tab browses and its next task runs in: the global
@@ -1616,17 +1637,19 @@
     // scroll lock the user engaged on the previous tab's chat no
     // longer applies.
     resetUserScrollLock();
-    if (tab.outputFragment) {
+    const restoredTranscript = !!tab.outputFragment;
+    if (restoredTranscript) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
       reviveActivePanelTimes(O);
       // The detach reset the scroll offsets of the transcript's
       // subpanels (real browsers destroy detached scrollers): put the
-      // locked ones back where the user was reading, then land the
-      // restored chat at the end of its latest panel — events may have
-      // streamed into the fragment while the tab was hidden.
+      // locked ones back where the user was reading.  The chat itself
+      // lands below (landOpenedTranscript), once the tab's own task
+      // name and numbers are back: the landing repaints the shown task,
+      // and that repaint must read this tab's, not the one the user
+      // just left.
       restoreLockedSubpanelOffsets();
-      autoScrollLatestEventPanel(O.lastElementChild);
     }
     currentTaskSettings = tab.taskSettings || null;
     currentTaskName = (tab.taskText || '').trim();
@@ -1693,10 +1716,17 @@
     updateInputDisabled();
     resetAdjacentState();
     syncAskComposer();
+    // landing-coverage:start
+    // A running tab comes back at the end of its transcript — events
+    // may have streamed into the fragment while the tab was hidden; a
+    // finished one with its own task panel at the top of the viewport.
+    // A welcome tab stays where showWelcomeScreen put it: at the top.
+    if (restoredTranscript && !tab.welcomeVisible) landOpenedTranscript();
+    // landing-coverage:end
     // visibletask-coverage:start
-    // The transcript comes back where the reader left it, which may well
-    // be inside a neighbouring task, so the shown task is derived from
-    // the restored transcript rather than from the tab's own name.
+    // The shown task is derived from the restored transcript, which may
+    // land inside a neighbouring task, rather than from the tab's own
+    // name.
     updateVisibleTask();
     // visibletask-coverage:end
     // The Explorer / Source Control views follow the tab's workspace.
@@ -2715,6 +2745,11 @@
         createNewTab();
         return;
       }
+      // A content tab taking the screen (stacked surface) restores no
+      // chat: blank the chat surface now, or the closed chat's timer,
+      // spinner, task and transcript would live on under the content
+      // tab until the next chat is restored.
+      if (successor.isContentTab) clearChatSurface();
       activateAdjacentTab(successor);
     }
     // A closed chat may have been the one whose question the composer
@@ -2723,6 +2758,24 @@
     reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
+  }
+
+  /**
+   * Blank the chat surface after the chat it showed closed with no chat
+   * to take its place: the transcript, the running timer and spinner,
+   * and the module-level task name, id and settings.
+   */
+  function clearChatSurface() {
+    O.innerHTML = '';
+    setRunningState(false);
+    currentTaskName = '';
+    currentTaskId = null;
+    currentTaskSettings = null;
+    setShownTask('');
+    if (statusText) {
+      statusText.textContent = 'Ready';
+      statusText.style.color = 'var(--dim)';
+    }
   }
 
   /**
@@ -2894,8 +2947,7 @@
       Array.from(area.children).forEach(v => {
         v.style.display = v.id === 'content-pane-empty' ? '' : 'none';
       });
-      syncBrowserTabVisibility(null);
-      syncTerminalTabVisibility(null);
+      syncContentViewVisibility(null);
     }
     renderTabBar();
     // After the render: the slide only takes with the pane open.
@@ -3090,8 +3142,7 @@
     });
     if (tab.contentViewEl) tab.contentViewEl.style.display = '';
     layoutContentEditor(tab);
-    syncBrowserTabVisibility(tab);
-    syncTerminalTabVisibility(tab);
+    syncContentViewVisibility(tab);
     // A path:NN link opened in the background rendered its editor at
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
@@ -3115,8 +3166,7 @@
     closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
     setChatSurfaceVisible(true);
-    syncBrowserTabVisibility(null);
-    syncTerminalTabVisibility(null);
+    syncContentViewVisibility(null);
   }
 
   // ---- The daemon machine's browser, streamed as a tab ---------------
@@ -3135,9 +3185,15 @@
   // `machine` with the tab id namespaced `browser__N@machine`, and
   // every tab-addressed command finds its machine from the id.
 
-  function syncBrowserTabVisibility(shownTab) {
+  /**
+   * Show the live view (browser or terminal) of `shownTab` and hide
+   * every other tab's; `null` hides them all.
+   * @param {object|null} shownTab The content tab on screen.
+   */
+  function syncContentViewVisibility(shownTab) {
     tabs.forEach(t => {
-      if (t.browserView) t.browserView.setVisible(t === shownTab);
+      const view = t.browserView || t.terminalView;
+      if (view) view.setVisible(t === shownTab);
     });
   }
 
@@ -3286,12 +3342,6 @@
     switchToTab(tab.id);
   }
 
-  function syncTerminalTabVisibility(shownTab) {
-    tabs.forEach(t => {
-      if (t.terminalView) t.terminalView.setVisible(t === shownTab);
-    });
-  }
-
   // The WebSocket came back (a `ready` after a reconnect): every
   // terminal tab asks for its shell again; the daemon re-attaches one
   // that survived the outage and starts a fresh one otherwise.
@@ -3370,19 +3420,103 @@
     chat.replayPending = null;
     const req = {id: pending.chatId, tabId: chat.id, scoped: true};
     if (pending.taskId) req.taskId = pending.taskId;
+    requestReplay(req);
+  }
+
+  // landing-coverage:start
+  /**
+   * Ask the daemon to replay a chat into the tab `req.tabId` names
+   * (`resumeSession`).  The tab remembers the task asked for, so that
+   * replay lands afresh (landOpenedTranscript) rather than keeping a
+   * reading position: it opens a chat or task the user asked for,
+   * unlike the reconnect replay that rebuilds the transcript on screen
+   * unasked.  The answer is told by its task id (replayAnswersRequest):
+   * a reconnect replay of another task arriving meanwhile neither
+   * consumes the request nor lands afresh.  Every caller names an open
+   * tab.
+   */
+  function requestReplay(req) {
+    getTab(req.tabId).replayRequested = taskIdStr(req.taskId);
     api.resumeSession(req);
+  }
+
+  function taskIdStr(taskId) {
+    return taskId === undefined || taskId === null ? '' : String(taskId);
+  }
+
+  /**
+   * Whether the `task_events` replay `ev` into `tab` answers the
+   * replay the page asked for (requestReplay): one is pending and it
+   * named this task, or the chat's latest task (any replay then).
+   */
+  function replayAnswersRequest(tab, ev) {
+    const asked = tab.replayRequested;
+    return asked !== null && (asked === '' || asked === taskIdStr(ev.task_id));
+  }
+  // landing-coverage:end
+
+  /**
+   * Make Enter and Space on a focusable non-button element (a history
+   * row, a group header) act as a click, as a real button would; keys
+   * pressed on a control inside it are left to that control.
+   * @param {HTMLElement} el The element, with `tabindex` and a click
+   *     handler of its own.
+   */
+  function activateOnEnterSpace(el) {
+    el.addEventListener('keydown', e => {
+      if (e.target !== el) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        el.click();
+      }
+    });
   }
 
   /**
    * The `resumeSession` request *req* for a chat of a remote machine:
    * `machine` binds the tab to it (the daemon forwards the resume, the
    * machine replays the chat into the tab) and `title` names the tab
-   * on every surface until the replay sets it.  A local chat's request
-   * is returned as it is.
+   * on every surface until the replay sets it.  The visible tab says
+   * the chat is on its way (showRemoteChatLoader).  A local chat's
+   * request is returned as it is.
    */
   function remoteResume(req, machine, title) {
     if (!machine) return req;
+    if (req.tabId === activeTabId) showRemoteChatLoader(machine);
     return Object.assign({}, req, {machine: machine, title: title || ''});
+  }
+
+  /**
+   * Say in the transcript area that a remote machine's chat is on its
+   * way: the daemon connects to the machine (a TLS handshake and a
+   * login away) and the machine replays the chat, which takes a few
+   * round trips, so the user sees the fetch under way instead of a
+   * bare task panel.  Gone with the answer's first frame, the tab's
+   * `status` (its transcript follows at once; a chat with nothing to
+   * replay sends only the status), with the transcript itself (the
+   * replay rebuilds the output) or with an error on the tab
+   * (removeRemoteChatLoader), whether the tab is on screen or parked
+   * meanwhile.
+   */
+  function showRemoteChatLoader(machine) {
+    removeRemoteChatLoader(getTab(activeTabId));
+    const loader = mkEl('div', 'adjacent-loader');
+    loader.id = 'remote-chat-loader';
+    loader.textContent = 'Loading the chat from ' + machine + '\u2026';
+    O.appendChild(loader);
+  }
+
+  /**
+   * Take the loading line out of *tab*'s transcript: the output on
+   * screen for the visible tab, the parked fragment (saveCurrentTab)
+   * for a background one.  No tab (an event naming a tab this page
+   * does not have), nothing to do.
+   */
+  function removeRemoteChatLoader(tab) {
+    if (!tab) return;
+    const home = tab.id === activeTabId ? O : tab.outputFragment;
+    const el = home ? home.querySelector('#remote-chat-loader') : null;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
   /**
@@ -3405,7 +3539,7 @@
       hasTaskId &&
       (deferred || !scrollChatToTask(taskId))
     ) {
-      api.resumeSession(
+      requestReplay(
         remoteResume(
           {id: chatId, taskId: taskId, tabId: tab.id},
           machine,
@@ -3440,9 +3574,7 @@
     tab.contentMonacoHolder = null;
     tab.contentModeBtn = null;
     if (tab.contentMenuBar) {
-      if (openContentMenu && openContentMenu.bar === tab.contentMenuBar) {
-        closeContentMenu();
-      }
+      closeContentMenuOf(tab);
       tab.contentMenuBar = null;
     }
     if (tab.contentEditor) {
@@ -3777,7 +3909,16 @@
       // lives there — with the Save button disabled forever, since
       // text that cannot be edited never goes dirty.
       if (tab.contentSaveBar && !tab.contentModeBtn) {
-        tab.contentSaveBar.remove();
+        // The "Reload from disk" button sits at the bar's right end:
+        // it still applies to the viewer, so it floats in the view's
+        // corner instead of leaving with the bar.
+        const bar = tab.contentSaveBar;
+        const refreshBtn = bar.querySelector('.content-refresh-btn');
+        if (refreshBtn) {
+          refreshBtn.classList.add('content-refresh-overlay');
+          bar.parentNode.appendChild(refreshBtn);
+        }
+        bar.remove();
         tab.contentSaveBar = null;
       }
       const code = appendCodeFallback(holder, text);
@@ -4152,6 +4293,13 @@
     openContentMenu = null;
   }
 
+  /** Close the open dropdown when it hangs off *tab*'s menu bar. */
+  function closeContentMenuOf(tab) {
+    if (openContentMenu && openContentMenu.bar === tab.contentMenuBar) {
+      closeContentMenu();
+    }
+  }
+
   // An editor action (getAction finds it) is offered when Monaco says
   // it applies right now — e.g. Go to Symbol needs a language with a
   // symbol provider. Other ids (undo, clipboard, select all) are core
@@ -4239,36 +4387,57 @@
     if (focusFirst && first) first.focus();
   }
 
+  /**
+   * The roving keyboard model of the page's menus: ArrowUp / ArrowDown
+   * wrap through `items`, Home / End jump to the ends, Enter / Space
+   * click the focused item (all four default-prevented), and Tab leaves
+   * the menu through `onLeave` with the browser's own focus move.
+   * @param {KeyboardEvent} e The keydown.
+   * @param {Array<Element>} items The focusable menu items, in order.
+   * @param {Function} onLeave Closes the menu when Tab is pressed.
+   * @returns {boolean} Whether the key belonged to the model.
+   */
+  function menuKeyNav(e, items, onLeave) {
+    if (!items.length) return false;
+    const at = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = at < 0 && step < 0 ? items.length - 1 : at + step;
+      items[(next + items.length) % items.length].focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      items[e.key === 'Home' ? 0 : items.length - 1].focus();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      if (at >= 0) items[at].click();
+    } else if (e.key === 'Tab') {
+      onLeave();
+      return true;
+    } else {
+      return false;
+    }
+    e.preventDefault();
+    return true;
+  }
+
   function onContentMenuKey(e, bar, btn, el) {
     const rows = Array.from(
       el.querySelectorAll('.content-menu-item[tabindex]'),
     );
-    const at = rows.indexOf(document.activeElement);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      const step = e.key === 'ArrowDown' ? 1 : -1;
-      const next = at < 0 && step < 0 ? rows.length - 1 : at + step;
-      rows[(next + rows.length) % rows.length].focus();
-    } else if (e.key === 'Home' || e.key === 'End') {
-      rows[e.key === 'Home' ? 0 : rows.length - 1].focus();
-    } else if (e.key === 'Enter' || e.key === ' ') {
-      if (at >= 0) rows[at].click();
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    // Tab moves on from the menu's button, not from the detached
+    // dropdown's spot at the end of the document.
+    function leaveToButton() {
+      btn.focus();
+      closeContentMenu();
+    }
+    if (menuKeyNav(e, rows, leaveToButton)) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const btns = Array.from(bar.children);
       const step = e.key === 'ArrowRight' ? 1 : -1;
       const i = btns.indexOf(btn) + step;
       const sibling = btns[(i + btns.length) % btns.length];
       sibling.focus();
       sibling.click();
-    } else if (e.key === 'Tab') {
-      // Tab moves on from the menu's button, not from the detached
-      // dropdown's spot at the end of the document.
-      btn.focus();
-      closeContentMenu();
-      return;
-    } else {
-      return;
+      e.preventDefault();
     }
-    e.preventDefault();
   }
 
   // The menus sit in their own row directly above the editor, so the
@@ -4437,7 +4606,9 @@
   // tab yields ``activeFile: ""``, which tells the daemon to drop its
   // snapshot of the closed file instead of completing against it; the
   // buffer is sent whenever it is known, even when emptied, so the
-  // daemon never pairs the path with stale text.
+  // daemon never pairs the path with stale text, and a file tab with
+  // no buffer (a read-only preview, a binary) sends ``null``, so the
+  // daemon drops any snapshot of the path and reads the file on disk.
   function editorContext(withContent) {
     const tab = getTab(lastViewedContentTabId);
     const isFile =
@@ -4445,8 +4616,10 @@
     const path = isFile ? tab.contentPath : '';
     if (!path) return withContent ? {activeFile: ''} : {};
     const ctx = {activeFile: path};
-    if (withContent && tab.contentHasText) {
-      ctx.activeFileContent = contentSourceValue(tab);
+    if (withContent) {
+      ctx.activeFileContent = tab.contentHasText
+        ? contentSourceValue(tab)
+        : null;
     }
     return ctx;
   }
@@ -4486,9 +4659,7 @@
     // The editor's menus act on the source: hidden with it.
     if (tab.contentMenuBar) {
       tab.contentMenuBar.style.display = tab.contentSourceMode ? '' : 'none';
-      if (openContentMenu && openContentMenu.bar === tab.contentMenuBar) {
-        closeContentMenu();
-      }
+      closeContentMenuOf(tab);
     }
     if (tab.contentSourceMode) {
       preview.style.display = 'none';
@@ -4577,18 +4748,32 @@
       failContentSave(tab, 'Save failed: no reply from the server');
     }, 30000);
     api.saveFile(
-      onMachine(
-        {
-          path: tab.contentPath,
-          content: model.getValue(),
-          workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
-          tabId: tab.ownerTabId,
-          token: tab.contentSaveToken,
-          version: tab.contentFileVersion,
-          force: !!force,
-        },
-        tab.ownerBrowseMachine,
-      ),
+      contentTabCommand(tab, {
+        content: model.getValue(),
+        tabId: tab.ownerTabId,
+        token: tab.contentSaveToken,
+        version: tab.contentFileVersion,
+        force: !!force,
+      }),
+    );
+  }
+
+  /**
+   * A daemon command about a content tab's file: its path and working
+   * directory, addressed to the machine the tab browses, with `fields`
+   * on top.
+   * @param {object} tab The content tab.
+   * @param {object} fields The command's other fields.
+   * @returns {object} The command to send.
+   */
+  function contentTabCommand(tab, fields) {
+    return onMachine(
+      {
+        path: tab.contentPath,
+        workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
+        ...fields,
+      },
+      tab.ownerBrowseMachine,
     );
   }
 
@@ -4617,17 +4802,7 @@
   function reloadContentTab(tab) {
     const requester = tab.ownerTabId || activeTabId;
     tab.contentReloadRequested = requester;
-    api.send(
-      onMachine(
-        {
-          type: 'openFile',
-          path: tab.contentPath,
-          workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
-          tabId: requester,
-        },
-        tab.ownerBrowseMachine,
-      ),
-    );
+    api.send(contentTabCommand(tab, {type: 'openFile', tabId: requester}));
   }
 
   function handleFileSaved(ev) {
@@ -4928,20 +5103,27 @@
   // saveFile) the preview renders alone, read-only, as before.
   function renderPreviewableContent(tab, view, ev, isMarkdown) {
     tab.contentIsMarkdown = isMarkdown;
-    tab.contentSourceText = ev.content || '';
-    tab.contentHasText = true;
+    const text = ev.content || '';
     if (typeof ev.version !== 'string') {
+      // A read-only preview (from an older daemon, or an HTML page
+      // past the editor cap, which can run to tens of MB): nothing
+      // can be edited, so no buffer is kept or reported. A completion
+      // names the file alone (activeFile) and the daemon reads the
+      // head of it from disk, instead of the page travelling back
+      // whole with every keystroke.
       tab.contentFileVersion = '';
+      tab.contentSourceText = '';
+      tab.contentHasText = false;
       appendContentHtmlFrame(
         view,
-        isMarkdown
-          ? markdownReportToHtml(tab.contentSourceText)
-          : tab.contentSourceText,
+        isMarkdown ? markdownReportToHtml(text) : text,
         false,
         tab,
       );
       return;
     }
+    tab.contentSourceText = text;
+    tab.contentHasText = true;
     tab.contentFileVersion = ev.version;
     appendContentSaveBar(tab, view);
     appendContentModeToggle(tab, tab.contentSaveBar);
@@ -5172,7 +5354,6 @@
       ownerTabId === undefined || ownerTabId === null || ownerTabId === ''
         ? activeTabId
         : String(ownerTabId);
-    const ownerTab = getTab(owner);
     if (ev.error) {
       // tableak-coverage:start
       // A background task's failed file open is that task's problem. Toasting
@@ -5214,10 +5395,14 @@
         ? tabBoundMachine(owner)
         : '';
     // One content tab per path, like one editor per file in VS Code --
-    // per machine: the same path on two machines is two files.
+    // per machine: the same path on two machines is two files.  A
+    // browser tab (its "path" is a URL) or a terminal tab (none) is
+    // never that file's tab.
     const existing = tabs.find(t => {
       return (
         t.isContentTab &&
+        !t.isBrowserTab &&
+        !t.isTerminalTab &&
         t.contentPath === path &&
         String(t.ownerBrowseMachine || '') === machine
       );
@@ -5275,9 +5460,7 @@
     tab.ownerBrowseMachine = machine;
     tab.ownerBrowseWorkDir = machine
       ? machineDirs(machine).workDir
-      : ownerTab
-        ? workDirForTab(ownerTab.id)
-        : '';
+      : workDirForTab(owner);
     tabs.push(tab);
     renderContentView(tab, ev);
     if (mayFocus) switchToTab(tab.id);
@@ -5436,25 +5619,8 @@
    * the tab.
    */
   function onTabCtxMenuKey(e) {
-    const items = tabCtxMenuItems();
-    if (!items.length) return;
-    const idx = items.indexOf(document.activeElement);
-    let next = -1;
-    if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
-    else if (e.key === 'ArrowUp') next = idx <= 0 ? items.length - 1 : idx - 1;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = items.length - 1;
-    else if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      if (idx >= 0) items[idx].click();
-      return;
-    } else if (e.key === 'Tab') {
-      // Tabbing out of a menu closes it (no focus trap).
-      closeTabContextMenu();
-      return;
-    } else return;
-    e.preventDefault();
-    items[next].focus();
+    // Tabbing out of the menu closes it (no focus trap).
+    menuKeyNav(e, tabCtxMenuItems(), closeTabContextMenu);
   }
   tabCtxMenu.addEventListener('keydown', onTabCtxMenuKey);
 
@@ -5469,10 +5635,11 @@
    * @param {string[]} ids Tab ids.
    */
   function closeTabsActiveLast(ids) {
-    const removesActive = id =>
-      addDescendantTabs(new Set([id])).has(activeTabId);
-    const last = ids.filter(removesActive);
-    ids.filter(id => !removesActive(id)).forEach(id => closeTab(id));
+    const last = [];
+    ids.forEach(id => {
+      if (addDescendantTabs(new Set([id])).has(activeTabId)) last.push(id);
+      else closeTab(id);
+    });
     if (last.length === 0) return;
     const outermost = last.reduce((a, b) =>
       addDescendantTabs(new Set([b])).has(a) ? b : a,
@@ -5885,7 +6052,7 @@
   // was issued. A snapshot broadcast before the daemon processed the
   // close still lists the tab and must not resurrect it (empty
   // transcript, one round trip of flicker). The shield lifts as soon as
-  // a snapshot omits the id, on the PENDING_OPEN_MAX_MISSES-th snapshot
+  // a snapshot omits the id, on the PENDING_CLOSE_MAX_HITS-th snapshot
   // that still lists it (the daemon kept the tab, so it is shown
   // again), or PENDING_CLOSE_TTL_MS after the close: a stale snapshot
   // is a matter of milliseconds, and a shield that outlives that would
@@ -5893,6 +6060,7 @@
   // when this client missed the close-confirming snapshot (outage).
   // armCloseShield / reconnect (`daemonStatus`) own the entries.
   const pendingCloseTabs = new Map();
+  const PENDING_CLOSE_MAX_HITS = PENDING_OPEN_MAX_MISSES;
   const PENDING_CLOSE_TTL_MS = 5000;
 
   function armCloseShield(tabId) {
@@ -5962,7 +6130,7 @@
       if (shield) {
         shield.hits += 1;
         if (
-          shield.hits < PENDING_OPEN_MAX_MISSES &&
+          shield.hits < PENDING_CLOSE_MAX_HITS &&
           Date.now() - shield.at < PENDING_CLOSE_TTL_MS
         ) {
           listedClosed.add(e.tabId);
@@ -6749,16 +6917,17 @@
   // metasections-coverage:end
 
   // The info subpanel of the task-info panel (#meta-info) shows the
-  // TASK UPDATE for the task running in the visible tab: the daemon
-  // (kiss.server.task_update) renders it from the task's own events —
-  // its latest summary and the tool calls since — on every poll, with
-  // no model call; only the subpanel's refresh button runs the /ask
-  // agent (src/kiss/agents/seas/ask/ask_sea.py) on "what has this task
-  // done so far, and what are its partial results?", whose answer then
-  // sits above the digest.  So the client polls getTaskUpdate every
+  // TASK UPDATE: the /ask agent's (src/kiss/agents/seas/ask/ask_sea.py)
+  // short answer to "what has this task done so far, and what are its
+  // partial results?" for the task running in the visible tab.  The
+  // daemon owns the update (kiss.server.task_update): it runs the
+  // agent once the tab's task is a minute old, again every 10 minutes
+  // while the panel keeps polling, and at once when the subpanel's
+  // refresh button is pressed.  So the client polls getTaskUpdate every
   // META_INFO_POLL_MS while the task runs; the reply's sig makes an
-  // unchanged update cost one small message per poll, and a run in
-  // flight renders as the subpanel's "updating" state.
+  // unchanged update cost one small message per poll, a task younger
+  // than a minute renders as the subpanel's "first update due" state
+  // and a run in flight as its "updating" state.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
@@ -6817,12 +6986,13 @@
 
   /**
    * Paint one task-update state into the info subpanel: the answer
-   * body, the status line under the header ("Updating…" or the time
-   * and cost of the last run, plus the last run's failure) and the
-   * refresh button's spinning / disabled state.
+   * body, the status line under the header ("Updating…", the time the
+   * first update is due, or the time and cost of the last run, plus
+   * the last run's failure) and the refresh button's spinning /
+   * disabled state.
    *
-   * @param {object|null} state {content, running, updatedAt, cost,
-   *   error}, or null to empty and hide the subpanel.
+   * @param {object|null} state {content, running, updatedAt, dueAt,
+   *   cost, error}, or null to empty and hide the subpanel.
    */
   function renderTaskUpdate(state) {
     if (!metaInfoContent) return;
@@ -6830,7 +7000,13 @@
       state && typeof state.content === 'string' ? state.content : '';
     const running = !!(state && state.running);
     const error = state && typeof state.error === 'string' ? state.error : '';
-    if (!content.trim() && !running && !error) {
+    // The daemon dates the first run a minute after the task started;
+    // until it has run the subpanel says so instead of staying blank.
+    const firstDueAt =
+      state && !state.updatedAt && Number(state.dueAt) > 0
+        ? Number(state.dueAt)
+        : 0;
+    if (!content.trim() && !running && !error && !firstDueAt) {
       setMetaInfoHTML('');
       if (metaInfoStatus) metaInfoStatus.textContent = '';
       if (metaInfoRefreshBtn) {
@@ -6849,6 +7025,8 @@
         status = 'Updated ' + shortClockTime(state.updatedAt);
         const cost = Number(state.cost);
         if (cost > 0) status += ' \u00b7 ' + fmtCost(cost);
+      } else if (firstDueAt) {
+        status = 'First update at ' + shortClockTime(firstDueAt);
       }
       if (error) {
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
@@ -6865,7 +7043,13 @@
         metaInfoTabId,
       );
     } else {
-      const pending = running ? 'Asking the task\u2026' : 'No update yet.';
+      let pending = 'No update yet.';
+      if (running) pending = 'Preparing the first update\u2026';
+      else if (firstDueAt) {
+        pending =
+          'The first update is asked a minute after the task starts; ' +
+          'press refresh to ask now.';
+      }
       setMetaInfoHTML('<p class="meta-info-pending">' + pending + '</p>');
     }
     if (metaInfoRefreshBtn) {
@@ -6937,17 +7121,13 @@
     // the daemon forwards it to that machine's daemon, which owns the
     // update.  '' is this machine.
     const machine = tabBoundMachine(metaInfoTabId);
-    try {
-      api.getTaskUpdate({
-        tabId: metaInfoTabId,
-        knownSig: metaInfoSig,
-        token: String(metaInfoGen),
-        refresh: !!refresh,
-        machine: machine,
-      });
-    } catch (_e) {
-      // Not connected yet; the next poll retries.
-    }
+    api.getTaskUpdate({
+      tabId: metaInfoTabId,
+      knownSig: metaInfoSig,
+      token: String(metaInfoGen),
+      refresh: !!refresh,
+      machine: machine,
+    });
   }
 
   /**
@@ -7017,6 +7197,7 @@
       content: typeof ev.content === 'string' ? ev.content : '',
       running: !!ev.running,
       updatedAt: Number(ev.updatedAt) || 0,
+      dueAt: Number(ev.dueAt) || 0,
       cost: Number(ev.cost) || 0,
       error: typeof ev.error === 'string' ? ev.error : '',
     });
@@ -7961,6 +8142,12 @@
     }
     if (ev.action === 'create' && scheduleAdd && scheduleAdd.saving)
       scheduleAdd = error ? {values: scheduleAdd.values, saving: false} : null;
+    // An editor whose job is gone (deleted from another surface, or by
+    // the cron agent) has nothing to edit: drop it, or it would reopen
+    // on a job of the same id scheduled later.  An errored reply lists
+    // nothing and says nothing about the job.
+    if (!error && scheduleEdit && !jobs.some(j => j.id === scheduleEdit.id))
+      scheduleEdit = null;
     for (const job of jobs) {
       const li = document.createElement('li');
       li.className = 'sidebar-panel-row sched-row';
@@ -8661,20 +8848,22 @@
       recommendationsStatusLine.textContent =
         error ||
         'No recommendations yet: /recommendations now suggests five tasks from your last 24 hours.';
-      return;
+    } else {
+      recommendationsStatusLine.textContent = generatedAt
+        ? 'Suggested ' + sidebarPanelTimeText(generatedAt)
+        : '';
+      for (const task of tasks) {
+        const li = document.createElement('li');
+        li.className = 'sidebar-panel-row recommendation-row';
+        li.tabIndex = 0;
+        li.dataset.task = task;
+        li.dataset.tooltip = 'Open a new chat with this task';
+        li.appendChild(sidebarPanelSpan('sidebar-panel-name', task));
+        recommendationsList.appendChild(li);
+      }
     }
-    recommendationsStatusLine.textContent = generatedAt
-      ? 'Suggested ' + sidebarPanelTimeText(generatedAt)
-      : '';
-    for (const task of tasks) {
-      const li = document.createElement('li');
-      li.className = 'sidebar-panel-row recommendation-row';
-      li.tabIndex = 0;
-      li.dataset.task = task;
-      li.dataset.tooltip = 'Open a new chat with this task';
-      li.appendChild(sidebarPanelSpan('sidebar-panel-name', task));
-      recommendationsList.appendChild(li);
-    }
+    // The status line's height changed: re-measure the bodies' share.
+    applyMetaSectionLayout();
   }
 
   /**
@@ -9324,11 +9513,15 @@
     return i >= 0 ? s.slice(i + 1) : s;
   }
 
-  /** Directory part of a relative path ('' when there is none). */
+  /**
+   * The directory part of *p*: '' when it has none, the separator
+   * itself for a file of the root directory (`/x.png` -> `/`).
+   */
   function pathDirName(p) {
     const s = String(p || '');
     const i = lastSeparatorIndex(s);
-    return i >= 0 ? s.slice(0, i) : '';
+    if (i < 0) return '';
+    return i === 0 ? s[0] : s.slice(0, i);
   }
 
   /**
@@ -9770,33 +9963,44 @@
   // Its reply rebuilds the tree and hands the keyboard back to it
   // (handleWorkDirListing).
   let explorerWorkDirCheckSeq = 0;
+  // The local folder that was the working directory when that check
+  // went out ('' for a machine's Explorer): kept as an added folder
+  // once the daemon accepts the pick (keepPreviousExplorerRoot).
+  let explorerWorkDirCheckPrev = '';
 
   /**
-   * "Set as Working Directory" (the check mark) on a top-level folder:
-   * exactly what "..." > Working directory does when that folder is
-   * opened there (openWorkDir): the daemon lists it first, and only a
-   * real folder, in its canonical spelling, becomes the workspace
-   * (applyPickedWorkDir); a refusal is reported as a notification.
+   * "Set as Working Directory" (the check mark) on a top-level folder
+   * goes through openWorkDir: the daemon lists the folder first, and
+   * only a real folder, in its canonical spelling, becomes the
+   * workspace (applyPickedWorkDir); a refusal is reported as a
+   * notification.
    * The folder that was the working directory stays in the Explorer as
    * an added folder, so switching never makes a tree disappear.
    */
   function setExplorerWorkDir(dir) {
     if (!dir || isRootDir(dir)) return;
-    const previous = explorerRoot;
-    if (
-      previous &&
-      !explorerMachine &&
-      !isRootDir(previous) &&
-      !samePath(previous, dir) &&
-      !explorerExtraRoots.some(p => samePath(p, previous))
-    ) {
-      explorerExtraRoots.push(previous);
-      saveExplorerExtraRoots();
-    }
     const seqBefore = workDirCheckSeq;
     openWorkDir(dir, explorerMachine);
-    if (workDirCheckSeq !== seqBefore)
-      explorerWorkDirCheckSeq = workDirCheckSeq;
+    if (workDirCheckSeq === seqBefore) return;
+    explorerWorkDirCheckSeq = workDirCheckSeq;
+    explorerWorkDirCheckPrev = explorerMachine ? '' : explorerRoot;
+  }
+
+  /**
+   * The daemon accepted the Explorer's pick of *dir*: the folder that
+   * was the working directory (*previous*) stays listed as an added
+   * folder, remembered with the others.
+   */
+  function keepPreviousExplorerRoot(previous, dir) {
+    if (
+      !previous ||
+      isRootDir(previous) ||
+      samePath(previous, dir) ||
+      explorerExtraRoots.some(p => samePath(p, previous))
+    )
+      return;
+    explorerExtraRoots.push(previous);
+    saveExplorerExtraRoots();
   }
 
   /** The top-level folder an Explorer row belongs to. */
@@ -10415,13 +10619,25 @@
       renderScmGraph();
     }
     if (!wd) return;
-    const token = String(scmGeneration);
-    api.gitStatus(
-      onMachine({workDir: wd, tabId: scmTabId(), token: token}, machine),
-    );
-    api.gitLog(
+    sendScmRequest(api.gitStatus, wd, machine, {});
+    sendScmRequest(api.gitLog, wd, machine, {limit: 50});
+  }
+
+  /**
+   * Send a Source Control request (`apiFn` is api.gitStatus or
+   * api.gitLog) for the workspace `wd` on `machine`, stamped with the
+   * tab the side views browse and the current generation token, with
+   * `extra` fields on top.
+   */
+  function sendScmRequest(apiFn, wd, machine, extra) {
+    apiFn(
       onMachine(
-        {workDir: wd, tabId: activeTabId, token: token, limit: 50},
+        {
+          workDir: wd,
+          tabId: scmTabId(),
+          token: String(scmGeneration),
+          ...extra,
+        },
         machine,
       ),
     );
@@ -10500,12 +10716,7 @@
       requestSourceControl(wd, machine);
       return;
     }
-    api.gitStatus(
-      onMachine(
-        {workDir: wd, tabId: scmTabId(), token: String(scmGeneration)},
-        machine,
-      ),
-    );
+    sendScmRequest(api.gitStatus, wd, machine, {});
   }
 
   /**
@@ -10599,6 +10810,23 @@
     scmHeaderCount.textContent = scmChangesCount.textContent;
   }
 
+  /**
+   * The placeholder of a Source Control list before it has rows: no
+   * workspace, the reply still loading, or the daemon's error.
+   * @param {Element} list The list to fill.
+   * @param {object|null} data The reply on hand (scmStatus / scmLog).
+   * @returns {boolean} Whether a placeholder was shown (the caller is
+   *     done).
+   */
+  function scmEmptyState(list, data) {
+    let text = '';
+    if (!scmWorkDir) text = 'No workspace folder';
+    else if (!data) text = 'Loading...';
+    else if (data.error) text = String(data.error);
+    if (text) sidebarEmpty(list, text);
+    return !!text;
+  }
+
   function renderScmChanges() {
     if (!scmChangesList) return;
     scmChangesList.textContent = '';
@@ -10609,19 +10837,8 @@
           : '';
       scmBranchEl.title = scmBranchEl.textContent;
     }
-    if (!scmWorkDir) {
+    if (scmEmptyState(scmChangesList, scmStatus)) {
       setScmChangesCount(0);
-      sidebarEmpty(scmChangesList, 'No workspace folder');
-      return;
-    }
-    if (!scmStatus) {
-      setScmChangesCount(0);
-      sidebarEmpty(scmChangesList, 'Loading...');
-      return;
-    }
-    if (scmStatus.error) {
-      setScmChangesCount(0);
-      sidebarEmpty(scmChangesList, String(scmStatus.error));
       return;
     }
     const worktrees = scmWorktrees(scmStatus);
@@ -11064,19 +11281,8 @@
   function renderScmGraph() {
     if (!scmGraphList) return;
     scmGraphList.textContent = '';
-    if (!scmWorkDir) {
+    if (scmEmptyState(scmGraphList, scmLog)) {
       scmGraphCount.textContent = '';
-      sidebarEmpty(scmGraphList, 'No workspace folder');
-      return;
-    }
-    if (!scmLog) {
-      scmGraphCount.textContent = '';
-      sidebarEmpty(scmGraphList, 'Loading...');
-      return;
-    }
-    if (scmLog.error) {
-      scmGraphCount.textContent = '';
-      sidebarEmpty(scmGraphList, String(scmLog.error));
       return;
     }
     const rows = scmGraphRows();
@@ -11465,7 +11671,7 @@
         machine: machine || '',
       },
       true,
-      ownerTabId || activeTabId,
+      ownerTabId,
     );
   }
 
@@ -11916,7 +12122,7 @@
             openWorkspaceFile(
               r.dataset.explorerPath,
               explorerRowRoot(r) || explorerRoot,
-              explorerMachine,
+              machine,
               true,
             );
           });
@@ -12001,8 +12207,7 @@
         id: 'open-to-side',
         label: 'Open to the Side',
         key: keyLabel('Ctrl+Enter', '\u2303Enter'),
-        run: () =>
-          openWorkspaceFile(path, root || explorerRoot, explorerMachine, true),
+        run: () => openWorkspaceFile(path, root || explorerRoot, machine, true),
       });
     }
     items.push({separator: true});
@@ -12746,7 +12951,7 @@
       // The daemon never pins a file-system root as a workspace
       // (ServerApi.dispatch blanks it); say so instead of half-applying.
       folderPickerEl.querySelector('.folder-picker-note').textContent =
-        'A file-system root cannot be the working directory; pick a folder.';
+        WORK_DIR_ROOT_REFUSED;
       return;
     }
     const listedChild = folderPickerEl.querySelector(
@@ -13335,21 +13540,22 @@
     dir = String(dir || '').trim();
     if (!dir) return;
     if (isRootDir(dir)) {
-      setWorkDirError(
-        'A file-system root cannot be the working directory; pick a folder.',
-      );
+      setWorkDirError(WORK_DIR_ROOT_REFUSED);
       return;
     }
     workDirCheckSeq++;
     workDirCheckPath = dir;
-    const check = {
-      path: dir,
-      workDir: dir,
-      tabId: activeTabId,
-      token: 'workdir:' + workDirCheckSeq,
-    };
-    if (machine) check.machine = machine;
-    api.listDir(check);
+    api.listDir(
+      onMachine(
+        {
+          path: dir,
+          workDir: dir,
+          tabId: activeTabId,
+          token: 'workdir:' + workDirCheckSeq,
+        },
+        machine,
+      ),
+    );
   }
 
   /** The daemon's answer to openWorkDir's listDir check. */
@@ -13365,11 +13571,10 @@
     // turns out to be a root the lexical check above could not see.
     const dir = ev.path || workDirCheckPath;
     if (isRootDir(dir)) {
-      setWorkDirError(
-        'A file-system root cannot be the working directory; pick a folder.',
-      );
+      setWorkDirError(WORK_DIR_ROOT_REFUSED);
       return;
     }
+    if (fromExplorer) keepPreviousExplorerRoot(explorerWorkDirCheckPrev, dir);
     applyPickedWorkDir(dir, String(ev.machine || ''));
     // The Explorer asked: its rebuilt tree keeps the keyboard, which
     // the rebuild stranded on the body (the clicked row is gone) --
@@ -13772,7 +13977,8 @@
     let steps = m.steps;
     if (usage) {
       tokens = usage.total_tokens;
-      if (eventCost(usage) != null) cost = eventCost(usage);
+      const usageCost = eventCost(usage);
+      if (usageCost != null) cost = usageCost;
       if (usage.total_steps != null) steps = usage.total_steps;
     }
     const start = Number(m.start_ts || 0);
@@ -14877,12 +15083,33 @@
     _pendingFileLinkSpans.delete(span);
   }
 
+  /**
+   * The directory a transcript's relative file paths (links, inline
+   * images) resolve against, as sent with their checkPaths / openFile.
+   *
+   * For a tab bound to a registered machine the request is forwarded
+   * there unchanged, so the directory must be one of THAT machine: its
+   * working directory, or none before it is known, which its daemon
+   * takes as its own working directory.  A directory of this daemon
+   * (`/Users/me/kiss` on a laptop) names nothing there: every relative
+   * link of a bound tab stayed inert, or opened to "File not found".
+   *
+   * @param {string} machine The tab's bound machine, '' for this daemon.
+   * @param {string|undefined} workDir The owning task's work dir on
+   *   this daemon; undefined for the active tab's.
+   * @returns {string} The directory to send ('' = the daemon's own).
+   */
+  function transcriptFileWorkDir(machine, workDir) {
+    if (machine) return machineDirs(machine).workDir || '';
+    return typeof workDir === 'string'
+      ? workDir
+      : workDirForTab(activeTabId) || '';
+  }
+
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
     if (_suppressFileLinkChecks) return;
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
-    const wd =
-      typeof workDir === 'string' ? workDir : workDirForTab(activeTabId) || '';
     // tableak-coverage:start
     const owner = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
@@ -14892,6 +15119,7 @@
     // is stamped on the span so a later re-check and the reply keep
     // the same identity whatever the drop-down says by then.
     const machine = tabBoundMachine(owner);
+    const wd = transcriptFileWorkDir(machine, workDir);
     const toCheck = [];
     for (const span of spans) {
       const p = _stripLineSuffix(span.getAttribute('data-path-candidate'));
@@ -14917,9 +15145,7 @@
    * `pathsExist` reply the same.
    */
   function sendCheckPaths(owner, wd, machine, paths) {
-    const cmd = {type: 'checkPaths', paths, workDir: wd, tabId: owner};
-    if (machine) cmd.machine = machine;
-    api.send(cmd);
+    api.checkPaths(onMachine({paths, workDir: wd, tabId: owner}, machine));
   }
 
   function handlePathsExist(ev) {
@@ -15011,24 +15237,54 @@
    * session. Their in-flight keys go with them, so the same paths are
    * checked afresh if the tab's transcript is rebuilt.
    *
+   * The released entries are returned so a transcript replacement that
+   * fails half way can hand them back (restorePendingFileLinks) along
+   * with the transcript it restores.
+   *
    * @param {string} tabId The tab whose transcript is being discarded.
+   * @returns {{spans: Array<Element>, checks: Array<string>}} What was
+   *   released.
    */
   function forgetPendingFileLinks(tabId) {
     const owner = String(tabId);
+    const spans = [];
     for (const span of Array.from(_pendingFileLinkSpans)) {
       if ((span.getAttribute('data-path-tab') || '') === owner) {
         _pendingFileLinkSpans.delete(span);
+        spans.push(span);
       }
     }
-    dropPendingPathChecksOf(owner);
+    return {spans, checks: dropPendingPathChecksOf(owner)};
   }
 
-  /** Drop every in-flight path-check key of tab *owner*. */
+  /**
+   * Put back what forgetPendingFileLinks released: the restored
+   * transcript's candidate spans wait for the daemon's answer again and
+   * its in-flight keys dedupe later checks of the same paths.
+   *
+   * @param {{spans: Array<Element>, checks: Array<string>}} released
+   *   The return value of forgetPendingFileLinks.
+   */
+  function restorePendingFileLinks(released) {
+    for (const span of released.spans) _pendingFileLinkSpans.add(span);
+    for (const key of released.checks) _pendingPathChecks.add(key);
+  }
+
+  /**
+   * Drop every in-flight path-check key of tab *owner*.
+   *
+   * @returns {Array<string>} The dropped keys.
+   */
   function dropPendingPathChecksOf(owner) {
     const prefix = owner + '\u0000';
+    const dropped = [];
     for (const key of Array.from(_pendingPathChecks)) {
-      if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
+      if (key.indexOf(prefix) === 0) {
+        _pendingPathChecks.delete(key);
+        dropped.push(key);
+      }
     }
+    return dropped;
   }
 
   /**
@@ -15928,7 +16184,7 @@
    * @param {object} entry The surviving entry.
    */
   function rpMergeDuplicateEntries(panelEl, entry) {
-    const key = entry.taskId === undefined ? '' : String(entry.taskId);
+    const key = taskIdStr(entry.taskId);
     if (key === '') return;
     const entries = panelEl._rpSubagents;
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -15994,7 +16250,7 @@
           // The parent names the stream a sub-agent of a chat shown
           // from a remote machine is fetched over (the daemon never
           // saw that finished sub-agent's new_tab).
-          api.resumeSession({
+          requestReplay({
             taskId: en.taskId,
             tabId: subTab.id,
             parentTabId: panelEl._rpParentTabId,
@@ -16307,7 +16563,6 @@
       // New summaries are HTML; legacy persisted events are Markdown.
       rb += kissSanitize(resultSummaryHtml(sum));
       usePre = false;
-      rawBody += sum;
     } else {
       const txt = (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim();
       rb += esc(txt);
@@ -16322,10 +16577,10 @@
       '">' +
       rb +
       '</div>';
-    // An HTML summary's source went into dataset.rawText above only as
-    // a placeholder: the copy button must copy the panel as the reader
-    // SEES it (formatted text), never the raw HTML markup, so the
-    // rendered body is serialized back into readable plain text.
+    // An HTML summary's source is not in dataset.rawText: the copy
+    // button must copy the panel as the reader SEES it (formatted
+    // text), never the raw HTML markup, so the rendered body is
+    // serialized back into readable plain text.
     if (!usePre) {
       const bodyForCopy = rc.querySelector('.rc-body');
       if (bodyForCopy) {
@@ -16569,23 +16824,14 @@
   }
 
   /**
-   * The directory part of *filePath*: '' when it has none, '/' for a
-   * file of the root directory.
-   */
-  function fileParentDir(filePath) {
-    const p = String(filePath || '');
-    const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-    if (cut < 0) return '';
-    return cut === 0 ? p[0] : p.slice(0, cut);
-  }
-
-  /**
    * *src*, a file path of an image, resolved against *baseDir*: its
    * query and fragment (`chart.png?v=2`, `sprite.svg#view`) dropped,
    * then percent-decoded (`my%20plot.png`), so a `%23` stays a `#` of
-   * the file name.  The join uses the separator *baseDir* itself uses
+   * the file name.  joinPath uses the separator *baseDir* itself uses
    * (a backslash for a Windows path), so the daemon gets one native path
-   * rather than `C:\\repo\\reports/fig.png`.
+   * rather than `C:\\repo\\reports/fig.png`.  '' for a src that names
+   * no file (`?v=1`): the daemon never answers an empty path, so
+   * requestInlineImage settles it without asking.
    */
   function imageFilePath(src, baseDir) {
     let s = String(src)
@@ -16594,10 +16840,8 @@
     try {
       s = decodeURIComponent(s);
     } catch (_e) {}
-    if (!baseDir || /^(?:[\\/]|~|[a-z]:[\\/])/i.test(s)) return s;
-    const sep =
-      baseDir.indexOf('\\') >= 0 && baseDir.indexOf('/') < 0 ? '\\' : '/';
-    return baseDir.replace(/[\\/]+$/, '') + sep + s.replace(/\//g, sep);
+    if (!s || /^(?:[\\/]|~|[a-z]:[\\/])/i.test(s)) return s;
+    return joinPath(baseDir, s);
   }
 
   /** The base64 of *text*'s UTF-8 bytes. */
@@ -16644,20 +16888,51 @@
    * @param {Function} onDone Called once with the data: URI or null.
    */
   function requestInlineImage(path, workDir, owner, machine, onDone) {
+    // A src that was only a query or fragment (`?v=1`) names no file
+    // (imageFilePath gives ''); the daemon never answers an empty path.
+    if (!path) {
+      onDone(null);
+      return;
+    }
     const token = 'img-' + ++inlineImageSeq;
     pendingInlineImages.set(token, onDone);
-    api.send(
+    api.openFile(
       onMachine(
-        {
-          type: 'openFile',
-          path: path,
-          workDir: workDir || '',
-          tabId: owner,
-          token: token,
-        },
+        {path: path, workDir: workDir || '', tabId: owner, token: token},
         machine,
       ),
     );
+  }
+
+  // The fileContent replies still arriving in pieces, by the request
+  // they answer (see joinFileContentChunks).
+  const fileContentChunks = new Map();
+
+  /**
+   * Join a fileContent reply the daemon sent in pieces.  A big file (a
+   * shared chat page of a long task) arrives as several fileContent
+   * frames of the same path, tabId and token, every one but the last
+   * flagged `more`; the first carries the reply's other fields.
+   * Returns the whole reply once its last piece is in, `null` while
+   * pieces are still due, and a reply sent whole as it is.
+   */
+  function joinFileContentChunks(ev) {
+    const key = [ev.tabId || '', ev.token || '', ev.path || ''].join('\n');
+    const head = fileContentChunks.get(key);
+    if (head) head.content += String(ev.content || '');
+    if (ev.more === true) {
+      if (!head) {
+        fileContentChunks.set(
+          key,
+          Object.assign({}, ev, {content: String(ev.content || '')}),
+        );
+      }
+      return null;
+    }
+    if (!head) return ev;
+    fileContentChunks.delete(key);
+    delete head.more;
+    return head;
   }
 
   /**
@@ -16676,9 +16951,11 @@
   /**
    * The connection dropped: its picture replies never come, so each
    * pending picture is settled as unavailable (its alt text shows, a
-   * waiting preview renders) and forgotten.
+   * waiting preview renders) and forgotten; the remaining pieces of a
+   * file arriving in chunks never come either, so those are dropped.
    */
   function forgetInFlightInlineImages() {
+    fileContentChunks.clear();
     const waiting = Array.from(pendingInlineImages.values());
     pendingInlineImages.clear();
     waiting.forEach(onDone => onDone(null));
@@ -16696,10 +16973,9 @@
    */
   function loadInlineImages(root, workDir, ownerTabId) {
     if (!root || !root.querySelectorAll) return;
-    const wd =
-      typeof workDir === 'string' ? workDir : workDirForTab(activeTabId) || '';
     const owner = String(ownerTabId === undefined ? activeTabId : ownerTabId);
     const machine = tabBoundMachine(owner);
+    const wd = transcriptFileWorkDir(machine, workDir);
     const imgs = root.querySelectorAll('img[src]');
     // One request per distinct src; the images that share it.
     const bySrc = new Map();
@@ -16773,7 +17049,7 @@
       onReady(html);
       return;
     }
-    const baseDir = fileParentDir(tab.contentPath);
+    const baseDir = pathDirName(tab.contentPath);
     const owner = String(tab.ownerTabId || activeTabId);
     // One request per distinct src; the images that share it.
     const bySrc = new Map();
@@ -18286,7 +18562,7 @@
     };
 
     const where = streamBegin(ctx, ev);
-    const target = where.target;
+    let target = where.target;
 
     // The window owns ONE status row, so the hidden tab's numbers are
     // lent to it for the length of this event and taken back after. That
@@ -18313,12 +18589,25 @@
     returnStatusRow(lent, tab);
     // visibletask-coverage:end
 
+    // The rendering can swap this tab on screen: a summary folds the
+    // fan-out panel before it, the fold closes the finished sub-agent
+    // tabs, and closing the one on screen restores this tab
+    // (restoreTab moved the fragment into the transcript and loaded the
+    // PRE-event state as the live stream).  The event then finishes as
+    // the visible tab's: in the transcript, with the state that
+    // rendered it as the live stream.
+    const swappedIn = activeTabId === tab.id;
+    if (swappedIn) {
+      if (target === ctx.container) target = O;
+      ctx.container = O;
+    }
     streamEnd(ctx, ev, target);
     if (ev.type === 'result' && ev.step_count) {
       tab.statusStepsText = 'Steps: ' + ev.step_count;
     }
 
     saveStreamCtxTo(tab, ctx);
+    if (swappedIn) saveLiveStreamCtx(ctx);
     tab.welcomeVisible = false;
   }
 
@@ -18571,10 +18860,15 @@
     return pinnedRegion;
   }
 
-  function scrollTaskRegionToTop(region) {
+  /** Scroll the transcript so `region`'s first row tops the viewport. */
+  function putTaskRegionAtTop(region) {
     const outputRect = O.getBoundingClientRect();
     const top = region.first.getBoundingClientRect().top;
     O.scrollTop += top - outputRect.top;
+  }
+
+  function scrollTaskRegionToTop(region) {
+    putTaskRegionAtTop(region);
     pinnedRegion = {el: region.first, scrollTop: O.scrollTop};
     updateVisibleTask();
   }
@@ -18605,7 +18899,13 @@
       const neighbour = regionNeighbour(region);
       const regionId = neighbour ? neighbour.dataset.taskId || '' : ownIdStr;
       if (regionId === idStr) {
-        scrollTaskRegionToTop(region);
+        // landing-coverage:start
+        // The tab's own task, still running: its chat lands at the
+        // end, where the output arrives, not on the task's text.
+        const tab = getTab(activeTabId);
+        if (!neighbour && tab && tab.isRunning) landOpenedTranscript();
+        else scrollTaskRegionToTop(region);
+        // landing-coverage:end
         return true;
       }
     }
@@ -18623,6 +18923,40 @@
     }
     return true;
   }
+
+  // landing-coverage:start
+  /**
+   * Land a transcript the reader just opened (a replay into the visible
+   * chat, a switch to another tab) where it is most useful.
+   *
+   * A running task's chat lands at its end, where the live output
+   * arrives.  A finished task's chat lands with the tab's own task
+   * panel at the top of the viewport: the task's text, its folded
+   * trajectory and as much of its result as fits are what the reader
+   * sees first.  The landing is a viewing position, not a pick: the
+   * shown task keeps following what fills the screen (a neighbour
+   * spliced in may), as after any scroll.  A transcript with no task
+   * region yet (nothing rendered) lands at its end like a running one.
+   * The landing is a fresh view: a scroll lock the user engaged by
+   * reading elsewhere in the chat (a history click on the running
+   * task on screen) no longer holds the chat there.
+   */
+  function landOpenedTranscript() {
+    resetUserScrollLock();
+    const tab = getTab(activeTabId);
+    if (!(tab && tab.isRunning)) {
+      const regions = getTaskRegions();
+      for (let i = 0; i < regions.length; i++) {
+        if (!regionNeighbour(regions[i])) {
+          putTaskRegionAtTop(regions[i]);
+          updateVisibleTask();
+          return;
+        }
+      }
+    }
+    autoScrollLatestEventPanel(O.lastElementChild);
+  }
+  // landing-coverage:end
 
   let endTs = 0;
   function doneLabelFor(startMs, endMs) {
@@ -18696,9 +19030,7 @@
   }
 
   function clearUsageMetrics() {
-    if (statusTokens) statusTokens.textContent = '';
-    if (statusBudget) statusBudget.textContent = '';
-    if (statusSteps) statusSteps.textContent = '';
+    paintStatusRow('', '', '');
     stepCount = 0;
     currentTaskMetrics = {tokens: '', budget: '', steps: ''};
   }
@@ -19113,8 +19445,7 @@
    */
   function tabTaskId(tab) {
     if (!tab) return '';
-    const owned = tab.currentTaskId || tab.pendingTaskId;
-    return owned === undefined || owned === null ? '' : String(owned);
+    return taskIdStr(tab.currentTaskId || tab.pendingTaskId);
   }
 
   /**
@@ -19530,6 +19861,9 @@
         updateNotification(ev);
         break;
       case 'fileContent':
+        // A big file arrives in pieces: nothing to do until the last.
+        ev = joinFileContentChunks(ev);
+        if (!ev) return;
         // A picture of a result, answer or preview (a tokened request):
         // it goes into its <img>, never into a tab.
         if (handleInlineImageContent(ev)) return;
@@ -19656,6 +19990,9 @@
       }
       case 'status': {
         const evTab = findTabByEvt(ev);
+        // The first frame of a replay's answer: the machine's chat is
+        // here (its transcript follows at once, or there is none).
+        removeRemoteChatLoader(evTab);
         if (!ev.running) {
           // A task that failed before its agent started never cleared
           // its launch-phase line; the end of the task does.  An
@@ -20013,12 +20350,13 @@
           updateMetaTaskDetails(metaShownSettings);
         }
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
-        autofillHistoryDateRange(ev.dateRange);
         // A stale reply (an older generation, dropped by renderHistory)
-        // must not rebuild the filters either: its machine or directory
-        // list may lack the one just chosen and would reset the
-        // selection (and refetch, dropping the current reply).
+        // must not rebuild the filters either: its date range is the
+        // previous query's, and its machine or directory list may lack
+        // the one just chosen and would reset the selection (and
+        // refetch, dropping the current reply).
         if ((ev.generation || 0) === historyGeneration) {
+          autofillHistoryDateRange(ev.dateRange);
           refreshHistoryMachineOptions(ev.machines, ev.localMachine);
           refreshHistoryWorkDirOptions(ev.workDirs);
         }
@@ -20144,6 +20482,9 @@
             : getTab(activeTabId);
           if (refusedTab) restoreRefusedPrompt(refusedTab);
         }
+        // A remote chat the daemon could not fetch (the machine is
+        // unreachable, say) is not on its way any more.
+        if (isAddressed(ev)) removeRemoteChatLoader(findTabByEvt(ev));
         // Diagnostics are task output like any other: a message that names a
         // task or a tab belongs to that conversation and nowhere else.
         if (routedToBackgroundTab(ev)) break;
@@ -20200,6 +20541,12 @@
           // daemon withheld on the last ready (pinned to the replaced
           // task) must not be fetched over them.
           clearTab.replayPending = null;
+          // landing-coverage:start
+          // A replay still asked for would come back for the replaced
+          // task: were it to arrive, or a reconnect to replay the new
+          // run, neither opens anything the user asked for.
+          clearTab.replayRequested = null;
+          // landing-coverage:end
           // The tab keeps the replaced task's id until the new run's
           // first id-bearing event (sendMessage claims a pending id only
           // for a tab that has none), so a `/ask` answer for the old task
@@ -20220,11 +20567,18 @@
           persistTabState();
         }
         const evTabId = ev.tabId;
+        // The new task replaces this chat's transcript: the fan-out
+        // panels in it are about to stop existing, so they must hand
+        // their sub-agent tabs in first.  Closing the sub-agent tab on
+        // screen can swap a hidden chat's tab there (restoreTab moves
+        // its fragment into the transcript), so which transcript is
+        // emptied is decided after the fold.
         if (evTabId === undefined || evTabId === activeTabId) {
-          // The new task replaces this chat's transcript: the fan-out
-          // panels in it are about to stop existing, so they must hand
-          // their sub-agent tabs in first.
           collapseNestedRunParallel(O);
+        } else if (clearTab) {
+          collapseNestedRunParallel(clearTab.outputFragment);
+        }
+        if (evTabId === undefined || evTabId === activeTabId) {
           clearOutput();
           resetOutputState();
           // The new transcript opens with the task's text (the
@@ -20239,7 +20593,6 @@
           setTaskSettings(null);
           showSpinner();
         } else if (clearTab) {
-          collapseNestedRunParallel(clearTab.outputFragment);
           forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
           if (clearTab.pendingTaskText) {
@@ -20268,16 +20621,19 @@
           const swTask =
             swTabId === activeTabId ? currentTaskName : swTab.taskText;
           if ((swTask || '').trim()) break;
+          // Resetting the chat to the welcome screen discards its
+          // transcript, fan-out panels and all; their sub-agent tabs
+          // must not outlive them.  The fold can swap the hidden tab on
+          // screen (see `clear`): which transcript is reset is decided
+          // after it.
+          collapseNestedRunParallel(
+            swTabId === activeTabId ? O : swTab.outputFragment,
+          );
           if (swTabId === activeTabId) {
-            // Resetting the chat to the welcome screen discards its
-            // transcript, fan-out panels and all; their sub-agent tabs
-            // must not outlive them.
-            collapseNestedRunParallel(O);
             clearOutput();
             resetOutputState();
             showWelcomeScreen();
           } else {
-            collapseNestedRunParallel(swTab.outputFragment);
             forgetPendingFileLinks(swTabId);
             swTab.outputFragment = null;
             swTab.welcomeVisible = true;
@@ -20379,6 +20735,12 @@
         // faildot-coverage:end
         // The daemon sends a running task's `status` before its replay,
         // so once the replay is here the tab's state is settled.
+        // landing-coverage:start
+        // A replay the page asked for (requestReplay) opens a chat or
+        // task: it lands afresh, whatever the reading position.
+        const freshOpen = !!teTab && replayAnswersRequest(teTab, ev);
+        if (freshOpen) teTab.replayRequested = null;
+        // landing-coverage:end
         if (teTab) {
           teTab.statusKnown = true;
           teTab.replayPending = null;
@@ -20442,6 +20804,13 @@
           // than leaving the tab showing half a new one.
           const teOldFrag = teTab.outputFragment;
           teTab.outputFragment = frag;
+          // The outgoing transcript's path spans and in-flight checks
+          // go with it (the visible tab's replay does this through
+          // clearOutput); a reply to them would only walk dead DOM.
+          // They are kept until the replay succeeds: a failed replay
+          // hands the old transcript back WITH its pending links, or
+          // the daemon's answer would never make them clickable.
+          const teOldLinks = forgetPendingFileLinks(teTabId);
           // visibletask-coverage:start
           // This transcript belongs to a hidden tab, but it renders
           // through the same renderers as the live stream: the visible
@@ -20478,6 +20847,10 @@
             });
           } catch (e) {
             teTab.outputFragment = teOldFrag;
+            // What the failed replay registered belongs to the fragment
+            // being discarded; the restored transcript gets its own back.
+            forgetPendingFileLinks(teTabId);
+            restorePendingFileLinks(teOldLinks);
             throw e;
           } finally {
             // visibletask-coverage:start
@@ -20549,7 +20922,7 @@
         // repopulates the info block, so a previous task's settings
         // must not survive a replay that carries none.
         setTaskSettings(null);
-        replayTaskEvents(ev.events || []);
+        replayTaskEvents(ev.events || [], freshOpen);
         // The replay recomputed the tab's verdict (hasRunTask /
         // lastTaskFailed in streamEnd); repaint the status icon.
         renderTabBar();
@@ -20808,7 +21181,7 @@
           ).id;
         }
         setTabRunning(getTab(subAgentTabId), true);
-        api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
+        requestReplay({taskId: ev.task_id, tabId: subAgentTabId});
         break;
       }
       case 'openSubagentTab': {
@@ -20994,6 +21367,9 @@
           const bgTab = findTabByEvt(ev);
           if (bgTab && !isStaleAskAnswer(ev, bgTab)) {
             processOutputEventForBgTab(ev, bgTab);
+            // Its rendering may have swapped that tab on screen (see
+            // processOutputEventForBgTab); the event is rendered.
+            if (bgTab.id === activeTabId) break;
           }
           if (!isForActiveTab(ev)) break;
         }
@@ -21177,8 +21553,15 @@
     foldTabTrajectory(ev.tabId);
     // trajectory-coverage:end
     setReady(label, ev.tabId, ev.startTs, ev.endTs);
-    focusFinishedTab(ev.tabId);
-    openReadyReportTabs(ev.tabId);
+    // A sub-agent's own terminal event is not the user's task finishing:
+    // its tab (nested under its parent's) is about to be closed by
+    // `subagentDone`, so neither the tab nor its report may come to the
+    // foreground (the page would bounce onto the tab and straight back
+    // off it).  A parentless background task keeps its switch.
+    const doneTab = ev.tabId !== undefined ? getTab(ev.tabId) : null;
+    const isChild = !!(doneTab && doneTab.isSubagentTab && doneTab.parentTabId);
+    if (!isChild) focusFinishedTab(ev.tabId);
+    openReadyReportTabs(ev.tabId, !isChild);
   }
 
   // faildot-coverage:start
@@ -21245,8 +21628,14 @@
       statusText.textContent = label || 'Ready';
       // A finished task (or its replay after a reconnect) must not raise
       // the phone's keyboard, nor pull the caret out of a field the user
-      // is typing in; see focusInputWithRetry.
-      if (!isMobileRemote && !composerFocusWouldSteal()) inp.focus();
+      // is typing in or out of the content pane (the editor, a terminal
+      // or browser screen); see focusInputWithRetry.
+      if (
+        !isMobileRemote &&
+        !composerFocusWouldSteal() &&
+        !contentViewHasFocus()
+      )
+        inp.focus();
     }
     renderTabBar();
   }
@@ -21483,10 +21872,7 @@
 
     for (const p of panels) {
       for (const en of p._rpSubagents || []) {
-        const tid =
-          en.taskId === undefined || en.taskId === null
-            ? ''
-            : String(en.taskId);
+        const tid = taskIdStr(en.taskId);
         if (!tid) continue;
         const at = remaining.findIndex(s => String(s.task_id) === tid);
         if (at >= 0) take(p, at);
@@ -22211,14 +22597,23 @@
     return ctx;
   }
 
-  function replayTaskEvents(events) {
-    // A transcript rebuilt while the user is reading it — a reconnect
-    // replays the tab on screen — keeps the reading position: a view
-    // the user scrolled away from the bottom is put back where it was
-    // instead of jumping to the latest panel.  A replay into an empty
-    // or bottom-pinned transcript lands at the end as always.
+  /**
+   * Replace the visible transcript with the replayed `events`.
+   *
+   * A transcript rebuilt unasked while the user is reading it — a
+   * reconnect replays the tab on screen — keeps the reading position:
+   * a view the user scrolled away from the bottom is put back where it
+   * was instead of jumping to the latest panel.  A replay the page
+   * asked for (`freshOpen`: a history click, a deferred replay, a
+   * sub-agent tab) opens a chat or task and lands afresh
+   * (landOpenedTranscript), as does a replay into an empty or
+   * bottom-pinned transcript.
+   */
+  function replayTaskEvents(events, freshOpen) {
     const keepScroll =
-      userScrollLock && Array.from(O.children).some(el => el !== welcome);
+      !freshOpen &&
+      userScrollLock &&
+      Array.from(O.children).some(el => el !== welcome);
     const keptScrollTop = O.scrollTop;
     clearOutput();
     resetOutputState();
@@ -22245,8 +22640,9 @@
       updateUserScrollLock();
     } else {
       // clearOutput() above released any user scroll lock: the replayed
-      // chat lands at the end of its latest event panel.
-      autoScrollLatestEventPanel(O.lastElementChild);
+      // chat lands at its end (a running task) or on its task panel (a
+      // finished one).
+      landOpenedTranscript();
     }
     Object.assign(currentTaskMetrics, readStatusRow());
     applyChevronState(currentTaskName);
@@ -22999,6 +23395,8 @@
     });
     wireSearchClear(modelSearch, modelSearchClear);
     modelSearch.addEventListener('keydown', e => {
+      // Keys inside an IME composition belong to the IME.
+      if (e.isComposing || e.keyCode === 229) return;
       const items = modelList.querySelectorAll('.model-item');
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -23665,6 +24063,8 @@
         setTricksAddError('');
       });
       tricksAddInput.addEventListener('keydown', e => {
+        // Enter inside an IME composition commits the composition.
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter') {
           e.preventDefault();
           submitNewTrick();
@@ -23765,41 +24165,33 @@
       hfMachine,
       hfWorkDir,
     } = getHistoryFilterEls();
-    [
-      hfRunning,
-      hfErrors,
-      hfCompleted,
-      hfFavorite,
-      hfCron,
-      hfFrom,
-      hfTo,
-      hfSea,
-      hfTag,
-      hfMachine,
-      hfWorkDir,
-    ].forEach(el => {
-      if (el) el.addEventListener('change', applyHistoryFilterVisibility);
+    [hfRunning, hfErrors, hfCompleted, hfFavorite, hfCron, hfSea].forEach(
+      el => {
+        if (el) el.addEventListener('change', applyHistoryFilterVisibility);
+      },
+    );
+    // A date the user picked is theirs: the history reply's range no
+    // longer autofills the boxes (autofillHistoryDateRange).
+    [hfFrom, hfTo].forEach(el => {
+      if (el) el.addEventListener('change', onHistoryDateRangeChange);
     });
     // The tag, the machine and the WORKDIR are applied by the daemon
     // (rare tags and a machine's or a directory's rows live beyond the
     // loaded page), so a change is a fresh view: refetch page one, like
     // a changed search text.  Only the tag is a search
     // (historySearchActive): a machine or a directory scopes the list
-    // and leaves every chat as collapsed as it was.
+    // and leaves every chat as collapsed as it was.  The loaded rows
+    // the filter excludes hide meanwhile; the pagination is reset
+    // first so an under-filled list asks for no next page of the old
+    // view (loadMoreHistory sees the list as loading).
     [hfTag, hfMachine, hfWorkDir].forEach(el => {
       if (!el) return;
       el.addEventListener('change', () => {
         resetHistoryPagination();
+        applyHistoryFilterVisibility();
         if (el === hfTag) reapplyAllHistoryGroupCollapse(true);
         requestHistory();
       });
-    });
-    [hfFrom, hfTo].forEach(el => {
-      if (el) {
-        el.addEventListener('change', () => {
-          historyDateRangeUserSet = true;
-        });
-      }
     });
     const historyFiltersToggle = document.getElementById(
       'history-filters-toggle',
@@ -23873,16 +24265,21 @@
       const el = e.target.closest('.kiss-filelink[data-path]');
       if (el && el.dataset.path) {
         const raw = el.dataset.path;
+        // The file is opened where the check found it: the directory
+        // the span was verified under (data-path-wd).  A link of a tab
+        // bound to a registered machine names a file there
+        // (verifyFileLinkCandidates stamped the machine and the
+        // machine's directory): the daemon forwards the openFile and
+        // that machine's daemon answers with the file's content.
+        // This daemon's own directory would send the machine a path
+        // it has no file at.
+        const wd = el.getAttribute('data-path-wd');
         const msg = {
           type: 'openFile',
           path: raw,
-          workDir: workDirForTab(activeTabId),
+          workDir: wd === null ? workDirForTab(activeTabId) : wd,
           tabId: activeTabId,
         };
-        // A link of a tab bound to a registered machine names a file
-        // there (verifyFileLinkCandidates stamped the machine): the
-        // daemon forwards the openFile and that machine's daemon
-        // answers with the file's content.
         const machine = el.getAttribute('data-path-machine') || '';
         if (machine) msg.machine = machine;
         const match = raw.match(/^(.+):(\d+)$/);
@@ -24706,9 +25103,7 @@
         '<span>' +
         esc(att.name) +
         '</span>' +
-        '<span class="fc-rm" data-idx="' +
-        idx +
-        '">&times;</span>';
+        '<span class="fc-rm">&times;</span>';
       chip.querySelector('.fc-rm').addEventListener('click', () => {
         const gone = attachments.splice(idx, 1)[0];
         // Wake any send parked on this slot in attachmentsReady().
@@ -25381,6 +25776,8 @@
    *   painted from (the tab's own task, or the spliced-in neighbour
    *   the reader scrolled to); without them the active tab's own chat
    *   binding and task id stand in.
+   * @returns {boolean} Whether the shown chat or task changed (the
+   *   highlight was repainted).
    */
   function reportVisibleTask(s) {
     const tab = getTab(activeTabId);
@@ -25389,9 +25786,7 @@
       s && s.task_id !== undefined && s.task_id !== null
         ? s.task_id
         : currentTaskId;
-    const taskId =
-      rawTask === undefined || rawTask === null ? '' : String(rawTask);
-    setHistoryActiveTask(chatId, taskId);
+    return setHistoryActiveTask(chatId, taskIdStr(rawTask));
   }
 
   /**
@@ -25403,12 +25798,13 @@
    */
   function setHistoryActiveTask(chatId, taskId) {
     if (chatId === historyActiveChatId && taskId === historyActiveTaskId) {
-      return;
+      return false;
     }
     historyActiveChatId = chatId;
     historyActiveTaskId = taskId;
     historyActiveScrollPending = true;
     applyHistoryActiveTask();
+    return true;
   }
 
   /**
@@ -25417,8 +25813,8 @@
    * — without a Task Info repaint) and paint the highlight.
    */
   function syncHistoryActiveTask() {
-    reportVisibleTask(metaShownSettings);
-    applyHistoryActiveTask();
+    // An unchanged task still needs the paint: the rows are fresh.
+    if (!reportVisibleTask(metaShownSettings)) applyHistoryActiveTask();
   }
 
   /**
@@ -25435,9 +25831,8 @@
       const s = allHistSessions[i];
       if (!s || String(s.id || '') !== historyActiveChatId) continue;
       if (!historyActiveTaskId) return historyRenderedRows[i];
-      const taskId =
-        s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
-      if (taskId === historyActiveTaskId) return historyRenderedRows[i];
+      if (taskIdStr(s.task_id) === historyActiveTaskId)
+        return historyRenderedRows[i];
     }
     return null;
   }
@@ -25787,7 +26182,7 @@
       // event is persisted: the server reattaches the live chat on replay.
       openHistoryTaskInNewTab(taskText);
       if (resumable) {
-        api.resumeSession(
+        requestReplay(
           remoteResume(
             {id: s.id, taskId: s.task_id, tabId: activeTabId},
             machine,
@@ -25886,6 +26281,8 @@
     input.addEventListener('dblclick', e => e.stopPropagation());
     input.addEventListener('keydown', e => {
       e.stopPropagation();
+      // Enter / Escape inside an IME composition belong to the IME.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         finish(true);
@@ -25961,13 +26358,7 @@
     launched.className = 'history-chat-launched';
     actions.appendChild(launched);
     header.appendChild(actions);
-    header.addEventListener('keydown', e => {
-      if (e.target !== header) return;
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        header.click();
-      }
-    });
+    activateOnEnterSpace(header);
     header.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
@@ -26269,14 +26660,13 @@
 
   /** Stable identity of a history row (its chat and task). */
   function historySessionKey(s) {
-    const taskId =
-      s.task_id === undefined || s.task_id === null ? '' : String(s.task_id);
-    return String(s.id || '') + '\u241f' + taskId;
+    return String(s.id || '') + '\u241f' + taskIdStr(s.task_id);
   }
 
   /**
    * The metrics line of a history row: steps, tokens, cost, a duration
-   * (ticking while the task runs or lacks a recorded end), and the
+   * (ticking while the task runs; none for a finished task with no
+   * recorded end, which would otherwise grow forever), and the
    * task's localized timestamp.  Shared by the row builder and the
    * identical-refresh fast path, which refreshes this text in place so
    * kept rows never show a stale duration.
@@ -26307,7 +26697,7 @@
     if (startTsMs > 0) {
       if (endTsMs > startTsMs) {
         durMs = endTsMs - startTsMs;
-      } else if (s.is_running || endTsMs === 0) {
+      } else if (s.is_running) {
         durMs = Date.now() - startTsMs;
       }
     }
@@ -26348,10 +26738,14 @@
    * Field-by-field equality of one history session (no serialization:
    * huge prompt strings are compared directly, and a difference —
    * typically in the newest row — is found without copying them).
+   * The favourite overlay's stash of the daemon's value
+   * (`_kissFavDaemon`, mergePendingFavorites) is bookkeeping, not a
+   * shown field: a row rendered from the click and the overlaid page
+   * that confirms it are the same row.
    */
   function historySessionRowEqual(a, b) {
-    const ka = Object.keys(a);
-    const kb = Object.keys(b);
+    const ka = Object.keys(a).filter(k => k !== '_kissFavDaemon');
+    const kb = Object.keys(b).filter(k => k !== '_kissFavDaemon');
     if (ka.length !== kb.length) return false;
     for (const k of ka) {
       const va = a[k];
@@ -26451,9 +26845,9 @@
 
     mergePendingFavorites(sessions);
     historyLoading = false;
-    // Retire EVERY loader row: resetHistoryPagination() clears
-    // historyLoading while a previous loader is still appended, so a
-    // scroll during the in-flight refresh can add a second one.  The
+    // Retire EVERY loader row: a refresh (resetHistoryPagination) can
+    // start while a previous loader is still appended, and the reply
+    // that clears historyLoading lets a scroll add a second one.  The
     // old offset-0 wipe removed the extras as a side effect; the
     // identical-refresh fast path below keeps the DOM, so the reply
     // itself must clear them all.
@@ -26581,7 +26975,6 @@
       historyRenderedTz = tzNow;
       historyRenderedLabels = labelsNow;
       historyRenderedLegacy = historyLegacyView;
-      historyList.classList.toggle('legacy-view', historyLegacyView);
       historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
@@ -26616,13 +27009,7 @@
       div.className = 'sidebar-item running-item';
       div.tabIndex = 0;
       div.setAttribute('role', 'button');
-      div.addEventListener('keydown', e => {
-        if (e.target !== div) return;
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          div.click();
-        }
-      });
+      activateOnEnterSpace(div);
       div.dataset.category = s.is_running
         ? 'running'
         : s.failed
@@ -26687,14 +27074,9 @@
           // reconciliation refetch NOW — if the write fails and nothing
           // else refreshes the panel, the daemon's value must still
           // reappear at the bound.
-          if (s.task_id !== undefined && s.task_id !== null) {
-            const ts = Date.now();
-            historyPendingFavorites.set(String(s.task_id), {
-              value: next,
-              ts,
-            });
-            scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
-          }
+          const ts = Date.now();
+          historyPendingFavorites.set(String(s.task_id), {value: next, ts});
+          scheduleHistoryFavExpiry(ts + 10000 + 100, ts);
           applyFavState();
           div.dataset.favorite = next ? '1' : '0';
           applyHistoryFilterVisibility();
@@ -26787,22 +27169,16 @@
       }
 
       const chatId = typeof s.id === 'string' ? s.id : '';
-      const taskIdRaw = s.task_id;
-      const taskIdStr =
-        taskIdRaw === undefined || taskIdRaw === null ? '' : String(taskIdRaw);
-      const parentIdRaw = s.parent_task_id;
-      const parentIdStr =
-        parentIdRaw === undefined || parentIdRaw === null
-          ? ''
-          : String(parentIdRaw);
+      const taskIdText = taskIdStr(s.task_id);
+      const parentIdStr = taskIdStr(s.parent_task_id);
       const idSegments = [];
       if (chatId) {
         idSegments.push({text: 'chat ' + chatId, copy: chatId, kind: 'chat'});
       }
-      if (taskIdStr) {
+      if (taskIdText) {
         idSegments.push({
-          text: 'task ' + taskIdStr,
-          copy: taskIdStr,
+          text: 'task ' + taskIdText,
+          copy: taskIdText,
           kind: 'task',
         });
       }
@@ -26906,6 +27282,12 @@
     btn.setAttribute('aria-label', label);
     btn.dataset.tooltip = historyLegacyView ? 'Group by chat' : 'Flat list';
     historyList.classList.toggle('legacy-view', historyLegacyView);
+  }
+
+  /** The user set a date box: keep it, and re-filter the loaded rows. */
+  function onHistoryDateRangeChange() {
+    historyDateRangeUserSet = true;
+    applyHistoryFilterVisibility();
   }
 
   function autofillHistoryDateRange(range) {
@@ -27287,25 +27669,24 @@
       hfDateClear.style.display = hasDate ? '' : 'none';
     }
     // A filter change may have just shown the highlighted row a
-    // pending scroll was waiting for.
-    applyHistoryActiveTask();
+    // pending scroll was waiting for.  The highlight itself is already
+    // painted: a filter changes no row's task, and the paths that do
+    // (a rebuild, a new active task) paint it themselves.
+    if (historyActiveScrollPending) applyHistoryActiveTask();
   }
 
   /**
-   * Flush the settings form if there is anything to flush.
+   * Flush the fields the user edited since the sheet opened, if any.
    *
-   * A form the reply never reached is not empty of intent: whatever the
-   * user typed into it must still be saved, so those fields alone are
-   * sent. A form nobody touched and nobody populated has nothing to say
-   * and stays silent.
+   * Only those fields are sent, whether or not the `configData` reply
+   * reached the form: the daemon merges the payload, and re-sending the
+   * loaded values of untouched fields would paint over whatever another
+   * surface saved while this sheet was open.  A sheet nobody touched
+   * stays silent.
    */
   function saveSettingsIfPopulated() {
-    const edited = settingsEditedFields;
-    if (!configFormPopulated && edited.size === 0) return;
-    const data = configFormPopulated
-      ? collectConfigForm()
-      : collectConfigForm(edited);
-    api.saveConfig(settingsCommand(data));
+    if (settingsEditedFields.size === 0) return;
+    api.saveConfig(settingsCommand(collectConfigForm(settingsEditedFields)));
   }
 
   // The registered machine whose settings the open settings sheet
@@ -27561,7 +27942,6 @@
       true,
       document.getElementById('settings-btn'),
     );
-    configFormPopulated = false;
     settingsEditedFields.clear();
     // The API Keys / Custom Models / Bedrock subpanels START collapsed
     // on every open; only an explicit click on their header expands them.
@@ -27796,13 +28176,11 @@
   /**
    * Blank the settings form's text boxes (the fields collectConfigForm
    * reads), so what the sheet shows until its machine answers is
-   * nothing rather than another machine's values.  The form is then
-   * unpopulated: a close saves only the boxes the user types into
-   * afterwards; the run toggles keep their state (a checkbox has no
-   * blank).
+   * nothing rather than another machine's values.  A close saves only
+   * the boxes the user types into afterwards; the run toggles keep
+   * their state (a checkbox has no blank).
    */
   function clearConfigForm() {
-    configFormPopulated = false;
     const ids = [
       'cfg-max-budget',
       'cfg-remote-password',
@@ -28666,7 +29044,6 @@
     return row;
   }
 
-  let configFormPopulated = false;
   // Ids of the settings fields the user has edited since the panel was
   // opened.  `configData` is not a one-shot reply: the daemon re-pushes
   // it after every save and the page re-requests it on every daemon
@@ -28788,6 +29165,11 @@
     // ``useWebTools`` override.
     webToolsStateKnown = true;
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
+    // Opt-in (user_config.DEFAULTS.chrome_bridge is false).
+    setChecked(
+      document.getElementById('cfg-chrome-bridge'),
+      cfg.chrome_bridge === true,
+    );
     // Claude Code bills the subscription unless the user turned it off
     // (user_config.DEFAULTS.claude_code_use_subscription is true).
     setChecked(
@@ -28816,7 +29198,6 @@
       setValue('cfg-custom-api-key', cfg.custom_api_key || '');
       setValue('cfg-custom-headers', cfg.custom_headers || '');
     }
-    configFormPopulated = true;
     FIRST_PARTY_KEY_IDS.forEach(k => {
       setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');
     });
@@ -28884,6 +29265,9 @@
     }
     if (want('cfg-use-memory')) {
       cfg.use_memory = !!(memoryToggleBtn && memoryToggleBtn.checked);
+    }
+    if (want('cfg-chrome-bridge')) {
+      cfg.chrome_bridge = el('cfg-chrome-bridge').checked;
     }
     if (want('cfg-claude-code-use-subscription')) {
       cfg.claude_code_use_subscription = el(
@@ -29170,8 +29554,10 @@
 
   function acceptCompletion(full) {
     const cur = inp.value;
+    // The longest tail of the draft that is a prefix of the completion
+    // is what the completion replaces.
     let overlap = Math.min(cur.length, full.length);
-    while (overlap > 0 && !cur.endsWith(full.slice(0, overlap))) {
+    while (overlap > 0 && !full.startsWith(cur.slice(cur.length - overlap))) {
       overlap -= 1;
     }
     const keep = cur.length - overlap;

@@ -16,9 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.discover import discover_sea
 from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.revise_and_review_paper import revise_and_review_paper_sea as sea
 from kiss.agents.seas.revise_and_review_paper.revise_and_review_paper_sea import (
@@ -69,7 +68,7 @@ def _review(tmp_path: Path, name: str, tail: str) -> Path:
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
-    """The SEA appends the coordinator rules, offers three tools and does not browse."""
+    """The SEA appends the coordinator rules, offers three tools and routes via bestrouter."""
     agent = ReviseAndReviewPaperSea()
     assert agent.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + sea.SYSTEM_PROMPT
     prompt = sea.SYSTEM_PROMPT
@@ -84,12 +83,17 @@ def test_sea_methods_follow_the_user_contract() -> None:
     names = [t.__name__ for t in agent.tools([print])]
     assert names == ["print", "writer_task", "reviewer_task", "loop_status"]
     assert agent.settings({}) == {
-        "use_web_tools": False,
         "auto_classify": False,
         "tool_profile": "full",
         "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
+        "model": "bestrouter",
     }
-    assert agent.settings({"model": "m"}) == {"model": "m", **agent.settings({})}
+    # Web tools are no longer forced off: the base's choice passes through,
+    # while the SEA's model wins over the base's.
+    assert agent.settings({"model": "m", "use_web_tools": True}) == {
+        "use_web_tools": True,
+        **agent.settings({}),
+    }
     assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
     # A plain ``BaseSea``: the resolved settings are these four keys and
     # nothing else; the deprecated getters are gone.
@@ -100,15 +104,13 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "strong accept" in agent.description()
 
 
-def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path: Path) -> None:
+def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas() -> None:
     """``resolve_timeout`` takes ``settings()["timeout"]`` when positive, else the default.
 
     The paper SEAs declare their own waits; a SEA without ``timeout``
     (the bundled ``sorcar`` SEA) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
-    Real SEA files whose ``settings()`` returns a non-numeric, boolean,
-    infinite or non-positive ``timeout``, or raises, fail loudly at ``sea_settings`` (a
-    broken script must not run with guessed parameters); a positive
-    float is kept as is.
+    A malformed ``timeout`` is refused by ``resolve_settings`` (see
+    ``tests/server/test_sea_settings_regressions.py``).
     """
     for command, seconds in [("revise_and_review_paper", 86400.0), ("write_paper", 21600.0),
                              ("review_paper", 7200.0)]:
@@ -121,46 +123,6 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     assert "timeout" not in dummy_settings
     assert resolve_timeout(None, dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
 
-    def _script(n: int, body: str) -> Path:
-        folder = tmp_path / f"t{n}"
-        folder.mkdir()
-        script = folder / f"t{n}_sea.py"
-        script.write_text(
-            "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
-            "class Sea(BaseSea):\n    def description(self):\n        return 'x'\n" + body,
-            encoding="utf-8",
-        )
-        return script
-
-    resolved = {
-        "": 3600.0,
-        "    def settings(self, settings):\n        return settings | {'timeout': 1800.0}\n":
-            1800.0,
-        "    def settings(self, settings):\n        return settings | {'timeout': 1800}\n": 1800.0,
-        # A removed legacy getter is an ordinary module function: ignored.
-        "\ndef dispatch_timeout():\n    return 1800.0\n": 3600.0,
-    }
-    for n, (body, expected) in enumerate(resolved.items()):
-        settings = sea_commands.sea_settings(_script(n, body))
-        assert resolve_timeout(None, settings) == expected, body
-        # An explicit positive argument always wins over the script.
-        assert resolve_timeout(42.0, settings) == 42.0, body
-    broken = {
-        "    def settings(self, settings):\n        return settings | {'timeout': 'soon'}\n":
-            "timeout",
-        "    def settings(self, settings):\n        return settings | {'timeout': True}\n":
-            "timeout",
-        "    def settings(self, settings):\n        return settings | {'timeout': float('inf')}\n":
-            "timeout",
-        # A non-positive wait means nothing: refused like an infinite one.
-        "    def settings(self, settings):\n        return settings | {'timeout': 0}\n": "timeout",
-        "    def settings(self, settings):\n        return settings | {'timeout': -5}\n": "timeout",
-        "    def settings(self, settings):\n        raise RuntimeError('broken')\n": "broken",
-    }
-    for n, (body, text) in enumerate(broken.items(), start=len(resolved)):
-        with pytest.raises(sea_commands.SeaError, match=text):
-            sea_commands.sea_settings(_script(n, body))
-
 
 def test_writer_task_first_round_and_revision_rounds() -> None:
     """Round 1 writes from the instructions; later rounds answer the review and carry notes."""
@@ -169,9 +131,14 @@ def test_writer_task_first_round_and_revision_rounds() -> None:
     assert "Writing instructions from the user:\nWrite for NeurIPS 2027 at /w/p/p.tex.\n" in first
     assert "Notes from the loop coordinator" not in first
     assert "review at" not in first
-    assert first.endswith("report what is left undone.")
+    # The writer rules end with the AI discovery loop the rules point at
+    # ("below"): the loop lives in the ``/discover`` SEA, not in ``SYSTEM.md``.
+    assert first.endswith(
+        "report what is left undone.\n\n" + discover_sea.DISCOVERY_INSTRUCTIONS
+    )
+    assert first.count(discover_sea.SECTION_HEADING) == 1
     assert "Do not run a review of your own" in first
-    assert "AI-discovery process" in first and "ablation" in first
+    assert "Follow the AI discovery loop below" in first and "ablation" in first
 
     later = sea.writer_task(
         "Write for NeurIPS 2027.", 3, "/w/reports/p-round2-review.txt", " YCSB allowed. \n"

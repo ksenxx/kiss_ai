@@ -22,6 +22,12 @@ Covered:
   and its remote-url.json for the webapp step);
 * the ``_KISS_BRAND_PASS=1`` recursion guard (two brand homes get exactly
   one pass each; a guarded run discovers nothing and prints no box);
+* a service unit a remote deploy wrote without ``KISS_HOME`` (the stock
+  app out of the checkout's venv) next to a brand home: the install from
+  that checkout rewrites the unit for the brand app with
+  ``Environment=KISS_HOME=<brand home>`` and starts it, with and without
+  ``KISS_HOME`` exported by the shell (a ``systemctl`` stub starts the
+  daemon from the unit install.sh wrote);
 * the VS Code notice with ``TERM_PROGRAM=vscode``, with an installed
   ``ksenxx.kiss-sorcar-*`` extension directory, and absent otherwise;
 * the new second line of the password box.
@@ -106,6 +112,27 @@ echo "$*" >> "$KISS_TEST_MARK_DIR/code"
 if [ "$1" = --uninstall-extension ]; then
     /bin/rm -rf "$HOME"/.vscode/extensions/"$2"-* "$HOME"/.vscode-server/extensions/"$2"-*
 fi
+exit 0
+"""
+
+# ``systemctl --user`` for the deploy-unit test only: records every call
+# and, on ``start``, launches the unit's ExecStart with the unit's
+# Environment=KISS_HOME and WorkingDirectory, as systemd would, so the
+# daemon-start mark reflects what install.sh wrote into the unit.
+STUB_SYSTEMCTL = """#!/bin/bash
+echo "$*" >> "$KISS_TEST_MARK_DIR/systemctl"
+unit="$HOME/.config/systemd/user/kiss-web.service"
+case " $* " in
+    *" start "*)
+        exec_start="$(sed -n 's/^ExecStart=//p' "$unit")"
+        workdir="$(sed -n 's/^WorkingDirectory=//p' "$unit")"
+        kiss_home="$(sed -n 's/^Environment=KISS_HOME=//p' "$unit")"
+        if [ -n "$kiss_home" ]; then export KISS_HOME="$kiss_home"; else unset KISS_HOME; fi
+        # systemd hands the daemon none of the caller's descriptors: not
+        # the installer's saved terminal (fd 3) nor its update lock (fd 9).
+        (cd "$workdir" && exec 3>&- 9>&- && exec nohup $exec_start) >/dev/null 2>&1 </dev/null &
+        ;;
+esac
 exit 0
 """
 
@@ -393,6 +420,88 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         )
         self.assertIn("https://custom.trycloudflare.com", out)
         self.assertIn("*  Remote access password:  pw-.custom", out)
+
+    def test_deploy_unit_without_kiss_home_still_yields_the_brand_daemon(self) -> None:
+        # The machine a remote deploy (rsorcar) last touched: the brand
+        # home ~/.s10s with its hook, and a kiss-web unit the deploy wrote
+        # with no KISS_HOME line, running the stock app out of the
+        # checkout's venv.  ./install.sh from that checkout must end with
+        # the brand's daemon on ~/.s10s -- whether the shell exports
+        # KISS_HOME=~/.s10s (the brand's rc line) or not (ssh command,
+        # the daemon's own update) -- and the unit rewritten to say so.
+        # A systemctl stub makes install.sh take its systemd branch and
+        # starts the daemon from the unit it wrote.
+        (self.stubs / "systemctl").write_text(STUB_SYSTEMCTL)
+        (self.stubs / "systemctl").chmod(0o755)
+        s10s = self._brand_home("s10s")
+        (s10s / "remote-url.json").write_text(
+            '{\n  "loopback": "http://127.0.0.1:8787",\n'
+            '  "tunnel": "https://s10s.trycloudflare.com"\n}\n'
+        )
+        checkout = self.home / "kiss"
+        checkout.mkdir()
+        unit = self.home / ".config" / "systemd" / "user" / "kiss-web.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text(
+            "[Service]\n"
+            f"ExecStart={checkout}/.venv/bin/kiss-web --workdir {checkout}\n"
+            f"WorkingDirectory={checkout}\n"
+            "StandardOutput=append:%h/.kiss/kiss-web-stdout.log\n"
+        )
+        brand_app = s10s / "s10s" / ".venv" / "bin" / "kiss-web"
+        # install.sh records the checkout's physical path (macOS: /var -> /private/var)
+        physical_checkout = checkout.resolve()
+        rewritten_unit = (
+            f"ExecStart={brand_app}\n"
+            f"WorkingDirectory={physical_checkout}\n",
+            f"Environment=KISS_HOME={s10s}\n"
+            f"StandardOutput=append:{s10s}/kiss-web-stdout.log\n"
+            f"StandardError=append:{s10s}/kiss-web-stderr.log\n",
+        )
+
+        # KISS_HOME unset: the stock pass installs ~/.kiss/kiss, the nested
+        # pass installs and brands ~/.s10s/s10s, and that is the daemon.
+        out = self._run(cwd=checkout)
+        self.assertEqual(out.count(NESTED_PASS), 1, out)
+        self.assertIn(f"{NESTED_PASS}~/.s10s...", out)
+        self.assertNotIn("The kiss-web service runs from brand home", out)
+        self.assertIn(
+            f"   Brand home {s10s} is installed and branded; starting the daemon from that app,"
+            f" not from {self.home / '.kiss' / 'kiss'}.",
+            out,
+        )
+        self.assertEqual(self._marks("hooks"), [f"KISS_HOME={s10s} APP={s10s / 's10s'}"])
+        self.assertIn("   Restarting the kiss-web systemd user service...", out)
+        self.assertEqual(
+            self._marks("systemctl")[-2:],
+            ["--user stop kiss-web.service", "--user start kiss-web.service"],
+        )
+        for part in rewritten_unit:
+            self.assertIn(part, unit.read_text())
+        # The daemon the stub started from that unit: the brand app, with
+        # the brand home, serving the checkout.
+        self.assertEqual(self._wait_mark("daemon-start", 1), [f"KISS_HOME={s10s} APP={brand_app}"])
+        self.assertEqual(self._wait_mark("daemon-pwd", 1), [str(physical_checkout)])
+        self.assertIn("https://s10s.trycloudflare.com", out)
+        self.assertIn("*  Remote access password:  pw-.s10s", out)
+
+        # KISS_HOME=~/.s10s exported by the shell: a direct brand-home
+        # install, no nested pass, the same unit and daemon.
+        unit.write_text(f"[Service]\nExecStart={checkout}/.venv/bin/kiss-web\n")
+        out = self._run({"KISS_HOME": str(s10s)}, cwd=checkout)
+        self.assertNotIn(NESTED_PASS, out)
+        self.assertEqual(
+            self._marks("hooks"),
+            [f"KISS_HOME={s10s} APP={s10s / 's10s'}"] * 2,
+        )
+        for part in rewritten_unit:
+            self.assertIn(part, unit.read_text())
+        self.assertEqual(
+            self._wait_mark("daemon-start", 2),
+            [f"KISS_HOME={s10s} APP={brand_app}"] * 2,
+        )
+        self.assertEqual(self._wait_mark("daemon-pwd", 2), [str(physical_checkout)] * 2)
+        self.assertIn("*  Remote access password:  pw-.s10s", out)
 
     def test_failing_nested_pass_is_a_warning(self) -> None:
         brandx = self._brand_home("brandx")

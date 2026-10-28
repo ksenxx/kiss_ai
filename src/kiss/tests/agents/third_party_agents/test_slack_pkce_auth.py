@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from kiss.agents.third_party_agents import _oauth_apps
+from kiss.agents.third_party_agents import _device_auth, _oauth_apps
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents.slack.slack_sea import (
     _USER_SCOPES,
@@ -82,10 +82,13 @@ def test_missing_client_id_is_reported(
 
 
 def test_authorize_url_requests_user_scopes_with_pkce(
-    slack: tuple[SlackOAuthState, SlackApiServer],
+    slack: tuple[SlackOAuthState, SlackApiServer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The sign-in URL targets Slack's authorize page with PKCE and user scopes."""
     oauth, server = slack
+    # The pending check below joins the poll thread for ``_FINISH_WAIT_S``
+    # (5 s by default, resolved at call time); no redirect ever lands here.
+    monkeypatch.setattr(_device_auth, "_FINISH_WAIT_S", 0.2)
     tools = auth_tools(SlackAgent())
     started = start_sign_in(tools, oauth)
     assert started["status"] == "consent_required"
@@ -107,7 +110,10 @@ def test_authorize_url_requests_user_scopes_with_pkce(
 
 
 def test_sign_in_stores_rotating_user_token_and_refreshes(
-    slack: tuple[SlackOAuthState, SlackApiServer], capsys: pytest.CaptureFixture
+    slack: tuple[SlackOAuthState, SlackApiServer],
+    capsys: pytest.CaptureFixture,
+    refusing_port: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The user token is validated, saved with its refresh token, and rotated."""
     oauth, server = slack
@@ -158,8 +164,8 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     oauth.refresh_token = "revoked"
     failed = json.loads(tools["check_slack_auth"]())
     assert failed["ok"] is False and "invalid_refresh_token" in failed["error"]
-    server.shutdown()
-    server.server_close()
+    # The token endpoint is read from the environment at refresh time.
+    monkeypatch.setenv("KISS_SLACK_BASE_URL", f"http://127.0.0.1:{refusing_port}/")
     failed = json.loads(tools["check_slack_auth"]())
     assert failed["ok"] is False and "ConnectionError" in failed["error"]
 

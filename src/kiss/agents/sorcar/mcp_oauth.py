@@ -278,6 +278,9 @@ class MCPLoginSession:
             # stall behind that wait.
             previous.cancel()
             previous.wait(5.0)
+            # Published before the bind below: should it fail, no
+            # caller must find the cancelled session still active.
+            cls._set_active(None)
         session = cls(cfg)
         session._server = _RedirectServer()
         cls._set_active(session)
@@ -292,8 +295,8 @@ class MCPLoginSession:
 
     @classmethod
     @locked(_lock)
-    def _set_active(cls, session: MCPLoginSession) -> None:
-        """Publish *session* as the active one."""
+    def _set_active(cls, session: MCPLoginSession | None) -> None:
+        """Publish *session* as the active one (``None``: no session)."""
         cls._active = session
 
     @classmethod

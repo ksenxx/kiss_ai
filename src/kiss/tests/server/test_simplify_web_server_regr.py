@@ -15,8 +15,7 @@ simplification pass:
   (shared cancel helper).
 * Tunnel bookkeeping reset via ``_stop_tunnel`` / ``_detach_tunnel``
   (shared reset helper).
-* ``_get_local_ips`` filtering, ``_version_tuple`` /
-  ``_compare_versions`` semantics.
+* ``_version_tuple`` / ``_compare_versions`` semantics.
 * ``_process_request`` routing for ``/``, ``/trajectories`` and 404s.
 
 All tests drive real objects — no mocks, patches, or fakes.
@@ -39,7 +38,6 @@ from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
-    _get_local_ips,
     _version_tuple,
 )
 from kiss.tests.conftest import is_root, posix_only
@@ -48,14 +46,6 @@ from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 class TestPureHelpers(unittest.TestCase):
     """Pin pure helper semantics."""
-
-    def test_get_local_ips_filters_loopback_and_linklocal(self) -> None:
-        ips = _get_local_ips()
-        self.assertIsInstance(ips, frozenset)
-        for addr in ips:
-            self.assertFalse(addr.startswith("127."))
-            self.assertFalse(addr.startswith("169.254."))
-            self.assertFalse(addr.startswith("::ffff:"))
 
     def test_version_tuple(self) -> None:
         self.assertEqual(_version_tuple("2026.6.1"), (2026, 6, 1))

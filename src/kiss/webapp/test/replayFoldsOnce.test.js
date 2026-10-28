@@ -13,13 +13,13 @@
 // collapse pass skips panels that are already folded.
 //
 // Covered here:
-//   * a 150-step running-task replay (302 panels) completes well under
-//     the quadratic cost (15 s in this harness before the fix) and ends
-//     with every older panel folded, exactly as before;
+//   * a 150-step running-task replay (302 panels) writes each panel's
+//     preview at most once (the quadratic pass wrote it once per event)
+//     and ends with every older panel folded, exactly as before;
 //   * live streaming after the replay still keeps the newest two panels
 //     open, so the replay-only shortcut does not leak into the stream.
 
-/* global require, console, process */
+/* global require, console */
 'use strict';
 
 const assert = require('assert');
@@ -27,9 +27,6 @@ const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
 
 const TS = 1767225600000;
 const STEPS = 150;
-// The pre-fix replay of STEPS steps took ~15 s here; the fixed one ~0.7 s.
-// The budget bounds CPU time (see replayRunning), not wall-clock time.
-const REPLAY_BUDGET_MS = 5000;
 
 function makePage() {
   const {win} = makeChatPage({
@@ -87,14 +84,19 @@ function longRun(steps) {
 }
 
 /**
- * Replays `events` into a running tab and returns the CPU time (user +
- * system, in ms) the replay took.  The replay is CPU-bound, so CPU time
- * is what the budget bounds; wall-clock time would also count the time
- * the process was descheduled on a loaded machine.
+ * Replays `events` into a running tab and returns how many times the
+ * replay wrote a folded panel's header preview.  Folding a panel
+ * rewrites its `.collapse-preview` text from the panel's DOM; the
+ * pre-fix per-event collapse pass redid that for every older panel on
+ * every replayed event (O(events x panels), ~15 s for STEPS steps), so
+ * the number of preview writes is the work the test bounds, not a
+ * timing that depends on the machine's load.
  */
 function replayRunning(win, tab, events) {
   send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
-  const c0 = process.cpuUsage();
+  const out = win.document.getElementById('output');
+  const observer = new win.MutationObserver(() => {});
+  observer.observe(out, {childList: true, characterData: true, subtree: true});
   send(win, {
     type: 'task_events',
     tabId: tab,
@@ -104,14 +106,19 @@ function replayRunning(win, tab, events) {
     extra: '',
     events,
   });
-  const c = process.cpuUsage(c0);
-  return (c.user + c.system) / 1000;
+  const previewWrites = observer
+    .takeRecords()
+    .filter(
+      r => r.target.classList && r.target.classList.contains('collapse-preview'),
+    ).length;
+  observer.disconnect();
+  return previewWrites;
 }
 
 function testLongReplayFoldsOnceAndFast() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
-  const elapsed = replayRunning(win, tab, longRun(STEPS));
+  const previewWrites = replayRunning(win, tab, longRun(STEPS));
 
   const ps = panels(win);
   assert.strictEqual(
@@ -133,13 +140,13 @@ function testLongReplayFoldsOnceAndFast() {
     'no Thoughts panel of the replay is folded',
   );
   assert.ok(
-    elapsed < REPLAY_BUDGET_MS,
-    `replaying ${STEPS} steps took ${elapsed} ms; the per-event collapse ` +
-      `pass is back (budget ${REPLAY_BUDGET_MS} ms)`,
+    previewWrites <= ps.length,
+    `replaying ${STEPS} steps wrote ${previewWrites} panel previews for ` +
+      `${ps.length} panels; the per-event collapse pass is back`,
   );
   win.close();
   console.log(
-    `  ok - a ${STEPS}-step replay folds once and fast (${elapsed} ms)`,
+    `  ok - a ${STEPS}-step replay folds once (${previewWrites} preview writes)`,
   );
 }
 

@@ -47,7 +47,7 @@ from typing import Any
 import pytest
 
 from kiss.core import stop_signal, tool_interrupt
-from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_agent import KISSAgent, NativeTurn
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ServedCall, ToolBridge
 from kiss.core.models.model import _CLIProcess, _StreamReadTimeoutError
@@ -70,12 +70,19 @@ from kiss.tests.core.test_codex_mcp_bridge import (
 )
 from kiss.tests.lock_injection import hammer
 
-NOOP_SCHEMA: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {"name": "noop", "description": "Nothing.", "parameters": {"type": "object"}},
-    }
-]
+
+def _schema(*names: str) -> list[dict[str, Any]]:
+    """An OpenAI tools schema listing one argument-less tool per name."""
+    return [
+        {
+            "type": "function",
+            "function": {"name": name, "description": "Nothing.", "parameters": {"type": "object"}},
+        }
+        for name in names
+    ]
+
+
+NOOP_SCHEMA = _schema("noop")
 
 
 def _echo(call: dict[str, Any]) -> tuple[str, str]:
@@ -512,11 +519,14 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
     agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
     agent.function_map = {hold.__name__: hold, "later": later}
     execute = functools.partial(
-        agent._execute_tool_on_helper_thread, stop_event=stop, printer_binding=None
+        agent._execute_tool_on_helper_thread,
+        stop_event=stop,
+        printer_binding=None,
+        turn=NativeTurn(),
     )
     stop_signal.set_thread_stop_event(stop)
     try:
-        with ToolBridge(NOOP_SCHEMA, execute) as bridge:
+        with ToolBridge(_schema(hold.__name__, "later"), execute) as bridge:
             first = _call(bridge.port, hold.__name__)
             assert HOLD_STARTED.wait(5)
             second = _call(bridge.port, "later")

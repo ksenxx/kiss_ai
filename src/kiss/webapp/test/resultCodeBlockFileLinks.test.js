@@ -20,7 +20,7 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks, existsOnRealFs} = require('./file_link_helpers');
+const {findLinks, checkPathsOnRealFs} = require('./file_link_helpers');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-rescode-'));
 const realFile = path.join(tmpDir, 'API.md');
@@ -29,27 +29,13 @@ const realFile2 = path.join(tmpDir, 'README.md');
 fs.writeFileSync(realFile2, 'world\n');
 const missingFile = path.join(tmpDir, 'missing.md');
 
-function checkPathsOnRealFs(msg) {
-  const results = {};
-  for (const p of msg.paths) {
-    let abs = p;
-    if (p.startsWith('~/')) {
-      abs = path.join(os.homedir(), p.slice(2));
-    } else if (!path.isAbsolute(p)) {
-      abs = path.resolve(msg.workDir || tmpDir, p);
-    }
-    results[p] = existsOnRealFs(abs);
-  }
-  return results;
-}
-
 // Loads the real chat page (chat.html + api.js + main.js) in jsdom
 // WITH the real highlight.js, answering every checkPaths against the
 // real filesystem exactly like the web server does.
 function makePage() {
   return harness.makePage({
     extraScripts: ['highlight.min.js', 'marked.min.js'],
-    beforeScripts: win => answerCheckPaths(win, checkPathsOnRealFs),
+    beforeScripts: win => answerCheckPaths(win, checkPathsOnRealFs(tmpDir)),
   });
 }
 

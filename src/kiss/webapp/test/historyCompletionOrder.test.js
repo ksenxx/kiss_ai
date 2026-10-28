@@ -12,7 +12,11 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage} = require('./simplify2_harness');
-const {sendHistory, makeRow} = require('./history_helpers');
+const {
+  sendHistory,
+  makeRow,
+  localIsoDate: localIso,
+} = require('./history_helpers');
 
 function makePage(legacy) {
   const {win, posted} = makeChatPage({
@@ -100,12 +104,6 @@ function testFlatRowsSortByCompletion() {
     'task b1',
   ]);
   win.close();
-}
-
-function localIso(sec) {
-  const d = new Date(sec * 1000);
-  const p = x => String(x).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
 function visibleFlatRows(win) {

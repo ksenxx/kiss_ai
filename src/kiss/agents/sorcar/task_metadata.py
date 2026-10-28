@@ -31,7 +31,11 @@ from collections.abc import Iterable
 from itertools import chain
 from pathlib import Path
 
-from kiss.agents.sorcar.chat_summary import POLITENESS_FILLER, upsert_chat_summary
+from kiss.agents.sorcar.chat_summary import (
+    NOT_SUBAGENT,
+    POLITENESS_FILLER,
+    upsert_chat_summary,
+)
 
 #: Upper bound on the number of tags stored per task: the history panel
 #: shows them inline after the "... ago" launch-age label.  The scope
@@ -459,6 +463,32 @@ def trajectory_has_secret(
     return has_secret_value(chain((str(task or ""), str(result or "")), texts))
 
 
+def write_task_tags(db: sqlite3.Connection, task_id: str, row: sqlite3.Row) -> None:
+    """Classify a task row and store its ``tags`` column.
+
+    The result decides the ``failed`` tag and the persisted events
+    whether the trajectory holds a secret.  Runs inside the caller's
+    transaction; nothing is committed here.
+
+    Args:
+        db: Connection to ``history.db``.
+        task_id: The ``task_history`` row id.
+        row: The row's ``task``, ``result``, ``success`` and
+            ``parent_task_id`` columns.
+    """
+    from kiss.agents.sorcar.persistence import _is_failed_result, _safe_str
+
+    # ``_safe_str``: a BLOB in a TEXT column (a hand-edited or
+    # third-party database) is decoded, not rendered as ``b'...'``.
+    tags = classify_task_tags(
+        _safe_str(row["task"]),
+        is_subagent=bool(row["parent_task_id"]),
+        failed=_is_failed_result(_safe_str(row["result"]), row["success"]),
+        has_secret=trajectory_has_secret(db, task_id, row["task"], row["result"]),
+    )
+    db.execute("UPDATE task_history SET tags = ? WHERE id = ?", (",".join(tags), task_id))
+
+
 def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     """Fill ``tags``, ``sea`` and ``chat_summaries`` for every row that lacks them.
 
@@ -476,27 +506,19 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     Returns:
         Counts: ``{"tags": n, "sea": n, "chats": n}``.
     """
-    from kiss.agents.sorcar.persistence import _is_failed_result
-
-    db.row_factory = sqlite3.Row
     counts = {"tags": 0, "sea": 0, "chats": 0}
-    rows = db.execute(
+    # A cursor with its own row factory: the caller's connection keeps
+    # whatever factory it was opened with.
+    cursor = db.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute(
         "SELECT id, task, result, parent_task_id, success FROM task_history "
         "WHERE tags IS NULL OR tags = ''"
     ).fetchall()
     for start in range(0, len(rows), _BACKFILL_BATCH):
         with db:
             for row in rows[start : start + _BACKFILL_BATCH]:
-                tags = classify_task_tags(
-                    row["task"] or "",
-                    is_subagent=bool(row["parent_task_id"]),
-                    failed=_is_failed_result(row["result"] or "", row["success"]),
-                    has_secret=trajectory_has_secret(db, row["id"], row["task"], row["result"]),
-                )
-                db.execute(
-                    "UPDATE task_history SET tags = ? WHERE id = ?",
-                    (",".join(tags), row["id"]),
-                )
+                write_task_tags(db, row["id"], row)
     counts["tags"] = len(rows)
     parents = db.execute(
         "SELECT DISTINCT parent_task_id FROM task_history "
@@ -511,7 +533,7 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
         counts["sea"] += len(inferred)
     chats = db.execute(
         "SELECT DISTINCT chat_id FROM task_history t "
-        "WHERE (parent_task_id IS NULL OR parent_task_id = '') AND chat_id != '' "
+        f"WHERE {NOT_SUBAGENT} AND chat_id != '' "
         "AND NOT EXISTS (SELECT 1 FROM chat_summaries c "
         "WHERE c.chat_id = t.chat_id AND c.summary != '')"
     ).fetchall()

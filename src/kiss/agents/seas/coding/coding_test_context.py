@@ -19,7 +19,7 @@ import difflib
 import posixpath
 import re
 import shlex
-import subprocess
+from collections.abc import Callable
 
 #: Start of a named definition in the common languages (Python, JS/TS, Go,
 #: Rust, Java, C#, Ruby, PHP, ...): keyword(s) followed by the name.
@@ -123,13 +123,14 @@ def _enclosing_definitions(lines: list[str], index: int, indent: int) -> list[st
 
 
 def find_referencing_tests(
-    container: str, workdir: str, names: list[str], exclude: str
+    run_shell: Callable[[str], str | None], workdir: str, names: list[str], exclude: str
 ) -> list[tuple[str, int]]:
-    """Test files under *workdir* in *container* that mention any of *names*, most mentions first.
+    """Test files under *workdir* that mention any of *names*, most mentions first.
 
     Args:
-        container: Docker container name or id.
-        workdir: Repository root inside the container.
+        run_shell: Runs a shell command in the trial environment and returns
+            its stdout (``None`` on failure), e.g. ``ContainerHarness.shell``.
+        workdir: Repository root inside the environment.
         names: Identifiers to grep for (whole words).
         exclude: Path of the edited file (never listed).
 
@@ -148,17 +149,11 @@ def find_referencing_tests(
         for index, name in enumerate(names[:4])
     )
     command = f"cd {shlex.quote(workdir)} && {{ {greps} ; }}"
-    try:
-        completed = subprocess.run(
-            ["docker", "exec", container, "sh", "-c", command],
-            capture_output=True, text=True, timeout=60,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    stdout = run_shell(command) or ""
     exclude_rel = posixpath.relpath(exclude, workdir) if exclude.startswith(workdir) else exclude
     matched: dict[str, set[int]] = {}
     mentions: dict[str, int] = {}
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         index, tab, rest = line.partition("\t")
         path, sep, count = rest.rpartition(":")
         if not tab or not sep or not count.isdigit():

@@ -20,7 +20,6 @@ now an explicit unsupported stub.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 from nio import AsyncClient
@@ -48,10 +47,8 @@ class _SyncRecordingHandler(RecordingHandler):
     REJECT_TOKEN = "rejected-token"
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
-        """Record the query string and reply with sync payload or error."""
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        self.server.requests.append(params)
+        """Record the request and reply with sync payload or error."""
+        params = self.record_request(None)["query"]
         if self.server.fail_all or params.get("since") == [type(self).REJECT_TOKEN]:
             self._json(400, {"errcode": "M_UNKNOWN", "error": "Unrecognised sync token"})
         else:
@@ -106,7 +103,7 @@ class TestMatrixSinceSelection:
         requests = server.requests
         backend._next_batch = "stale-in-memory"
         messages, cursor = backend.poll_messages("!room:example.org", "persisted-42")
-        assert requests[-1].get("since") == ["persisted-42"]
+        assert requests[-1]["query"].get("since") == ["persisted-42"]
         assert messages == []
         # The server's next_batch becomes the new cursor for the runner.
         assert cursor == "nb-1"
@@ -120,7 +117,7 @@ class TestMatrixSinceSelection:
         requests = server.requests
         backend._next_batch = "mem-batch"
         backend.poll_messages("!room:example.org", "0")
-        assert requests[-1].get("since") == ["mem-batch"]
+        assert requests[-1]["query"].get("since") == ["mem-batch"]
 
     def test_no_cursor_and_no_batch_syncs_from_scratch(
         self, matrix_backend: tuple[MatrixChannelBackend, _SyncServer]
@@ -129,7 +126,7 @@ class TestMatrixSinceSelection:
         backend, server = matrix_backend
         requests = server.requests
         backend.poll_messages("!room:example.org", "")
-        assert "since" not in requests[-1]
+        assert "since" not in requests[-1]["query"]
 
     def test_successive_polls_chain_next_batch(
         self, matrix_backend: tuple[MatrixChannelBackend, _SyncServer]
@@ -139,7 +136,7 @@ class TestMatrixSinceSelection:
         requests = server.requests
         backend.poll_messages("!room:example.org", "")
         backend.poll_messages("!room:example.org", "0")
-        assert requests[-1].get("since") == ["nb-1"]
+        assert requests[-1]["query"].get("since") == ["nb-1"]
 
     def test_rejected_since_token_recovers_with_full_sync(
         self, matrix_backend: tuple[MatrixChannelBackend, _SyncServer]
@@ -155,8 +152,8 @@ class TestMatrixSinceSelection:
         messages, cursor = backend.poll_messages(
             "!room:example.org", _SyncRecordingHandler.REJECT_TOKEN
         )
-        assert requests[-2].get("since") == [_SyncRecordingHandler.REJECT_TOKEN]
-        assert "since" not in requests[-1]
+        assert requests[-2]["query"].get("since") == [_SyncRecordingHandler.REJECT_TOKEN]
+        assert "since" not in requests[-1]["query"]
         assert messages == []
         # The retry's fresh token replaces the rejected cursor.
         assert cursor == f"nb-{len(requests)}"
@@ -180,7 +177,7 @@ class TestMatrixSinceSelection:
         assert cursor == _SyncRecordingHandler.REJECT_TOKEN
         # Exactly one retry: the rejected since, then the full sync.
         assert len(requests) == 2
-        assert "since" not in requests[-1]
+        assert "since" not in requests[-1]["query"]
 
 
 class TestMatrixWithoutClient:

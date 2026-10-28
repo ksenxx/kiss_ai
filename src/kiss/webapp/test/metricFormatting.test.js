@@ -19,6 +19,7 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {makeRow} = require('./history_helpers');
 
 function headerTokens(win) {
   return win.document.getElementById('status-tokens').textContent;
@@ -43,8 +44,9 @@ const TOKEN_CASES = [
   [999600000000000, '1000T'],
 ];
 
-function testHeaderTokensCompactOnStructuredUsageInfo() {
-  const {win} = makePage({beforeScripts: stubRaf});
+// The header counters, the Result panel, the history row and the model
+// list do not interfere, so every check runs on one page.
+function testHeaderTokensCompactOnStructuredUsageInfo(win) {
   for (const [tokens, expected] of TOKEN_CASES) {
     send(win, {
       type: 'usage_info',
@@ -59,13 +61,10 @@ function testHeaderTokensCompactOnStructuredUsageInfo() {
     );
     assert.strictEqual(headerBudget(win), 'Cost: $0.41');
   }
-  win.close();
   console.log('  ok - header tokens are compact for structured usage_info');
 }
 
-function testHeaderCostTwoDecimalsOnAllPaths() {
-  const {win} = makePage({beforeScripts: stubRaf});
-
+function testHeaderCostTwoDecimalsOnAllPaths(win) {
   // Structured usage_info with a numeric cost.
   send(win, {type: 'usage_info', total_tokens: 500, cost: 0.056});
   assert.strictEqual(headerBudget(win), 'Cost: $0.06');
@@ -94,14 +93,12 @@ function testHeaderCostTwoDecimalsOnAllPaths() {
   assert.strictEqual(headerTokens(win), 'Tokens: 1.23M');
   assert.strictEqual(headerBudget(win), 'Cost: $1.30');
 
-  win.close();
   console.log('  ok - header cost shows two decimals on every write path');
 }
 
-function testResultPanelHeaderCarriesNoMetrics() {
+function testResultPanelHeaderCarriesNoMetrics(win) {
   // The run's spend lives in the status bar only; the Result panel's
   // header is just its title.
-  const {win} = makePage({beforeScripts: stubRaf});
   send(win, {
     type: 'result',
     success: true,
@@ -109,35 +106,29 @@ function testResultPanelHeaderCarriesNoMetrics() {
     total_tokens: 45678,
     cost: '$0.4123',
   });
-  const header = win.document.querySelector('.rc .rc-h');
-  assert.ok(header, 'the result panel must render its header');
-  assert.strictEqual(header.textContent.trim(), 'Result');
+  const headers = win.document.querySelectorAll('.rc .rc-h');
+  assert.ok(headers.length, 'the result panel must render its header');
+  for (const header of headers) {
+    assert.strictEqual(header.textContent.trim(), 'Result');
+  }
   assert.strictEqual(headerTokens(win), 'Tokens: 45.7K');
   assert.strictEqual(headerBudget(win), 'Cost: $0.41');
-  win.close();
   console.log('  ok - the result panel header shows no tokens or cost');
 }
 
-function testHistoryRowsUseCompactFormats() {
-  const {win} = makePage({beforeScripts: stubRaf});
+function testHistoryRowsUseCompactFormats(win) {
   send(win, {
     type: 'history',
     offset: 0,
     sessions: [
-      {
+      makeRow({
         id: 'h1',
         task_id: 7,
         title: 'big run',
-        preview: 'big run',
-        timestamp: 1700000000,
-        has_events: false,
-        failed: false,
-        is_running: false,
         tokens: 1234567,
         cost: 0.1234,
         steps: 42,
-        is_favorite: false,
-      },
+      }),
     ],
   });
   const metrics = win.document.querySelector('.running-item-metrics');
@@ -146,12 +137,10 @@ function testHistoryRowsUseCompactFormats() {
     metrics.textContent.includes('1.23M tok • $0.12'),
     'history metrics must be compact; got: ' + metrics.textContent,
   );
-  win.close();
   console.log('  ok - history rows use the compact formats');
 }
 
-function testModelItemsWrapNameForStartTruncation() {
-  const {win} = makePage({beforeScripts: stubRaf});
+function testModelItemsWrapNameForStartTruncation(win) {
   const long = 'claude-extremely-long-model-name-20261114-thinking-64k';
   send(win, {
     type: 'models',
@@ -181,13 +170,14 @@ function testModelItemsWrapNameForStartTruncation() {
   }
   const stripped = names.map(el => el.textContent.replace(/\u200e/g, ''));
   assert.deepStrictEqual(stripped, [long, 'gpt-5.6-sol']);
-  win.close();
   console.log('  ok - model items wrap the name for start-truncation');
 }
 
-testHeaderTokensCompactOnStructuredUsageInfo();
-testHeaderCostTwoDecimalsOnAllPaths();
-testResultPanelHeaderCarriesNoMetrics();
-testHistoryRowsUseCompactFormats();
-testModelItemsWrapNameForStartTruncation();
+const {win} = makePage({beforeScripts: stubRaf});
+testHeaderTokensCompactOnStructuredUsageInfo(win);
+testHeaderCostTwoDecimalsOnAllPaths(win);
+testResultPanelHeaderCarriesNoMetrics(win);
+testHistoryRowsUseCompactFormats(win);
+testModelItemsWrapNameForStartTruncation(win);
+win.close();
 console.log('metricFormatting.test.js: all tests passed');

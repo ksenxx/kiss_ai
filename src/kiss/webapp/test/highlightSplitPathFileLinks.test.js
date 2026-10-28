@@ -23,7 +23,7 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks} = require('./file_link_helpers');
+const {findLinks, existsOnRealFs} = require('./file_link_helpers');
 
 // Fixture tree on disk, addressed through the virtual prefix
 // VIRTUAL_ROOT ("/home/tester/kiss") that the real listing used: hljs
@@ -51,16 +51,8 @@ fs.mkdirSync(realPath(cacheDir));
 function checkPathsOnRealFs(msg) {
   const results = {};
   for (const p of msg.paths) {
-    let ok = false;
-    if (p.startsWith(VIRTUAL_ROOT + '/')) {
-      try {
-        const st = fs.statSync(realPath(p));
-        ok = st.isFile() || st.isDirectory();
-      } catch {
-        ok = false;
-      }
-    }
-    results[p] = ok;
+    results[p] =
+      p.startsWith(VIRTUAL_ROOT + '/') && existsOnRealFs(realPath(p));
   }
   return results;
 }

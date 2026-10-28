@@ -9,24 +9,17 @@
 //   * a browser the daemon admits without a password (http://127.0.0.1,
 //     nothing stored) sends its frames bare: no password key at all.
 const assert = require('assert');
-const {sleep} = require('./simplify2_harness');
 const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
+  installFakeTimers,
+  openNextSocket,
+  settle,
   frames,
-  waitForSocket,
+  ok,
+  fail,
 } = require('./transport_page_helpers');
-
-function ok(msg) {
-  console.log('  ok -', msg);
-}
-
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
-}
 
 async function run() {
   // 1. Scheme follows the page.
@@ -53,6 +46,7 @@ async function run() {
     window.localStorage.setItem('sorcar-remote-pwd', 'Secret20Chars0000000');
     const sockets = [];
     installFakeWebSocket(window, sockets);
+    const timers = installFakeTimers(window);
     bootShim(window);
     const transport = window.acquireTransport();
     transport.postMessage({type: 'ready'});
@@ -80,7 +74,7 @@ async function run() {
     sock.close();
     try {
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
-      await waitForSocket(sockets, 2);
+      openNextSocket(sockets, timers, 0);
       sockets[1].fireOpen();
       assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
       ok('post-auth auth_failed forgets the password; the reconnect probes with ""');
@@ -93,11 +87,8 @@ async function run() {
     window.document.getElementById('auth-modal-input').value = 'NewPassword000000000';
     window.document.getElementById('auth-modal-ok').click();
     // The dialog resolves a promise before the auth frame goes out.
-    const authDeadline = Date.now() + 3000;
-    while (sockets[1].sent.length < 2) {
-      if (Date.now() > authDeadline) throw new Error('the typed password never went out');
-      await sleep(20);
-    }
+    await settle();
+    assert.strictEqual(sockets[1].sent.length, 2, 'the typed password went out');
     sockets[1].fireMessage({type: 'auth_ok'});
     transport.postMessage({type: 'ping'});
     try {
@@ -167,6 +158,7 @@ async function run() {
     window.localStorage.setItem('sorcar-remote-pwd', 'Secret20Chars0000000');
     const sockets = [];
     installFakeWebSocket(window, sockets);
+    const timers = installFakeTimers(window);
     bootShim(window);
     const received = []; // what the page sees, minus the shim's own daemonStatus
     window.addEventListener('message', (ev) => {
@@ -221,7 +213,7 @@ async function run() {
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       sock.fireMessage({type: 'error', code: 'auth_failed', text: 'Wrong password.'});
       sock.close();
-      await waitForSocket(sockets, 2);
+      openNextSocket(sockets, timers, 0);
       sockets[1].fireOpen();
       assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
       const refusal = 'Remote access is turned off: no remote password is set.';

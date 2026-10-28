@@ -31,7 +31,13 @@ pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 def test_channel_config_path_honours_kiss_home_lazily(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ChannelConfig.path follows $KISS_HOME changes made after import."""
+    """ChannelConfig.path follows $KISS_HOME changes made after import.
+
+    test_concaudit_w8_fixtures.py::test_isolated_kiss_home_redirects_channel_configs
+    pins the first half (the path lands under the fixture's home) for
+    several channels; what this test adds is that the path *moves* when
+    the variable changes again inside one process and no config leaks.
+    """
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home_a"))
     path_a = _config.path
     assert path_a == (tmp_path / "kiss_home_a" / "third_party_agents" / "tlon" / "config.json")

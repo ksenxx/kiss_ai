@@ -127,6 +127,7 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
     def __init__(self, tools_schema: list[dict[str, Any]], execute: ToolExecutor):
         super().__init__(("127.0.0.1", 0), _BridgeHandler)
         self.tools = _function_schemas(tools_schema)
+        self.tool_names = frozenset(tool["name"] for tool in self.tools)
         self.execute = execute
         self.execute_lock = threading.Lock()
         # The handler threads executing a call (by ident), every call
@@ -229,7 +230,13 @@ class _BridgeHandler(socketserver.StreamRequestHandler):
         if request.get("op") == "tools":
             _send_line(self.connection, {"tools": server.tools})
             return
-        call = {"name": request["name"], "arguments": request.get("arguments") or {}}
+        name = request["name"]
+        if name not in server.tool_names:
+            # Only the listed tools are served: ``finish`` and the
+            # between-turns tools are kept off the bridge on purpose.
+            _send_line(self.connection, {"error": f"KISSError: unknown tool {name!r}"})
+            return
+        call = {"name": name, "arguments": request.get("arguments") or {}}
         _send_line(self.connection, server.serve_call(call))
 
 
@@ -265,7 +272,7 @@ class ToolBridge:
     @property
     def tool_names(self) -> frozenset[str]:
         """The names of the tools the bridge serves."""
-        return frozenset(tool["name"] for tool in self._server.tools)
+        return self._server.tool_names
 
     @property
     def calls_in_flight(self) -> int:

@@ -9,28 +9,25 @@
 //
 // Before the fix `_onPasswordEntered` stored the typed value at once.
 const assert = require('assert');
-const {sleep} = require('./simplify2_harness');
 const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
+  installFakeTimers,
+  openNextSocket,
+  settle,
   frames,
-  waitForSocket,
+  ok,
+  fail,
 } = require('./transport_page_helpers');
 
 const KEY = 'sorcar-remote-pwd';
 
-function ok(msg) {
-  console.log('  ok -', msg);
-}
-
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
-}
-
-/** A tab on the real shim whose socket is born CONNECTING. */
+/**
+ * A tab on the real shim whose socket is born CONNECTING; its timers
+ * are recorded, so a reconnect backoff is fired by `reconnect`, never
+ * slept through.
+ */
 function newTab(storage) {
   const {window} = newAuthDom('https://example.test/');
   if (storage) {
@@ -41,15 +38,21 @@ function newTab(storage) {
   }
   const sockets = [];
   installFakeWebSocket(window, sockets, {connecting: true});
+  const timers = installFakeTimers(window);
   bootShim(window);
-  return {window, sockets};
+  return {window, sockets, timers};
+}
+
+/** Fire the reconnect timer the tab armed, so socket *n + 1* opens. */
+function reconnect(tab, n) {
+  openNextSocket(tab.sockets, tab.timers, n);
 }
 
 /** Type *pwd* into the tab's dialog and press OK; wait for the frame. */
 async function submitPassword(tab, pwd) {
   tab.window.document.getElementById('auth-modal-input').value = pwd;
   tab.window.document.getElementById('auth-modal-ok').click();
-  await sleep(20);
+  await settle();
 }
 
 async function run() {
@@ -76,7 +79,7 @@ async function run() {
       // The server drops B's idle unauthenticated socket while A's
       // guess is pending; B reconnects underneath its open dialog.
       b.sockets[0].fireClose();
-      await waitForSocket(b.sockets, 2);
+      reconnect(b, 0);
       b.sockets[1].fireOpen();
       assert.deepStrictEqual(
         frames(b.sockets[1]),
@@ -98,7 +101,7 @@ async function run() {
       text: 'That password is not correct. Try again.',
     });
     a.sockets[0].fireClose();
-    await waitForSocket(a.sockets, 2);
+    reconnect(a, 0);
     a.sockets[1].fireOpen();
     try {
       assert.deepStrictEqual(frames(a.sockets[1]), [
@@ -117,7 +120,7 @@ async function run() {
     try {
       assert.strictEqual(storage.getItem(KEY), null, 'still pending');
       a.sockets[1].fireMessage({type: 'auth_ok'});
-      await sleep(20);
+      await settle();
       assert.strictEqual(
         storage.getItem(KEY),
         'right',
@@ -130,7 +133,7 @@ async function run() {
         'the dialog closes on auth_ok',
       );
       b.sockets[1].fireClose();
-      await waitForSocket(b.sockets, 3);
+      reconnect(b, 1);
       b.sockets[2].fireOpen();
       assert.deepStrictEqual(frames(b.sockets[2]), [
         {type: 'auth', password: 'right'},
@@ -154,7 +157,7 @@ async function run() {
     tab.sockets[0].fireOpen();
     tab.sockets[0].fireMessage({type: 'auth_required'});
     tab.sockets[0].fireClose();
-    await waitForSocket(tab.sockets, 2);
+    reconnect(tab, 0);
     // Still CONNECTING when the user presses OK: the typed password
     // waits for this socket's onopen.
     await submitPassword(tab, 'typed-late');
@@ -166,7 +169,7 @@ async function run() {
         {type: 'auth', password: 'typed-late'},
       ]);
       tab.sockets[1].fireMessage({type: 'auth_ok'});
-      await sleep(20);
+      await settle();
       assert.strictEqual(storage.getItem(KEY), 'typed-late');
       ok(
         'a password typed while the socket was down goes out on the reconnect',
@@ -183,11 +186,11 @@ async function run() {
       text: 'Wrong password.',
     });
     tab.sockets[1].fireClose();
-    await waitForSocket(tab.sockets, 3);
+    reconnect(tab, 1);
     tab.sockets[2].fireOpen();
     tab.sockets[2].fireMessage({type: 'auth_required'});
     tab.sockets[2].fireClose();
-    await waitForSocket(tab.sockets, 4);
+    reconnect(tab, 2);
     tab.sockets[3].fireOpen();
     tab.sockets[3].fireClose();
     await submitPassword(tab, 'after-drop');

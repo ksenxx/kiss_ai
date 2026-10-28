@@ -112,6 +112,17 @@ def test_known_key_with_none_value_is_dropped() -> None:
     assert resolved["use_web_tools"] is True
 
 
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [(True, "must be int or float, got bool"), (-5, "must be a positive number of seconds")],
+)
+def test_boolean_or_negative_timeout_is_rejected(value: object, message: str) -> None:
+    # ``True`` is an ``int`` to ``isinstance`` but not a number of seconds;
+    # a negative wait means nothing.
+    with pytest.raises(SeaError, match=rf"settings\(\)\['timeout'\] {message}"):
+        resolve_settings({"timeout": value})
+
+
 def _history_tasks() -> list[str]:
     """Return the ``task`` text of every persisted task row, oldest first."""
     with _rw_lock.read_lock():

@@ -30,6 +30,7 @@ import threading
 import time
 from typing import Any
 
+from kiss.core import stop_signal
 from kiss.core.models.model_info import _lookup_model_info
 
 logger = logging.getLogger(__name__)
@@ -128,7 +129,16 @@ class PromptCacheKeepAlive:
     timeout, 30 s for Anthropic with retries off; typically 1-3 s), which
     keeps the model object single-threaded again once the body is left.
     Responses are only appended by the thread and read by the caller
-    after ``__exit__`` has joined it, so no lock is needed.
+    after :meth:`stop` has joined it, so no lock is needed.
+
+    A task Stop is a ``KeyboardInterrupt`` injected into the task thread
+    (``PyThreadState_SetAsyncExc``), delivered at the next check point:
+    that can be the entry of ``__enter__``'s ``start()`` return or of
+    ``__exit__`` itself, before ``_stop`` is set, and the thread would
+    then ping (and bill) for up to *max_pings* intervals after the task
+    ended.  :meth:`stop` is therefore idempotent and the caller repeats
+    it from a ``finally`` of its own, and the thread gives up by itself
+    once the stop event of the thread that created it is set.
     """
 
     def __init__(
@@ -149,6 +159,7 @@ class PromptCacheKeepAlive:
         self._interval = KEEP_ALIVE_INTERVAL_SECONDS
         self._max_pings = KEEP_ALIVE_MAX_PINGS if max_pings is None else max_pings
         self._stop = threading.Event()
+        self._owner_stop = stop_signal.get_thread_stop_event()
         self._thread = threading.Thread(
             target=self._run, name="prompt-cache-keepalive", daemon=True
         )
@@ -157,25 +168,32 @@ class PromptCacheKeepAlive:
         try:
             self._thread.start()
         except BaseException:
-            # A task-thread Stop (``KeyboardInterrupt`` injected with
-            # ``PyThreadState_SetAsyncExc``) lands at the next check
-            # point, which can be inside ``start()`` after the thread
-            # is already running: ``__exit__`` never runs for an
-            # ``__enter__`` that raised, so the thread would keep
-            # pinging — and billing — for up to ``max_pings`` intervals
-            # after the task ended.  Stop it on the way out.
+            # ``__exit__`` never runs for an ``__enter__`` that raised,
+            # and the Stop may have landed after the thread was spawned.
             self._stop.set()
             raise
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+    def stop(self) -> None:
+        """Stop the ping thread and wait for a ping already in flight.
+
+        Idempotent and safe before the thread started: ``__exit__``
+        calls it, and the body's caller calls it again from a
+        ``finally`` in case a Stop landed on ``__exit__``'s entry.
+        """
         self._stop.set()
-        self._thread.join()
+        if self._thread.is_alive():
+            self._thread.join()
 
     def _run(self) -> None:
         next_ping_at = self._cache_touched_at + self._interval
         for _ in range(self._max_pings):
             if self._stop.wait(max(0.0, next_ping_at - time.time())):
+                return
+            if self._owner_stop is not None and self._owner_stop.is_set():
                 return
             started = time.time()
             try:

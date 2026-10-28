@@ -85,10 +85,11 @@ def generate_commit_message_from_diff(
         The cleaned commit-message string, or
         :func:`fallback_commit_message` on failure.
     """
-    subject = FALLBACK_SUBJECT
-    if diff_text:
-        subject = _commit_message_from_llm(diff_text, user_prompt, subject, bill_to)
-    return _ensure_task_metadata(subject, user_prompt, task_result)
+    if not diff_text:
+        return fallback_commit_message(user_prompt, task_result)
+    return _ensure_task_metadata(
+        _commit_message_from_llm(diff_text, user_prompt, bill_to), user_prompt, task_result,
+    )
 
 
 def fallback_commit_message(
@@ -111,17 +112,18 @@ def fallback_commit_message(
     return _ensure_task_metadata(FALLBACK_SUBJECT, user_prompt, task_result)
 
 
-def _commit_message_from_llm(
-    diff_text: str, user_prompt: str | None, fallback: str, bill_to: Any,
-) -> str:
+def _commit_message_from_llm(diff_text: str, user_prompt: str | None, bill_to: Any) -> str:
     """Ask the fast model for a commit message describing *diff_text*.
 
     Args:
         diff_text: The non-empty diff to describe.
         user_prompt: The task prompt behind the diff, when known; the
             model is told to phrase the subject after its intent.
-        fallback: Returned when no model is available or the call fails.
         bill_to: The agent the call's spend is attributed to, or ``None``.
+
+    Returns:
+        The cleaned model output, or :data:`FALLBACK_SUBJECT` when no
+        model is available, the call fails or the output is empty.
     """
     if user_prompt:
         context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
@@ -152,10 +154,10 @@ def _commit_message_from_llm(
             is_agentic=False,
             verbose=False,
         )
-        return clean_llm_output(raw) or fallback
+        return clean_llm_output(raw) or FALLBACK_SUBJECT
     except Exception:
         logger.debug("Commit message generation failed", exc_info=True)
-        return fallback
+        return FALLBACK_SUBJECT
     finally:
         if bill_to is not None and (generator.budget_used > 0 or generator.total_tokens_used > 0):
             from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage

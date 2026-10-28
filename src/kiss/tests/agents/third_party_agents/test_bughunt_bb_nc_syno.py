@@ -8,14 +8,14 @@ Synology Chat channel backends.
 No mock/patch libraries: real in-process ``RecordingServer`` instances
 record every request (method/path/query/body) and return BlueBubbles-,
 Nextcloud-OCS-, and Synology-shaped JSON.  Backends read their server URL
-from ``~/.kiss/third_party_agents/*/config.json``; configs touched by the
-tests are backed up and restored around each test.
+from ``<KISS_HOME>/third_party_agents/*/config.json``; each test runs
+under an isolated ``KISS_HOME``.
 """
 
 from __future__ import annotations
 
 import json
-import sys
+import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -24,7 +24,6 @@ from urllib.parse import parse_qs, urlencode
 
 import pytest
 
-from kiss.agents.third_party_agents.bluebubbles import bluebubbles_sea as bb_mod
 from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesChannelBackend
 from kiss.agents.third_party_agents.nextcloud import nextcloud_sea as nc_mod
 from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkChannelBackend
@@ -100,15 +99,19 @@ def _bb_responder(messages: list[dict[str, Any]], send_status: int = 200) -> Res
     return respond
 
 
-class TestBlueBubbles:
-    """BlueBubbles backend: cursor handling, chat filtering, send errors."""
+class _EmulatorCase:
+    """Every test gets a clean config dir and a fresh recording server (``self._server``)."""
 
     @pytest.fixture(autouse=True)
     def _isolated(self, isolated_kiss_home: Path):
-        """Clean BlueBubbles config plus a fresh recording server per test."""
+        """Clean config plus a fresh recording server per test."""
         with recording_server(_Handler, _ResponderServer) as server:
             self._server, self._url = server, server.base_url
             yield
+
+
+class TestBlueBubbles(_EmulatorCase):
+    """BlueBubbles backend: cursor handling, chat filtering, send errors."""
 
     def _make_backend(self) -> BlueBubblesChannelBackend:
         backend = BlueBubblesChannelBackend()
@@ -116,15 +119,19 @@ class TestBlueBubbles:
         backend._password = "pw"
         return backend
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="BlueBubbles connect() is macOS-only")
-    def test_poll_oldest_zero_after_connect_returns_pending_message(self) -> None:
+    def test_poll_oldest_zero_returns_pending_message(self) -> None:
         """poll_messages(channel, '0') right after connect() must return the
         pending message the server serves (no after-NOW filter), via the
-        documented POST /api/v1/message/query endpoint filtered by chatGuid."""
-        bb_mod._config.save({"server_url": self._url, "password": "pw"})
+        documented POST /api/v1/message/query endpoint filtered by chatGuid.
+
+        ``connect()`` itself is macOS-only (pinned as failing elsewhere by
+        ``test_auth_flow.py``), so the test seeds what it leaves behind on
+        every platform: ``_last_ts`` at NOW.  The regression was a zero
+        cursor falling back to that NOW stamp as an ``after`` filter, which
+        hid the message pending at 1700000000123."""
         self._server.responder = _bb_responder([_BB_MSG_PENDING])
-        backend = BlueBubblesChannelBackend()
-        assert backend.connect() is True
+        backend = self._make_backend()
+        backend._last_ts = time.time() * 1000  # as connect() sets it
         messages, cursor = backend.poll_messages("iMessage;-;+15550001111", "0", limit=50)
         assert len(messages) == 1
         assert messages[0]["text"] == "hello agent"
@@ -208,15 +215,8 @@ _NC_MESSAGES = [
 ]
 
 
-class TestNextcloudTalk:
+class TestNextcloudTalk(_EmulatorCase):
     """Nextcloud Talk backend: URL normalization, poll cursor/ts, send/join."""
-
-    @pytest.fixture(autouse=True)
-    def _isolated(self, isolated_kiss_home: Path):
-        """Clean Nextcloud config plus a fresh recording server per test."""
-        with recording_server(_Handler, _ResponderServer) as server:
-            self._server, self._url = server, server.base_url
-            yield
 
     def _save_config_with_trailing_slash(self) -> None:
         nc_mod._config.save({"url": self._url + "/", "username": "bot", "password": "pw"})
@@ -314,20 +314,18 @@ class TestNextcloudTalk:
         assert join_reqs[0]["method"] == "POST"
 
 
-class TestSynologyChat:
+class TestSynologyChat(_EmulatorCase):
     """Synology Chat backend: webhook form parsing, send body, poll drain."""
 
     @pytest.fixture(autouse=True)
-    def _isolated(self, isolated_kiss_home: Path):
-        """Clean Synology config plus a fresh recording server per test."""
+    def _disconnected(self):
+        """Stop the webhook server of the backend a test built, if any."""
         self._backend: SynologyChatChannelBackend | None = None
-        with recording_server(_Handler, _ResponderServer) as server:
-            self._server, self._url = server, server.base_url
-            try:
-                yield
-            finally:
-                if self._backend is not None:
-                    self._backend.disconnect()
+        try:
+            yield
+        finally:
+            if self._backend is not None:
+                self._backend.disconnect()
 
     def _post_webhook(self, fields: dict[str, str]) -> None:
         assert self._backend is not None and self._backend._webhook_server is not None

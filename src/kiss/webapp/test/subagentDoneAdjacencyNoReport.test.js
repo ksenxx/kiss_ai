@@ -25,7 +25,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  click: clickTab,
+} = require('./simplify2_harness');
 const {
   bootParallelRun,
   writeReport,
@@ -34,9 +39,8 @@ const {
   stripContentTabEls,
   tabEl,
   activeTabId,
-  clickTab,
   chatSurfaceVisible,
-  swipeLeftToFileScreen,
+  spawnSubagent,
 } = require('./subagent_tab_helpers');
 
 function makePage() {
@@ -128,28 +132,15 @@ function testDeepSubagentLandsOnItsParentChatTab() {
   // A sub-agent of a sub-agent: when the grandchild finishes while the
   // user is on it, the user should land on its own parent chat tab, not
   // on the report and not on some unrelated tab.
-  const {win, posted, parentId, subTabIds} = bootParallelRun(1, makePage());
-
-  const before = posted.length;
-  send(win, {
-    type: 'new_tab',
-    task_id: 'grandchild-task',
-    parent_tab_id: subTabIds[0],
-    taskId: '',
-  });
-  const resume = posted
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'grandchild-task');
-  assert.ok(resume, 'new_tab must make the page post resumeSession');
-  const grandId = resume.tabId;
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: grandId,
-    parent_tab_id: subTabIds[0],
-    description: 'grandchild',
-    task_id: 'grandchild-task',
-    taskIndex: 0,
-  });
+  const page = makePage();
+  const {win, parentId, subTabIds} = bootParallelRun(1, page);
+  const grandId = spawnSubagent(
+    page,
+    subTabIds[0],
+    'grandchild-task',
+    'grandchild',
+    0,
+  );
 
   clickTab(win, tabEl(win, grandId));
   assert.strictEqual(activeTabId(win), grandId, 'precondition');
@@ -273,43 +264,8 @@ function testUserFileOpenStillFocusesAfterSubagentDone() {
   console.log('  ok - a user-opened file still focuses after subagentDone');
 }
 
-function testReportTabRemainsReachableAfterClose() {
-  // The parked report must still be openable by the user afterwards:
-  // a swipe left from the chat puts the file screen on view, where the
-  // strip lists the report as the shown content tab.
-  const {win, subTabIds} = bootParallelRun(1, makePage());
-
-  clickTab(win, tabEl(win, subTabIds[0]));
-  writeReport(win, 'reports/late.md', '# Late Report', {tabId: subTabIds[0]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-
-  const reportTab = contentTabFor(win, 'late.md');
-  assert.ok(reportTab, 'the report tab must exist');
-  swipeLeftToFileScreen(win);
-  assert.strictEqual(
-    activeTabId(win),
-    reportTab.id,
-    'the swipe to the file screen must open the parked report',
-  );
-  const stripEl = tabEl(win, reportTab.id);
-  assert.ok(
-    stripEl && stripEl.classList.contains('active'),
-    'the file screen strip lists the report as the active tab',
-  );
-  const frames = Array.from(
-    win.document.querySelectorAll(
-      '#content-tab-area .content-tab-view iframe.content-html-frame',
-    ),
-  ).filter(f => f.closest('.content-tab-view').style.display !== 'none');
-  assert.strictEqual(frames.length, 1, 'exactly one frame must be visible');
-  assert.ok(
-    /<h1[^>]*>Late Report<\/h1>/.test(frames[0].getAttribute('srcdoc') || ''),
-    'the opened report must render its markdown',
-  );
-
-  win.close();
-  console.log('  ok - the parked report tab is still reachable afterwards');
-}
+// That the parked report stays reachable (one swipe left puts it on the
+// file screen, rendered) is pinned by subagentReportNoTabSwitch.test.js.
 
 function main() {
   console.log('subagentDoneAdjacencyNoReport.test.js');
@@ -319,7 +275,6 @@ function main() {
   testClosingActiveSubagentWithoutReportStillPicksChatTab();
   testUserOpenedContentTabSurvivesAndIsNotStolen();
   testUserFileOpenStillFocusesAfterSubagentDone();
-  testReportTabRemainsReachableAfterClose();
   console.log('subagentDoneAdjacencyNoReport.test.js: all tests passed');
 }
 

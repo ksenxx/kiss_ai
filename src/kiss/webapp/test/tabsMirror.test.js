@@ -15,6 +15,7 @@ const assert = require('assert');
 const {
   makePage: buildPage,
   send,
+  clickTab,
   ofType: msgsOf,
   snapshotEntry,
 } = require('./simplify2_harness');
@@ -220,12 +221,14 @@ function testInFlightOpenSurvivesStaleSnapshot() {
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   win._testApi.createNewTab();
   const fresh = activeTabId(win);
-  // A snapshot broadcast before the daemon processed this client's
-  // openTab must not remove the brand-new local tab.
+  // Snapshots broadcast before the daemon processed this client's
+  // openTab must not remove the brand-new local tab (a pending open
+  // only expires after several unconfirming snapshots: tabsMirrorReview).
+  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
   assert.ok(
     tabBarIds(win).includes(fresh),
-    'a snapshot that predates the in-flight openTab must keep the tab',
+    'snapshots that predate the in-flight openTab must keep the tab',
   );
   // Once the echo lists it, the registration is complete...
   send(win, {
@@ -348,6 +351,12 @@ function testPerTabComposerAndModelSurviveReconcile() {
     'the composer draft survives a snapshot',
   );
   assert.deepStrictEqual(tabBarTitles(win), ['one renamed', 'two renamed']);
+  const modelLabel = () =>
+    win.document.getElementById('model-name').textContent.replace(/\u200e/g, '');
+  clickTab(win, 't2');
+  assert.strictEqual(modelLabel(), 'model-b', "t2's model pick survives");
+  clickTab(win, 't1');
+  assert.strictEqual(modelLabel(), 'model-a', "t1 keeps the chat's model");
 }
 
 // --- daemon reconnect -------------------------------------------------------

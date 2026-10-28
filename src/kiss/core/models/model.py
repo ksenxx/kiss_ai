@@ -178,14 +178,11 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
         role = item.get("role")
         if itype == "function_call":
             args = item.get("arguments")
-            tc = {
-                "id": item.get("call_id", ""),
-                "type": "function",
-                "function": {
-                    "name": item.get("name", ""),
-                    "arguments": args if isinstance(args, str) else json.dumps(args or {}),
-                },
-            }
+            tc = _chat_tool_call_entry(
+                item.get("call_id", ""),
+                item.get("name", ""),
+                args if isinstance(args, str) else json.dumps(args or {}),
+            )
             prev = out[-1] if out else None
             if isinstance(prev, dict) and prev.get("role") == "assistant":
                 merged = dict(prev)
@@ -274,7 +271,10 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-BINARY_ATTACHMENT_OPEN_RE = re.compile(r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>")
+BINARY_ATTACHMENT_OPEN = "<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>"
+BINARY_ATTACHMENT_OPEN_RE = re.compile(
+    re.escape(BINARY_ATTACHMENT_OPEN).replace(re.escape("{mime_type}"), r"([^>\s]+)")
+)
 BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
 
 # The Read tool may also embed a HEIF photo: parse_binary_attachments() runs
@@ -294,8 +294,8 @@ def encode_binary_attachment(mime_type: str, data: bytes) -> str:
         :func:`parse_binary_attachments` will later decode back into an
         :class:`Attachment`.
     """
-    payload = base64.b64encode(data).decode("ascii")
-    return f"<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>{payload}{BINARY_ATTACHMENT_CLOSE}"
+    opener = BINARY_ATTACHMENT_OPEN.format(mime_type=mime_type)
+    return f"{opener}{Attachment(data, mime_type).to_base64()}{BINARY_ATTACHMENT_CLOSE}"
 
 
 def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
@@ -648,6 +648,135 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[Any]:
             continue
 
 
+def normalize_content_blocks(
+    content: Any,
+    foreign_types: tuple[str, ...],
+    convert_foreign: Callable[[dict[str, Any]], dict[str, Any] | None],
+    keep_thinking: bool,
+) -> list[dict[str, Any]]:
+    """Normalize response content blocks to JSON-serializable dicts.
+
+    Text blocks whose text is empty or whitespace-only are dropped: the
+    APIs reject them (``text content blocks must contain non-whitespace
+    text``).  A dict block whose ``type`` is one of *foreign_types* (the
+    other provider's media parts, present after a conversation hand-off)
+    is replaced by ``convert_foreign(block)`` or dropped when that returns
+    ``None``; every other dict passes through.  SDK objects become dicts:
+    ``text`` and ``tool_use`` by their fields, anything else by
+    ``model_dump(exclude_none=True)`` or ``str()``.  ``thinking`` and
+    ``redacted_thinking`` blocks are hidden provider state that must not
+    be replayed to a different provider, so they are dropped unless
+    *keep_thinking* (an SDK ``thinking`` object then keeps its
+    ``thinking`` text and ``signature``).
+
+    Args:
+        content: The content blocks of a response or message (``None``
+            for none).
+        foreign_types: Block ``type`` values routed through *convert_foreign*.
+        convert_foreign: Converts one foreign dict block, ``None`` to drop it.
+        keep_thinking: Keep thinking blocks (same-provider replay).
+
+    Returns:
+        list[dict[str, Any]]: Normalized content blocks as dictionaries.
+    """
+    blocks: list[dict[str, Any]] = []
+    if content is None:
+        return blocks
+    for block in content:
+        if isinstance(block, dict):
+            dict_block_type = block.get("type")
+            if dict_block_type in ("thinking", "redacted_thinking") and not keep_thinking:
+                continue
+            if dict_block_type == "text" and not block.get("text", "").strip():
+                continue
+            if dict_block_type in foreign_types:
+                converted = convert_foreign(block)
+                if converted is not None:
+                    blocks.append(converted)
+                continue
+            blocks.append(block)
+            continue
+        block_type = getattr(block, "type", None)
+        if block_type in ("thinking", "redacted_thinking") and not keep_thinking:
+            continue
+        if block_type == "text":
+            text = getattr(block, "text", "")
+            if not text.strip():
+                continue
+            blocks.append({"type": "text", "text": text})
+        elif block_type == "tool_use":
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}) or {},
+                }
+            )
+        elif block_type == "thinking":
+            thinking_block: dict[str, Any] = {
+                "type": "thinking",
+                "thinking": getattr(block, "thinking", ""),
+            }
+            signature = getattr(block, "signature", None)
+            if signature is not None:
+                thinking_block["signature"] = signature
+            blocks.append(thinking_block)
+        elif hasattr(block, "model_dump"):
+            blocks.append(block.model_dump(exclude_none=True))
+        else:
+            text = str(block)
+            if not text.strip():
+                continue
+            blocks.append({"type": "text", "text": text})
+    return blocks
+
+
+def checked_nonempty(normalized: list[Any]) -> list[Any]:
+    """Return the normalized conversation, raising when nothing is left to send.
+
+    Every transport drops whitespace-only messages before a request; when
+    that leaves no message at all the API would reject the request with an
+    opaque error, so the transports raise this one instead.
+
+    Args:
+        normalized: The conversation after the transport's normalization.
+
+    Returns:
+        *normalized* unchanged.
+
+    Raises:
+        KISSError: When *normalized* is empty.
+    """
+    if not normalized:
+        raise KISSError(
+            "Cannot generate response: all messages have whitespace-only content "
+            "that was filtered out. At least one message with non-whitespace "
+            "content is required."
+        )
+    return normalized
+
+
+def text_of_parts(parts: list[Any]) -> str:
+    """Join the ``text`` of the ``text``-typed parts of a content array.
+
+    Serves both Chat Completions content parts and normalized Anthropic
+    content blocks: the ``text`` of every ``{"type": "text", ...}`` dict
+    is concatenated and anything else is skipped.
+
+    Args:
+        parts: Content parts (dicts with a ``type``).
+
+    Returns:
+        The concatenated text.
+    """
+    return "".join(
+        str(part.get("text", "") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
+
+
 def flatten_content_to_text(content: Any) -> str:
     """Flatten a message ``content`` value into plain text.
 
@@ -725,11 +854,7 @@ def merge_system_texts(configured: str | None, messages: list[dict[str, Any]]) -
             continue
         content = msg.get("content")
         if isinstance(content, list):
-            content = "".join(
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            )
+            content = text_of_parts(content)
         if not isinstance(content, str) or not content.strip():
             continue
         stripped = strip_system_cache_break(content)
@@ -899,6 +1024,8 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # The inputs ``client`` was built from; see _reuse_client.
+        self._client_inputs: tuple[Any, ...] | None = None
         # A complete, billed response the adapter refused to use
         # (truncated, incomplete, refused); see take_partial_usage_response.
         self._rejected_response: Any = None
@@ -915,6 +1042,29 @@ class Model(ABC):
         # model_config keys already reported as unsupported, so a long run
         # is told once rather than on every step.
         self._reported_unsupported_config_keys: set[str] = set()
+
+    def _reuse_client(self, inputs: tuple[Any, ...], build: Callable[[], Any]) -> None:
+        """Keep the SDK client unless the inputs it was built from changed.
+
+        Every SDK client owns an httpx connection pool, and ``KISSAgent``
+        reuses the adapter and calls ``initialize()`` per run, so the
+        client is built once per set of *inputs* and reused: rebuilding
+        it every time would abandon a pool (and its TLS handshakes) to
+        the garbage collector.  When *inputs* changed (a new key, endpoint
+        or header between turns) the client is rebuilt with *build* and
+        the replaced one closed so its pool is released at once.
+
+        Args:
+            inputs: Everything *build* reads (API key, endpoint, headers…).
+            build: The zero-argument SDK client constructor.
+        """
+        if self.client is not None and inputs == self._client_inputs:
+            return
+        replaced = self.client
+        self.client = build()
+        self._client_inputs = inputs
+        if replaced is not None:
+            replaced.close()
 
     def system_instruction_text(self) -> str | None:
         """Return ``model_config["system_instruction"]`` as provider-neutral text.
@@ -1096,8 +1246,8 @@ class Model(ABC):
     ) -> None:
         """Replace the last assistant message with one that includes tool calls.
 
-        Used by text-based tool calling paths (ClaudeCodeModel, CodexModel,
-        OpenAICompatibleModel)
+        Used by the text-based tool calling of
+        :meth:`generate_and_process_with_tools` (the CLI-backed models),
         where ``generate()`` already appended a plain assistant message and it
         needs to be upgraded to include parsed tool call metadata.
 
@@ -1132,14 +1282,17 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
-    @abstractmethod
     def generate(self) -> tuple[str, Any]:
-        """Generates content from prompt.
+        """Generates content from the current conversation without tools.
+
+        The default is a tool-less :meth:`generate_and_process_with_tools`
+        turn; adapters whose tool-less request differs override it.
 
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
-        pass  # pragma: no cover
+        _, content, response = self.generate_and_process_with_tools({})
+        return content, response
 
     @abstractmethod
     def generate_and_process_with_tools(
@@ -1526,7 +1679,7 @@ class Model(ABC):
             dict[str, Any]: The tool schema in OpenAI format.
         """
         description, doc, parameters = _tool_summary_and_params(func, func.__name__)
-        param_descriptions = self._parse_docstring_params(doc)
+        param_descriptions = _parse_docstring_params(doc)
 
         # Under ``from __future__ import annotations`` (PEP 563) the
         # signature's raw annotations are strings like ``"int"``, which
@@ -1543,7 +1696,7 @@ class Model(ABC):
 
         for param_name, param in parameters.items():
             param_type = hints.get(param_name, param.annotation)
-            param_schema = self._python_type_to_json_schema(param_type)
+            param_schema = _python_type_to_json_schema(param_type)
 
             if param_name in param_descriptions:
                 param_schema["description"] = param_descriptions[param_name]
@@ -1566,95 +1719,94 @@ class Model(ABC):
             },
         }
 
-    def _parse_docstring_params(self, docstring: str) -> dict[str, str]:
-        """Parses parameter descriptions from a Google-style ``Args:`` section.
 
-        An entry is ``name: text`` or ``name (type): text`` at the
-        section's base indentation; lines indented deeper continue the
-        entry and are joined with single spaces, so a description that
-        wraps over several lines reaches the model whole.  A blank line
-        or a ``Returns:`` / ``Raises:`` / ``Example:`` heading ends the
-        section.
+def _parse_docstring_params(docstring: str) -> dict[str, str]:
+    """Parses parameter descriptions from a Google-style ``Args:`` section.
 
-        Args:
-            docstring: The docstring to parse.
+    An entry is ``name: text`` or ``name (type): text`` at the
+    section's base indentation; lines indented deeper continue the
+    entry and are joined with single spaces, so a description that
+    wraps over several lines reaches the model whole.  A blank line
+    or a ``Returns:`` / ``Raises:`` / ``Example:`` heading ends the
+    section.
 
-        Returns:
-            dict[str, str]: A dictionary mapping parameter names to descriptions.
-        """
-        param_descriptions: dict[str, str] = {}
-        in_args_section = False
-        base_indent: int | None = None
-        current: str | None = None
+    Args:
+        docstring: The docstring to parse.
 
-        for line in docstring.split("\n"):
-            stripped = line.strip()
-            if stripped.lower().startswith("args:"):
-                in_args_section, base_indent, current = True, None, None
-                continue
-            if stripped.lower().startswith(("returns:", "raises:", "example:")) or (
-                in_args_section and not stripped
-            ):
-                in_args_section = False
-                continue
-            if not in_args_section:
-                continue
-            indent = len(line) - len(line.lstrip())
-            if base_indent is None:
-                base_indent = indent
-            if indent > base_indent and current is not None:
-                param_descriptions[current] += " " + stripped
-            elif ":" in stripped:
-                param_part, desc_part = (part.strip() for part in stripped.split(":", 1))
-                current = param_part.split("(")[0].strip()
-                param_descriptions[current] = desc_part
+    Returns:
+        dict[str, str]: A dictionary mapping parameter names to descriptions.
+    """
+    param_descriptions: dict[str, str] = {}
+    in_args_section = False
+    base_indent: int | None = None
+    current: str | None = None
 
-        return param_descriptions
+    for line in docstring.split("\n"):
+        stripped = line.strip()
+        if stripped.lower().startswith("args:"):
+            in_args_section, base_indent, current = True, None, None
+            continue
+        if stripped.lower().startswith(("returns:", "raises:", "example:")) or (
+            in_args_section and not stripped
+        ):
+            in_args_section = False
+            continue
+        if not in_args_section:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if base_indent is None:
+            base_indent = indent
+        if indent > base_indent and current is not None:
+            param_descriptions[current] += " " + stripped
+        elif ":" in stripped:
+            param_part, desc_part = (part.strip() for part in stripped.split(":", 1))
+            current = param_part.split("(")[0].strip()
+            param_descriptions[current] = desc_part
 
-    def _python_type_to_json_schema(self, python_type: Any) -> dict[str, Any]:
-        """Converts a Python type annotation to a JSON schema type.
+    return param_descriptions
 
-        Args:
-            python_type: The Python type annotation to convert.
 
-        Returns:
-            dict[str, Any]: The JSON schema type definition.
-        """
-        if python_type is inspect.Parameter.empty:
-            return {"type": "string"}
+def _python_type_to_json_schema(python_type: Any) -> dict[str, Any]:
+    """Converts a Python type annotation to a JSON schema type.
 
-        origin = get_origin(python_type)
-        args = get_args(python_type)
+    Args:
+        python_type: The Python type annotation to convert.
 
-        if origin is Union or origin is types_module.UnionType:
-            non_none_args = [a for a in args if a is not type(None)]
-            if len(non_none_args) == 1:
-                return self._python_type_to_json_schema(non_none_args[0])
-            return {"anyOf": [self._python_type_to_json_schema(a) for a in non_none_args]}
-
-        if origin is list:
-            if args:
-                return {
-                    "type": "array",
-                    "items": self._python_type_to_json_schema(args[0]),
-                }
-            return {"type": "array"}
-
-        if origin is dict:
-            return {"type": "object"}
-
-        type_mapping: dict[type, dict[str, str]] = {
-            str: {"type": "string"},
-            int: {"type": "integer"},
-            float: {"type": "number"},
-            bool: {"type": "boolean"},
-            type(None): {"type": "null"},
-        }
-
-        if python_type in type_mapping:
-            return type_mapping[python_type]
-
+    Returns:
+        dict[str, Any]: The JSON schema type definition.
+    """
+    if python_type is inspect.Parameter.empty:
         return {"type": "string"}
+
+    origin = get_origin(python_type)
+    args = get_args(python_type)
+
+    if origin is Union or origin is types_module.UnionType:
+        non_none_args = [a for a in args if a is not type(None)]
+        if len(non_none_args) == 1:
+            return _python_type_to_json_schema(non_none_args[0])
+        return {"anyOf": [_python_type_to_json_schema(a) for a in non_none_args]}
+
+    if origin is list:
+        if args:
+            return {"type": "array", "items": _python_type_to_json_schema(args[0])}
+        return {"type": "array"}
+
+    if origin is dict:
+        return {"type": "object"}
+
+    type_mapping: dict[type, dict[str, str]] = {
+        str: {"type": "string"},
+        int: {"type": "integer"},
+        float: {"type": "number"},
+        bool: {"type": "boolean"},
+        type(None): {"type": "null"},
+    }
+
+    if python_type in type_mapping:
+        return type_mapping[python_type]
+
+    return {"type": "string"}
 
 
 class CLITextModel(Model):
@@ -3142,10 +3294,7 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 if not (isinstance(tc, dict) and "name" in tc):
                     continue
                 arguments = tc.get("arguments", {})
-                try:
-                    key = (tc["name"], json.dumps(arguments, sort_keys=True))
-                except TypeError:
-                    key = (tc["name"], repr(arguments))
+                key = (tc["name"], json.dumps(arguments, sort_keys=True))
                 if key in seen:
                     continue
                 seen.add(key)

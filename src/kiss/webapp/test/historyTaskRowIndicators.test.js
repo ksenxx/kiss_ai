@@ -276,6 +276,13 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
     generation: getHist.generation,
   });
 
+  // The panel's padding-top is the --space-1-5 token; the test reads
+  // it from the page rather than pinning the designer's pixel value.
+  const padTop = win
+    .getComputedStyle(win.document.documentElement)
+    .getPropertyValue('--space-1-5')
+    .trim();
+  assert.ok(padTop, '--space-1-5 is defined on the page');
   rows(win).forEach(row => {
     const title = row.querySelector('.sidebar-item-text').textContent;
     const indicator = indicatorOf(row);
@@ -289,11 +296,10 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
     // The action buttons occupy a line of their own below the task
     // text, so the panel is taller than its title: the indicator is
     // centered on the first line of the text (the panel's padding-top
-    // plus half a line box, --space-1-5 = 6px) instead of on the whole
-    // panel.
+    // plus half a line box) instead of on the whole panel.
     assert.strictEqual(
       style.top,
-      'calc(0.5lh + 6px)',
+      `calc(0.5lh + ${padTop})`,
       `row ${title} indicator must sit on the first line of the task ` +
         `text, not at the panel middle; got top=${style.top}`,
     );

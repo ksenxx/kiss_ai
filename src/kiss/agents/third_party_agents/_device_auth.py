@@ -58,6 +58,9 @@ _MIN_INTERVAL = 1.0
 _MAX_INTERVAL = 60.0
 _SLOW_DOWN_STEP = 5.0
 _TIMEOUT = 30.0
+# How long ``ConsentSession.finish`` waits for a still-polling thread
+# before answering ``pending`` (read at call time so tests can shorten it).
+_FINISH_WAIT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -234,13 +237,16 @@ class ConsentSession:
         self._thread.start()
 
     @classmethod
-    def finish(cls, service: str, wait_seconds: float = 5.0) -> tuple[ConsentSession | None, str]:
+    def finish(
+        cls, service: str, wait_seconds: float | None = None
+    ) -> tuple[ConsentSession | None, str]:
         """Collect *service*'s active session once the user approved.
 
         Args:
             service: Connector service name.
             wait_seconds: How long to wait for a still-running poll
-                thread before reporting ``pending``.
+                thread before reporting ``pending``; ``None`` means
+                ``_FINISH_WAIT_S``.
 
         Returns:
             ``(session, "ok")`` once the user approved (``session.result``
@@ -253,7 +259,7 @@ class ConsentSession:
             session = cls._active.get(service)
         if session is None:
             return None, f"no sign-in in progress; call authenticate_{service}() first"
-        session._thread.join(timeout=wait_seconds)
+        session._thread.join(timeout=_FINISH_WAIT_S if wait_seconds is None else wait_seconds)
         if session._thread.is_alive():
             return None, "pending"
         with cls._registry_lock:

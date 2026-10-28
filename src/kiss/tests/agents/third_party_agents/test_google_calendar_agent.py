@@ -37,8 +37,6 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     serve_recording,
 )
 
-_TOKEN = TOKEN
-
 _EVENT = {
     "id": "ev1",
     "summary": "Standup",
@@ -79,7 +77,7 @@ class _CalendarRequestHandler(RecordingHandler):
     def _handle(self) -> None:
         body = self._read_body()
         self.record_request(body)
-        if not self.bearer_ok(_TOKEN):
+        if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"code": 401, "message": "Unauthorized"}}))
             return
         parsed = urlparse(self.path)
@@ -152,7 +150,7 @@ def test_list_calendars(backend) -> None:
     req = _last(server)
     assert req["method"] == "GET"
     assert req["path"] == "/users/me/calendarList"
-    assert req["authorization"] == f"Bearer {_TOKEN}"
+    assert req["authorization"] == f"Bearer {TOKEN}"
 
 
 def test_list_events_defaults(backend) -> None:
@@ -301,7 +299,7 @@ def test_delete_event_handles_204(backend) -> None:
     req = _last(server)
     assert req["method"] == "DELETE"
     assert req["path"] == "/calendars/primary/events/ev1"
-    assert req["authorization"] == f"Bearer {_TOKEN}"
+    assert req["authorization"] == f"Bearer {TOKEN}"
 
 
 def test_quick_add(backend) -> None:

@@ -128,7 +128,8 @@ class Sea(BaseSea):
     def _persisted_settings(self, task_id: str) -> dict[str, Any]:
         db = _persistence._get_db()
         with _persistence._rw_lock.read_lock():
-            events = _persistence._fetch_events_for_task_id(db, task_id)
+            rows = _persistence._select_event_rows(db, task_id)
+        events = _persistence._decode_event_rows(rows)
         settings = [e["settings"] for e in events if e.get("type") == "task_settings"]
         assert len(settings) == 1, events
         assert isinstance(settings[0], dict)

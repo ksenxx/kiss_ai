@@ -60,18 +60,14 @@ def _backend(uri: str, read_only: bool) -> PostgresChannelBackend:
     return b
 
 
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes exactly the auth trio."""
+def test_check_auth_unauthenticated_message() -> None:
+    """check_postgres_auth explains how to configure when unauthenticated.
+
+    The fresh-agent auth-trio contract itself is pinned for every channel
+    by test_base_channel_agent.py.
+    """
     agent = PostgresAgent()
     assert agent.name == "PostgreSQL Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == ["check_postgres_auth", "authenticate_postgres", "clear_postgres_auth"]
-
-
-def test_check_auth_unauthenticated_message() -> None:
-    """check_postgres_auth explains how to configure when unauthenticated."""
-    agent = PostgresAgent()
     tools = tools_by_name(agent)
     msg = tools["check_postgres_auth"]()
     assert "authenticate_postgres" in msg
@@ -268,7 +264,7 @@ class TestPostgresLive:
                     "POSTGRES_PASSWORD=kisstest",
                     "-p",
                     "127.0.0.1::5432",
-                    "postgres:17-alpine",
+                    image,
                 ],
                 check=True,
                 capture_output=True,

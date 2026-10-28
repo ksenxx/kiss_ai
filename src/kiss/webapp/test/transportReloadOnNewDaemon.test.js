@@ -29,10 +29,16 @@
 'use strict';
 
 const assert = require('assert');
-const {JSDOM, VirtualConsole} = require('jsdom');
+const {VirtualConsole} = require('jsdom');
 const {
+  newAuthDom,
   bootShim,
   installFakeWebSocket,
+  installFakeTimers,
+  pendingTimers,
+  fireTimer: fire,
+  openNextSocket: openNext,
+  settle,
   frames,
 } = require('./transport_page_helpers');
 
@@ -42,36 +48,10 @@ function page() {
   vc.on('jsdomError', err => {
     if (/navigation/.test(String(err && err.message))) reloads.push(1);
   });
-  const dom = new JSDOM(
-    `<!DOCTYPE html><html><head></head><body>
-    <div id="kiss-server-loading" role="status">
-      <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">starting</div></div>
-    <div id="app" style="display:none;">
-      <div id="auth-modal" style="display:none;">
-        <input id="auth-modal-input" type="password">
-        <div id="auth-modal-error" role="alert"></div>
-        <button id="auth-modal-ok"></button>
-        <button id="auth-modal-cancel"></button>
-      </div>
-    </div></body></html>`,
-    {
-      runScripts: 'outside-only',
-      pretendToBeVisual: true,
-      url: 'https://example.test/',
-      virtualConsole: vc,
-    },
-  );
-  const {window} = dom;
+  const {window} = newAuthDom('https://example.test/', {virtualConsole: vc});
   const sockets = [];
-  const timers = [];
   installFakeWebSocket(window, sockets);
-  window.setTimeout = function (fn, ms) {
-    timers.push({fn, ms, cleared: false, ran: false});
-    return timers.length;
-  };
-  window.clearTimeout = function (id) {
-    if (timers[id - 1]) timers[id - 1].cleared = true;
-  };
+  const timers = installFakeTimers(window);
   // Every /api/daemon request is answered from the front of `answers`:
   // {instance} -> 200 JSON, 'fail' -> a network error, 'http500' ->
   // 500, 'http404' -> 404, 'throw' -> fetch itself throws, a function
@@ -101,18 +81,9 @@ function page() {
   return {window, sockets, timers, reloads, answers, requests};
 }
 
-// Let the fetch promise chain settle (Node's own timer, not the page's).
-function settle() {
-  return new Promise(r => setTimeout(r, 20));
-}
-
 function authOk(sock) {
   sock.fireOpen();
   sock.fireMessage({type: 'auth_ok'});
-}
-
-function pendingTimers(timers) {
-  return timers.filter(t => !t.cleared && !t.ran);
 }
 
 /**
@@ -124,11 +95,6 @@ function retries(timers) {
   return pendingTimers(timers).filter(t => RETRY_MS.includes(t.ms));
 }
 
-function fire(timer) {
-  timer.ran = true;
-  timer.fn();
-}
-
 /**
  * Drop socket number *n* and run the reconnect timer the shim armed for
  * it, so socket *n + 1* opens; return that socket.
@@ -136,15 +102,6 @@ function fire(timer) {
 function reconnect(sockets, timers, n) {
   sockets[n].fireClose();
   return openNext(sockets, timers, n);
-}
-
-/** Run the pending reconnect timer, so socket *n + 1* opens. */
-function openNext(sockets, timers, n) {
-  const pending = pendingTimers(timers).filter(t => t.ms >= 500);
-  assert.strictEqual(pending.length, 1, 'one reconnect timer is pending');
-  fire(pending[0]);
-  assert.strictEqual(sockets.length, n + 2, 'the timer opened the next socket');
-  return sockets[n + 1];
 }
 
 async function main() {

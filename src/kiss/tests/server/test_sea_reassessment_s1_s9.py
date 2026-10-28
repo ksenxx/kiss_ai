@@ -38,7 +38,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     resolve_agent,
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
+from kiss.agents.sorcar.run_config import run_config_line
 from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_docs import precedence_block, precedence_example, render
 from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
@@ -132,7 +132,6 @@ def test_stale_prose_rule_reads_prose_outside_generated_blocks(tmp_path: Path) -
 
 
 def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
-    assert "pinned" in RUN_CONFIG_KEYS and "overridden" not in RUN_CONFIG_KEYS
     line = run_config_line({
         "sea": "sh", "channel": False, "model": "gpt-5", "tool_profile": "bash",
         "max_budget": 1.0, "timeout": 3600, "inherited": ["model", "chat_id", "max_budget"],

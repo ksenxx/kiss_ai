@@ -33,7 +33,7 @@
 
 const assert = require('assert');
 const {send, readyTabId} = require('./simplify2_harness');
-const {subagentTabEls} = require('./subagent_tab_helpers');
+const {subagentTabEls, spawnSubagent} = require('./subagent_tab_helpers');
 const {makeWebappClient} = require('./transport_page_helpers');
 
 /** Boot a client, start the parent task, and return the parent tab id. */
@@ -54,10 +54,6 @@ function bootParent(client) {
   return parentId;
 }
 
-function all(client) {
-  return client.drain();
-}
-
 // ---------------------------------------------------------------------------
 // 1. new_tab must resume the sub-agent on the deterministic shared id.
 // ---------------------------------------------------------------------------
@@ -74,7 +70,7 @@ function testDeterministicId() {
     taskId: '',
   });
 
-  const resume = all(client)
+  const resume = client.drain()
     .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
     .pop();
   assert.ok(resume, 'new_tab must make the client resume the sub-agent');
@@ -106,24 +102,11 @@ function testNoCloseTabOnConvergedAnnouncement() {
   const taskId = 'sub-task-det-2';
   const sharedId = parentId + '__sub_' + taskId;
 
-  send(client.win, {
-    type: 'new_tab',
-    task_id: taskId,
-    parent_tab_id: parentId,
-    taskId: '',
-  });
   // The daemon's ready round-trip for the OTHER client announces the
   // same sub-agent.  Both clients minted the same deterministic id, so
   // the announcement names a tab this client already has.
-  send(client.win, {
-    type: 'openSubagentTab',
-    tab_id: sharedId,
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: taskId,
-    taskIndex: 0,
-    isSubagentTab: true,
-  });
+  const tabId = spawnSubagent(client, parentId, taskId, 'sub 1', 0);
+  assert.strictEqual(tabId, sharedId, 'both clients mint the same id');
   send(client.win, {
     type: 'task_events',
     tabId: sharedId,
@@ -132,7 +115,7 @@ function testNoCloseTabOnConvergedAnnouncement() {
     events: [],
   });
 
-  const closes = all(client).filter(m => m.type === 'closeTab');
+  const closes = client.drain().filter(m => m.type === 'closeTab');
   assert.strictEqual(
     closes.length,
     0,
@@ -173,7 +156,7 @@ function testParentlessDeterministicId() {
     parent_tab_id: '',
     taskId: '',
   });
-  const resume = all(client)
+  const resume = client.drain()
     .filter(m => m.type === 'resumeSession' && m.taskId === taskId)
     .pop();
   assert.ok(resume, 'a parent-less new_tab must still resume the sub-agent');

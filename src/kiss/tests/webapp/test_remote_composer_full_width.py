@@ -100,6 +100,7 @@ def _build_test_page(body_class: str) -> str:
         .replace("{{INPUT_PLACEHOLDER}}", "Ask anything")
         .replace("{{ENTERKEYHINT}}", "")
         .replace("{{MODEL_NAME}}", "claude-fable-5")
+        .replace("{{PRODUCT_NAME}}", "KISS Sorcar")
     )
     for block_name, block in (("output", output), ("input-area", input_area)):
         assert "{{" not in block, (

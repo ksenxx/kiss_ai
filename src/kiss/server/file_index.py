@@ -37,7 +37,6 @@ entry.
 
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import logging
@@ -583,17 +582,12 @@ class FileIndex:
         Returns:
             A new index; ``relisted`` tells whether anything was read.
         """
-        # The walk allocates hundreds of thousands of short-lived tuples
-        # and strings; letting the cyclic collector run through them costs
-        # ~15% of a cold scan for nothing (nothing here forms cycles).
+        # Not wrapped in gc.disable() for the walk's ~15% saving: the
+        # switch is process-wide, and a cold scan of a large tree (up to
+        # _SCAN_FILES_CAP entries, minutes on a network file system) would
+        # stop every other thread's cyclic garbage from being collected.
         started = time.monotonic()
-        gc_was_enabled = gc.isenabled()
-        gc.disable()
-        try:
-            index = cls._scan(root, listings or {}, previous)
-        finally:
-            if gc_was_enabled:
-                gc.enable()
+        index = cls._scan(root, listings or {}, previous)
         index.built_at = started
         return index
 
@@ -841,8 +835,8 @@ class FileIndexRegistry:
     """Owns the indexes of every root the picker has been asked about.
 
     One daemon thread builds and refreshes indexes so two scans of the
-    same root never race; :meth:`view_for` never blocks — it serves the
-    current index (scheduling a refresh when it is older than
+    same root never race; :meth:`picker_for` never blocks — it serves
+    the current index (scheduling a refresh when it is older than
     :data:`STALE_AFTER`) or ``None`` when the root has not been indexed
     yet, in which case :meth:`ensure` builds it and runs a callback.
 
@@ -948,7 +942,12 @@ class FileIndexRegistry:
         return Picker(local, home_rest, index.view(""))
 
     def view_for(self, work_dir: str) -> FileView | None:
-        """Return the view of *work_dir* (its picker's local part), or ``None`` if unindexed."""
+        """Return the view of *work_dir* (its picker's local part), or ``None`` if unindexed.
+
+        Test probe only: the daemon serves pickers through
+        :meth:`picker_for`; the tests under ``src/kiss/tests/server``
+        read a root's local view here.
+        """
         picker = self.picker_for(work_dir)
         return None if picker is None else picker.local
 
@@ -960,7 +959,9 @@ class FileIndexRegistry:
             on_ready: Called on the worker thread once the root's index
                 is at least as new as this call.  It is invoked even when
                 the build failed (the root then has an empty index), so a
-                caller waiting on a picker reply always gets one.
+                caller waiting on a picker reply always gets one; only a
+                job still queued when :meth:`stop` runs is dropped with
+                its callback (the daemon is shutting down).
 
         Returns:
             Whether the job was queued.  ``False`` after :meth:`stop` or

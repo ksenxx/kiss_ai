@@ -35,6 +35,14 @@ import unittest
 from pathlib import Path
 
 import kiss.server.web_server as ws
+from kiss.core.file_lock import lock_exclusive, unlock
+
+
+def _assert_download_lock_released(cache: Path) -> None:
+    """The flock ``speech.download_once`` takes next to *cache* is free again."""
+    with open(cache.parent / f".{cache.name}.lock", "w", encoding="utf-8") as lock_file:
+        assert lock_exclusive(lock_file, blocking=False), "the download lock was not released"
+        unlock(lock_file)
 
 
 class TestVoiceModelDownloadTimeout(unittest.TestCase):
@@ -107,8 +115,7 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         self.assertEqual(result, [None])
         self.assertFalse(ws.VOICE_MODEL_CACHE.exists())
         # The lock was released: a follow-up caller is not convoyed.
-        self.assertTrue(ws._voice_model_lock.acquire(timeout=1))
-        ws._voice_model_lock.release()
+        _assert_download_lock_released(ws.VOICE_MODEL_CACHE)
 
     def test_slow_trickle_download_hits_the_total_deadline(self) -> None:
         """Review finding 3: a peer sending one byte before every
@@ -165,8 +172,7 @@ class TestVoiceModelDownloadTimeout(unittest.TestCase):
         )
         self.assertEqual(result, [None])
         self.assertFalse(ws.VOICE_MODEL_CACHE.exists())
-        self.assertTrue(ws._voice_model_lock.acquire(timeout=1))
-        ws._voice_model_lock.release()
+        _assert_download_lock_released(ws.VOICE_MODEL_CACHE)
 
     def test_total_deadline_env_rejects_nonfinite_values(self) -> None:
         """``inf`` / ``1e999`` must not disable the total deadline —

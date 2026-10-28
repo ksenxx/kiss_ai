@@ -71,8 +71,18 @@ from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
+
+_LOCK_TIMEOUT_S = 30.0
+"""Longest wait for another process's lock on an MCP config or token file.
+
+A legitimate holder rewrites one small JSON file and is done in
+milliseconds, so a wait past this bound is a wedged holder (a process
+stopped in a debugger, a stuck filesystem): the ``TimeoutError`` is the
+caller's error instead of a tool thread parked for good.
+"""
 
 #: Length of one blocking wait slice on the tool thread.  One
 #: ``future.result(timeout)`` or ``Event.wait(timeout)`` over the whole
@@ -320,7 +330,7 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
         else project_mcp_config_path(work_dir)
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with exclusive_file_lock(path.with_suffix(".lock")):
+    with exclusive_file_lock(path.with_suffix(".lock"), timeout=_LOCK_TIMEOUT_S):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -339,6 +349,8 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
 def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
     """Remove server *name* from every writable MCP config file.
 
+    Used by ``connectors/enable.py`` (``disable``).
+
     Args:
         name: The server name to remove.
         work_dir: The project directory (for the project-scope files).
@@ -354,7 +366,7 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
     ):
         if not path.exists():
             continue
-        with exclusive_file_lock(path.with_suffix(".lock")):
+        with exclusive_file_lock(path.with_suffix(".lock"), timeout=_LOCK_TIMEOUT_S):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -370,12 +382,11 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
 def _atomic_write_config(path: Path, raw: dict[str, Any]) -> None:
     """Atomically replace the MCP config *path* with *raw* as JSON.
 
-    An interrupted in-place ``write_text`` could leave invalid JSON;
-    write-to-temp + ``os.replace`` cannot.
+    A new file gets plain ``write_text`` permissions (``0o666`` filtered
+    by the umask: the config holds no secrets); an existing file keeps
+    its bits.
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(raw, indent=2) + "\n", create_mode=0o666)
 
 
 _RESERVED_BASENAMES = frozenset(
@@ -443,15 +454,7 @@ class FileTokenStorage:
             os.chmod(self.path.parent, 0o700)
         except OSError:  # pragma: no cover — permission error
             logger.debug("could not chmod auth dir", exc_info=True)
-        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp, self.path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        atomic_write_text(self.path, json.dumps(data, indent=2) + "\n", mode=0o600)
 
     def _load(self, data: dict[str, Any], key: str, model: Any) -> Any:
         """Return ``data[key]`` validated as the pydantic *model*, else ``None``."""
@@ -510,7 +513,7 @@ class FileTokenStorage:
                 ``"oauth_metadata"``).
             value: Its already-serialized JSON value, or ``None`` to forget it.
         """
-        with exclusive_file_lock(self._lock_path):
+        with exclusive_file_lock(self._lock_path, timeout=_LOCK_TIMEOUT_S):
             data = self._read()
             data[key] = value
             if key == "tokens":
@@ -572,7 +575,7 @@ class FileTokenStorage:
         Returns:
             ``True`` when a file was deleted, ``False`` when absent.
         """
-        with exclusive_file_lock(self._lock_path):
+        with exclusive_file_lock(self._lock_path, timeout=_LOCK_TIMEOUT_S):
             try:
                 self.path.unlink()
                 return True
@@ -1454,7 +1457,9 @@ _RESERVED_TOOL_NAMES = frozenset({
     "Bash", "bash_job", "run_commands_parallel", "Read", "Edit", "Write", "finish",
     "create_worktree", "commit_and_merge",
     "go_to_url", "click", "type_text", "press_key", "scroll",
-    "screenshot", "get_page_content", "show_browser", "close_browser",
+    "screenshot", "get_page_content", "evaluate_script", "list_console_messages",
+    "list_network_requests", "wait_for", "attach_to_chrome", "use_my_chrome",
+    "show_browser", "close_browser",
     "memory_search", "memory_pull", "memory_read", "memory_write", "memory_list",
     "memory_delete", "memory_refresh",
     "skill", "ask_user_question", "talk", "set_model", "decide",
@@ -1516,6 +1521,10 @@ def make_mcp_tools(
             # server 'a' tool 'b_c' vs server 'a_b' tool 'c'); a
             # duplicate registration would abort the agent's tool loop.
             base = wrapper.__name__
+            # Judged on the un-suffixed name: a denied tool is dropped
+            # before it can reserve a suffix another tool would get.
+            if skill_permission(base, rules) == "deny":
+                continue
             full_name = base
             counter = 2
             while full_name in taken:
@@ -1524,7 +1533,5 @@ def make_mcp_tools(
             taken.add(full_name)
             wrapper.__name__ = full_name
             wrapper.__qualname__ = full_name
-            if skill_permission(full_name, rules) == "deny":
-                continue
             tools.append(wrapper)
     return tools

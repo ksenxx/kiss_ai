@@ -24,8 +24,8 @@ import json
 import shutil
 import stat
 import sys
-from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -37,7 +37,6 @@ from kiss.agents.third_party_agents.notion.notion_sea import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     serve_recording,
 )
 
@@ -155,27 +154,17 @@ def _list_response(results: list[dict[str, Any]], next_cursor: Any, has_more: bo
 class _NotionRequestHandler(RecordingHandler):
     """Emulates the Notion REST API and records requests."""
 
-    def _authorized(self) -> bool:
-        return self.headers.get("Authorization") == f"Bearer {_TOKEN}"
-
-    def _record(self, body: dict[str, Any] | None) -> None:
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": self.path,
-                "authorization": self.headers.get("Authorization", ""),
-                "notion_version": self.headers.get("Notion-Version", ""),
-                "body": body,
-            }
-        )
-
-    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._record(None)
-        if not self._authorized():
+    def _route(self, body: dict[str, Any] | None) -> None:
+        self.record_request(body, notion_version=self.headers.get("Notion-Version", ""))
+        if not self.bearer_ok(_TOKEN):
             self._reply(401, json.dumps({"object": "error", "code": "unauthorized"}))
             return
         path = urlparse(self.path).path
-        if path == "/v1/fail":
+        if self.command == "POST":
+            self._route_post(path, body)
+        elif self.command == "PATCH":
+            self._route_patch(path, body)
+        elif path == "/v1/fail":
             self._reply(500, json.dumps({"object": "error", "code": "internal_server_error"}))
         elif path == "/v1/notjson":
             self._reply(200, "plain text", content_type="text/plain")
@@ -192,13 +181,7 @@ class _NotionRequestHandler(RecordingHandler):
         else:
             self._reply(404, json.dumps({"object": "error", "code": "object_not_found"}))
 
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        body = self._read_body()
-        self._record(body)
-        if not self._authorized():
-            self._reply(401, json.dumps({"object": "error", "code": "unauthorized"}))
-            return
-        path = urlparse(self.path).path
+    def _route_post(self, path: str, body: dict[str, Any] | None) -> None:
         if path == "/v1/search":
             if body and body.get("query") == "many":
                 results: list[dict[str, Any]] = [
@@ -243,13 +226,7 @@ class _NotionRequestHandler(RecordingHandler):
         else:
             self._reply(404, json.dumps({"object": "error", "code": "object_not_found"}))
 
-    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        body = self._read_body()
-        self._record(body)
-        if not self._authorized():
-            self._reply(401, json.dumps({"object": "error", "code": "unauthorized"}))
-            return
-        path = urlparse(self.path).path
+    def _route_patch(self, path: str, body: dict[str, Any] | None) -> None:
         if path == "/v1/blocks/page-1/children":
             self._reply(200, _list_response([_APPENDED_BLOCK], None, False))
         elif path == "/v1/pages/page-1":
@@ -259,6 +236,15 @@ class _NotionRequestHandler(RecordingHandler):
             self._reply(200, json.dumps(updated))
         else:
             self._reply(404, json.dumps({"object": "error", "code": "object_not_found"}))
+
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        self._route(None)
+
+    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        self._route(self._read_body())
+
+    def do_PATCH(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        self._route(self._read_body())
 
 
 @pytest.fixture()
@@ -270,12 +256,10 @@ def notion_server():
 @pytest.fixture()
 def backend(notion_server):
     """A backend pointed at the emulated server with the valid token."""
-    server = notion_server
-    base_url = f"{server.base_url}/v1"
     b = NotionChannelBackend()
-    b._base_url = base_url
+    b._base_url = f"{notion_server.base_url}/v1"
     b._token = _TOKEN
-    return b, server
+    return b, notion_server
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
@@ -315,13 +299,9 @@ def _call_every_tool(b: NotionChannelBackend) -> list[str]:
     ]
 
 
-def test_agent_instantiation_unauthenticated() -> None:
-    """A fresh agent is unauthenticated and exposes only the auth trio."""
-    agent = NotionAgent()
-    assert agent.name == "Notion Agent"
-    assert agent._is_authenticated() is False
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names == ["check_notion_auth", "authenticate_notion", "clear_notion_auth"]
+def test_agent_name() -> None:
+    """The agent carries its display name (the auth trio is checked in test_base_channel_agent)."""
+    assert NotionAgent().name == "Notion Agent"
 
 
 def test_check_auth_unauthenticated_message() -> None:
@@ -512,9 +492,8 @@ def test_notion_get_block_children(backend) -> None:
     ]
     assert result["next_cursor"] == "cur-2"
     assert result["has_more"] is True
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/v1/blocks/page-1/children"
-    assert parse_qs(parsed.query) == {"page_size": ["50"]}
+    assert server.requests[-1]["path"] == "/v1/blocks/page-1/children"
+    assert server.requests[-1]["query"] == {"page_size": ["50"]}
 
 
 def test_notion_get_block_children_with_cursor(backend) -> None:
@@ -522,8 +501,7 @@ def test_notion_get_block_children_with_cursor(backend) -> None:
     b, server = backend
     result = json.loads(b.notion_get_block_children("page-1", start_cursor="c3", page_size=7))
     assert result["ok"] is True
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parse_qs(parsed.query) == {"page_size": ["7"], "start_cursor": ["c3"]}
+    assert server.requests[-1]["query"] == {"page_size": ["7"], "start_cursor": ["c3"]}
 
 
 def test_notion_append_paragraph(backend) -> None:
@@ -749,9 +727,8 @@ def test_notion_list_users(backend) -> None:
         {"id": "u-1", "name": "Alice", "type": "person"},
         {"id": "u-2", "name": "KISS Bot", "type": "bot"},
     ]
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/v1/users"
-    assert parsed.query == ""
+    assert server.requests[-1]["path"] == "/v1/users"
+    assert server.requests[-1]["query"] == {}
 
 
 def test_notion_list_users_with_cursor(backend) -> None:
@@ -759,8 +736,7 @@ def test_notion_list_users_with_cursor(backend) -> None:
     b, server = backend
     result = json.loads(b.notion_list_users(start_cursor="c5"))
     assert result["ok"] is True
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parse_qs(parsed.query) == {"start_cursor": ["c5"]}
+    assert server.requests[-1]["query"] == {"start_cursor": ["c5"]}
 
 
 def test_notion_create_comment(backend) -> None:
@@ -798,9 +774,8 @@ def test_notion_get_comments(backend) -> None:
         },
         {"id": "c-2", "text": "", "created_time": "", "created_by": ""},
     ]
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parsed.path == "/v1/comments"
-    assert parse_qs(parsed.query) == {"block_id": ["page-1"]}
+    assert server.requests[-1]["path"] == "/v1/comments"
+    assert server.requests[-1]["query"] == {"block_id": ["page-1"]}
 
 
 def test_notion_get_comments_with_cursor(backend) -> None:
@@ -808,8 +783,7 @@ def test_notion_get_comments_with_cursor(backend) -> None:
     b, server = backend
     result = json.loads(b.notion_get_comments("page-1", start_cursor="c7"))
     assert result["ok"] is True
-    parsed = urlparse(server.requests[-1]["path"])
-    assert parse_qs(parsed.query) == {"block_id": ["page-1"], "start_cursor": ["c7"]}
+    assert server.requests[-1]["query"] == {"block_id": ["page-1"], "start_cursor": ["c7"]}
 
 
 def test_path_traversal_ids_rejected_before_any_request(backend) -> None:

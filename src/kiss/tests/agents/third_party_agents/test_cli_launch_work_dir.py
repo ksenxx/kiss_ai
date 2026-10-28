@@ -21,11 +21,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.third_party_agents import _kiss_web_launcher
-from kiss.agents.third_party_agents._channel_cli import (
-    _build_arg_parser,
-    _build_run_kwargs,
-    _launch_work_dir,
-)
+from kiss.agents.third_party_agents._channel_cli import _build_arg_parser, _build_run_kwargs
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     KissWebChatAgent,
     run_agent_via_kiss_web,
@@ -45,30 +41,6 @@ def _wire_work_dir(run_kwargs: dict[str, Any]) -> str:
         run_agent_via_kiss_web(KissWebChatAgent("probe"), prompt, **run_kwargs)
         assert len(daemon.run_commands) == 1
         return str(daemon.run_commands[0]["workDir"])
-
-
-def test_launch_work_dir_prefers_kiss_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``KISS_WORKDIR`` (set by the wrapper) overrides the process cwd."""
-    launch = tmp_path / "user_shell_dir"
-    launch.mkdir()
-    monkeypatch.setenv("KISS_WORKDIR", str(launch))
-    assert _launch_work_dir() == str(launch.resolve())
-
-
-def test_launch_work_dir_falls_back_to_cwd_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without ``KISS_WORKDIR`` the launch dir is the real process cwd."""
-    monkeypatch.delenv("KISS_WORKDIR", raising=False)
-    assert _launch_work_dir() == str(Path.cwd())
-
-
-def test_launch_work_dir_ignores_nonexistent_kiss_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A stale ``KISS_WORKDIR`` pointing nowhere falls back to cwd."""
-    monkeypatch.setenv("KISS_WORKDIR", str(tmp_path / "does_not_exist"))
-    assert _launch_work_dir() == str(Path.cwd())
 
 
 @pytest.mark.parametrize("stale_kiss_workdir", [False, True], ids=["unset", "stale"])

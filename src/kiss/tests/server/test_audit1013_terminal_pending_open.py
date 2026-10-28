@@ -48,7 +48,7 @@ from kiss.tests.server.test_audit1013_terminal_open_lock import (
     _release_fifo,
     _shells_in,
 )
-from kiss.tests.server.test_terminal_tab_service import ConnPrinter
+from kiss.tests.server.test_terminal_tab_service import ConnPrinter, session_count
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="inspects the shells through /proc",
@@ -130,7 +130,7 @@ def test_close_during_a_pending_open_leaves_no_shell(
     opener_a.join(10.0)
     opener_b.join(10.0)
     assert not opener_a.is_alive() and not opener_b.is_alive()
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     assert printer.of_type("terminalOpened") == []
     _wait_until(lambda: _shells_in(work) == [])
 
@@ -158,7 +158,7 @@ def test_disconnect_during_a_pending_open_carries_the_grace_forward(
     assert sorted(e["tab_id"] for e in opened) == ["tab-a", "tab-b"]
     assert all(e["attached"] is False for e in opened)
     printer.wait_for(lambda: len(printer.of_type("terminalExit", "conn")) == 2, timeout=5.0)
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     _wait_until(lambda: _shells_in(work) == [])
 
 
@@ -183,7 +183,7 @@ def test_reconnect_during_a_pending_open_claims_the_shell(
     opened = printer.of_type("terminalOpened", "conn-2")
     assert len(opened) == 1 and opened[0]["attached"] is True
     time.sleep(1.0)
-    assert svc.session_count() == 1 and printer.of_type("terminalExit") == []
+    assert session_count(svc) == 1 and printer.of_type("terminalExit") == []
     svc.input("tab", "conn-2", "echo claimed-$((40+2))\n")
     printer.wait_for(lambda: "claimed-42" in printer.output("tab"), timeout=5.0)
     assert len(_shells_in(work)) == 1
@@ -206,13 +206,13 @@ def test_shutdown_during_a_pending_open_leaves_no_shell(
     opener_a.join(10.0)
     opener_b.join(10.0)
     assert not opener_a.is_alive() and not opener_b.is_alive()
-    assert svc.session_count() == 0
+    assert session_count(svc) == 0
     assert printer.of_type("terminalOpened") == []
     _wait_until(lambda: _shells_in(work) == [])
     # The service is reusable after a shutdown (a test harness hangs up
     # leftover shells that way): a later open starts a shell.
     svc.open("tab-c", "conn", str(work), 80, 24)
-    assert svc.session_count() == 1 and len(_shells_in(work)) == 1
+    assert session_count(svc) == 1 and len(_shells_in(work)) == 1
 
 
 def _pty_masters_of(pid: int) -> list[int]:
@@ -241,7 +241,7 @@ def test_concurrent_opens_keep_every_history_hook_and_share_no_master(
     for opener in openers:
         opener.join(10.0)
         assert not opener.is_alive()
-    assert svc.session_count() == len(tabs)
+    assert session_count(svc) == len(tabs)
     assert bash_shell.is_file() and not bash_shell.with_name("bashrc.tmp").exists()
     # Every shell got the start-up file: none lost it to a colliding write.
     for tab in tabs:

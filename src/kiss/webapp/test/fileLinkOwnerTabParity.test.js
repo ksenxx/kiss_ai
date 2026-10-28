@@ -21,17 +21,9 @@
 
 const assert = require('assert');
 const {makePage, send, clickTab, twoTabs} = require('./simplify2_harness');
+const {checkPathCommands} = require('./file_link_helpers');
 
 const WORK_DIR = '/tmp/kiss-owner-parity';
-
-// The commands are built inside the JSDOM realm, so their `paths` array
-// is a foreign Array; copy it into this realm before comparing.
-function checkPathCommands(posted) {
-  return posted
-    .filter(m => m && m.type === 'checkPaths')
-    .map(m => ({type: m.type, tabId: m.tabId, workDir: m.workDir,
-      paths: Array.from(m.paths || [])}));
-}
 
 // Two tabs; the SECOND one is left on screen so the first is a genuine
 // background tab whose transcript is rendered into a detached fragment.

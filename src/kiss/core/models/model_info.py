@@ -189,7 +189,7 @@ MY_MODELS_DEFAULT_CONTENT = (
                 "  gen      (bool, default true)  text generation supported",
                 "  dec      (bool, default false) OpenRouter decisions model answering",
                 "      noul/choice/score questions via /api/alpha/decisions",
-                "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
+                "  thinking (str,  optional)      reasoning_effort sent by default, e.g. 'xhigh'",
                 "  use_responses_api (bool, optional) route via the OpenAI v2",
                 "      Responses API (/v1/responses) instead of Chat Completions",
                 "",
@@ -579,7 +579,10 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       :class:`~kiss.core.models.decisions_model.DecisionsModel` by the
       :func:`model` factory.  Such entries have ``gen``/``fc``/``emb``
       false, so they never appear in the agent model picker.
-    * ``thinking`` — highest accepted ``reasoning_effort`` (default ``None``).
+    * ``thinking`` — the reasoning effort level the adapters send for the
+      entry unless ``model_config`` overrides it (default ``None``: none
+      sent). On a base entry it is the highest accepted level capped at
+      ``high``; the generated ``-{level}`` aliases carry the other levels.
     * ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
       ``cache_write_1h_price_per_1M`` — explicit cache pricing
       overrides (default ``None``; otherwise reconstructed from
@@ -1331,8 +1334,9 @@ def _strip_thinking_alias(bare: str) -> str:
 
 # Rolling "latest" aliases (OpenRouter ``~openai`` passthroughs) that track
 # GPT-5.6/GPT-6 snapshots and therefore share their cache and long-context
-# pricing rules (their catalog rates match the versioned counterparts:
-# astra -> gpt-6-astra, luna/sol/terra -> gpt-5.6-*).  ``gpt-latest`` is the
+# pricing rules (their catalog rates match the versioned counterparts, as
+# of 2026-10: astra -> gpt-6-astra, luna -> gpt-6-luna, sol -> gpt-6.1-sol,
+# terra -> gpt-6.1-terra).  ``gpt-latest`` is the
 # pre-September-2026 spelling of ``gpt-sol-latest``, kept for user-local
 # catalog copies that predate the rename.  ``gpt-mini-latest`` is NOT here:
 # it tracks gpt-5.4-mini, which has free cache writes and no long-context
@@ -1380,8 +1384,11 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     :func:`_openai_charges_cache_writes`). The multipliers below match
     OpenAI's published pricing: GPT-5.x and GPT-6.x are 0.10x when a
     cached-input price is published (gpt-6-astra: $1.00 cached vs $10.00
-    input) except GPT-6.1 Sol at 0.05x ($0.10 cached vs $2.00 input,
-    https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+    input) except the GPT-6.1 family at 0.05x (gpt-6.1-sol: $0.10 cached
+    vs $2.00 input, gpt-6.1-terra: $0.05 cached vs $1.00 input;
+    https://developers.openai.com/api/docs/models/gpt-6.1-sol and
+    https://developers.openai.com/api/docs/models/gpt-6.1-terra, both
+    "priced at 5% of the uncached input token rate"),
     GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
     GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
     no cached-input discount, so cached tokens are charged at the full input
@@ -1397,10 +1404,16 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     if "-pro" in bare:
         return 1.0
     # The rolling "latest" aliases track GPT-5.x/6.x snapshots, so they
-    # share the 0.10x discount (see :data:`_OPENAI_ROLLING_LATEST`).
+    # share the tracked snapshot's discount (see
+    # :data:`_OPENAI_ROLLING_LATEST`): gpt-sol-latest / gpt-terra-latest
+    # track gpt-6.1-sol / gpt-6.1-terra (0.05x), the others 0.10x.  Their
+    # ``openrouter/~openai/*`` catalog entries carry OpenRouter's published
+    # rate, which wins over this fallback (:func:`_apply_cache_pricing`).
+    if bare.startswith(("gpt-sol-latest", "gpt-terra-latest")):
+        return 0.05
     if bare.startswith(_OPENAI_ROLLING_LATEST + ("gpt-mini-latest",)):
         return 0.10
-    if bare.startswith("gpt-6.1-sol"):
+    if bare.startswith("gpt-6.1-"):
         return 0.05
     if bare.startswith(("gpt-5", "gpt-6")) or "chat-latest" in bare:
         return 0.10
@@ -2361,6 +2374,9 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     (https://developers.openai.com/api/docs/pricing: gpt-6-astra
     $10/$1/$12.50/$50 -> $20/$2/$25/$75, gpt-6-sol $2/$0.20/$2.50/$10 ->
     $4/$0.40/$5/$15, gpt-6.1-sol $2/$0.10/$2.50/$10 -> $4/$0.20/$5/$15,
+    gpt-6.1-terra $1/$0.05/$1.25/$5 -> $2/$0.10/$2.50/$7.50 (model page:
+    "Prompts with more than 272K input tokens are priced at 2x input and
+    cache rates and 1.5x output for the full request"),
     gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
     $0.20/$0.02/$0.25/$0.75, gpt-5.6-sol $4/$0.40/$5/$20 ->
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
@@ -2410,7 +2426,7 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     if bare.startswith(_ANTHROPIC_LONG_CONTEXT_FAMILIES):
         return 100_000, 5.0, 5.0
     if bare.startswith(
-        ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
+        ("gpt-6-", "gpt-6.1-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
         + _OPENAI_ROLLING_LATEST
     ) or (bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare):
         return 272_000, 2.0, 1.5

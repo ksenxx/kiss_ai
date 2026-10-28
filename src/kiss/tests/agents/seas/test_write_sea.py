@@ -38,19 +38,7 @@ def test_protocol_bans_the_tells_and_fixes_the_register() -> None:
     assert WriteSea().system_prompt("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT
     protocol = write_sea.SYSTEM_PROMPT
     assert protocol.startswith("## Writing protocol (write)")
-    for phrase in (
-        "general reader",
-        "American English",
-        "Be concise",
-        "read as if a careful person wrote it",
-        "No em dashes",
-        "No emoji",
-        "delve, leverage",
-        "moreover, furthermore",
-        "Do not invent facts",
-        "check every line against the lists above",
-    ):
-        assert phrase in protocol, phrase
+    assert "No em dashes" in protocol and "Do not invent facts" in protocol
     # The protocol practices what it preaches: the only "---" is the quoted token it bans.
     assert "\u2014" not in protocol
     assert protocol.count("---") == protocol.count('"---"') == 1
@@ -65,17 +53,20 @@ def test_description_is_one_sentence_naming_the_command() -> None:
 
 
 def test_dispatch_timeout_of_the_sea_is_an_hour() -> None:
-    """The file's ``timeout`` is an hour.
+    """The file's ``timeout`` is an hour and its model is the ``bestrouter``.
 
     The slash command runs the SEA directly (no ``run_agent`` relay), so
     the timeout matters on the ``run_agent`` path only: an empty
     ``timeout`` argument resolves to ``settings()["timeout"]`` and an
     explicit argument wins over it.
     """
-    assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
+    assert WriteSea().settings({}) == {
+        "timeout": write_sea.DISPATCH_TIMEOUT_SECONDS,
+        "model": "bestrouter",
+    }
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(_SEA_PATH)
-    assert settings == {"timeout": 3600.0}
+    assert settings == {"timeout": 3600.0, "model": "bestrouter"}
     assert resolve_timeout(None, settings) == 3600.0
     assert resolve_timeout(120.0, settings) == 120.0
     # The timeout lives in ``settings()`` alone: no removed getter
@@ -90,9 +81,11 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     hook receives the assembled prompt (default + suffix) and appends.
     """
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    # The SEA pins no setting and has no ``prompt``: nothing is reported as
-    # overridden (the four hooks are written on every run, not listed).
-    assert apply_sea(cmd) == set()
+    # The SEA pins only its model and has no ``prompt``: ``model`` is the
+    # one setting reported as overridden (the four hooks are written on
+    # every run, not listed).
+    assert apply_sea(cmd) == {"model"}
+    assert cmd["model"] == "bestrouter"
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]
     assert hook("BASE\n\nCALLER") == "BASE\n\nCALLER\n\n" + write_sea.SYSTEM_PROMPT

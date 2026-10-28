@@ -18,16 +18,6 @@ lifetimes had holes:
   ``run_parallel`` sub-agent that outlives its parent's cleanup writes
   exactly there.
 
-* ``reset()`` reached the bash state through the **creating**
-  ``_bash_state`` property, unlike ``_flush_bash`` / the ``tool_call``
-  branch / ``_emit_tool_result``, which deliberately use the
-  non-creating lookup so "a straggler flush must not resurrect the
-  just-freed ``_BashState``".  On a thread with no task id bound this
-  created and retained a state under the ``""`` key, which
-  ``cleanup_task`` can never remove (it returns early on an empty
-  key).  Resetting a state that does not exist has nothing to do, so
-  the non-creating lookup is also the simpler expression of it.
-
 Real printers, real threads, real bash streaming — nothing is mocked.
 """
 
@@ -37,7 +27,6 @@ import threading
 import unittest
 
 from kiss.server.json_printer import _CLOSED_TASK_MEMORY, JsonPrinter
-from kiss.tests.server._memory_printer import MemoryPrinter
 
 
 class TestPrinterTaskStateLifetime(unittest.TestCase):
@@ -150,38 +139,6 @@ class TestPrinterTaskStateLifetime(unittest.TestCase):
             "the oldest finished task should have been evicted first"
         )
         assert self._offset_keys(printer) == set()
-
-    def test_reset_without_a_task_retains_no_bash_state(self) -> None:
-        """``reset()`` on a task-less thread must not create state."""
-        printer = JsonPrinter()
-        printer.reset()
-        assert "" not in printer._bash_states, (
-            "reset() created a bash state under the empty task key, "
-            "which cleanup_task can never remove"
-        )
-        assert printer._bash_states == {}
-
-    def test_reset_still_discards_buffered_bash_output(self) -> None:
-        """The reset contract itself is unchanged for a live task."""
-        printer = MemoryPrinter()
-        printer._thread_local.task_id = "T3"
-        printer.subscribe_tab("T3", "tab1")
-        printer.print("first chunk", type="bash_stream")
-        printer.print("second chunk", type="bash_stream")
-
-        printer.reset()
-        printer._flush_bash()
-
-        texts = [
-            str(ev.get("text", ""))
-            for ev in printer.emitted
-            if ev.get("type") == "system_output"
-        ]
-        assert not any("second chunk" in text for text in texts), (
-            f"reset() failed to discard the buffered bash text: {texts}"
-        )
-        printer.cleanup_task("T3")
-        assert printer._bash_states == {}
 
 
 if __name__ == "__main__":

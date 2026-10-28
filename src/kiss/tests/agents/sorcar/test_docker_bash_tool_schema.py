@@ -102,7 +102,8 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         parameters = inspect.signature(self._bash_tool()).parameters
         self.assertEqual(
             list(parameters),
-            ["command", "description", "timeout_seconds", "max_output_chars", "background"],
+            ["command", "description", "timeout_seconds", "max_output_chars", "background",
+             "on_timeout"],
         )
 
     def test_default_output_cap_is_the_configured_budget(self) -> None:
@@ -117,11 +118,11 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         self.assertLessEqual(len(result), DEFAULT_CONFIG.tool_output_default_chars)
         self.assertIn("truncated", result)
 
-    def test_background_is_refused_with_the_nohup_fallback(self) -> None:
-        """Docker mode has no job registry; the model is told what to do instead."""
-        result = self._bash_tool()("sleep 30", "would be a background job", background=True)
-        self.assertTrue(result.startswith("Error:"), result)
-        self.assertIn("nohup", result)
+    def test_background_starts_a_container_job(self) -> None:
+        """Docker mode has its own job registry: ``background=True`` starts a container job."""
+        result = self._bash_tool()("sleep 30", "a background job", background=True)
+        self.assertTrue(result.startswith("Started background job"), result)
+        self.assertIn("bash_job(", result)
 
     def test_docker_bash_without_a_manager_still_raises(self) -> None:
         """The forwarder refuses to run without a container attached."""

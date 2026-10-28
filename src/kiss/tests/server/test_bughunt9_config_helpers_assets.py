@@ -18,13 +18,14 @@
    booleans for numeric keys, and the function's own contract says a
    non-numeric value falls back to ``DEFAULTS['max_budget']``.
 
-3. ``tricks.ensure_user_asset_from_default`` seeded the asset
-   with a plain ``Path.write_text`` — ``open('w')`` truncates first,
-   so a concurrent reader (e.g. the autocomplete worker thread calling
-   ``read_tricks`` while a command-handler thread seeds
-   ``MY_INJECTION.md``) could observe an empty or partially-written
-   file.  The seed must be atomic: a reader sees either no file or
-   the full default content, never a torn write.
+3. The ``MY_INJECTION.md`` seed (``tricks._ensure_my_injection``, now
+   :func:`kiss.core.utils.seed_file_atomically`) wrote the asset with
+   a plain ``Path.write_text`` — ``open('w')`` truncates first, so a
+   concurrent reader (e.g. the autocomplete worker thread calling
+   ``read_tricks_data`` while a command-handler thread seeds the file)
+   could observe an empty or partially-written file.  The seed must be
+   atomic: a reader sees either no file or the full default content,
+   never a torn write.
 
 4. ``user_config.save_api_key`` shell-quoted the key
    *value* (the H3 fix) but interpolated the key *name* verbatim into
@@ -44,7 +45,7 @@ import time
 from pathlib import Path
 
 from kiss.agents.sorcar.commit_message import clean_llm_output
-from kiss.server.tricks import ensure_user_asset_from_default
+from kiss.core.utils import seed_file_atomically
 
 
 def _unlink_when_free(path: Path) -> None:
@@ -141,8 +142,7 @@ class TestUserAssetSeedIsAtomic:
                 if stop.is_set():
                     break
                 _unlink_when_free(target)
-                result = ensure_user_asset_from_default(name, content)
-                assert result == target
+                seed_file_atomically(target, content)
         finally:
             stop.set()
             t.join()
@@ -153,18 +153,16 @@ class TestUserAssetSeedIsAtomic:
 
     def test_seed_and_preserve_contract_unchanged(self, kiss_home: Path) -> None:
         """Seeding + never-overwrite semantics survive the atomicity fix."""
-        result = ensure_user_asset_from_default("A.md", "## Trick\n\nseed\n")
-        assert result == kiss_home / "A.md"
-        assert result is not None
+        result = kiss_home / "A.md"
+        seed_file_atomically(result, "## Trick\n\nseed\n")
         assert result.read_text() == "## Trick\n\nseed\n"
         result.write_text("user edit")
-        again = ensure_user_asset_from_default("A.md", "## Trick\n\nseed\n")
-        assert again == result
+        seed_file_atomically(result, "## Trick\n\nseed\n")
         assert result.read_text() == "user edit"
 
     def test_no_temp_file_litter_after_seed(self, kiss_home: Path) -> None:
         """The atomic seed must not leave staging files behind."""
-        ensure_user_asset_from_default("B.md", "body\n")
+        seed_file_atomically(kiss_home / "B.md", "body\n")
         leftovers = [
             p.name for p in kiss_home.iterdir() if p.name != "B.md"
         ]

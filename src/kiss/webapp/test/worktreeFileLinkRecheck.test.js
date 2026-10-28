@@ -18,25 +18,11 @@ const {
 const {
   findLinks,
   findMissing,
-  existsOnRealFs,
+  checkPathsOnRealFs,
 } = require('./file_link_helpers');
 
 // A real temp workspace; each test creates the files it links to.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtrecheck-'));
-
-function checkPathsOnRealFs(msg) {
-  const results = {};
-  for (const p of msg.paths) {
-    let abs = p;
-    if (p.startsWith('~/')) {
-      abs = path.join(os.homedir(), p.slice(2));
-    } else if (!path.isAbsolute(p)) {
-      abs = path.resolve(msg.workDir || tmpDir, p);
-    }
-    results[p] = existsOnRealFs(abs);
-  }
-  return results;
-}
 
 // makePage loads the real chat page (chat.html + api.js + main.js)
 // in jsdom.  Every posted `checkPaths` command is answered with a
@@ -44,7 +30,7 @@ function checkPathsOnRealFs(msg) {
 // the remote web server does.
 function makePage() {
   return makeChatPage({
-    beforeScripts: win => answerCheckPaths(win, checkPathsOnRealFs),
+    beforeScripts: win => answerCheckPaths(win, checkPathsOnRealFs(tmpDir)),
   });
 }
 

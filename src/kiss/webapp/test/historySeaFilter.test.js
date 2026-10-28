@@ -13,29 +13,14 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {visibleTitles} = require('./history_helpers');
+const {visibleTitles, finishedSession} = require('./history_helpers');
 
+/** A finished row run by the script `sea` (undefined: a legacy row). */
 function session(id, title, sea, extra) {
-  return Object.assign(
-    {
-      id: 'chat-' + id,
-      task_id: id,
-      title,
-      timestamp: 1_700_000_000 + id * 100,
-      preview: title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: '',
-      startTs: (1_700_000_000 + id * 100) * 1000,
-      endTs: (1_700_000_000 + id * 100) * 1000 + 10_000,
-      sea,
-    },
-    extra || {},
+  return finishedSession(
+    id,
+    title,
+    Object.assign({task_id: id, sea}, extra || {}),
   );
 }
 
@@ -235,11 +220,5 @@ function runTests() {
   testSelectionSurvivesRefreshWithoutThatSea();
 }
 
-try {
-  runTests();
-  console.log('\n5 passed, 0 failed');
-  process.exit(0);
-} catch (err) {
-  console.error('FAIL:', err && err.stack ? err.stack : err);
-  process.exit(1);
-}
+runTests();
+console.log('\nhistorySeaFilter: all tests passed');

@@ -17,7 +17,8 @@ const {
   makePage: makeHarnessPage,
   send,
   sleep,
-  captureTimers,
+  recordTimers,
+  fireTimers,
   click,
 } = require('./simplify2_harness');
 
@@ -82,7 +83,7 @@ async function testSuccessFlashesAndReverts() {
   };
   const idle = btn.innerHTML;
   assert.strictEqual(btn.hasAttribute('title'), false, 'no native title');
-  const timers = captureTimers(win);
+  const timers = recordTimers(win, 1500);
   click(win, btn);
   await sleep(5);
   assert.deepStrictEqual(copied, ['task one'], 'the row text was copied');
@@ -91,7 +92,8 @@ async function testSuccessFlashesAndReverts() {
   assert.ok(btn.querySelector('polyline'), 'the check mark confirms');
   assert.strictEqual(btn.title, 'Copied');
   // The 1500 ms revert timer is fired instead of waited for.
-  timers.find(t => t.ms === 1500).cb();
+  assert.strictEqual(timers.length, 1, 'one revert timer');
+  fireTimers(timers);
   assert.strictEqual(btn.innerHTML, idle, 'the copy icon is back');
   assert.ok(!btn.classList.contains('copied'));
   assert.strictEqual(btn.hasAttribute('title'), false, 'no title again');

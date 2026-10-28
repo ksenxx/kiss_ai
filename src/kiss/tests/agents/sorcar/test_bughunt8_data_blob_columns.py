@@ -29,6 +29,7 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
+    _finalize_task_metadata,
     _load_chat_events_by_task_id,
     _load_history,
 )
@@ -121,3 +122,15 @@ class TestBlobInTextColumns(_TempDbTestBase):
         assert isinstance(extra, str)
         if extra:
             json.loads(extra)
+
+    def test_finalize_reads_a_failure_prefix_from_a_blob_result(self) -> None:
+        """A BLOB ``result`` is decoded before the ``failed`` tag is decided."""
+        tid, _ = _add_task("analyze task")
+        self._corrupt_column(tid, "result", b"Task failed: interrupted")
+        db = th._get_db()
+
+        with db:
+            _finalize_task_metadata(db, tid)
+
+        tags = db.execute("SELECT tags FROM task_history WHERE id = ?", (tid,)).fetchone()[0]
+        assert "failed" in tags.split(","), tags

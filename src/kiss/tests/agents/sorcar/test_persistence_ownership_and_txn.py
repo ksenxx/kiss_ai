@@ -525,7 +525,7 @@ class UpdateTaskColumnGuardTest(_PersistenceTestCase):
         """The long-removed ``extra`` column is rejected, not written."""
         task_id, _chat = th._add_task("guard me")
         with self.assertRaises(ValueError):
-            th._update_task_columns({"result": "ok", "extra": "{}"}, task_id, None)
+            th._update_task_columns({"result": "ok", "extra": "{}"}, task_id)
         self.assertEqual(self._result_of(task_id), "Agent Failed Abruptly")
 
     def test_result_still_round_trips(self) -> None:

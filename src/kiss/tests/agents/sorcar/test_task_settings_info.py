@@ -255,8 +255,8 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         """``_host_settings`` names this machine's user, IP, OS and hardware.
 
         The OSError fallbacks in ``_host_settings`` (no login name) and
-        ``_local_ip_address`` (no route to the outside — an offline
-        host) are unreachable on a working test host without test
+        ``kiss.core.utils.default_route_ip`` (no route to the outside —
+        an offline host) are unreachable on a working test host without test
         doubles, so per policy they are documented here rather than
         mocked.  The IP is validated in place, never compared against
         a second live lookup, which could legitimately differ if the

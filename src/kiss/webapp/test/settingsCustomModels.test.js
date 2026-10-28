@@ -4,7 +4,7 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the settings panel's collapsible
-// subpanels and the Custom Models (~/.kiss/MY_MODELS.json) CRUD UI,
+// subpanels and the Custom Models (~/.s10s/MY_MODELS.json) CRUD UI,
 // driving the real chat.html + api.js + main.js:
 //
 // * Opening the settings panel requests the custom-model list
@@ -26,8 +26,14 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, loadMainCss} = require('./simplify2_harness');
-const {lastMsg, click, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {
+  makePage,
+  send,
+  loadMainCss,
+  lastMsg,
+  click,
+} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 function boxValues(win) {
   const el = id => win.document.getElementById(id);
@@ -266,10 +272,9 @@ function testDeletePostsAndAbandonsEdit() {
   send(win, {type: 'myModelsData', models: MODELS});
 
   click(win, win.document.querySelectorAll('.custom-model-edit-btn')[1]);
-  // The trash icon only reveals an inline Delete / Cancel pair
-  // (ui_antipattern_destructive_confirm.test.js); Delete posts.
+  // The trash icon only reveals an inline Delete / Cancel pair (pinned
+  // by ui_antipattern_destructive_confirm.test.js); Delete posts.
   click(win, win.document.querySelectorAll('.custom-model-delete-btn')[1]);
-  assert.ok(!lastMsg(posted, 'deleteMyModel'), 'the icon alone posts nothing');
   click(
     win,
     win.document.querySelectorAll('.custom-model-row')[1].querySelector(
@@ -383,10 +388,14 @@ function testCancelRestoresAuthoritativeConfigValues() {
     'an edit-time keystroke must not block later config repaints',
   );
 
-  // Closing now must flush the authoritative value, not a stale one.
+  // Closing now must not flush the cancelled keystroke: with every
+  // edit cancelled there is nothing to save.
   closeSettings(win);
-  const msg = lastMsg(posted, 'saveConfig');
-  assert.strictEqual(msg.config.custom_endpoint, 'http://cfg2/v1');
+  assert.strictEqual(
+    lastMsg(posted, 'saveConfig'),
+    null,
+    'a cancelled edit leaves nothing to flush on close',
+  );
 
   win.close();
   console.log('  ok - Cancel restores authoritative config values');

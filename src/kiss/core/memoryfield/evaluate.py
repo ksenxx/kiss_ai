@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import logging
+import operator
 import random
 import re
 import sqlite3
@@ -230,12 +231,8 @@ def reciprocal_rank_fusion(rankings: list[list[str]], k: int, constant: int = 60
     for ranking in rankings:
         for rank, name in enumerate(ranking, start=1):
             scores[name] = scores.get(name, 0.0) + 1.0 / (constant + rank)
-    ordered = sorted(scores.items(), key=_score_of_item, reverse=True)
+    ordered = sorted(scores.items(), key=operator.itemgetter(1), reverse=True)
     return [name for name, _ in ordered[:k]]
-
-
-def _score_of_item(item: tuple[str, float]) -> float:
-    return item[1]
 
 
 @dataclass(frozen=True)

@@ -252,7 +252,7 @@ class TestB3StashBeforeCheckout:
             wt_dir=wt_dir,
             baseline_commit=None,
         )
-        result, stash_warning, _cleanup = agent._do_merge(wt)
+        result, _resolved, stash_warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.SUCCESS, (
             f"merge must stash before checkout; got {result} "
@@ -295,7 +295,7 @@ class TestB3StashBeforeCheckout:
             wt_dir=wt_dir,
             baseline_commit=None,
         )
-        result, stash_warning, _cleanup = agent._do_merge(wt)
+        result, _resolved, stash_warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.SUCCESS
         assert stash_warning == ""

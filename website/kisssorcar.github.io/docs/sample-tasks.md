@@ -52,7 +52,7 @@ security vulnerabilities, create a POC and test it. Create a report.
 ## AI Discovery
 
 ```text
-Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give
+/discover Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give
 the best accuracy and recall on the data at <</path/to/data>> at the lowest price? Use 'modal'
 CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is
 $ 1,000. Do not STOP until accuracy/recall reaches 99% and the model's price per query is less
@@ -62,7 +62,7 @@ than $0.50. Create a report.
 ## Software Optimization
 
 ```text
-Sorcar for Optimization: Can you run the command <<command>> and optimize it with respect to the
+/discover Sorcar for Optimization: Can you run the command <<command>> and optimize it with respect to the
 following metrics: <<speed, accuracy, recall, cost>>. Then use AI discovery to optimize. You can
 add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not
 forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until

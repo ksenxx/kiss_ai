@@ -255,7 +255,11 @@
     return /Mac|iPhone|iPad/i.test(plat);
   }
 
-  /** Build the ordered menu model for a right-click on *target* in *doc*. */
+  /**
+   * Build the ordered menu model for a right-click on *target* in *doc*:
+   * one item per menu row, each carrying the editable element under the
+   * click (`editable`, null outside a field) its action applies to.
+   */
   function buildMenuModel(doc, target) {
     const mod = isMac(doc) ? '\u2318' : 'Ctrl+';
     const editable = editableTarget(target);
@@ -301,6 +305,9 @@
       label: 'Select All',
       key: mod + 'A',
       enabled: true,
+    });
+    items.forEach(item => {
+      item.editable = editable;
     });
     return items;
   }
@@ -348,13 +355,26 @@
     return pending.then(
       text => {
         const value = String(text || '');
+        // `number` / `email` inputs expose no selection API (selectionStart
+        // is null, setRangeText throws InvalidStateError) but they do keep
+        // a native selection, which execCommand('insertText') honours; it
+        // fires the field's own `input` event.  Appending is the last
+        // resort when the command is unavailable (jsdom) or refused.
+        let fired = false;
         if (el.isContentEditable) insertIntoContentEditable(doc, el, value);
-        else if (typeof el.setRangeText === 'function') {
+        else if (
+          typeof el.setRangeText === 'function' &&
+          el.selectionStart !== null
+        ) {
           el.setRangeText(value, el.selectionStart, el.selectionEnd, 'end');
         } else {
-          el.value = String(el.value || '') + value;
+          el.focus();
+          fired =
+            typeof doc.execCommand === 'function' &&
+            doc.execCommand('insertText', false, value);
+          if (!fired) el.value = String(el.value || '') + value;
         }
-        el.dispatchEvent(new win.Event('input', {bubbles: true}));
+        if (!fired) el.dispatchEvent(new win.Event('input', {bubbles: true}));
         return true;
       },
       () => false,
@@ -442,12 +462,11 @@
         // Copy simply reads it — no cached text that can go stale when the
         // user narrows the selection afterwards.  Over a field it selects
         // that field's contents, exactly like the native menu does.
+        // select() works on every input type; setSelectionRange throws on
+        // `number` / `email` inputs.
         if (item.editable && isTextField(item.editable)) {
           item.editable.focus();
-          item.editable.setSelectionRange(
-            0,
-            String(item.editable.value || '').length,
-          );
+          item.editable.select();
         } else {
           selectAllText = selectAll(doc, item.editable);
           const sel = win && win.getSelection && win.getSelection();
@@ -475,7 +494,6 @@
       close();
       ensureStyle();
       const model = buildMenuModel(doc, target);
-      const editable = editableTarget(target);
       // Chromium truncates a multi-range Selection to its first range, so
       // an untouched Select All is copied from the captured text instead
       // (buildMenuModel always puts the Copy item first).
@@ -511,7 +529,7 @@
           ev.preventDefault();
           ev.stopPropagation();
           if (!item.enabled) return;
-          activate({id: item.id, text: item.text, editable: editable});
+          activate({id: item.id, text: item.text, editable: item.editable});
         });
         menu.appendChild(el);
       });
@@ -580,16 +598,12 @@
       }
     }
 
-    function onWindowChange() {
-      close();
-    }
-
     doc.addEventListener('contextmenu', onContextMenu);
     doc.addEventListener('click', onDocClick);
     doc.addEventListener('keydown', onKeyDown);
     if (win) {
-      win.addEventListener('blur', onWindowChange);
-      win.addEventListener('resize', onWindowChange);
+      win.addEventListener('blur', close);
+      win.addEventListener('resize', close);
     }
 
     return {close: close};

@@ -20,6 +20,7 @@ const {
   answering,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {paste, settle} = require('./attachment_helpers');
 
 const pages = [];
 
@@ -515,32 +516,28 @@ async function pasteHeic(win) {
   const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0001.HEIC', {
     type: 'image/heic',
   });
-  const paste = new win.Event('paste', {bubbles: true, cancelable: true});
-  Object.defineProperty(paste, 'clipboardData', {
-    value: {items: [{kind: 'file', getAsFile: () => heic}]},
-  });
-  inp.dispatchEvent(paste);
-  await new Promise(r => setTimeout(r, 50));
-  return {inp, paste};
+  paste(win, heic);
+  await settle(() => win.document.querySelector('.file-chip'));
+  return {inp, heic};
 }
 
 test('a send that waits for an attachment keeps its route', async () => {
   const {win, posted, tab} = makePage(true);
   win._testApi.endLaunch();
-  const {inp, paste} = await pasteHeic(win);
+  const {inp, heic} = await pasteHeic(win);
   // A prompt parked behind the conversion: a question arriving during
   // the wait must not turn it into an answer.
   inp.value = 'a prompt with a photo';
   posted.length = 0;
   pressEnter(win);
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
   assert.ok(answering(win));
   // The stuck chip is removed, releasing the parked send.
   win.document
     .querySelector('.file-chip .fc-rm')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  await new Promise(r => setTimeout(r, 50));
+  await settle(() => !win.document.querySelector('.file-chip'));
   assert.strictEqual(
     posted.filter(
       m => m.type === 'userAnswer' || m.type === 'appendUserMessage',
@@ -552,8 +549,8 @@ test('a send that waits for an attachment keeps its route', async () => {
   assert.strictEqual(inp.value, '', 'the composer is the empty answer box');
   // An answer never waits for a photo: it is text only, the chip stays
   // for the next prompt, and the parked prompt comes back.
-  inp.dispatchEvent(paste);
-  await new Promise(r => setTimeout(r, 50));
+  paste(win, heic);
+  await settle(() => win.document.querySelector('.file-chip'));
   posted.length = 0;
   inp.value = 'the answer';
   pressEnter(win);
@@ -606,7 +603,7 @@ test('a question is never folded by the streaming collapse pass, answered or not
   );
   // Answered: the question stays open while the stream goes on (the
   // user's side of the conversation is never folded away; see
-  // askQuestionNeverCollapsed.test.js for the answer and the replays).
+  // askPanelsNeverCollapsed.test.js for the answer and the replays).
   send(win, {type: 'askUserDone', tabId: tab});
   bash(5);
   bash(6);
@@ -697,12 +694,6 @@ test('the clear button reflects the parked prompt that comes back', () => {
     'none',
     'text is back, so is the button',
   );
-});
-
-test('the floating modal is gone from the markup', () => {
-  const {win} = makePage(true);
-  assert.strictEqual(win.document.getElementById('ask-user-modal'), null);
-  assert.strictEqual(win.document.querySelector('.ask-user-input'), null);
 });
 
 Promise.all(pending).then(() => {

@@ -80,12 +80,7 @@ function metricsSpan(row) {
   return row.querySelector('.running-item-metrics');
 }
 
-function testWorkspaceLineMergesMetadata() {
-  const {win} = makePage();
-  sendEmptyWorkDir(win);
-
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
-
+function testWorkspaceLineMergesMetadata(win) {
   const rows = rowsByTitle(win);
   const a = rows['meta row A — all flags on'];
   const b = rows['meta row B — all flags off'];
@@ -202,17 +197,12 @@ function testWorkspaceLineMergesMetadata() {
     );
   }
 
-  win.close();
   console.log(
     '  ok - workspace + metadata render on the same line, separated by " • "',
   );
 }
 
-function testWorkspaceLineBreaksToOwnVisualLine() {
-  const {win} = makePage();
-  loadMainCss(win);
-  sendEmptyWorkDir(win);
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+function testWorkspaceLineBreaksToOwnVisualLine(win) {
   const span = workspaceSpan(rowsByTitle(win)['meta row A — all flags on']);
   assert.strictEqual(
     win.getComputedStyle(span).flexBasis,
@@ -220,13 +210,18 @@ function testWorkspaceLineBreaksToOwnVisualLine() {
     'the workspace+meta span takes the whole row width, so it renders ' +
       'on its own line below the metrics row',
   );
-  win.close();
   console.log('  ok - workspace+meta span has flex-basis: 100%');
 }
 
 function main() {
-  testWorkspaceLineMergesMetadata();
-  testWorkspaceLineBreaksToOwnVisualLine();
+  // One styled page with the fixture rendered serves both checks.
+  const {win} = makePage();
+  loadMainCss(win);
+  sendEmptyWorkDir(win);
+  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  testWorkspaceLineMergesMetadata(win);
+  testWorkspaceLineBreaksToOwnVisualLine(win);
+  win.close();
   console.log('historyTaskMeta.test.js: all assertions passed.');
 }
 

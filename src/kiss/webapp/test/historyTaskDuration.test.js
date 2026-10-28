@@ -11,7 +11,7 @@ const {
   send,
   rowsByTitle,
 } = require('./simplify2_harness');
-const {freezeClockAndStyle} = require('./history_helpers');
+const {freezeClockAndStyle, makeRow} = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
@@ -24,91 +24,56 @@ function makePage() {
 }
 
 const SESSIONS_FIXTURE = [
-  {
+  makeRow({
     id: 'chatA',
     task_id: 1,
     title: 'ten second task',
-    timestamp: 1_700_000_000,
-    preview: 'ten second task',
-    has_events: false,
-    failed: false,
-    is_running: false,
     tokens: 1234,
     cost: 0.1234,
     steps: 3,
-    is_favorite: false,
-    work_dir: '',
-    startTs: 1_700_000_000_000,
-    endTs: 1_700_000_010_000,
-  },
-  {
+  }),
+  makeRow({
     id: 'chatB',
     task_id: 2,
     title: 'sixty five second task',
     timestamp: 1_700_000_100,
-    preview: 'sixty five second task',
-    has_events: false,
-    failed: false,
-    is_running: false,
     tokens: 100,
     cost: 0.01,
-    steps: 1,
-    is_favorite: false,
-    work_dir: '',
     startTs: 1_700_000_100_000,
     endTs: 1_700_000_165_000,
-  },
-  {
+  }),
+  makeRow({
     id: 'chatC',
     task_id: 3,
     title: 'long hour task',
     timestamp: 1_700_000_200,
-    preview: 'long hour task',
-    has_events: false,
-    failed: false,
-    is_running: false,
     tokens: 99999,
     cost: 1.2345,
     steps: 50,
-    is_favorite: false,
-    work_dir: '',
     startTs: 1_700_000_200_000,
     endTs: 1_700_000_200_000 + 3_725_000,
-  },
-  {
+  }),
+  makeRow({
     id: 'chatD',
     task_id: 4,
     title: 'still running task',
     timestamp: Math.floor((FROZEN_NOW_MS - 65_000) / 1000),
-    preview: 'still running task',
-    has_events: false,
-    failed: false,
     is_running: true,
     tokens: 42,
-    cost: 0,
-    steps: 1,
-    is_favorite: false,
-    work_dir: '',
     startTs: FROZEN_NOW_MS - 65_000,
     endTs: 0,
-  },
-  {
+  }),
+  makeRow({
     id: 'chatE',
     task_id: 5,
     title: 'legacy row with no timestamps',
     timestamp: 0,
     preview: 'legacy row',
-    has_events: false,
-    failed: false,
-    is_running: false,
     tokens: 0,
-    cost: 0,
     steps: 0,
-    is_favorite: false,
-    work_dir: '',
     startTs: 0,
     endTs: 0,
-  },
+  }),
 ];
 
 function metricsText(row) {

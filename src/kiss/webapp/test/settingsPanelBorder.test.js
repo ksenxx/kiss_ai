@@ -16,22 +16,16 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
+// The last rule for a selector is the one the cascade applies, so a
+// later same-selector override cannot hide behind an earlier match.
+const {lastCssRule: cssRule} = require('./designTokens');
+
 const MEDIA = path.join(__dirname, '..', 'media');
 const MAIN_CSS = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 const REMOTE_CSS = fs.readFileSync(
   path.join(MEDIA, 'remote-codex.css'),
   'utf8',
 );
-
-function cssRule(css, selector) {
-  const source = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(source + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`, 'g');
-  let body = null;
-  let m;
-  while ((m = re.exec(css)) !== null) body = m[1];
-  assert.ok(body !== null, `CSS rule for ${selector} missing`);
-  return body;
-}
 
 function testMainCssUsesHairlineAndElevation() {
   const rule = cssRule(MAIN_CSS, '#settings-panel');

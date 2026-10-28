@@ -12,8 +12,10 @@ Verifies the contract enforced by the
    are plain :class:`BaseChannelAgent` carriers whose tasks always
    execute on the kiss-web daemon through :func:`kiss.server.sorcar.run`.
 2. ``channel_main()``'s parser rejects every chat-session CLI flag
-   (``-n/--new``, ``-c/--chat-id``, ``-l/--list-chat-id``) — they no
-   longer exist anywhere in the project's CLI surface.
+   (``-n/--new``, ``-c/--chat-id``, ``-l/--list-chat-id``): they no longer
+   exist anywhere in the project's CLI surface.  Each flag is its own
+   tripwire (``allow_abbrev=False``; one could be re-added without the
+   others), so every one is checked.
 """
 
 from __future__ import annotations
@@ -52,17 +54,7 @@ def test_channel_agent_does_not_subclass_sorcar_agent(
     assert issubclass(cls, BaseChannelAgent)
 
 
-@pytest.mark.parametrize(
-    "flag",
-    [
-        "-n",
-        "--new",
-        "-c",
-        "--chat-id",
-        "-l",
-        "--list-chat-id",
-    ],
-)
+@pytest.mark.parametrize("flag", ["-n", "--new", "-c", "--chat-id", "-l", "--list-chat-id"])
 def test_channel_main_rejects_chat_session_flag(
     flag: str,
     capsys: pytest.CaptureFixture[str],

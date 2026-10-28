@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import pytest
 
-from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_agent import MAX_CONSECUTIVE_ERRORS, MAX_CONSECUTIVE_STALLS, KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import MODEL_INFO, ModelInfo
 from kiss.tests.core.models.test_anthropic_stream_stall_timeout import (  # noqa: F401
@@ -149,8 +149,10 @@ class TestAgentSurvivesStalledStream:
         self, monkeypatch: pytest.MonkeyPatch, stall_server: str
     ) -> None:
         """Every request stalls: the agent must surface a KISSError after
-        its bounded retries — a visible failure the orchestrator can
-        report — rather than the silent infinite "thinking" of the bug."""
+        its bounded retries (``MAX_CONSECUTIVE_STALLS``, a stall's own
+        limit, wider than the three strikes of a model error) — a visible
+        failure the orchestrator can report — rather than the silent
+        infinite "thinking" of the bug."""
         _register_model(monkeypatch)
         _ensure_api_key(monkeypatch)
         monkeypatch.setenv("ANTHROPIC_BASE_URL", stall_server)
@@ -159,14 +161,39 @@ class TestAgentSurvivesStalledStream:
             lambda: agent.run(
                 model_name=_MODEL,
                 prompt_template="Update ./README.md based on the latest code.",
-                max_steps=5,
+                max_steps=MAX_CONSECUTIVE_STALLS + 5,
                 max_budget=1.0,
                 model_config={"stream_stall_timeout": _STALL_TIMEOUT},
                 verbose=False,
             ),
-            deadline=4 * _FAST_FAIL_BUDGET,
+            deadline=10 * _FAST_FAIL_BUDGET,
         )
         assert isinstance(outcome, KISSError)
         msg = str(outcome)
-        assert "consecutive errors" in msg
+        assert f"{MAX_CONSECUTIVE_STALLS} consecutive stalled streams" in msg
         assert "stalled" in msg
+        assert _STATE.request_count == MAX_CONSECUTIVE_STALLS
+
+    def test_stalls_do_not_count_toward_the_three_strikes(
+        self, monkeypatch: pytest.MonkeyPatch, stall_server: str
+    ) -> None:
+        """More stalls in a row than ``MAX_CONSECUTIVE_ERRORS``, then a healthy
+        API: the run goes on (a long unattended run died this way)."""
+        _register_model(monkeypatch)
+        _ensure_api_key(monkeypatch)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", stall_server)
+        _STATE.stall_first_n = MAX_CONSECUTIVE_ERRORS + 2
+        agent = KISSAgent("test-stall-strikes")
+        outcome = _run_bounded(
+            lambda: agent.run(
+                model_name=_MODEL,
+                prompt_template="Update ./README.md based on the latest code.",
+                max_steps=MAX_CONSECUTIVE_ERRORS + 5,
+                max_budget=1.0,
+                model_config={"stream_stall_timeout": _STALL_TIMEOUT},
+                verbose=False,
+            ),
+            deadline=6 * _FAST_FAIL_BUDGET,
+        )
+        assert outcome == ("ok", "recovered")
+        assert _STATE.request_count == MAX_CONSECUTIVE_ERRORS + 3

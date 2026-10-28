@@ -201,8 +201,11 @@ class TestF3VoiceModelCrossProcessRace(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(cache.read_bytes()).hexdigest(), expected
         )
+        # The flock sidecar of ``speech.download_once`` stays (unlinking
+        # it would defeat the cross-process exclusion); no temp files do.
         leftovers = [
-            p.name for p in cache.parent.iterdir() if p.name != cache.name
+            p.name for p in cache.parent.iterdir()
+            if p.name not in (cache.name, f".{cache.name}.lock")
         ]
         self.assertEqual(leftovers, [])
 

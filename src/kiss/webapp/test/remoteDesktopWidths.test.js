@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const {MEDIA} = require('./simplify2_harness');
 const {makeResizePage: makePage, panelW} = require('./panel_resize_helpers');
-const {inlineDesignTokens} = require('./designTokens');
+const {inlineDesignTokens, lastCssRule} = require('./designTokens');
 
 function sidebarW(win) {
   return panelW(win, '--sidebar-w');
@@ -20,14 +20,10 @@ const CSS = inlineDesignTokens(
   fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
 );
 
+// The last rule for the selector: the one the cascade applies, so a later
+// same-selector override cannot hide behind an earlier match.
 function cssRule(selector) {
-  const source = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(source + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`, 'g');
-  let body = null;
-  let m;
-  while ((m = re.exec(CSS)) !== null) body = m[1];
-  assert.ok(body !== null, `CSS rule for ${selector} missing`);
-  return body;
+  return lastCssRule(CSS, selector);
 }
 
 // jsdom reports window.innerWidth = 1024; the default docked width is

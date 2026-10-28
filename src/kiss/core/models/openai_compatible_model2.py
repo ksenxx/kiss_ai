@@ -36,6 +36,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _get_attr_or_key,
     accepted_request_params,
+    checked_nonempty,
     strip_system_cache_break,
 )
 from kiss.core.models.openai_compatible_model import (
@@ -44,6 +45,7 @@ from kiss.core.models.openai_compatible_model import (
     _conversation_with_tools_prompt,
     _extract_deepseek_reasoning,
     _function_call_entry,
+    _function_call_item,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,9 +74,21 @@ def _content_index(event: Any) -> int:
     return int(getattr(event, "content_index", 0) or 0)
 
 
-def _move_markers(
-    args_from_delta: set[int], args_from_added: set[int], src: int, dst: int
-) -> None:
+_PART_TEXT_FIELD = {"input_text": "text", "output_text": "text", "refusal": "refusal"}
+
+
+def _part_is_blank(part: dict[str, Any]) -> bool:
+    """Return whether a text-bearing Responses content *part* holds only whitespace.
+
+    Only ``input_text``, ``output_text`` and ``refusal`` parts can be
+    blank; every other part type (images, files) is never blank.
+    """
+    ptype = part.get("type")
+    field = _PART_TEXT_FIELD.get(ptype) if isinstance(ptype, str) else None
+    return field is not None and not str(part.get(field, "")).strip()
+
+
+def _move_markers(args_from_delta: set[int], args_from_added: set[int], src: int, dst: int) -> None:
     """Re-key the argument-source markers of the slot moved from *src* to *dst*.
 
     Markers already at *dst* stay, so a slot merged into an occupant keeps
@@ -224,11 +238,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         if self.token_callback is not None:
             return self._stream_request(self.client.responses.create, kwargs, self._consume_stream)
-        response = self.client.responses.create(**kwargs)
         # Billed already (see _consume_stream): a failed status, a parse
         # error or the caller's tool-call validation raising from here on
-        # must leave the usage for the agent's partial-usage drain.
-        self._rejected_response = response
+        # must leave the usage for the agent's partial-usage drain, so
+        # _blocking_request records it in _rejected_response.
+        response = self._blocking_request(self.client.responses.create, kwargs)
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
         return content, tool_calls, response, _StreamOrder({}, None)
@@ -355,14 +369,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if isinstance(content, list):
                 filtered: list[Any] = []
                 for part in content:
-                    if isinstance(part, dict):
-                        ptype = part.get("type")
-                        if ptype in ("input_text", "output_text"):
-                            if not str(part.get("text", "")).strip():
-                                continue
-                        elif ptype == "refusal":
-                            if not str(part.get("refusal", "")).strip():
-                                continue
+                    if isinstance(part, dict) and _part_is_blank(part):
+                        continue
                     filtered.append(part)
                 if filtered:
                     new_item = dict(item)
@@ -707,7 +715,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         Single source of truth for parameter shaping shared by both
         :meth:`_build_request_kwargs` (normal path) and
-        :meth:`_request_with_tools_prompt` (DeepSeek fallback).
+        :meth:`_request_with_tools_prompt` (DeepSeek fallback); it first
+        re-syncs the SDK client with the current endpoint inputs
+        (:meth:`_ensure_client`).
 
         Translations applied:
 
@@ -741,6 +751,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Raises:
             KISSError: When the conversation is empty after normalisation.
         """
+        self._ensure_client()
         kwargs = self._config_request_params()
         system_instruction = self.system_instruction_text()
         reasoning_effort = kwargs.pop("reasoning_effort", None)
@@ -761,13 +772,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             kwargs["text"] = text_cfg
 
         kwargs["model"] = self._api_model_name
-        normalized = self._normalize_input(input_items)
-        if not normalized:
-            raise KISSError(
-                "Cannot generate response: all input items have empty or "
-                "whitespace-only content. At least one item with "
-                "non-whitespace content is required."
-            )
+        normalized = checked_nonempty(self._normalize_input(input_items))
         kwargs["input"] = normalized
 
         # A conversation handed over from a Chat Completions model
@@ -778,22 +783,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             normalized, system_instruction
         ):
             kwargs["instructions"] = system_instruction
-        if reasoning_effort is not None:
-            existing = kwargs.get("reasoning")
-            if isinstance(existing, dict):
-                existing = dict(existing)
-            else:
-                existing = {}
-            existing["effort"] = reasoning_effort
-            kwargs["reasoning"] = existing
         reasoning_cfg = kwargs.get("reasoning")
-        if (
-            isinstance(reasoning_cfg, dict)
-            and "effort" in reasoning_cfg
-            and "summary" not in reasoning_cfg
-        ):
-            reasoning_cfg = dict(reasoning_cfg)
-            reasoning_cfg["summary"] = "auto"
+        reasoning_cfg = dict(reasoning_cfg) if isinstance(reasoning_cfg, dict) else {}
+        if reasoning_effort is not None:
+            reasoning_cfg["effort"] = reasoning_effort
+        if "effort" in reasoning_cfg:
+            reasoning_cfg.setdefault("summary", "auto")
             kwargs["reasoning"] = reasoning_cfg
         kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
@@ -1065,7 +1060,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         return None
 
     @staticmethod
-    def _function_call_item(tc: dict[str, str]) -> dict[str, Any]:
+    def _streamed_call_item(tc: dict[str, str]) -> dict[str, Any]:
         """Build the conversation ``function_call`` item for a streamed call.
 
         Args:
@@ -1076,16 +1071,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             The Responses-API ``function_call`` input item; the stream's
             item id is kept under ``id`` when the provider sent one.
         """
-        fc_item: dict[str, Any] = {
-            "type": "function_call",
-            "call_id": tc.get("id", ""),
-            "name": tc.get("name", ""),
-            "arguments": tc.get("arguments", ""),
-        }
-        item_id = tc.get("item_id", "")
-        if item_id:
-            fc_item["id"] = item_id
-        return fc_item
+        return _function_call_item(
+            tc.get("id", ""), tc.get("name", ""), tc.get("arguments", ""), tc.get("item_id", "")
+        )
 
     def _consume_stream(
         self,
@@ -1258,10 +1246,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     if name and not slot.get("name"):
                         slot["name"] = name
                     if args:
-                        existing_args = slot.get("arguments", "")
-                        if not existing_args:
-                            slot["arguments"] = args
-                        elif idx in args_from_delta:
+                        if not slot.get("arguments") or idx in args_from_delta:
                             slot["arguments"] = args
                         args_from_added.add(idx)
                     if item_id:
@@ -1779,7 +1764,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             for tc_i, tc in enumerate(raw_tool_calls):
                 if tc.get("id") in existing_call_ids or tc.get("item_id") in existing_item_ids:
                     continue
-                fc_item = self._function_call_item(tc)
+                fc_item = self._streamed_call_item(tc)
                 item_id = tc.get("item_id", "")
                 resolved_order = item_output_indexes.get(item_id)
                 if resolved_order is None:
@@ -1818,7 +1803,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if content:
                 self.conversation.append({"role": "assistant", "content": content})
             for tc in raw_tool_calls:
-                self.conversation.append(self._function_call_item(tc))
+                self.conversation.append(self._streamed_call_item(tc))
         self._pending_function_calls = [
             {"name": tc.get("name", ""), "call_id": tc.get("id", "")} for tc in raw_tool_calls
         ]
@@ -1858,12 +1843,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             self.conversation.append({"role": "assistant", "content": content})
         for fc in function_calls:
             self.conversation.append(
-                {
-                    "type": "function_call",
-                    "call_id": fc["id"],
-                    "name": fc["name"],
-                    "arguments": json.dumps(fc.get("arguments", {})),
-                }
+                _function_call_item(fc["id"], fc["name"], json.dumps(fc["arguments"]))
             )
         self._pending_function_calls = [
             {"name": fc["name"], "call_id": fc["id"]} for fc in function_calls

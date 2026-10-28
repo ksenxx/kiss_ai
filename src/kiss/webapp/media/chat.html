@@ -6,13 +6,15 @@
   {{HEAD_SCRIPT}}
   <link href="{{STYLE_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
-  <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
   <link rel="icon" type="image/svg+xml" href="{{ICON_SVG_HREF}}">
   <link rel="icon" type="image/png" sizes="512x512" href="{{ICON_PNG_HREF}}">
   <link rel="apple-touch-icon" href="{{ICON_PNG_HREF}}">
   <link rel="manifest" href="/manifest.webmanifest">
   <title>{{PAGE_TITLE}}</title>
   {{HEAD_STYLE}}
+  <!-- The brand skin is the LAST stylesheet so its rules beat main.css
+       and everything HEAD_STYLE injects (layout sheet, palettes). -->
+  <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
 </head>
 <body {{BODY_CLASS_ATTR}}>
   <div id="kiss-server-loading" role="status" aria-live="polite">
@@ -132,11 +134,11 @@
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></span>
                   <span class="more-item-label">Git Commit</span>
                 </button>
-                <button id="browser-btn" class="more-menu-item" role="menuitem" data-tooltip="Open the browser of the machine running KISS Sorcar as a tab" aria-label="Open browser">
+                <button id="browser-btn" class="more-menu-item" role="menuitem" data-tooltip="Open the browser of the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open browser">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
                   <span class="more-item-label">Browser</span>
                 </button>
-                <button id="terminal-btn" class="more-menu-item" role="menuitem" data-tooltip="Open a terminal on the machine running KISS Sorcar as a tab" aria-label="Open terminal">
+                <button id="terminal-btn" class="more-menu-item" role="menuitem" data-tooltip="Open a terminal on the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open terminal">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
                   <span class="more-item-label">Terminal</span>
                 </button>
@@ -520,7 +522,7 @@
           <input type="text" id="tricks-search" placeholder="Search promptlets..." aria-label="Search promptlets">
           <button class="search-clear-btn" id="tricks-search-clear" style="display:none;" aria-label="Clear search">&times;</button>
         </div>
-        <!-- Add row: the daemon appends the text to ~/.kiss/MY_INJECTION.md
+        <!-- Add row: the daemon appends the text to ~/<home dir>/MY_INJECTION.md
              (addTrick) and answers with a tricksData list that repaints
              #tricks-list. -->
         <div id="tricks-add-row">
@@ -573,6 +575,10 @@
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-memory" checked>
             Use persistent memory
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-chrome-bridge">
+            Drive my Chrome: serve the "{{PRODUCT_NAME}} Bridge" extension (~/{{HOME_DIR}}/chrome_extension) from daemon start
           </label>
           <label class="config-label">Auto submit spoken task
             <select id="cfg-voice-auto-submit">

@@ -95,9 +95,8 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         os.environ["KISS_TEST_SPOOL"] = str(self._spool)
         self.addCleanup(os.environ.pop, "KISS_TEST_SENDS", None)
         os.environ["KISS_TEST_SENDS"] = str(self._sends)
-        _config.save({"phone_number": "+1BOT"})
+        _config.save({"phone_number": "+1BOT"})  # loaded by the runner's connect()
         self._backend = SignalChannelBackend()
-        self._backend._phone_number = "+1BOT"
         # The daemon stand-in the runner's real ``_launch_task`` reaches:
         # ``run_agent_via_kiss_web`` resolves its endpoint file from the
         # module-level ``_ENDPOINT_FILE_OVERRIDE`` when none is passed.
@@ -106,10 +105,6 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
                 _kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", text="handled", chat_id="chat-1"
             )
         )
-
-    def _launched_prompts(self) -> list[str]:
-        """Prompts of the ``run`` commands the daemon received, in order."""
-        return [str(command["prompt"]) for command in self._daemon.run_commands]
 
     def _make_runner(self) -> ChannelRunner:
         """Build a runner monitoring contact +1AAA with persistent state."""
@@ -137,7 +132,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 0)
-        self.assertEqual(self._launched_prompts(), [])
+        self.assertEqual(self._daemon.launched_prompts, [])
         self.assertEqual(self._sent_recipients(), [])
         # The destructively consumed envelope is parked, not lost.
         self.assertEqual(self._spool.read_text(encoding="utf-8"), "")
@@ -149,7 +144,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         # A later tick with an empty spool still does not act on it.
         processed = runner.run_once()
         self.assertEqual(processed, 0)
-        self.assertEqual(self._launched_prompts(), [])
+        self.assertEqual(self._daemon.launched_prompts, [])
         self.assertEqual(self._sent_recipients(), [])
         state = load_channel_state(self._state_path)
         self.assertEqual(len(state["pending_envelopes"]), 1)
@@ -160,8 +155,8 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertEqual(len(self._launched_prompts()), 1)
-        self.assertIn("hello bot", self._launched_prompts()[0])
+        self.assertEqual(len(self._daemon.launched_prompts), 1)
+        self.assertIn("hello bot", self._daemon.launched_prompts[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
         # The real launch stored the daemon's chat id for the thread.
         state = load_channel_state(self._state_path)
@@ -179,9 +174,9 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertEqual(len(self._launched_prompts()), 1)
-        self.assertIn("real question", self._launched_prompts()[0])
-        self.assertNotIn("eve says hi", self._launched_prompts()[0])
+        self.assertEqual(len(self._daemon.launched_prompts), 1)
+        self.assertIn("real question", self._daemon.launched_prompts[0])
+        self.assertNotIn("eve says hi", self._daemon.launched_prompts[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
         state = load_channel_state(self._state_path)
         self.assertEqual(
@@ -197,7 +192,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertIn("parked question", self._launched_prompts()[0])
+        self.assertIn("parked question", self._daemon.launched_prompts[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
         state = load_channel_state(self._state_path)
         self.assertEqual(state["pending_envelopes"], [])

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.handoff_digest import (
+    LAST_CALLS,
     describe_written_files,
     handoff_digest,
     parse_tool_calls,
@@ -147,7 +148,7 @@ def test_handoff_digest_sections() -> None:
     with tempfile.TemporaryDirectory() as td:
         written = Path(td) / "p.py"
         written.write_bytes(b"def parse():\n    pass\n")
-        digest = handoff_digest(_messages(), [written], last_calls=4)
+        digest = handoff_digest(_messages(), {written})
     assert digest.startswith("## Task\nFix the parser.")
     assert "## Last progress summaries the session wrote\n- read p.py\n- ran tests" in digest
     assert f"## Files written by the task\n- {written} (22 bytes): parse" in digest
@@ -160,35 +161,37 @@ def test_handoff_digest_sections() -> None:
         in digest
     )
     assert (
-        "## Last 4 of 6 tool calls (oldest first)\n"
-        "3. Bash(command=pytest, description=Test) -> FAILED"
+        "## Last 6 of 6 tool calls (oldest first)\n"
+        "1. Read(file_path=p.py) -> 1: def parse():"
     ) in digest
     assert "6. not valid python() -> REFUSED: no" in digest
+    # Only the newest LAST_CALLS calls are listed, numbered from their
+    # position in the whole trajectory.
+    padding = [
+        m
+        for i in range(LAST_CALLS - 4)
+        for m in (
+            {"role": "model", "content": _call("note", text=f"n{i}")},
+            {"role": "user", "content": f"[note]: noted n{i}"},
+        )
+    ]
+    windowed = handoff_digest(_messages() + padding, [])
+    assert (
+        f"## Last {LAST_CALLS} of {LAST_CALLS + 2} tool calls (oldest first)\n"
+        "3. Bash(command=pytest, description=Test) -> FAILED"
+    ) in windowed
+    assert "1. Read(" not in windowed
+    assert f"{LAST_CALLS + 2}. note(text=n{LAST_CALLS - 5}) -> noted" in windowed
     # A long result is clipped and its full length named.
     long_messages = [
         {"role": "user", "content": "t"},
         {"role": "model", "content": _call("Bash", command="x")},
         {"role": "user", "content": "[Bash]: " + "y" * 1000},
     ]
-    assert "y" * 300 + " … [1,000 chars]" in handoff_digest(long_messages, [])
+    assert "y" * 300 + " …[700 more chars]" in handoff_digest(long_messages, [])
     # No summaries, files, errors or calls: only the task section.
     only_task = [{"role": "user", "content": "just a task"}]
     assert handoff_digest(only_task, []) == "## Task\njust a task\n"
-    # Framework recaps are not in the messages; they fill the slots the model's own
-    # summaries leave empty and never displace one, however many there are.
-    with_recaps = handoff_digest(_messages(), [], recaps=["- steps 1-10: read, ran"])
-    assert (
-        "## Last progress summaries the session wrote\n- steps 1-10: read, ran\n\n"
-        "- read p.py\n- ran tests\n"
-    ) in with_recaps
-    many = [f"- steps {n * 10 + 1}-{n * 10 + 10}: more" for n in range(6)]
-    crowded = handoff_digest(_messages(), [], recaps=many)
-    assert "- read p.py\n- ran tests" in crowded
-    assert "steps 41-50: more\n\n- steps 51-60: more\n\n- read p.py" in crowded
-    assert "steps 31-40" not in crowded
-    assert handoff_digest(only_task, [], recaps=["- steps 1-10: x"]) == (
-        "## Task\njust a task\n\n## Last progress summaries the session wrote\n- steps 1-10: x\n"
-    )
 
 
 def note(text: str) -> str:

@@ -32,13 +32,8 @@ from kiss.agents.seas.review_paper.review_paper_sea import ReviewPaperSea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
-    system_message,
-    tool_names,
-    tool_results,
-)
+from kiss.tests.agents.seas.conftest import gate
+from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
     tool_call_body,
@@ -165,13 +160,19 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
     assert [t.__name__ for t in sea.tools([print])] == ["print", "read_paper", "check_review"]
-    # Browse, skip the classifier; a ``run_agent`` dispatch waits two hours.
+    # Browse, skip the classifier, route through the bestrouter; a
+    # ``run_agent`` dispatch waits two hours.
     assert sea.settings({}) == {
         "use_web_tools": True,
         "auto_classify": False,
         "timeout": 2 * 3600,
+        "model": "bestrouter",
     }
-    assert sea.settings({"model": "m"}) == {"model": "m", **sea.settings({})}
+    # The SEA's model wins over the base's; other base keys pass through.
+    assert sea.settings({"model": "m", "use_memory": True}) == {
+        "use_memory": True,
+        **sea.settings({}),
+    }
     assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == (
         sea.settings({})
     )
@@ -353,29 +354,21 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     paper.write_text("\\section{Intro}\nWe measure 329 tasks.", encoding="utf-8")
     review = tmp_path / "review.txt"
     review.write_text(_SLOPPY_REVIEW, encoding="utf-8")
-    run = sea_commands.evaluate_sea(
-        [ReviewPaperSea()], f"Review {paper} for ICLR 2027; write to {review}."
+    results = assert_appending_sea_run(
+        ReviewPaperSea(),
+        f"Review {paper} for ICLR 2027; write to {review}.",
+        [
+            tool_call_body("read_paper", {"paper_path": str(paper)}, prompt_tokens=500),
+            tool_call_body("check_review", {"review_path": str(review)}, prompt_tokens=600),
+            finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=700),
+        ],
+        tmp_path,
+        tools={"read_paper", "check_review", "Bash", "run_parallel", "go_to_url", "finish"},
+        system_prompt=review_paper_sea.SYSTEM_PROMPT,
+        anchors=("# Paper-reviewing agent", "Judge the novelty"),
+        summary="7 gate(s) failed",
     )
-    script = [
-        tool_call_body("read_paper", {"paper_path": str(paper)}, prompt_tokens=500),
-        tool_call_body("check_review", {"review_path": str(review)}, prompt_tokens=600),
-        finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=700),
-    ]
-    parsed, agentic = run_sea(run, script, tmp_path, max_steps=5)
-    assert parsed["success"] is True
-    assert "7 gate(s) failed" in parsed["summary"]
-
-    assert len(agentic) == 3
-    for request in agentic:
-        names = tool_names(request)
-        expected = {"read_paper", "check_review", "Bash", "run_parallel", "go_to_url", "finish"}
-        assert expected <= names, names
-        system = system_message(request)
-        assert not system.startswith(review_paper_sea.SYSTEM_PROMPT)
-        assert "# Paper-reviewing agent" in system
-        assert "Judge the novelty" in system
-    results = tool_results(agentic[2])
-    assert len(results) == 2, agentic[2]["messages"]
+    assert len(results) == 2, results
     assert f"paper: {paper} (1 page)\n=== page 1 ===\n\\section{{Intro}}" in results[0]
     assert "summary: 7 gate(s) failed" in results[1]
     assert "reviewer boilerplate: 4 (limit 0) FAIL" in results[1]

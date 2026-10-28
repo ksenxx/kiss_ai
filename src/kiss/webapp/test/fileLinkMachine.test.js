@@ -9,11 +9,11 @@
 
 // File links of a tab bound to a registered machine (main.js against
 // the real chat.html):
-//   * the `checkPaths` for a bound tab's transcript is stamped with the
-//     tab's machine, and each candidate span with data-path-machine;
-//   * the `pathsExist` reply (stamped `machine` by the daemon) promotes
-//     the span, and a click posts an `openFile` stamped with the machine;
-//   * a tab of this machine sends neither stamp;
+//   * a `path:line` link of a bound tab keeps the machine stamp on its
+//     check and its `openFile` (the plain path case is pinned by
+//     fileLinksOfMachineBoundTab.test.js);
+//   * a tab of this machine sends neither stamp, also when the tab is
+//     in the background;
 //   * the checks re-issued after a reconnect keep the machine stamp;
 //   * the machine is the daemon's binding (where the shown task ran),
 //     never the drop-down's unsubmitted pick, and a reply stamped with
@@ -23,7 +23,7 @@
 
 const assert = require('assert');
 const {makePage, send, pickMachine} = require('./simplify2_harness');
-const {findLinks} = require('./file_link_helpers');
+const {findLinks, checkPathCommands: checks} = require('./file_link_helpers');
 
 const BOX_TAB = 'tab-on-box';
 const HOME_TAB = 'tab-at-home';
@@ -66,10 +66,6 @@ function makeDomPage() {
   return {win, posted, close: () => win.close()};
 }
 
-function checks(posted) {
-  return posted.filter(m => m.type === 'checkPaths');
-}
-
 function answer(win, check) {
   const results = {};
   for (const p of check.paths) results[p] = true;
@@ -87,43 +83,6 @@ function linkFor(win, p) {
   return findLinks(win, p)[0];
 }
 
-function testBoundTabChecksAndOpensOnTheMachine() {
-  const wv = makeDomPage();
-  send(wv.win, {type: 'prompt', text: 'see src/box.py please', tabId: BOX_TAB});
-  send(wv.win, {type: 'text_end', tabId: BOX_TAB});
-  const sent = checks(wv.posted);
-  assert.strictEqual(sent.length, 1, 'one checkPaths for the prompt');
-  assert.strictEqual(
-    sent[0].machine,
-    'box',
-    'the check is stamped with the machine',
-  );
-  assert.strictEqual(sent[0].tabId, BOX_TAB);
-  assert.deepStrictEqual(Array.from(sent[0].paths), ['src/box.py']);
-  const span = wv.win.document.querySelector(
-    '#output [data-path-candidate], #output [data-path]',
-  );
-  assert.ok(span, 'the path became a candidate span');
-  assert.strictEqual(span.getAttribute('data-path-machine'), 'box');
-  answer(wv.win, sent[0]);
-  const link = linkFor(wv.win, 'src/box.py');
-  assert.ok(link, "the machine's reply promoted the link");
-  link.dispatchEvent(new wv.win.MouseEvent('click', {bubbles: true}));
-  const opens = wv.posted.filter(m => m.type === 'openFile');
-  assert.strictEqual(opens.length, 1, 'a click posts one openFile');
-  assert.strictEqual(opens[0].path, 'src/box.py');
-  assert.strictEqual(
-    opens[0].machine,
-    'box',
-    'the openFile goes to the machine',
-  );
-  assert.strictEqual(opens[0].tabId, BOX_TAB);
-  wv.close();
-  console.log(
-    "  ok - a bound tab's links are checked and opened on its machine",
-  );
-}
-
 function testBoundTabLineSuffixKeepsTheMachine() {
   const wv = makeDomPage();
   send(wv.win, {
@@ -134,7 +93,8 @@ function testBoundTabLineSuffixKeepsTheMachine() {
   send(wv.win, {type: 'text_end', tabId: BOX_TAB});
   const sent = checks(wv.posted);
   assert.strictEqual(sent.length, 1);
-  assert.deepStrictEqual(Array.from(sent[0].paths), ['src/box.py']);
+  assert.strictEqual(sent[0].machine, 'box', 'the check carries the machine');
+  assert.deepStrictEqual(sent[0].paths, ['src/box.py']);
   answer(wv.win, sent[0]);
   const link = linkFor(wv.win, 'src/box.py:12');
   assert.ok(link, 'the path:line link is promoted');
@@ -189,7 +149,7 @@ function testReissueAfterReconnectKeepsTheMachine() {
   const sent = checks(wv.posted);
   assert.strictEqual(sent.length, 2, 'the unanswered check is re-issued');
   assert.strictEqual(sent[1].machine, 'box');
-  assert.deepStrictEqual(Array.from(sent[1].paths), ['src/box.py']);
+  assert.deepStrictEqual(sent[1].paths, ['src/box.py']);
   wv.close();
   console.log('  ok - re-issued checks keep the machine stamp');
 }
@@ -304,7 +264,6 @@ function testHomeTabLinksIgnoreADropDownPick() {
   console.log("  ok - a home tab's links ignore the drop-down pick");
 }
 
-testBoundTabChecksAndOpensOnTheMachine();
 testBoundTabLineSuffixKeepsTheMachine();
 testHomeTabSendsNoMachine();
 testReissueAfterReconnectKeepsTheMachine();

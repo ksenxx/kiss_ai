@@ -43,6 +43,7 @@ from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_workflow_bugs import (  # noqa: F401
     _make_repo,
 )
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
@@ -69,7 +70,7 @@ def _make_wt_with_commit(
         original_branch="main",
         wt_dir=wt_dir,
     )
-    agent._wt = wt
+    seed_worktree(agent, wt)
     return wt
 
 
@@ -240,12 +241,12 @@ class TestBug4CloseTabOrphansWorktree:
         wt_dir = self.repo / ".kiss-worktrees" / slug
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(self.repo, branch, "main")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=self.repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
-        )
+        ))
         assert agent._wt_pending
         head_before = self._main_head()
 

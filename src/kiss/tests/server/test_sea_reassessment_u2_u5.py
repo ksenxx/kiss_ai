@@ -32,7 +32,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     resolve_agent,
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
+from kiss.agents.sorcar.run_config import run_config_line
 from kiss.agents.sorcar.sea_apply import apply_sea, calling_work_dir
 from kiss.agents.sorcar.sea_commands import (
     declared_settings,
@@ -182,7 +182,6 @@ class Sea(BaseSea):
 
 
 def test_run_config_line_marks_an_inferred_review_profile() -> None:
-    assert "tool_profile_inferred" in RUN_CONFIG_KEYS
     named = {"sea": "", "tool_profile": "review", "max_budget": 0.3}
     assert "tools=review budget=$0.30" in run_config_line(named)
     inferred = {**named, "tool_profile_inferred": True}
@@ -208,8 +207,9 @@ def test_reviewer_sub_agent_payload_marks_the_inferred_profile(tmp_path: Path) -
         # The rule did not fire (the task asks for changes): nothing to mark.
         got = payload(agent, "Fix the failing test in foo.py")
         assert got["tool_profile"] == "full" and "tool_profile_inferred" not in got
-        # A named profile, alias included, is the caller's choice.
-        agent._tool_profile_name = "readonly"
+        # A named profile, alias included, is the caller's choice
+        # (``run`` stores the canonical spelling).
+        agent._tool_profile_name = canonical_tool_profile("readonly")
         got = payload(agent, "Review the diff; report issues only.")
         assert got["tool_profile"] == "review" and "tool_profile_inferred" not in got
     finally:

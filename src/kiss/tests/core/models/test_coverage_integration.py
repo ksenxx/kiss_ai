@@ -21,8 +21,8 @@ from unittest import TestCase
 import pytest
 
 from kiss.core.models.model import (
-    Model,
     _parse_text_based_tool_calls,
+    _python_type_to_json_schema,
 )
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.models.openai_compatible_model import (
@@ -31,30 +31,20 @@ from kiss.core.models.openai_compatible_model import (
 
 
 class TestModelSchemaConversion(TestCase):
-    def _get_model(self) -> Model:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-        return OpenAICompatibleModel(
-            model_name="gpt-4o-mini",
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-        )
-
     def test_optional_type_schema(self) -> None:
-        m = self._get_model()
-        schema = m._python_type_to_json_schema(int | None)
+        schema = _python_type_to_json_schema(int | None)
         assert schema == {"type": "integer"}
 
     def test_union_type_schema(self) -> None:
-        m = self._get_model()
-        schema = m._python_type_to_json_schema(str | int)
+        schema = _python_type_to_json_schema(str | int)
         assert "anyOf" in schema
 
 
 class TestModelCallbackLoop(TestCase):
-
     def test_invoke_callback_no_callback(self) -> None:
         """Cover the early return when token_callback is None."""
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
         m = OpenAICompatibleModel(
             model_name="gpt-4o-mini",
             base_url="https://api.openai.com/v1",
@@ -78,8 +68,10 @@ def _noop_callback(token: str) -> None:
 
 def _make_collector_callback(collector: list[str]):
     """Create a token callback that collects tokens into a list."""
+
     def _cb(token: str) -> None:
         collector.append(token)
+
     return _cb
 
 
@@ -113,6 +105,7 @@ class TestOpenAICompatibleModelInit:
         assert "gpt-4" in s
         assert "http://localhost:8080" in s
         assert repr(m) == s
+
 
 class TestOpenAICompatibleModelInitialize:
     def test_initialize_with_pdf_attachment(self) -> None:
@@ -207,9 +200,7 @@ def _make_stream_chunks(
                     "id": "chatcmpl-test",
                     "object": "chat.completion.chunk",
                     "model": "fake-model",
-                    "choices": [
-                        {"index": 0, "delta": {"content": char}, "finish_reason": None}
-                    ],
+                    "choices": [{"index": 0, "delta": {"content": char}, "finish_reason": None}],
                 }
             )
         )
@@ -221,9 +212,7 @@ def _make_stream_chunks(
                         "id": "chatcmpl-test",
                         "object": "chat.completion.chunk",
                         "model": "fake-model",
-                        "choices": [
-                            {"index": 0, "delta": delta, "finish_reason": None}
-                        ],
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
                     }
                 )
             )
@@ -362,13 +351,9 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             tc_json = json.dumps(
                 {"tool_calls": [{"name": "finish", "arguments": {"result": "42"}}]}
             )
-            chunks = _make_stream_chunks(
-                content=f"<think>reasoning</think>{tc_json}"
-            )
+            chunks = _make_stream_chunks(content=f"<think>reasoning</think>{tc_json}")
         elif mode == "deepseek":
-            chunks = _make_stream_chunks(
-                content="<think>reasoning</think>The answer is 42"
-            )
+            chunks = _make_stream_chunks(content="<think>reasoning</think>The answer is 42")
         elif mode == "reasoning_content":
             chunks = []
             chunks.append(
@@ -511,9 +496,7 @@ class TestOpenAICompatibleModelGenerateWithTools:
         assert len(fc) == 1
         assert fc[0]["arguments"] == {}
 
-    def test_deepseek_text_based_tools_with_system_message(
-        self, fake_openai_server: str
-    ) -> None:
+    def test_deepseek_text_based_tools_with_system_message(self, fake_openai_server: str) -> None:
         """Cover the system message branch in _generate_with_text_based_tools."""
         FakeOpenAIHandler.response_mode = "deepseek"
         m = OpenAICompatibleModel(

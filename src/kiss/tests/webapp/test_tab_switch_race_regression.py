@@ -1033,9 +1033,13 @@ class TestPerTabT0(unittest.TestCase):
         # sheetOrModalOpen also counts the sign-in window; the page has
         # none here (signinModal is null).
         signin_open_src = _extract_function(self.js, "signinWindowOpen")
+        # ...nor when the keyboard is in the content pane (the editor, a
+        # terminal or browser screen); there is no content area here.
+        content_focus_src = _extract_function(self.js, "contentViewHasFocus")
         result = _run_node(_make_test_script(
             r"""
             var signinModal = null;
+            var contentArea = null;
             var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
             var activeTabId = 1;
             var t0 = 111;
@@ -1060,7 +1064,8 @@ class TestPerTabT0(unittest.TestCase):
             var inp = { focus: function() { focusCalls++; } };
             // setReady() only refocuses the composer on desktop clients
             // and only when nothing else owns the keyboard (main.js:
-            // `if (!isMobileRemote && !composerFocusWouldSteal()) inp.focus();`).
+            // `if (!isMobileRemote && !composerFocusWouldSteal() &&
+            //      !contentViewHasFocus()) inp.focus();`).
             var isMobileRemote = false;
             var openSheets = [];
             var serverResetConfirmModal = null;
@@ -1072,6 +1077,7 @@ class TestPerTabT0(unittest.TestCase):
             + signin_open_src
             + sheet_open_src
             + focus_steal_src
+            + content_focus_src
             + set_ready_src
             + r"""
             setReady('Done (4s)', 1, 1000, 5000);

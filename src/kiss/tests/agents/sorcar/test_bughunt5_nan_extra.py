@@ -182,14 +182,14 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         with th._rw_lock.read_lock():
             sub_row = db.execute(
                 "SELECT "
-                + th._HISTORY_NOT_SUBAGENT
+                + th.NOT_SUBAGENT
                 + " AS not_sub, parent_task_id "
                 "FROM task_history WHERE id = ?",
                 (sub_id,),
             ).fetchone()
             parent_row = db.execute(
                 "SELECT "
-                + th._HISTORY_NOT_SUBAGENT
+                + th.NOT_SUBAGENT
                 + " AS not_sub, parent_task_id "
                 "FROM task_history WHERE id = ?",
                 (parent_id,),

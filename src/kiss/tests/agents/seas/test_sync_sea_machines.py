@@ -71,7 +71,8 @@ class TestSyncOnMachines(TwoDaemonsCase):
         """A bare origin with ``main``, clones ``mine``/``theirs``/``colleague``.
 
         Returns ``mine``, ``theirs``, the colleague's pushed commit and
-        the box's own unpushed commit.
+        the box's own unpushed commit; the box's checkout also has an
+        uncommitted file, ``c.txt``, for its sync to commit.
         """
         mine, theirs, colleague = remote_and_clones(
             Path(self.tmpdir), "mine", "theirs", "colleague"
@@ -79,6 +80,7 @@ class TestSyncOnMachines(TwoDaemonsCase):
         pushed = commit(colleague, "colleague", {"a.txt": "a\n"})
         git(colleague, "push", "-q", "origin", "main")
         own = commit(theirs, "box", {"b.txt": "b\n"})
+        (theirs / "c.txt").write_text("left uncommitted on the box\n", encoding="utf-8")
         return mine, theirs, pushed, own
 
     def _box_has_opened(self, *dirs: Path) -> None:
@@ -122,12 +124,19 @@ class TestSyncOnMachines(TwoDaemonsCase):
         result = next(m for m in seen if m["type"] == "result" and m.get("tabId") == tab)
         self.assertIn("box merged and pushed", json.dumps(result))
 
-        # Git: mine fast-forwarded to the colleague's commit, the box
-        # merged it into its own commit and pushed, mine got the merge.
+        # Git: mine fast-forwarded to the colleague's commit; the box
+        # committed its uncommitted c.txt on top of its own commit, merged
+        # the colleague's in and pushed; mine got the merge (c.txt included).
         head = git(theirs, "rev-parse", "HEAD")
-        self.assertEqual(git(theirs, "rev-parse", "HEAD^1"), own)
+        gathered = git(theirs, "rev-parse", "HEAD^1")
+        self.assertEqual(git(theirs, "rev-parse", f"{gathered}^"), own)
+        self.assertEqual(git(theirs, "show", "--format=", "--name-only", gathered), "c.txt")
         self.assertEqual(git(theirs, "rev-parse", "HEAD^2"), pushed)
+        self.assertEqual(git(theirs, "status", "--porcelain"), "")
         self.assertEqual(git(mine, "rev-parse", "HEAD"), head)
+        self.assertEqual(
+            (mine / "c.txt").read_text(encoding="utf-8"), "left uncommitted on the box\n"
+        )
         self.assertEqual(git(mine, "ls-remote", "origin", "refs/heads/main").split()[0], head)
 
         # The local model: the sync system prompt, the task listing the
@@ -167,6 +176,9 @@ class TestSyncOnMachines(TwoDaemonsCase):
                 f"(origin = {origin_url})."
             ),
             box_report,
+        )
+        self.assertIn(
+            f"Committed 1 uncommitted change(s) on main as {gathered[:12]}: c.txt\n", box_report
         )
         self.assertIn(f"Merged origin/main: now at {head[:12]}", box_report)
         self.assertIn("Budget: $0.0000/$2.00", box_report)

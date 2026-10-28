@@ -21,8 +21,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 const STORED = {
   max_budget: 100,
@@ -53,10 +53,10 @@ function testClearedKeyIsSentAsEmptyString() {
     'a deliberately cleared key must be serialized as "" so the ' +
       'daemon deletes it from the shell RC',
   );
-  assert.strictEqual(
-    msg.apiKeys.OPENAI_API_KEY,
-    'sk-keep',
-    'an untouched populated key is re-sent unchanged',
+  assert.ok(
+    !('OPENAI_API_KEY' in msg.apiKeys),
+    'an untouched key is left out: the daemon merges the payload and ' +
+      'keeps it',
   );
   win.close();
   console.log('  ok - a cleared key field is sent as an empty string');
@@ -74,10 +74,12 @@ function testUntouchedEmptyKeysStayOmitted() {
     config: STORED,
     apiKeys: {OPENAI_API_KEY: 'sk-keep'},
   });
+  // An unrelated edit gives the close something to save.
+  typeInto(win, 'cfg-custom-headers', 'X-Trace: 1');
   closeSettings(win);
 
   const msg = lastMsg(posted, 'saveConfig');
-  assert.ok(msg, 'closing a populated panel still saves the form');
+  assert.ok(msg, 'closing the edited panel saves the edit');
   assert.ok(
     !('ANTHROPIC_API_KEY' in msg.apiKeys),
     'a key box that was empty all along must be omitted from the payload',
@@ -86,9 +88,12 @@ function testUntouchedEmptyKeysStayOmitted() {
     !('GEMINI_API_KEY' in msg.apiKeys),
     'no unedited empty box may be serialized',
   );
-  assert.strictEqual(msg.apiKeys.OPENAI_API_KEY, 'sk-keep');
+  assert.ok(
+    !('OPENAI_API_KEY' in msg.apiKeys),
+    'an untouched populated box is omitted too (the daemon keeps it)',
+  );
   win.close();
-  console.log('  ok - untouched empty key boxes are omitted');
+  console.log('  ok - untouched key boxes are omitted');
 }
 
 // The panel-never-populated path (configData never arrived) sends only

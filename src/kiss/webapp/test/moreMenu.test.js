@@ -20,8 +20,9 @@
 const assert = require('assert');
 const {makePage, click} = require('./simplify2_harness');
 
-function testMenuHoldsEveryMovedAction() {
-  const {win} = makePage();
+// Tests 1 and 2 read the static markup, so they run on the page of
+// test 3 before its first click.
+function testMenuHoldsEveryMovedAction(win) {
   const menu = win.document.getElementById('more-menu');
   assert.ok(menu, '#more-menu must exist');
   for (const id of [
@@ -44,12 +45,10 @@ function testMenuHoldsEveryMovedAction() {
       '#' + id + ' must be a native <button>',
     );
   }
-  win.close();
   console.log('  ok - the "..." menu holds every moved action');
 }
 
-function testSettingsIsTheLastMenuItem() {
-  const {win} = makePage();
+function testSettingsIsTheLastMenuItem(win) {
   const menu = win.document.getElementById('more-menu');
   const items = Array.from(menu.querySelectorAll('.more-menu-item'));
   assert.ok(items.length >= 2, 'the menu must hold several items');
@@ -58,12 +57,10 @@ function testSettingsIsTheLastMenuItem() {
     'settings-btn',
     'Settings must be the LAST item of the "..." menu on every surface',
   );
-  win.close();
   console.log('  ok - Settings is the last "..." menu item');
 }
 
-function testOnlyOneComposerPopupAtATime() {
-  const {win} = makePage();
+function testOnlyOneComposerPopupAtATime(win) {
   const doc = win.document;
   const moreBtn = doc.getElementById('more-btn');
   const moreMenu = doc.getElementById('more-menu');
@@ -121,9 +118,10 @@ function testOutsideClickAndItemClickCloseMenu() {
 
 function main() {
   console.log('moreMenu.test.js');
-  testMenuHoldsEveryMovedAction();
-  testSettingsIsTheLastMenuItem();
-  testOnlyOneComposerPopupAtATime();
+  const {win} = makePage();
+  testMenuHoldsEveryMovedAction(win);
+  testSettingsIsTheLastMenuItem(win);
+  testOnlyOneComposerPopupAtATime(win);
   testOutsideClickAndItemClickCloseMenu();
   console.log('all ok');
 }

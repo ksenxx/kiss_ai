@@ -24,16 +24,18 @@ from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import system_message, tool_names
 from kiss.tests.agents.sorcar.local_model_server import finish_body
 
-_PLAIN_RUN = sea_commands.evaluate_sea([BaseSea()], "Say done.")
-"""A run with no SEA behaviour: identity hooks, no settings, the task as prompt."""
-
 _FILE_TOOLS = {"Bash", "Read", "Edit", "Write", "finish"}
+
+
+def _plain_run() -> sea_commands.SeaRun:
+    """A fresh run with no SEA behaviour: identity hooks, no settings, the task as prompt."""
+    return sea_commands.evaluate_sea([BaseSea()], "Say done.")
 
 
 def test_explicit_full_profile_offers_the_whole_toolset(tmp_path: Path) -> None:
     """``tool_profile="full"`` is accepted and offers more than Bash+finish."""
     script = [finish_body("<p>done</p>", prompt_tokens=500)]
-    parsed, agentic = run_sea(_PLAIN_RUN, script, tmp_path, max_steps=3, tool_profile="full")
+    parsed, agentic = run_sea(_plain_run(), script, tmp_path, max_steps=3, tool_profile="full")
     assert parsed["success"] is True
     assert _FILE_TOOLS <= tool_names(agentic[0])
     assert "# Restricted tool profile" not in system_message(agentic[0])
@@ -44,7 +46,7 @@ def test_profile_does_not_leak_into_the_next_run_of_the_same_agent(tmp_path: Pat
     script = [finish_body("<p>done</p>", prompt_tokens=500)]
     agent = ChatSorcarAgent("profile-reset-test")
     _parsed, first = run_sea(
-        _PLAIN_RUN, script, tmp_path, agent=agent, max_steps=3, tool_profile="bash"
+        _plain_run(), script, tmp_path, agent=agent, max_steps=3, tool_profile="bash"
     )
     assert tool_names(first[0]) == {"Bash", "finish"}
     again = sea_commands.evaluate_sea([BaseSea()], "Say done again.")
@@ -56,7 +58,7 @@ def test_profile_without_basic_tools_offers_finish_only_and_no_note(tmp_path: Pa
     """``append_basic_tools=False`` builds no toolset to cut down: finish only, no profile note."""
     script = [finish_body("<p>done</p>", prompt_tokens=500)]
     parsed, agentic = run_sea(
-        _PLAIN_RUN,
+        _plain_run(),
         script,
         tmp_path,
         max_steps=3,

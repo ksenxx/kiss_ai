@@ -14,29 +14,20 @@
 // ({type: 'voiceSpeech', text: string}).
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
+const {makeBareVoiceWindow} = require('./voice_page_helpers');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
-function makeWindow() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body>' +
-      '<button id="voice-btn" class="toggle-btn"></button>' +
-      '<textarea id="task-input"></textarea>' +
-      '<iframe id="preview" sandbox="allow-scripts"></iframe>' +
-      '</body></html>',
-    {runScripts: 'dangerously', url: 'https://localhost/'},
+// A sandboxed iframe whose contentWindow serves as a foreign `source`.
+function addPreviewFrame(win) {
+  win.document.body.insertAdjacentHTML(
+    'beforeend',
+    '<iframe id="preview" sandbox="allow-scripts"></iframe>',
   );
-  const win = dom.window;
-  win.__VOICE__ = {};
-  const script = win.document.createElement('script');
-  script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
-  win.document.body.appendChild(script);
-  return win;
+}
+
+function makeWindow() {
+  return makeBareVoiceWindow({}, addPreviewFrame);
 }
 
 function dispatch(win, init) {

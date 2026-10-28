@@ -13,9 +13,9 @@ import os
 import posixpath
 import re
 import shutil
+import socket
 import stat
 import string
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -99,7 +99,7 @@ def seed_file_atomically(path: Path, content: str) -> None:
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
+    fd, staged = _open_staging_file(path, 0o600)
     try:
         # A buffered file object (rather than a bare os.write, whose
         # partial-write count would have to be handled) guarantees the
@@ -171,15 +171,12 @@ def atomic_write_text(
             preserved = stat.S_IMODE(target.stat().st_mode)
         except OSError:
             preserved = None  # new file: created with create_mode below
-    if preserved is None:
-        # Stage with create_mode so the kernel applies the process
-        # umask at creation, exactly like Path.write_text — without the
-        # process-global (and thread-racy) os.umask() probe.
-        fd, tmp = _open_staging_file(target, create_mode)
-    else:
-        # Stage privately; the intended bits are applied only once the
-        # content is complete, just before publication.
-        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(target.parent))
+    # A new file is staged with create_mode so the kernel applies the
+    # process umask at creation, exactly like Path.write_text — without
+    # the process-global (and thread-racy) os.umask() probe.  An existing
+    # file is staged privately; its bits are applied only once the
+    # content is complete, just before publication.
+    fd, tmp = _open_staging_file(target, create_mode if preserved is None else 0o600)
     try:
         # A buffered file object rather than a bare os.write, whose
         # POSIX-legal short return count would otherwise be ignored and
@@ -419,7 +416,8 @@ def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:
 
     Like ``tempfile.mkstemp`` but with a caller-chosen creation mode
     (``mkstemp`` hardwires ``0o600``), so the kernel derives the final
-    bits from the process umask at creation time.
+    bits from the process umask at creation time.  The one staging
+    primitive of this module: every atomic write and seed uses it.
 
     Args:
         target: The destination the staging file will be renamed onto.
@@ -450,6 +448,26 @@ def _try_chmod(path: str, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         logger.debug("chmod %o failed on %s", mode, path, exc_info=True)
+
+
+def default_route_ip() -> str | None:
+    """Return the IPv4 address of this host's default outbound interface.
+
+    Opens a UDP socket "connected" to a public address, which selects
+    the outbound interface without sending any packet (the numeric
+    destination also avoids DNS), and reads the socket's own address.
+    No hostname-resolution fallback: that could stall on a broken
+    resolver or report loopback.
+
+    Returns:
+        The address, or ``None`` when the host has no route.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return None
 
 
 def is_root_dir(path: str) -> bool:

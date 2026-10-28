@@ -636,7 +636,7 @@ class JsonPrinter(Printer):
     their streamed tokens to the correct (thinking vs text) panel
     without corrupting each other.  Recording and bash buffering are
     per-task (keyed by ``task_id``) so one task's ``stop_recording()``
-    or ``reset()`` does not destroy another task's state.
+    or ``cleanup_task()`` does not destroy another task's state.
 
     The set of frontend tabs that should receive a task's events is
     looked up from ``_subscribers[task_id]``.  A tab subscribes via
@@ -1740,26 +1740,6 @@ class JsonPrinter(Printer):
                 del self._subscriber_expiry[key]
                 self._subscribers.pop(key, None)
 
-    def reset(self) -> None:
-        """Reset internal streaming state for a new turn.
-
-        Clears the buffer under the per-task ``flush_lock`` so an
-        in-flight flush either captured its text before this (and is
-        broadcasting, which finishes before ``reset()`` returns) or
-        finds an empty buffer after it — after ``reset()`` returns, no
-        stale bash text from the previous turn can be broadcast.
-        """
-        self._current_block_type = ""
-        # Non-creating lookup, like _flush_bash and the tool_call /
-        # tool_result branches: there is nothing to reset when the
-        # task has no bash state, and creating one here retained an
-        # entry under the "" key of a task-less thread that
-        # cleanup_task can never remove (R09-7).
-        bs = locked_call(self._bash_lock, self._bash_states.get, self._task_key())
-        if bs is None:
-            return
-        locked_call(bs.flush_lock, locked_call, self._bash_lock, _clear_bash_state, bs)
-
     def _buffer_bash_fragment(self, text: str) -> tuple[_BashState | None, bool]:
         """Under ``_lock``: append a bash_stream fragment to the task's buffer.
 
@@ -1863,12 +1843,12 @@ class JsonPrinter(Printer):
 
         Capturing the buffered text and broadcasting it is ONE critical
         section under the state's per-task ``flush_lock`` (the text
-        copy itself additionally under ``_bash_lock``, the order
-        ``reset()`` uses).  Two consequences: a concurrent ``reset()``
-        or ``cleanup_task`` — both clear the buffer under
-        ``flush_lock`` / ``_bash_lock`` — either waits for an in-flight
-        broadcast or leaves nothing to capture, so stale text from a
-        previous turn is never sent; and the agent thread's own flush
+        copy itself additionally under ``_bash_lock``).  Two
+        consequences: a concurrent ``cleanup_task`` — it clears the
+        buffer under ``_bash_lock`` and then takes ``flush_lock`` —
+        either waits for an in-flight broadcast or leaves nothing to
+        capture, so stale text from a previous turn is never sent; and
+        the agent thread's own flush
         before a ``tool_result`` / ``tool_call`` / ``result`` waits for
         a timer flush that is mid-broadcast, so the trailing
         ``system_output`` of a command can never land AFTER the event

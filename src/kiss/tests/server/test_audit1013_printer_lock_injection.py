@@ -135,7 +135,6 @@ class _Lifecycle:
         self.printer.ensure_recording_for_task("audit1013-life")
         self.printer.peek_recording()
         self.printer.stop_recording()
-        self.printer.reset()
         self.printer.cleanup_task("audit1013-life", subscriber_linger_seconds=0)
 
 

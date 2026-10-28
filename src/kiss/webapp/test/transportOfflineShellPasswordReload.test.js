@@ -10,12 +10,12 @@
 // after the reload branch had returned, so the reloaded page sent an
 // empty auth frame and reopened the dialog.
 const assert = require('assert');
-const {sleep} = require('./simplify2_harness');
 const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
   frames,
+  settle,
 } = require('./transport_page_helpers');
 
 const KEY = 'sorcar-remote-pwd';
@@ -84,17 +84,17 @@ async function run() {
       {type: 'auth', password: ''},
     ]);
     cached.sockets[0].fireMessage({type: 'auth_required'});
-    await sleep(20);
+    await settle();
     cached.window.document.getElementById('auth-modal-input').value = 'right';
     cached.window.document.getElementById('auth-modal-ok').click();
-    await sleep(20);
+    await settle();
     assert.deepStrictEqual(frames(cached.sockets[0]).at(-1), {
       type: 'auth',
       password: 'right',
     });
     assert.strictEqual(storage.local.getItem(KEY), null, 'still pending');
     cached.sockets[0].fireMessage({type: 'auth_ok'});
-    await sleep(20);
+    await settle();
     assert.strictEqual(reloads.length, 1, 'the cached page reloads once');
     assert.strictEqual(storage.session.getItem(RELOADED_FLAG), '1');
     assert.strictEqual(
@@ -118,7 +118,7 @@ async function run() {
       {type: 'auth', password: 'right'},
     ]);
     reloaded.sockets[0].fireMessage({type: 'auth_ok'});
-    await sleep(20);
+    await settle();
     assert.strictEqual(reloads.length, 1, 'the reloaded page stays');
     const modal = reloaded.window.document.getElementById('auth-modal');
     assert.ok(

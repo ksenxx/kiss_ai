@@ -200,7 +200,6 @@ def test_persist_bug11_save_task_extra_rejects_bogus_parent(
     persistence._save_task_extra(
         {"subagent": {"parent_task_id": "not-a-uuid"}},
         task_id=task_id,
-        task=None,
     )
     db = persistence._get_db()
     row = db.execute(

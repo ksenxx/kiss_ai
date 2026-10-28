@@ -35,6 +35,7 @@ from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.test_worktree_audit9 import (  # noqa: F401
     _make_repo,
 )
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.worktree_helpers import merge_conflict
 
 
@@ -64,12 +65,12 @@ class TestInc6Fix:
         server = AgentServer()
         server.work_dir = str(repo)
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
-        )
+        ))
         st = agent_state.AgentState(
             "task-inc6",
             agent=agent,

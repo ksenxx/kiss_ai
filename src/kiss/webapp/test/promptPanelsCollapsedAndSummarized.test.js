@@ -114,9 +114,10 @@ function testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced() {
   assert.ok(pr.classList.contains('collapsed'), 'early prompt folded');
   send(win, {type: 'system_prompt', text: 'authoritative system'});
   send(win, {type: 'prompt', text: 'authoritative prompt'});
+  // The in-place replacement itself (one panel, the authoritative
+  // text) is pinned by promptPanelEarlyReplace.test.js.
   sys = output(win).querySelector('.ev.system-prompt');
   pr = output(win).querySelector('.ev.prompt');
-  assert.strictEqual(output(win).querySelectorAll('.ev.prompt').length, 1);
   assert.ok(
     sys.classList.contains('collapsed'),
     'replaced system prompt folded',
@@ -126,7 +127,6 @@ function testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced() {
     header(pr, 'prompt').getAttribute('aria-expanded'),
     'false',
   );
-  assert.ok(pr.textContent.includes('authoritative prompt'));
   win.close();
   console.log('  ok - early placeholders and their replacements are collapsed');
 }
@@ -429,23 +429,23 @@ function testFinishedTaskFoldsEverythingIntoTrajectory() {
   console.log('  ok - a finished task keeps the prompts under its summary');
 }
 
-function runTests() {
-  testPromptPanelsStartCollapsed();
-  testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced();
-  testUserUnfoldSurvivesEarlyReplace();
-  testUserCanUnfoldAndRefold();
-  testFirstSummaryFoldsPromptsUnderIt();
-  testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem();
-  testPromptWithImageIsFoldedUnderSummary();
-  testSecondSummaryStopsAtTheFirst();
-  testSteerMessageStaysOutsideWhilePromptEchoFolds();
-  testReplayOfRunningTaskFoldsPromptsUnderSummary();
-  testFinishedTaskFoldsEverythingIntoTrajectory();
-}
+const TESTS = [
+  testPromptPanelsStartCollapsed,
+  testEarlyPromptPanelsStartCollapsedAndStayCollapsedWhenReplaced,
+  testUserUnfoldSurvivesEarlyReplace,
+  testUserCanUnfoldAndRefold,
+  testFirstSummaryFoldsPromptsUnderIt,
+  testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem,
+  testPromptWithImageIsFoldedUnderSummary,
+  testSecondSummaryStopsAtTheFirst,
+  testSteerMessageStaysOutsideWhilePromptEchoFolds,
+  testReplayOfRunningTaskFoldsPromptsUnderSummary,
+  testFinishedTaskFoldsEverythingIntoTrajectory,
+];
 
 try {
-  runTests();
-  console.log('\n11 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

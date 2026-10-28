@@ -283,50 +283,9 @@ async function main() {
     assert.strictEqual(lastPoll(wv).refresh, true, 'the click asks for a run');
   });
 
-  await test('a history row click switches to the tab already bound to the chat', () => {
-    const {win, posted} = makePage();
-    const ready = posted.find(m => m && m.type === 'ready');
-    send(win, {
-      type: 'task_events',
-      tabId: ready.tabId,
-      chat_id: 'chat-existing',
-      task_id: 101,
-      task: 'Existing task opened already',
-      events: [],
-      extra: '{}',
-    });
-    // The task is still going, so "+" leaves the chat open behind the
-    // new one (an idle chat would be retired on leaving it).
-    send(win, {type: 'status', running: true, tabId: ready.tabId});
-    win.document.querySelector('#new-chat-btn').click();
-    assert.strictEqual(chatTabs(win).length, 2);
-    assert.strictEqual(activeTabLabel(win), 'new chat');
-    const rows = showHistory(win, posted, [
-      {
-        id: 'chat-existing',
-        task_id: 101,
-        title: 'Existing task opened already',
-        preview: 'Existing task opened already',
-        has_events: true,
-        is_running: true,
-        ts: Date.now() / 1000,
-      },
-    ]);
-    rows[0].dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    assert.strictEqual(
-      activeTabLabel(win),
-      'Existing task opened already',
-      'the click lands on the existing tab',
-    );
-    assert.strictEqual(win._testApi.getActiveTabId(), ready.tabId);
-    // The pick leaves an idle chat behind: the empty "new chat" is
-    // retired.
-    assert.strictEqual(chatTabs(win).length, 1, 'no extra tab');
-    assert.ok(
-      posted.some(m => m.type === 'closeTab' && m.tabId !== ready.tabId),
-      'the idle chat left behind is closed in the registry',
-    );
-  });
+  // "a history row click switches to the tab already bound to the chat"
+  // lives in historyClickNoInputCopy.test.js; the closeTab the
+  // retired idle chat posts is pinned by historyMachineFilter.test.js.
 
   await test('a history row click resumes an unopened chat in a fresh tab', () => {
     const {win, posted} = makePage();

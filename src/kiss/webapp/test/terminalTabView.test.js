@@ -18,6 +18,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {waitFor, settle} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -106,7 +107,12 @@ function runTimers(page) {
   due.forEach(t => t.fn());
 }
 
-/** Create a view, show it and let xterm load (one microtask turn). */
+/** Wait until the page's `n`th terminal exists (xterm has loaded). */
+function xtermLoaded(page, n = 1) {
+  return waitFor(() => page.terminals.length >= n, 'xterm did not load');
+}
+
+/** Create a view, show it and let xterm load. */
 async function openView(page) {
   const sent = [];
   const view = page.win.TerminalTabView.create('tab-1', {
@@ -115,8 +121,7 @@ async function openView(page) {
   });
   page.win.document.body.appendChild(view.el);
   view.setVisible(true);
-  await Promise.resolve();
-  await Promise.resolve();
+  await xtermLoaded(page);
   return {view, sent};
 }
 
@@ -258,7 +263,7 @@ async function testDispose() {
   assert.strictEqual(page.fits.length, 1, 'no refit after dispose');
   page.frames.forEach(cb => cb());
   view.setVisible(true);
-  await Promise.resolve();
+  await settle();
   assert.strictEqual(page.terminals.length, 1, 'no terminal after dispose');
 }
 
@@ -268,8 +273,7 @@ async function testOutputBeforeXterm() {
   view.data('early');
   view.exit();
   view.setVisible(true);
-  await Promise.resolve();
-  await Promise.resolve();
+  await xtermLoaded(page);
   assert.ok(page.terminals[0].written.startsWith('early'));
   assert.ok(page.terminals[0].written.includes('The shell exited.'));
 }

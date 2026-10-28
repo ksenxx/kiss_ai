@@ -83,6 +83,7 @@ import inspect
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -92,7 +93,6 @@ from urllib.parse import parse_qs, quote
 import pytest
 import requests
 
-from kiss.agents.third_party_agents._channel_agent_utils import config_file_lock, write_private_file
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
 from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import _make_backend as ms_make_backend
@@ -127,6 +127,7 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
     _config as tg_config,
 )
 from kiss.agents.third_party_agents.telegram.telegram_sea import _make_backend as tg_make_backend
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     MuseApiHandler,
     auth_tools,
@@ -234,18 +235,6 @@ class _TokenXApiHandler(MuseApiHandler):
         if api_method == "redirectOffsite":
             self.redirect(302, self.server.offsite_location)
             return
-        if api_method == "redirectLowercase":
-            # Absolute Location echoing the REAL token with a
-            # lowercase percent escape for its colon (%3a).
-            self.redirect(302, self.server.lowercase_location)
-            return
-        if api_method == "redirectOddEncoding":
-            # Absolute Location echoing the token with a normally-safe
-            # character percent-encoded (A -> %41): no whole-string
-            # spelling matches, only a decoded per-segment comparison
-            # catches it.
-            self.redirect(302, self.server.odd_location)
-            return
         if api_method == "echoBody":
             # An ordinary API error that reflects the request path.
             self._send(
@@ -348,8 +337,6 @@ class _TokenXApiServer(RecordingServer):
         # malformed-expires_in fallback.
         self.token_expires_in: Any = 3600
         self.offsite_location: str = ""
-        self.lowercase_location: str = ""
-        self.odd_location: str = ""
         self.graph_nonjson: bool = False
         self.graph_always_401: bool = False
         self.getme_nonjson: bool = False
@@ -379,7 +366,8 @@ def rogue_server() -> Any:
 MUSE_POLICY = loopback_policy("msteams", "telegram")
 
 
-def _ms_env(monkeypatch: pytest.MonkeyPatch, api_server: _TokenXApiServer) -> None:
+@pytest.fixture()
+def ms_env(monkeypatch: pytest.MonkeyPatch, api_server: _TokenXApiServer) -> None:
     """Point the composed Azure token URL at the emulator."""
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", api_server.base_url)
 
@@ -421,10 +409,9 @@ def _audit_text() -> str:
 
 
 def test_msteams_daemon_side_token_exchange(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """The daemon exchanges the vaulted secret; the agent holds a surrogate."""
-    _ms_env(monkeypatch, api_server)
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
@@ -448,31 +435,29 @@ def test_msteams_daemon_side_token_exchange(
 
 
 def test_msteams_token_cache_expiry_forces_reexchange(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """An expired cached token is re-acquired (60s skew honored)."""
-    _ms_env(monkeypatch, api_server)
-    api_server.token_expires_in = 61  # 1s of effective validity after skew
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
-    # Under load the Graph call inside connect() can itself land past the
-    # 1 s window and re-exchange, so only "a fresh exchange happened and
-    # the newest token was used" is asserted, not an exact count.
-    exchanges = len(api_server.token_requests)
-    assert exchanges >= 1
-    time.sleep(1.2)
+    assert len(api_server.token_requests) == 1
+    # Backdate the cached expiry to 59 s from now: still in the future,
+    # but inside the 60 s skew, so the cache must not be trusted.
+    vault_file = muse_auth_dir() / "vault" / "msteams.json"
+    payload = json.loads(vault_file.read_text())
+    payload["cached_token"]["expires_at"] = time.time() + 59
+    vault_file.write_text(json.dumps(payload))
     assert json.loads(backend.list_teams())["ok"] is True
-    assert len(api_server.token_requests) > exchanges
+    assert len(api_server.token_requests) == 2
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
-    assert bearer_of(graph[-1]) == f"Bearer graph-tok-{len(api_server.token_requests)}"
+    assert bearer_of(graph[-1]) == "Bearer graph-tok-2"
 
 
 def test_msteams_bad_secret_fails_without_leaking_it(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """A refused exchange surfaces a secret-free resolution error."""
-    _ms_env(monkeypatch, api_server)
     bad_secret = "msteams-wrong-secret-value"
     _ms_enroll(api_server, bad_secret)
     backend = _ms_backend(api_server)
@@ -540,10 +525,9 @@ def test_msteams_store_validation_pins_the_token_endpoint(muse_env: Path) -> Non
 
 
 def test_msteams_write_needs_grant_and_agent_wires_from_vault(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """Graph POSTs classify as writes; a fresh agent wires vault-first."""
-    _ms_env(monkeypatch, api_server)
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
@@ -872,10 +856,9 @@ def test_telegram_action_classification() -> None:
 
 
 def test_msteams_probe_policy_denial_and_nonjson_graph(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """The probe distinguishes policy denials from proof of exchange."""
-    _ms_env(monkeypatch, api_server)
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
@@ -897,10 +880,9 @@ def test_msteams_probe_policy_denial_and_nonjson_graph(
 
 
 def test_msteams_graph_http_errors_surface_in_tools(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """Graph 4xx envelopes surface as ok=False from the posting tools."""
-    _ms_env(monkeypatch, api_server)
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
@@ -944,10 +926,9 @@ def test_msteams_flag_off_refuses_to_connect(
 
 
 def test_agents_construct_and_fail_closed(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """Full agent construction wires vault-first and fails closed."""
-    _ms_env(monkeypatch, api_server)
     # Happy path: enrolled vault, no config.
     store_credentials("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
     tg_agent = TelegramAgent()
@@ -1148,6 +1129,7 @@ def test_transport_failures_redact_url_credentials(muse_env: Path, refusing_port
     assert "syno-secret-q" not in q_message and "token=" not in q_message
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="the rogue emulator binds 127.0.0.2")
 def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
@@ -1176,10 +1158,9 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
 
 
 def test_vault_client_credentials_cache_edges(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """Malformed cache/expiry values fall back safely; scope is optional."""
-    _ms_env(monkeypatch, api_server)
     # A scope-less enrollment sends no scope field to the endpoint.
     info = {
         "kind": "oauth2_client_credentials",
@@ -1217,10 +1198,9 @@ def test_token_exchange_refuses_redirecting_endpoint(
     muse_env: Path,
     api_server: _TokenXApiServer,
     rogue_server: _TokenXApiServer,
-    monkeypatch: pytest.MonkeyPatch,
+    ms_env: None,
 ) -> None:
     """A 307 from the token endpoint never forwards the secret-bearing POST."""
-    _ms_env(monkeypatch, api_server)
     api_server.token_redirect_to = rogue_server.base_url + "/stolen/oauth2/v2.0/token"
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
@@ -1233,10 +1213,9 @@ def test_token_exchange_refuses_redirecting_endpoint(
 
 
 def test_token_exchange_error_never_relays_endpoint_text(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """Reflected (encoded) secret text in an error field is suppressed."""
-    _ms_env(monkeypatch, api_server)
     api_server.token_error_echo = True
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
@@ -1248,10 +1227,9 @@ def test_token_exchange_error_never_relays_endpoint_text(
 
 
 def test_token_exchange_rejects_nonfinite_expiry(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """A non-finite expires_in must not create an immortal cache entry."""
-    _ms_env(monkeypatch, api_server)
     api_server.token_expires_in = "Infinity"
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
@@ -1262,10 +1240,9 @@ def test_token_exchange_rejects_nonfinite_expiry(
 
 
 def test_msteams_probe_rejects_graph_401(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """A Graph 401 (unusable token) is not reported as authenticated."""
-    _ms_env(monkeypatch, api_server)
     api_server.graph_always_401 = True
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
@@ -1274,10 +1251,9 @@ def test_msteams_probe_rejects_graph_401(
 
 
 def test_failed_rotations_keep_the_prior_credential(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
+    muse_env: Path, api_server: _TokenXApiServer, ms_env: None
 ) -> None:
     """A rejected replacement leaves the working enrollment untouched."""
-    _ms_env(monkeypatch, api_server)
     # Telegram: enroll a good token, then attempt a bad rotation.
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     tg_backend = _tg_backend(api_server)
@@ -1293,57 +1269,42 @@ def test_failed_rotations_keep_the_prior_credential(
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
 
 
-def test_lowercase_percent_escapes_cannot_smuggle_the_token(
+def test_percent_spelled_echoes_cannot_smuggle_the_token(
     muse_env: Path, api_server: _TokenXApiServer, rogue_server: _TokenXApiServer
 ) -> None:
-    """A %3a-encoded echoed token is normalized before any cross-origin hop."""
+    """Every percent-spelling of an echoed token is normalized before a cross-origin hop.
+
+    ``%3a`` is a lowercase escape of the colon; ``%41`` encodes a
+    normally-safe ``A`` so no whole-string spelling matches and only a
+    decoded per-segment comparison catches it; ``%253A`` is a two-level
+    (double) encoding of the colon.
+    """
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     backend = _tg_backend(api_server)
     assert backend.connect() is True
     grant("telegram", "write", "session")
     surrogate = backend._bot.token
-    encoded = _REAL_TG_TOKEN.replace(":", "%3a")
-    api_server.lowercase_location = f"{rogue_server.base_url}/bot{encoded}/getMe"
-    resp = MuseBoundarySession("telegram").request(
-        "GET",
-        f"{api_server.base_url}/bot{surrogate}/redirectLowercase",
-        headers={"Authorization": f"Bearer {surrogate}"},
+    spellings = (
+        _REAL_TG_TOKEN.replace(":", "%3a"),
+        _REAL_TG_TOKEN.replace("A", "%41", 1),
+        _REAL_TG_TOKEN.replace(":", "%253A"),
     )
-    assert resp.status_code == 401  # rogue origin got no usable credential
-    rogue_paths = "".join(r["path"] for r in rogue_server.requests)
-    assert "muse-redacted" in rogue_paths
-    for spelling in (_REAL_TG_TOKEN, encoded, _REAL_TG_TOKEN.replace(":", "%3A")):
-        assert spelling not in rogue_paths
-    audit = _audit_text()
-    for spelling in (_REAL_TG_TOKEN, encoded, _REAL_TG_TOKEN.replace(":", "%3A")):
-        assert spelling not in audit
-
-
-def test_odd_percent_encoding_is_scrubbed_per_segment(
-    muse_env: Path, api_server: _TokenXApiServer, rogue_server: _TokenXApiServer
-) -> None:
-    """A token spelled with a non-standard escape is caught by segment decode."""
-    tg_config.save({"bot_token": _REAL_TG_TOKEN})
-    backend = _tg_backend(api_server)
-    assert backend.connect() is True
-    grant("telegram", "write", "session")
-    surrogate = backend._bot.token
-    # Encode a normally-safe 'A' as %41 so no whole-string spelling of
-    # the token matches; only decoding each path segment reveals it.
-    odd = _REAL_TG_TOKEN.replace("A", "%41", 1)
-    api_server.odd_location = f"{rogue_server.base_url}/bot{odd}/getMe"
-    resp = MuseBoundarySession("telegram").request(
-        "GET",
-        f"{api_server.base_url}/bot{surrogate}/redirectOddEncoding",
-        headers={"Authorization": f"Bearer {surrogate}"},
-    )
-    assert resp.status_code == 401
-    rogue_paths = "".join(r["path"] for r in rogue_server.requests)
-    assert _REAL_TG_TOKEN not in rogue_paths
-    # The daemon's decoded target no longer contains the real token.
-    assert "muse-redacted" in rogue_paths
-    audit = _audit_text()
-    assert _REAL_TG_TOKEN not in audit
+    forbidden = (_REAL_TG_TOKEN, _REAL_TG_TOKEN.replace(":", "%3A"), *spellings)
+    for spelling in spellings:
+        before = len(rogue_server.requests)
+        api_server.offsite_location = f"{rogue_server.base_url}/bot{spelling}/getMe"
+        resp = MuseBoundarySession("telegram").request(
+            "GET",
+            f"{api_server.base_url}/bot{surrogate}/redirectOffsite",
+            headers={"Authorization": f"Bearer {surrogate}"},
+        )
+        assert resp.status_code == 401, spelling  # rogue origin got no usable credential
+        rogue_paths = "".join(r["path"] for r in rogue_server.requests[before:])
+        # The daemon's decoded target no longer contains the real token.
+        assert "muse-redacted" in rogue_paths, spelling
+        audit = _audit_text()
+        for text in forbidden:
+            assert text not in rogue_paths and text not in audit, (spelling, text)
 
 
 def test_reply_echoes_are_normalized_to_the_surrogate(
@@ -1505,7 +1466,11 @@ def test_odd_encoded_response_echoes_are_scrubbed(
 def test_ask_policy_grant_is_inherited_by_scratch_validation(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
-    """A root ``read: ask`` grant approves candidate validation."""
+    """A root ``read: ask`` grant approves candidate validation.
+
+    The denial's remediation names the grantable root (``telegram``),
+    never the scratch ``telegram-pending-<hex>`` id a retry would replace.
+    """
     set_policy("telegram", read="ask")
     agent = TelegramAgent.__new__(TelegramAgent)
     agent._backend = _tg_backend(api_server)
@@ -1513,37 +1478,15 @@ def test_ask_policy_grant_is_inherited_by_scratch_validation(
     denied = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert denied["ok"] is False
     assert "requires user approval" in denied["error"]
+    assert "grant telegram read" in denied["error"]
+    assert "pending" not in denied["error"]
+    assert "on 'telegram'" in denied["error"]
     # A telegram read grant (the root identity) approves the scratch
     # probe, so authentication succeeds.
     grant("telegram", "read", "perpetual")
     saved = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
     assert saved["ok"] is True
     assert vault_has_credentials("telegram")
-
-
-def test_double_encoded_echo_cannot_smuggle_the_token(
-    muse_env: Path, api_server: _TokenXApiServer, rogue_server: _TokenXApiServer
-) -> None:
-    """A %253A (two-level) echo is normalized on every surface."""
-    tg_config.save({"bot_token": _REAL_TG_TOKEN})
-    backend = _tg_backend(api_server)
-    assert backend.connect() is True
-    grant("telegram", "write", "session")
-    surrogate = backend._bot.token
-    double = _REAL_TG_TOKEN.replace(":", "%253A")
-    api_server.lowercase_location = f"{rogue_server.base_url}/bot{double}/getMe"
-    resp = MuseBoundarySession("telegram").request(
-        "GET",
-        f"{api_server.base_url}/bot{surrogate}/redirectLowercase",
-        headers={"Authorization": f"Bearer {surrogate}"},
-    )
-    assert resp.status_code == 401
-    rogue_paths = "".join(r["path"] for r in rogue_server.requests)
-    assert double not in rogue_paths
-    assert _REAL_TG_TOKEN not in rogue_paths
-    assert "muse-redacted" in rogue_paths
-    audit = _audit_text()
-    assert double not in audit and _REAL_TG_TOKEN not in audit
 
 
 def test_atomic_store_if_absent_never_clobbers(muse_env: Path) -> None:
@@ -1570,11 +1513,10 @@ def test_atomic_store_if_absent_never_clobbers(muse_env: Path) -> None:
 def test_immortal_cache_is_not_trusted(
     muse_env: Path,
     api_server: _TokenXApiServer,
-    monkeypatch: pytest.MonkeyPatch,
+    ms_env: None,
     expires_at: float,
 ) -> None:
     """A persisted expires_at of inf (older build) or 1e308 forces re-exchange."""
-    _ms_env(monkeypatch, api_server)
     store_credentials("msteams", _client_credential_info(api_server.base_url), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
@@ -1639,22 +1581,6 @@ def test_malformed_first_migration_connect_returns_false(
 
 
 # --------------------------------------------- review round-4 regressions
-
-
-def test_ask_remediation_names_the_grantable_root(
-    muse_env: Path, api_server: _TokenXApiServer
-) -> None:
-    """The ask instruction names the grantable root, not the scratch id."""
-    set_policy("telegram", read="ask")
-    agent = TelegramAgent.__new__(TelegramAgent)
-    agent._backend = _tg_backend(api_server)
-    denied = json.loads(auth_tools(agent)["authenticate_telegram"](_REAL_TG_TOKEN))
-    assert denied["ok"] is False
-    # The printed command grants ``telegram`` (grantable), never a
-    # random ``telegram-pending-<hex>`` (which a retry would replace).
-    assert "grant telegram read" in denied["error"]
-    assert "pending" not in denied["error"]
-    assert "on 'telegram'" in denied["error"]
 
 
 def test_malformed_stale_config_does_not_block_the_vault(
@@ -1724,6 +1650,11 @@ def _on_candidate_thread(frame_locals: dict[str, Any]) -> bool:
     return threading.current_thread().name == "candidate"
 
 
+def _on_scrub_thread(frame_locals: dict[str, Any]) -> bool:
+    """Match ``Path.read_text()`` entered by the ``scrub`` thread (not the test's own)."""
+    return threading.current_thread().name == "scrub"
+
+
 def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> None:
     """A concurrent authoritative store makes a malformed candidate moot.
 
@@ -1764,6 +1695,7 @@ def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> N
             daemon.vault.store("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
         # Released, the candidate now blocks on the vault lock this thread holds.
     thread.join(10.0)
+    assert not thread.is_alive(), "candidate never replied"
     assert result["reply"] == {"ok": True, "created": False}
     payload = json.loads((muse_auth_dir() / "vault" / "telegram.json").read_text())
     assert payload["authorized_user_info"]["token"] == _REAL_TG_TOKEN
@@ -1779,29 +1711,40 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
     that lands while the scrub is pending is observed by the scrub's
     read (the comparison backs off), and one that lands after the
     replacement survives it — the in-between interleaving no longer
-    exists.  The test proves the serialization end-to-end: the scrub
-    demonstrably BLOCKS while a writer holds the lock, then honors the
-    value that writer landed.
+    exists.  The test proves the exclusion end-to-end, with the real
+    lock doing the excluding: a ``Pause`` holds the scrub INSIDE its
+    critical section (at the read, after the lock was taken) and a
+    writer's non-blocking acquisition of the same lock fails there;
+    released, the scrub completes its cycle and the lock is free again.
+    (``test_compare_and_scrub_keeps_a_newer_config_value`` pins the
+    back-off on a newer value.)  Were the lock a no-op the writer's
+    acquisition would succeed while the scrub is mid-cycle.
     """
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
+    lock_path = tg_config.path.with_name(tg_config.path.name + ".lock")
     scrubbed = threading.Event()
 
     def scrub() -> None:
         _scrub_config_token(expected=_REAL_TG_TOKEN)
         scrubbed.set()
 
-    with config_file_lock(tg_config.path):
-        thread = threading.Thread(target=scrub, daemon=True)
+    with Pause(Path.read_text.__code__, _on_scrub_thread) as pause:
+        thread = threading.Thread(target=scrub, name="scrub", daemon=True)
         thread.start()
-        # The scrub is blocked on the lock, BEFORE its read.
-        assert not scrubbed.wait(0.4)
-        # A concurrent writer (holding the lock, as all writers do)
-        # lands a newer token.
-        write_private_file(tg_config.path, json.dumps({"bot_token": "9:newer-token"}, indent=2))
+        assert pause.paused.wait(10.0), "the scrub never reached its read"
+        assert not scrubbed.is_set()
+        # A concurrent writer (taking the lock, as all writers do) is
+        # excluded for as long as the scrub's cycle lasts.
+        with open(lock_path, "a+b") as writer_lock:
+            assert not lock_exclusive(writer_lock, blocking=False)
     thread.join(10.0)
     assert scrubbed.is_set()
-    # The scrub read the newer value under the lock and backed off.
-    assert json.loads(tg_config.path.read_text())["bot_token"] == "9:newer-token"
+    # The cycle completed: the token (the only key) is scrubbed and the
+    # lock is free for the next writer.
+    assert not tg_config.path.exists()
+    with open(lock_path, "a+b") as writer_lock:
+        assert lock_exclusive(writer_lock, blocking=False)
+        unlock(writer_lock)
 
 
 def _wait_for_blocked_connect(port: int, timeout: float = 10.0) -> bool:
@@ -1854,6 +1797,9 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
     blocked; draining the backlog then lets the connect complete — and
     the accepted socket must receive ZERO bytes.
     """
+    overflow = Path("/proc/sys/net/ipv4/tcp_abort_on_overflow")
+    if not overflow.is_file() or overflow.read_text().strip() != "0":
+        pytest.skip("needs Linux SYN-drop behaviour on a full backlog (tcp_abort_on_overflow=0)")
     store_credentials("telegram", {"kind": "path", "token": "1:old-generation-token"}, [])
     handle = mint_surrogate("telegram")
     assert handle is not None

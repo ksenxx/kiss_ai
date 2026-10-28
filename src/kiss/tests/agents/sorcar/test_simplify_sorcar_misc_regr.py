@@ -36,6 +36,8 @@ from kiss.agents.sorcar.git_worktree import (
     _merge_fix_steps,
     strip_worktree_suffix,
 )
+from kiss.agents.sorcar.sorcar_agent import _WorktreeCleanupOutcome
+from kiss.tests.conftest import seed_worktree
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -74,13 +76,13 @@ def _make_worktree(repo: Path, slug: str = "kiss_wt-test-1") -> tuple[str, Path]
 def _make_agent(repo: Path, branch: str, wt_dir: Path) -> ChatSorcarAgent:
     """Build a ChatSorcarAgent with a pending worktree state."""
     agent = ChatSorcarAgent("regr-test")
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch=branch,
         original_branch=GitWorktreeOps.current_branch(repo),
         wt_dir=wt_dir,
         baseline_commit=None,
-    )
+    ))
     return agent
 
 
@@ -148,7 +150,7 @@ class TestFinalizeWorktree:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert not wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
 
@@ -159,7 +161,7 @@ class TestFinalizeWorktree:
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
         (wt_dir / "new.txt").write_text("work in progress\n")
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert not wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
         assert _run_git(repo, "show", f"{branch}:new.txt") == "work in progress\n"
@@ -174,7 +176,7 @@ class TestFinalizeWorktree:
         import shutil
 
         shutil.rmtree(wt_dir)
-        assert agent._finalize_worktree() is True
+        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
 
 class TestPreserveForReview:
@@ -241,13 +243,13 @@ class TestMergeDiscard:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=None,
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
         msg = agent.merge()
         assert "Cannot merge" in msg
         assert f"git merge --squash {branch}" in msg

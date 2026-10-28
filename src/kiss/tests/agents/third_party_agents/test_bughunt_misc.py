@@ -37,26 +37,18 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 class TestGoveeImportSafe(unittest.TestCase):
     """govee.py must be importable without GOVEE_API_KEY set."""
 
-    def test_import_without_api_key_does_not_exit(self) -> None:
-        """Importing the module with GOVEE_API_KEY unset must not kill the process."""
-        env = {k: v for k, v in os.environ.items() if k != "GOVEE_API_KEY"}
-        result = subprocess.run(
-            [sys.executable, "-c", "import kiss.agents.third_party_agents.govee"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=120,
-        )
-        self.assertEqual(
-            result.returncode,
-            0,
-            f"import exited with {result.returncode}: {result.stderr.strip()}",
-        )
+    def test_import_does_not_exit_but_main_still_errors(self) -> None:
+        """One interpreter: the import survives (sentinel printed), ``main`` then exits.
 
-    def test_main_without_api_key_still_errors(self) -> None:
-        """Running the CLI with a command but no key must still exit with the error."""
+        A ``sys.exit`` at import time would never reach the sentinel, so
+        the stdout check pins "importing does not exit" and the exit code
+        plus stderr pin "running a command without the key still fails".
+        """
         env = {k: v for k, v in os.environ.items() if k != "GOVEE_API_KEY"}
-        code = "from kiss.agents.third_party_agents import govee; govee.main(['govee.py', 'list'])"
+        code = (
+            "from kiss.agents.third_party_agents import govee; print('imported', flush=True); "
+            "govee.main(['govee.py', 'list'])"
+        )
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
@@ -64,6 +56,7 @@ class TestGoveeImportSafe(unittest.TestCase):
             env=env,
             timeout=120,
         )
+        self.assertEqual(result.stdout.strip(), "imported", result.stderr.strip())
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOVEE_API_KEY", result.stderr)
 

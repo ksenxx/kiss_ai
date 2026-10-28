@@ -33,6 +33,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 class _BlockingMergeAgent(ChatSorcarAgent):
@@ -40,13 +41,13 @@ class _BlockingMergeAgent(ChatSorcarAgent):
 
     def __init__(self, repo_root: Path) -> None:
         super().__init__("Bughunt5 blocking-merge agent")
-        self._wt = GitWorktree(
+        seed_worktree(self, GitWorktree(
             repo_root=repo_root,
             branch="kiss/wt-bughunt5",
             original_branch="main",
             wt_dir=repo_root / "wt",
             baseline_commit=None,
-        )
+        ))
         self.merge_entered = threading.Event()
         self.merge_release = threading.Event()
         self.merge_calls = 0
@@ -58,7 +59,7 @@ class _BlockingMergeAgent(ChatSorcarAgent):
             self.merge_calls += 1
         self.merge_entered.set()
         self.merge_release.wait(timeout=30)
-        self._wt = None
+        self._wts = {}
         return "Successfully merged worktree branch."
 
 

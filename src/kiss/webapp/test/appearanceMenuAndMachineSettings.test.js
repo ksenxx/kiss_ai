@@ -21,17 +21,19 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, pickMachine} = require('./simplify2_harness');
-const {lastMsg, click, byId} = require('./settings_helpers');
+const {
+  makePage,
+  send,
+  pickMachine,
+  lastMsg,
+  click,
+  byId,
+} = require('./simplify2_harness');
+const {MACHINES} = require('./settings_helpers');
 
 function label(win, id) {
   return byId(win, id).querySelector('.more-item-label').textContent;
 }
-
-const MACHINES = [
-  {name: 'laptop', status: 'reachable', local: true},
-  {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
-];
 
 /** A page whose chat header lists `laptop` (this daemon) and `gpu-box`. */
 function pageWithMachines(opts) {
@@ -303,7 +305,8 @@ function testSettingsOpenForTheSelectedMachine() {
   assert.strictEqual(line.textContent, 'Settings of gpu-box');
 
   // This daemon's own poll does not touch the form; gpu-box's
-  // forwarded reply fills it; another machine's is ignored.
+  // forwarded reply fills it (a stray reply for another machine is
+  // pinned by audit1017SettingsSheetRemoteMachine.test.js).
   send(win, {
     type: 'configData',
     config: {remote_password: 'laptop-pw', max_budget: 3, work_dir: '/laptop'},
@@ -317,14 +320,6 @@ function testSettingsOpenForTheSelectedMachine() {
     '/laptop',
     'the work dir is still adopted (the TASK INFO Workdir row shows it)',
   );
-  send(win, {
-    type: 'configData',
-    forwarded: true,
-    machine: 'other-box',
-    config: {remote_password: 'other-pw'},
-    apiKeys: {},
-  });
-  assert.strictEqual(byId(win, 'cfg-remote-password').value, '');
   send(win, {
     type: 'configData',
     forwarded: true,
@@ -494,6 +489,12 @@ function testRemoteSheetKeepsThisDaemonsStateApart() {
     "gpu-box's toggle",
   );
 
+  // The user flips one of gpu-box's toggles, so the close has an edit
+  // to post (an untouched sheet posts nothing).
+  const gpuMemory = byId(win, 'cfg-use-memory');
+  gpuMemory.checked = true;
+  gpuMemory.dispatchEvent(new win.Event('change', {bubbles: true}));
+
   // Closing restores this daemon's toggles at once, before its reply.
   const beforeClose = posted.length;
   click(win, byId(win, 'settings-panel-close'));
@@ -514,9 +515,14 @@ function testRemoteSheetKeepsThisDaemonsStateApart() {
     0,
     "gpu-box's models are not on offer for this daemon",
   );
-  assert.ok(
-    lastMsg(posted.slice(beforeClose), 'saveConfig').machine === 'gpu-box',
+  const closeSave = lastMsg(posted.slice(beforeClose), 'saveConfig');
+  assert.ok(closeSave && closeSave.machine === 'gpu-box', 'saved to gpu-box');
+  assert.deepStrictEqual(
+    Object.keys(closeSave.config),
+    ['use_memory'],
+    "only gpu-box's edited toggle is posted",
   );
+  assert.strictEqual(closeSave.config.use_memory, true);
   // The machine refused the close's save: still reported.
   send(win, {
     type: 'configData',

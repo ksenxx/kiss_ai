@@ -31,13 +31,11 @@ function closeOpenWindows() {
   while (openWindows.length) openWindows.pop().close();
 }
 
+/** The tab ids on the strip (#tab-list), in order. */
 function tabBarIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
+  return Array.from(win.document.querySelectorAll('.chat-tab'))
     .filter(el => !!el.dataset.tabId)
     .map(el => el.dataset.tabId);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 const {ofType: msgsOf, snapshotEntry} = harness;
@@ -192,31 +190,9 @@ function testUnconfirmedPendingOpenExpiresAfterSnapshots() {
   assert.deepStrictEqual(tabBarIds(win), ['t1']);
 }
 
-function testConfirmedPendingOpenIsAdoptedDespiteEarlierMisses() {
-  // Two stale snapshots then the echo: the tab must be adopted, not
-  // expired — expiry only applies to ids that never get confirmed.
-  const {win, posted} = makePage();
-  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
-  win._testApi.createNewTab();
-  const newId = msgsOf(posted, 'openTab')[0].tabId;
-
-  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
-  send(win, {type: 'tabs_state', tabs: [snapshotEntry('t1', 'one')]});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [snapshotEntry('t1', 'one'), snapshotEntry(newId, 'new chat')],
-  });
-  assert.ok(
-    tabBarIds(win).includes(newId),
-    'the confirming snapshot must adopt the tab',
-  );
-  // And it stays through later snapshots that list it.
-  send(win, {
-    type: 'tabs_state',
-    tabs: [snapshotEntry('t1', 'one'), snapshotEntry(newId, 'new chat')],
-  });
-  assert.ok(tabBarIds(win).includes(newId));
-}
+// Two stale snapshots then the echo adopting the tab (expiry only
+// applies to ids that never get confirmed) is pinned by
+// tabsMirror.test.js::testInFlightOpenSurvivesStaleSnapshot.
 
 const tests = [
   testCloseSubagentTabBroadcastRemovesTabWithoutEcho,
@@ -225,7 +201,6 @@ const tests = [
   testOpenTabRejectedDropsLocalPendingTab,
   testOpenTabRejectedForLastTabKeepsLocalPlaceholder,
   testUnconfirmedPendingOpenExpiresAfterSnapshots,
-  testConfirmedPendingOpenIsAdoptedDespiteEarlierMisses,
 ];
 
 let failures = 0;

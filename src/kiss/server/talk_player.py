@@ -37,14 +37,12 @@ grandchild holding the audio device and overlapping the next clip.
 from __future__ import annotations
 
 import base64
-import contextlib
 import logging
 import math
 import os
 import queue
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -52,7 +50,7 @@ import threading
 from typing import Any
 
 from kiss.core.locked import locked_call
-from kiss.core.processes import kill_process_group, popen_process_group
+from kiss.core.processes import popen_process_group, terminate_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +58,6 @@ _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
 _PLAY_TIMEOUT_ENV = "KISS_SORCAR_PLAY_TIMEOUT"
 _MAX_TALK_IDS = 500
 _PLAYBACK_TIMEOUT = 600.0
-# Grace between the group SIGTERM and the SIGKILL escalation: long
-# enough for a well-behaved player to release the audio device, short
-# enough that the serialising worker is never stuck behind a zombie.
-_KILL_GRACE = 5.0
 
 _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("mpg123", "-q"),
@@ -128,34 +122,6 @@ def _playback_timeout() -> float:
     return _PLAYBACK_TIMEOUT
 
 
-def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
-    """Kill a hung playback child and every process it spawned.
-
-    The child was started in its own process group, so signalling
-    the group (:func:`kiss.core.processes.kill_process_group`) reaches
-    grandchildren too — a ``KISS_SORCAR_PLAY_CMD`` wrapper script's
-    real player must die with the wrapper, or it would keep the audio
-    device and play over the next clip.  SIGTERM first (players flush
-    and release the device), escalating to SIGKILL after
-    ``_KILL_GRACE`` seconds.
-    """
-    try:
-        kill_process_group(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=_KILL_GRACE)
-    except subprocess.TimeoutExpired:
-        pass
-    except OSError:
-        # The group could not be signalled (or is already gone): kill
-        # the child alone so the caller's final wait normally ends
-        # at once instead of running out its timeout.
-        proc.kill()
-        return
-    try:
-        kill_process_group(proc.pid, signal.SIGKILL)
-    except OSError:
-        proc.kill()
-
-
 def _run_playback(argv: list[str]) -> None:
     """Run one playback child to completion.
 
@@ -178,14 +144,18 @@ def _run_playback(argv: list[str]) -> None:
     try:
         proc.wait(timeout=_playback_timeout())
     except subprocess.TimeoutExpired:
-        _kill_playback(proc)
-        # Bounded: a SIGKILLed player stuck in the kernel (an audio
-        # device or network file system that does not return) would
-        # otherwise wedge the sole talk worker for good.  A child that
-        # outlives the wait stays ours; ``subprocess`` reaps it later
-        # from its unreaped-children list once it finally dies.
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
+        # The child was started in its own process group, so the kill
+        # reaches grandchildren too: a ``KISS_SORCAR_PLAY_CMD`` wrapper
+        # script's real player must die with the wrapper, or it would
+        # keep the audio device and play over the next clip.  SIGTERM
+        # first (players flush and release the device), SIGKILL five
+        # seconds later; the wait after that is bounded, so a SIGKILLed
+        # player stuck in the kernel (an audio device or network file
+        # system that does not return) cannot wedge the sole talk
+        # worker for good.  A child that outlives the wait stays ours;
+        # ``subprocess`` reaps it later from its unreaped-children list
+        # once it finally dies.
+        terminate_process_group(proc)
 
 
 class TalkPlayer:
@@ -305,10 +275,3 @@ def _shared_player_locked() -> TalkPlayer:
     if _shared_player is None:
         _shared_player = TalkPlayer()
     return _shared_player
-
-
-def reset_shared_player_for_tests() -> None:
-    """Discard the shared player (test isolation for talkId dedupe)."""
-    global _shared_player
-    with _shared_lock:
-        _shared_player = None

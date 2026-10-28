@@ -14,14 +14,15 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {makePage} = require('./simplify2_harness');
+const {makePage, loadMainCss} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {cssRule} = require('./designTokens');
 const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
 
-const {win} = makePage();
+const {win} = makePage({beforeScripts: loadMainCss});
 const doc = win.document;
 
 function label(id) {
@@ -100,43 +101,38 @@ test('restart-server confirm names the outcome and keeps Cancel first', () => {
 
 const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
-function rule(selector) {
-  const re = new RegExp(
-    selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}',
-  );
-  const m = css.match(re);
-  assert.ok(m, `rule for ${selector} must exist`);
-  return m[1];
-}
-
 test('clear buttons are at least 24x24 px hit targets', () => {
   for (const sel of ['#input-clear-btn', '.search-clear-btn']) {
-    const body = rule(sel);
-    const w = /width:\s*(\d+)px/.exec(body);
-    const h = /height:\s*(\d+)px/.exec(body);
-    assert.ok(w && Number(w[1]) >= 24, `${sel} width >= 24, got ${body}`);
-    assert.ok(h && Number(h[1]) >= 24, `${sel} height >= 24, got ${body}`);
+    const style = win.getComputedStyle(doc.querySelector(sel));
+    assert.ok(parseFloat(style.width) >= 24, `${sel} width >= 24, got ${style.width}`);
+    assert.ok(parseFloat(style.height) >= 24, `${sel} height >= 24, got ${style.height}`);
   }
 });
 
+// jsdom never matches :focus-visible (and reports the initial
+// `outline-style: none` for every element), so the ring is read from
+// the stylesheet rules.
 test('model pill and model search show a focus ring instead of outline:none', () => {
-  assert.ok(!/outline:\s*none/.test(rule('#model-btn')), '#model-btn');
-  assert.ok(!/outline:\s*none/.test(rule('#model-search')), '#model-search');
-  assert.ok(
-    /outline:\s*1px solid var\(--accent\)/.test(
-      rule('#model-btn:focus-visible'),
-    ),
-  );
-  assert.ok(
-    /outline:\s*1px solid var\(--accent\)/.test(
-      rule('#model-search:focus-visible'),
-    ),
-  );
+  for (const id of ['model-btn', 'model-search']) {
+    assert.ok(
+      !/outline:\s*none/.test(cssRule(css, `#${id}`)),
+      `#${id} must not suppress its outline`,
+    );
+    assert.ok(
+      /outline:\s*1px solid var\(--accent\)/.test(
+        cssRule(css, `#${id}:focus-visible`),
+      ),
+      `#${id}:focus-visible draws the accent ring`,
+    );
+  }
 });
 
 test('disabled menu items keep their label readable', () => {
-  const m = /opacity:\s*([0-9.]+)/.exec(rule('.more-menu-item:disabled'));
-  assert.ok(m && Number(m[1]) >= 0.5, `opacity >= 0.5, got ${m && m[1]}`);
+  const item = doc.getElementById('settings-btn');
+  item.disabled = true;
+  const opacity = Number(win.getComputedStyle(item).opacity);
+  item.disabled = false;
+  assert.ok(opacity >= 0.5, `opacity >= 0.5, got ${opacity}`);
 });
 
 // Close the page so no timer main.js armed keeps node alive.

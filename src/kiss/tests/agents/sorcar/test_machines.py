@@ -42,6 +42,7 @@ from kiss.server.web_server import _get_local_ips
 from kiss.tests.conftest import posix_only
 from kiss.tests.local_ws import make_test_tls
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
+from kiss.tests.server.pause import Pause
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 
 needs_sshd = pytest.mark.skipif(not SSHD, reason="no sshd on this host")
@@ -1226,6 +1227,54 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
         monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
         with pytest.raises(mach.MachineError, match="ssh is not installed on this machine"):
             mach.SshTunnel(login, daemon.port).open(timeout=1.0)
+    finally:
+        mach.close_links()
+        daemon.stop()
+
+
+@fake_ssh_only
+def test_removing_a_machine_waits_for_a_stream_handshake_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removal during a stream's handshake leaves no tunnel of the removed machine.
+
+    A stream's handshake (``open_connection``) runs outside the
+    link's lock, so ``remove_machine`` could retire the link and sweep
+    the tunnels while the handshake had not opened its tunnel yet; the
+    handshake then opened a fresh one that nothing swept.  ``retire``
+    waits for the handshake instead, so the sweep comes after it.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    login = "ksen@going.example.org"
+    streams: list[ClientConnection] = []
+    errors: list[Exception] = []
+
+    def connect(link: mach.MachineLink) -> None:
+        try:
+            streams.append(link.open_connection())
+        except mach.MachineError as exc:
+            errors.append(exc)
+
+    try:
+        machine = mach.add_machine("going", login)
+        link = mach.link_for(machine)
+        with Pause(mach.tunnel_port.__code__, lambda local: local["ssh"] == login) as held:
+            dialling = threading.Thread(target=connect, args=(link,))
+            dialling.start()
+            assert held.paused.wait(30), "the handshake about to open its tunnel"
+            removing = threading.Thread(target=mach.remove_machine, args=("going",))
+            removing.start()
+            # The removal retires the link and waits for the handshake.
+            time.sleep(0.5)
+            assert link._retired and removing.is_alive()
+        dialling.join(30)
+        removing.join(30)
+        assert not dialling.is_alive() and not removing.is_alive()
+        assert mach.load_machines() == []
+        assert mach._tunnels == {}, "the removed machine's tunnel was swept"
+        for stream in streams:
+            stream.close()
     finally:
         mach.close_links()
         daemon.stop()

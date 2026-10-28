@@ -26,10 +26,10 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.core.user_config import CONFIG_PATH, save_config
-from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl, write_trajectory
+from kiss.viz_trajectory import server as viz_server
 
 
 class _ThreadRecordingPath(Path):
@@ -61,7 +61,7 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
         self._list_threads: list[int] = []
         self._load_threads: list[int] = []
         self._orig_list_jobs = web_server.list_jobs
-        self._orig_load = sorcar_api._load_trajectories_from_dir
+        self._orig_load = viz_server.load_job_trajectories
         orig_list, orig_load = self._orig_list_jobs, self._orig_load
         list_threads, load_threads = self._list_threads, self._load_threads
 
@@ -69,12 +69,14 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             list_threads.append(threading.get_ident())
             return orig_list(artifact_dir)
 
-        def recording_load(job_dir: Path) -> list[dict[str, Any]]:
+        def recording_load(
+            artifact_dir: Path, job_name: str, job_dir: Path | None = None,
+        ) -> list[dict[str, Any]]:
             load_threads.append(threading.get_ident())
-            return orig_load(job_dir)
+            return orig_load(artifact_dir, job_name, job_dir=job_dir)
 
         web_server.list_jobs = recording_list_jobs
-        sorcar_api._load_trajectories_from_dir = recording_load
+        viz_server.load_job_trajectories = recording_load
 
         self._orig_template = web_server.TRAJECTORY_TEMPLATE
         _ThreadRecordingPath.recorded = []
@@ -94,7 +96,7 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         web_server.get_jobs_root = self._orig_get_jobs_root
         web_server.list_jobs = self._orig_list_jobs
-        sorcar_api._load_trajectories_from_dir = self._orig_load
+        viz_server.load_job_trajectories = self._orig_load
         web_server.TRAJECTORY_TEMPLATE = self._orig_template
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)

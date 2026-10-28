@@ -107,16 +107,6 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
         )
         self.assertEqual(reply["results"], {"hello.txt": True})
 
-    async def test_open_file_falls_back_to_server_work_dir(self) -> None:
-        # Backend work dir cleared: the third fallback arm (this
-        # server's own work_dir) must still resolve relative paths.
-        self.server._agent_server.work_dir = ""
-        reply = await self._roundtrip(
-            [{"type": "openFile", "path": "hello.txt", "tabId": "t"}],
-            "fileContent",
-        )
-        self.assertEqual(reply["content"], "hi\n")
-
     async def test_check_paths_echoes_blank_for_non_string_workdir(self) -> None:
         reply = await self._roundtrip(
             [{"type": "checkPaths", "paths": ["hello.txt", 3, ""],

@@ -13,7 +13,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  pickMachine: pick,
+} = require('./simplify2_harness');
+const {MACHINES} = require('./settings_helpers');
 
 function makePage(state) {
   const {win, posted, getState} = makeChatPage({
@@ -21,17 +26,6 @@ function makePage(state) {
     initialState: state || undefined,
   });
   return {win, posted, state: getState};
-}
-
-const MACHINES = [
-  {name: 'laptop', local: true, status: 'reachable', address: 'https://a'},
-  {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
-];
-
-function pick(win, value) {
-  const sel = win.document.getElementById('chat-machine');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 function persistedPicks(state) {

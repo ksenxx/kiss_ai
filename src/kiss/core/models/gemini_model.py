@@ -30,6 +30,7 @@ from kiss.core.models.model import (
     pop_max_tokens_and_stop,
     responses_items_to_chat_messages,
     split_data_url,
+    text_of_parts,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error
 
@@ -237,11 +238,7 @@ def _tool_result_response_dict(content: Any) -> dict[str, Any]:
         A JSON-serializable dict for ``FunctionResponse.response``.
     """
     if isinstance(content, list):
-        content = "".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        )
+        content = text_of_parts(content)
     if isinstance(content, str):
         try:
             parsed = json.loads(content)
@@ -264,9 +261,7 @@ def _modality_token_count(
             omits it.
         modality: The modality to count (AUDIO by default).
     """
-    return sum(
-        d.token_count or 0 for d in details or () if d.modality == modality
-    )
+    return sum(d.token_count or 0 for d in details or () if d.modality == modality)
 
 
 class GeminiModel(Model):
@@ -298,8 +293,22 @@ class GeminiModel(Model):
         )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
+        # The pool behind ``client``, kept so a stream abort can reach the
+        # live response; built with the client by _build_client.
+        self._http_client: _ResponseTrackingHttpxClient
+
+    def _build_client(self) -> genai.Client:
+        """Return a new ``genai.Client`` over a fresh tracking pool.
+
+        ``genai.Client.close()`` closes the httpx client it was given, so
+        the pool belongs to one client: the replaced client takes its old
+        pool with it when :meth:`Model._reuse_client` closes it.
+        """
         self._http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
-        self._client_api_key: str | None = None
+        return genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(httpx_client=self._http_client),
+        )
 
     def reset_conversation(self) -> None:
         """Reset conversation state including thought signatures.
@@ -321,15 +330,9 @@ class GeminiModel(Model):
         """
         # Built here rather than in __init__ because the Sorcar agent may
         # override ``api_key`` between construction and initialize() (a
-        # task-specific key on a same-provider model switch).  Reused across
-        # runs: every ``genai.Client`` owns an ``httpx.AsyncClient`` that
-        # nothing closes, so rebuilding per run leaks one per run.
-        if self.client is None or self.api_key != self._client_api_key:
-            self.client = genai.Client(
-                api_key=self.api_key,
-                http_options=types.HttpOptions(httpx_client=self._http_client),
-            )
-            self._client_api_key = self.api_key
+        # task-specific key on a same-provider model switch); see
+        # Model._reuse_client.
+        self._reuse_client((self.api_key,), self._build_client)
         msg: dict[str, Any] = {"role": "user", "content": prompt}
         if attachments:
             msg["attachments"] = attachments
@@ -340,12 +343,11 @@ class GeminiModel(Model):
         """Return the conversation converted to Chat-Completions messages.
 
         The one place :func:`responses_items_to_chat_messages` runs for a
-        request: :meth:`generate` and
-        :meth:`generate_and_process_with_tools` convert once and pass the
-        result to the three consumers (:meth:`_tool_call_id_to_name_map`,
-        :meth:`_convert_conversation_to_gemini_contents`,
-        :meth:`_resolve_system_instruction`) instead of each consumer
-        re-running the full conversion.
+        request: :meth:`generate_and_process_with_tools` converts once and
+        passes the result to :meth:`_convert_conversation_to_gemini_contents`
+        (which feeds :meth:`_tool_call_id_to_name_map`) and
+        :meth:`_build_config` instead of each consumer re-running the
+        full conversion.
 
         Returns:
             The conversation in Chat-Completions format.
@@ -391,9 +393,7 @@ class GeminiModel(Model):
             thought_signature=self._thought_signatures.get(call_id) if call_id else None,
         )
 
-    def _function_response_part(
-        self, name: str, content: Any, call_id: Any
-    ) -> types.Part:
+    def _function_response_part(self, name: str, content: Any, call_id: Any) -> types.Part:
         """Build a Gemini ``function_response`` part, re-attaching any thought signature.
 
         Args:
@@ -587,9 +587,7 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
-    def _resolve_system_instruction(
-        self, chat_messages: list[dict[str, Any]]
-    ) -> str | None:
+    def _resolve_system_instruction(self, chat_messages: list[dict[str, Any]]) -> str | None:
         """Merge configured and conversation-level system instructions.
 
         OpenAI-style ``role="system"`` messages (present when the
@@ -646,9 +644,7 @@ class GeminiModel(Model):
         if params.get("thinking_config") is None:
             params["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
 
-        params = self._keep_supported_request_params(
-            params, _GEMINI_CONFIG_FIELDS, "Gemini"
-        )
+        params = self._keep_supported_request_params(params, _GEMINI_CONFIG_FIELDS, "Gemini")
         params["tools"] = tools
         params["system_instruction"] = self._resolve_system_instruction(chat_messages)
         return types.GenerateContentConfig(**params)
@@ -732,15 +728,6 @@ class GeminiModel(Model):
         self._rejected_response = None
         return parts, usage_chunk or last_chunk
 
-    def generate(self) -> tuple[str, Any]:
-        """Generates content from prompt without tools.
-
-        Returns:
-            tuple[str, Any]: A tuple of (generated_text, raw_response).
-        """
-        _, content, response = self.generate_and_process_with_tools({})
-        return content, response
-
     def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -792,10 +779,7 @@ class GeminiModel(Model):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> (
-        tuple[int, int, int, int]
-        | tuple[int, int, int, int, int, int, int, int, int]
-    ):
+    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int, int, int, int]:
         """Extracts token counts from a Gemini API response.
 
         Gemini prices audio input above text on several models (e.g.
@@ -838,24 +822,30 @@ class GeminiModel(Model):
                 cached_tokens,
             )
             audio_tokens = max(
-                _modality_token_count(getattr(um, "prompt_tokens_details", None))
-                - cached_audio,
+                _modality_token_count(getattr(um, "prompt_tokens_details", None)) - cached_audio,
                 0,
             )
-            input_tokens = (
-                max(prompt_tokens - cached_tokens - audio_tokens, 0) + tool_use_tokens
-            )
+            input_tokens = max(prompt_tokens - cached_tokens - audio_tokens, 0) + tool_use_tokens
             text_cached = cached_tokens - cached_audio
             if audio_tokens or cached_audio or image_output:
                 return (
-                    input_tokens, output_tokens, text_cached, 0, 0,
-                    audio_tokens, 0, cached_audio, image_output,
+                    input_tokens,
+                    output_tokens,
+                    text_cached,
+                    0,
+                    0,
+                    audio_tokens,
+                    0,
+                    cached_audio,
+                    image_output,
                 )
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
     def get_embedding(  # pragma: no cover – API call
-        self, text: str, embedding_model: str | None = None,
+        self,
+        text: str,
+        embedding_model: str | None = None,
     ) -> list[float]:
         """Generates an embedding vector for the given text.
 

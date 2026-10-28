@@ -34,6 +34,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.conftest import (
     make_capturing_server,
     redirect_persistence,
@@ -183,13 +184,13 @@ class TestUnknownWorktreeAction(_DbTestBase):
     def _arm_pending_worktree(self, tab_id: str, task_id: str) -> None:
         """Register a state whose agent holds a pending worktree."""
         agent = ChatSorcarAgent("lockdown worktree agent")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=Path(self.tmpdir),
             branch="kiss-wt-test",
             original_branch="main",
             wt_dir=Path(self.tmpdir) / "wt",
             baseline_commit=None,
-        )
+        ))
         _register_state(task_id, agent=agent, tab_id=tab_id)
 
     def test_direct_call_returns_unknown_action_message(self) -> None:

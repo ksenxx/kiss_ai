@@ -13,10 +13,10 @@ service-account key.  No mocks or patches.
 
 from __future__ import annotations
 
+import functools
 import json
 import stat
 from pathlib import Path
-from typing import cast
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -28,14 +28,10 @@ from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
     _service_account_path,
     connection_status,
 )
-from kiss.tests.agents.third_party_agents.composio_test_utils import (
-    TOKEN,
-    fake_composio,
-)
+from kiss.tests.agents.third_party_agents.composio_test_utils import TOKEN
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
-    RecordingServer,
     recording_server,
 )
 from kiss.tests.conftest import IS_WINDOWS
@@ -46,10 +42,8 @@ class _ChatHandler(RecordingHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Answer GET /v1/spaces."""
-        cast(RecordingServer, self.server).requests.append(
-            {"path": self.path, "authorization": self.headers.get("Authorization")}
-        )
-        ok = self.headers.get("Authorization") == f"Bearer {TOKEN}"
+        self.record_request(None)
+        ok = self.bearer_ok(TOKEN)
         self._json(
             200 if ok else 401,
             {"spaces": [{"name": "spaces/A", "displayName": "Team", "type": "ROOM"}]}
@@ -62,26 +56,32 @@ pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 @pytest.fixture()
-def chat(monkeypatch):
+def chat(composio):
     """Run a local Chat API behind the local Composio emulator.
 
     Yields:
         ``(composio, chat_server)``, with chat.googleapis.com rerouted
         to the local Chat server.
     """
-    with recording_server(_ChatHandler) as server, fake_composio(monkeypatch) as composio:
+    with recording_server(_ChatHandler) as server:
         composio.upstream_overrides["https://chat.googleapis.com"] = server.base_url
         yield composio, server
 
 
-def _write_service_account_key(path: Path) -> None:
-    """Write a real service-account JSON key with a fresh RSA private key."""
+@functools.cache
+def _service_account_pem() -> str:
+    """One real RSA private key per module: the tests only ever parse it, never sign."""
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = key.private_bytes(
+    return key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
+
+
+def _write_service_account_key(path: Path) -> None:
+    """Write a real service-account JSON key with a parseable RSA private key."""
+    pem = _service_account_pem()
     path.write_text(
         json.dumps(
             {
@@ -171,7 +171,7 @@ def test_clear_forgets_the_service_account_key(chat, tmp_path: Path) -> None:
 
 
 def test_cron_preflight_status_prefers_a_usable_service_account(
-    chat, monkeypatch: pytest.MonkeyPatch
+    chat, monkeypatch: pytest.MonkeyPatch, refusing_port: int
 ) -> None:
     """The cron pre-flight hook is ACTIVE on a parsable Chat-bot key, else asks Composio."""
     composio, _server = chat
@@ -190,7 +190,7 @@ def test_cron_preflight_status_prefers_a_usable_service_account(
     composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
     assert json.loads(auth_tools(agent)["finish_googlechat_auth"]())["ok"] is True
     assert connection_status() == "ACTIVE"
-    monkeypatch.setenv("COMPOSIO_BASE_URL", "http://127.0.0.1:9")  # unreachable
+    monkeypatch.setenv("COMPOSIO_BASE_URL", f"http://127.0.0.1:{refusing_port}")  # unreachable
     assert connection_status() == "UNKNOWN"
     path.write_text("{}")
     assert connection_status() == "UNKNOWN"  # a corrupt key falls through to Composio

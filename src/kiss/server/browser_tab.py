@@ -388,10 +388,16 @@ class BrowserTabService:
         return asyncio.run_coroutine_threadsafe(coro, loop)
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
-        """Start the private event loop thread on first use."""
+        """Start the private event loop thread on first use.
+
+        Test probe only: the service itself starts the loop through
+        :meth:`_run_threadsafe`; the tests under ``src/kiss/tests/server``
+        drive coroutines on the loop (and hammer this entry's lock) here.
+        """
         return locked_call(self._lock, self._ensure_loop_locked)
 
     def _ensure_loop_locked(self) -> asyncio.AbstractEventLoop:
+        """:meth:`_ensure_loop` with ``_lock`` held by the caller."""
         if self._closed:
             raise RuntimeError("The browser service is shut down.")
         if self._loop is None:
@@ -452,10 +458,15 @@ class BrowserTabService:
             # (or, past ``_OPEN_TIMEOUT``, abandoned) launch: stopping it
             # also closes a browser it already launched, so the next open
             # starts a fresh one on a free profile.  A shutdown that ran
-            # meanwhile has already taken and stopped it.
+            # meanwhile has already taken and stopped it.  The stop is
+            # bounded as in ``_teardown_locked``: a driver that does not
+            # exit would otherwise hold ``_launch_lock`` for good.
             if self._playwright is playwright:
                 self._playwright = None
-                await playwright.stop()
+                try:
+                    await asyncio.wait_for(playwright.stop(), _TEARDOWN_TIMEOUT)
+                except Exception as exc:  # noqa: BLE001 — the driver exits on its own
+                    logger.warning("browser tab: driver stop after failed launch: %r", exc)
             raise
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)

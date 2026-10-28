@@ -41,6 +41,7 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 def _register_state(
@@ -136,12 +137,12 @@ class TestBug66EmitPendingNoAutoDiscard:
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-1"
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
-        )
+        ))
 
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
@@ -181,12 +182,12 @@ class TestBug66EmitPendingNoAutoDiscard:
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug66-2"
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
-        )
+        ))
         (wt_dir / "new_file.txt").write_text("agent work\n")
 
         printer = _RecordingPrinter()

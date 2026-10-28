@@ -260,9 +260,7 @@ def start_connect(service: str, label: str) -> dict[str, Any]:
     }
 
 
-def finish_connect(
-    service: str, label: str, wait_seconds: float = _FINISH_WAIT_SECONDS
-) -> dict[str, Any]:
+def finish_connect(service: str, label: str, wait_seconds: float | None = None) -> dict[str, Any]:
     """Wait briefly for the pending connection to become ``ACTIVE``.
 
     On success the new connected account replaces the previous one,
@@ -272,12 +270,15 @@ def finish_connect(
         service: KISS service name.
         label: Human-readable service label.
         wait_seconds: How long to wait for the user to finish the sign-in
-            before answering ``pending``.
+            before answering ``pending``; ``None`` means the module default
+            ``_FINISH_WAIT_SECONDS`` (resolved at call time).
 
     Returns:
         ``{"ok": True, ...}`` once active, ``{"ok": False, "status":
         "pending", ...}`` while the user has not finished, or an error.
     """
+    if wait_seconds is None:
+        wait_seconds = _FINISH_WAIT_SECONDS
     state = _read_json(_state_path(service))
     pending = str(state.get("pending_id") or "")
     if not pending:

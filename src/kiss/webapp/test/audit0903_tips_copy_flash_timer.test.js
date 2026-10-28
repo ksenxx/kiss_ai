@@ -21,32 +21,18 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const {sleep, click, showTips} = require('./simplify2_harness');
+const {
+  sleep,
+  click,
+  showTips,
+  recordTimers,
+  fireTimers,
+} = require('./simplify2_harness');
 
 // The 1500 ms revert timers are recorded instead of waited for: the
 // test fires them by hand, so no wall-clock sleep decides whether the
-// stale one lands before or after the second click.
-function recordFlashTimers(win) {
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (fn, ms, ...args) {
-    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
-    const timer = {fn, cleared: false};
-    timers.push(timer);
-    return timer;
-  };
-  win.clearTimeout = function (handle) {
-    if (handle && typeof handle === 'object') handle.cleared = true;
-    else realClearTimeout(handle);
-  };
-  return timers;
-}
-
-/** Run every recorded timer that was not cleared, as the clock would. */
-function fireFlashTimers(timers) {
-  for (const timer of timers) if (!timer.cleared) timer.fn();
-}
+// stale one lands before or after the second click.  The only other
+// asynchrony is the clipboard promise, so `sleep(0)` is the exact wait.
 
 function makePage(clipboardImpl) {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
@@ -55,7 +41,7 @@ function makePage(clipboardImpl) {
     url: 'https://localhost/',
   });
   const win = dom.window;
-  const timers = recordFlashTimers(win);
+  const timers = recordTimers(win, 1500);
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
     value: clipboardImpl,
@@ -87,14 +73,14 @@ async function testStaleTimerDoesNotEndSecondFlash() {
   const btn = openTipWithCode(win);
 
   click(win, btn);
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(writes.length, 1);
   assert.match(writes[0], /echo hello/);
   assert.strictEqual(btn.textContent, 'Copied!');
   assert.strictEqual(timers.length, 1, 'the first click arms one revert timer');
 
   click(win, btn);
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(btn.textContent, 'Copied!');
   assert.strictEqual(
     timers.length,
@@ -104,14 +90,14 @@ async function testStaleTimerDoesNotEndSecondFlash() {
 
   // 1500 ms after the FIRST click: whatever the first click left armed
   // fires now, before the second click's timer is due.
-  fireFlashTimers(timers.slice(0, 1));
+  fireTimers(timers.slice(0, 1));
   assert.strictEqual(
     btn.textContent,
     'Copied!',
     "the first click's stale timer must not wipe the second flash early",
   );
 
-  fireFlashTimers(timers);
+  fireTimers(timers);
   assert.strictEqual(
     btn.textContent,
     'Copy',
@@ -128,9 +114,9 @@ async function testFailedCopyFlashesFailed() {
   // No document.execCommand in JSDOM: the fallback reports failure.
   const btn = openTipWithCode(win);
   click(win, btn);
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(btn.textContent, 'Failed');
-  fireFlashTimers(timers);
+  fireTimers(timers);
   assert.strictEqual(btn.textContent, 'Copy');
   win.close();
   console.log('  ok - a failed copy flashes and reverts too');
@@ -152,17 +138,17 @@ async function testStaleCompletionDoesNotOverwriteLatest() {
 
   click(win, btn); // click 1 → pending write 1
   click(win, btn); // click 2 → pending write 2
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(settlers.length, 2, 'expected two clipboard writes');
 
   settlers[1].resolve(); // the newest write lands first
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(btn.textContent, 'Copied!');
 
   // The stale older write now fails (no document.execCommand in JSDOM,
   // so its fallback reports failure too).
   settlers[0].reject(new Error('denied'));
-  await sleep(20);
+  await sleep(0);
   assert.strictEqual(
     btn.textContent,
     'Copied!',
@@ -175,7 +161,7 @@ async function testStaleCompletionDoesNotOverwriteLatest() {
     1,
     'only the latest click arms a revert timer',
   );
-  fireFlashTimers(timers);
+  fireTimers(timers);
   assert.strictEqual(btn.textContent, 'Copy');
   win.close();
   console.log('  ok - a stale async completion cannot overwrite the latest');

@@ -6,17 +6,14 @@
 
 While a chat page shows a running task, its task-info panel asks the
 daemon (``getTaskUpdate``) for a short progress update.  The update is
-rendered from what the task already reports (:func:`progress_digest`):
-its latest ``summary`` — the model's own checkpoint or the executor's
-ten-step recap — and the tool calls since, read from the persisted
-events on each poll, so it costs no model call and stays live during
-an hour-long wait.  Only the panel's refresh button runs the ``/ask``
-agent (:mod:`~kiss.agents.seas.ask.ask_sea`) on :data:`UPDATE_QUESTION`,
-the same answer a user gets by typing ``/ask`` into the task's chat;
-:class:`TaskUpdateRunner` keeps one update per task and never doubles a
-run.  (Before the 2026-10-24 trajectory audit a timer ran the agent a
-minute after the task started and every ten minutes after: 207 probes
-and $62 in a week, many fired while the task slept in a wait.)
+the answer of the ``/ask`` agent
+(:mod:`~kiss.agents.seas.ask.ask_sea`) to :data:`UPDATE_QUESTION`, the
+same two-or-three-sentence answer a user gets by typing ``/ask`` into
+the task's chat.  :class:`TaskUpdateRunner` keeps one update per task
+and runs the agent once the task is :data:`FIRST_UPDATE_DELAY_S` old,
+then whenever the update is older than :data:`UPDATE_INTERVAL_S` or is
+explicitly refreshed — never more than one run per task at a time, and
+never for a task nobody is looking at (a poll is what triggers a run).
 
 :func:`run_task_update_sea` runs the agent in-process the way
 :func:`~kiss.agents.sorcar.merge_conflict_resolver.run_merge_sea` runs the merge
@@ -28,11 +25,7 @@ task's; its spend is attributed to the task.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import html
-import json
 import logging
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -40,25 +33,24 @@ from typing import Any
 
 from kiss.agents.seas.ask.ask_sea import AskSea
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
+from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK, task_start_ms
 from kiss.agents.sorcar.sea_commands import evaluate_sea
-from kiss.core.step_recap import describe_args
+from kiss.core import stop_signal
+from kiss.server import agent_state
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
 
-# The question the panel asks the ``/ask`` agent about the task (refresh only).
+# The question the panel asks the ``/ask`` agent about the task.
 UPDATE_QUESTION = "What has this task done so far, and what are its partial results?"
+# A task's first update runs this long after the task started.
+FIRST_UPDATE_DELAY_S = 60.0
+# How long an update stays fresh before a poll triggers the next run.
+UPDATE_INTERVAL_S = 600.0
 # USD cap of one run.
 UPDATE_BUDGET_USD = 1.0
 # Updates of tasks that stopped being polled are dropped after this long.
 _PRUNE_AFTER_S = 3600.0
-# A poll re-reads the task's events for the digest at most this often.
-DIGEST_REFRESH_S = 15.0
-# Tool calls listed after the latest summary (older ones are counted).
-DIGEST_MAX_CALLS = 25
-# Characters of a tool call's title kept in the digest.
-_DIGEST_TITLE_CHARS = 120
 
 # ``(parent_agent, task_id) -> (answer_html, cost_usd)``.
 TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
@@ -69,147 +61,59 @@ class TaskUpdate:
     """The task-info panel's update for one task.
 
     Attributes:
-        text: The ``/ask`` agent's answer (HTML) to the last refresh,
-            ``""`` until the user asked.  A failed run keeps the
-            previous answer.
-        digest: The HTML digest of the task's own events (its latest
-            ``summary`` and the tool calls since), refreshed by polls.
-        digest_at: ``time.time()`` when the digest was last computed.
+        text: The agent's answer (HTML), ``""`` before the first run
+            completes.  A failed run keeps the previous answer.
         error: The failure of the last run, ``""`` when it succeeded.
         finished_at: ``time.time()`` when the last run ended (0 = never).
         cost: USD spent by the last run.
         running: Whether a run is in flight.
+        started_at: ``time.time()`` when the task started (the first
+            poll's time when the task's agent does not tell).
         polled_at: ``time.time()`` of the last poll (for pruning).
     """
 
     text: str = ""
-    digest: str = ""
-    digest_at: float = 0.0
     error: str = ""
     finished_at: float = 0.0
     cost: float = 0.0
     running: bool = False
+    started_at: float = 0.0
     polled_at: float = 0.0
+
+    @property
+    def due_at(self) -> float:
+        """Return the ``time.time()`` before which no unforced run starts.
+
+        The task's start plus :data:`FIRST_UPDATE_DELAY_S` until the
+        first run has ended, then the last run's end plus
+        :data:`UPDATE_INTERVAL_S`.
+        """
+        if self.finished_at:
+            return self.finished_at + UPDATE_INTERVAL_S
+        return self.started_at + FIRST_UPDATE_DELAY_S
 
     @property
     def sig(self) -> str:
         """Return a fingerprint that changes whenever the panel must repaint."""
-        digest_hash = hashlib.sha1(self.digest.encode("utf-8")).hexdigest()[:10]
-        return f"{self.finished_at:.3f}:{int(self.running)}:{digest_hash}"
-
-    @property
-    def content(self) -> str:
-        """Return the panel body: the agent's answer, when there is one, above the digest."""
-        if not self.text:
-            return self.digest
-        return f'<div class="task-update-answer">{self.text}</div>\n{self.digest}'
+        return f"{self.finished_at:.3f}:{int(self.running)}"
 
     def payload(self) -> dict[str, Any]:
         """Return the wire fields of a ``taskUpdate`` reply.
 
-        ``exists`` is true from the first poll on.  No run is ever
-        scheduled: the digest keeps the panel current and the agent
-        runs only on the panel's refresh button.
+        ``exists`` is true from the first poll on: before the first run
+        the panel shows when that run is due (``dueAt``), so a task that
+        is seconds old does not look like a task without an update.
         """
         return {
             "exists": True,
-            "content": self.content,
+            "content": self.text,
             "error": self.error,
             "running": self.running,
             "cost": self.cost,
             "updatedAt": int(self.finished_at * 1000),
+            "dueAt": int(self.due_at * 1000),
             "sig": self.sig,
         }
-
-
-_INLINE_CODE = re.compile(r"`([^`]+)`")
-_BOLD = re.compile(r"\*\*([^*]+)\*\*")
-
-
-def _inline_html(text: str) -> str:
-    """Return *text* HTML-escaped with Markdown backticks and ``**bold**`` rendered."""
-    escaped = html.escape(text, quote=False)
-    escaped = _INLINE_CODE.sub(r"<code>\1</code>", escaped)
-    return _BOLD.sub(r"<strong>\1</strong>", escaped)
-
-
-def _summary_html(markdown: str) -> str:
-    """Return the HTML of a ``summary`` description: bullets as a list, other lines as ``<p>``."""
-    parts: list[str] = []
-    items: list[str] = []
-    for raw in markdown.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line[:2] in ("- ", "* "):
-            items.append(f"<li>{_inline_html(line[2:])}</li>")
-            continue
-        if items:
-            parts.append("<ul>" + "".join(items) + "</ul>")
-            items = []
-        parts.append(f"<p>{_inline_html(line)}</p>")
-    if items:
-        parts.append("<ul>" + "".join(items) + "</ul>")
-    return "".join(parts)
-
-
-def _call_title(entry: Any) -> str:
-    """Return the one-line title of a TOOL CALL digest entry from its JSON arguments."""
-    try:
-        args = json.loads(entry.text) if entry.text else {}
-    except ValueError:
-        args = {}
-    if not isinstance(args, dict):
-        args = {}
-    return describe_args(args)[:_DIGEST_TITLE_CHARS]
-
-
-def progress_digest(task_id: str) -> str:
-    """Return the HTML digest of what *task_id* has done: its latest summary and the calls since.
-
-    Rendered from the task's persisted events, so it costs no model
-    call and stays live during a long wait: the ``summary`` events are
-    the model's own checkpoints or the executor's ten-step recaps
-    (:mod:`kiss.core.step_recap`), the tool log is every call since.
-
-    Args:
-        task_id: The task's persisted id.
-
-    Returns:
-        The HTML, ``""`` for a task without a history row.
-    """
-    from kiss.agents.sorcar import task_digest
-
-    task = task_digest.load_task(task_id)
-    if task is None:
-        return ""
-    entries, _spend = task_digest.digest_events(task["events"])
-    last_summary = -1
-    for index, entry in enumerate(entries):
-        if entry.kind == "SUMMARY":
-            last_summary = index
-    calls_before = sum(1 for e in entries[:last_summary] if e.kind == "TOOL CALL")
-    calls_since = [e for e in entries[last_summary + 1:] if e.kind == "TOOL CALL"]
-    parts = ['<section class="task-update-digest">']
-    if last_summary >= 0:
-        parts.append(f"<h4>Latest summary (after {calls_before} tool calls)</h4>")
-        parts.append(_summary_html(entries[last_summary].text))
-    else:
-        parts.append("<h4>No summary yet</h4>")
-    if calls_since:
-        parts.append(f"<h4>Since then ({len(calls_since)} tool calls)</h4>")
-        shown = calls_since[-DIGEST_MAX_CALLS:]
-        if len(calls_since) > len(shown):
-            parts.append(f"<p>… {len(calls_since) - len(shown)} earlier calls</p>")
-        items = "".join(
-            f"<li><code>{html.escape(e.name)}</code> {_inline_html(_call_title(e))}</li>"
-            for e in shown
-        )
-        parts.append(f'<ol class="task-update-log">{items}</ol>')
-    else:
-        parts.append("<p>No tool calls since.</p>")
-    parts.append("</section>")
-    return "\n".join(parts)
 
 
 def mark_legacy_updates_as_side_channels() -> int:
@@ -296,7 +200,6 @@ def _charge_locked(
         _append_chat_event,
     )
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
-    from kiss.server import agent_state
 
     try:
         updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
@@ -395,6 +298,12 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     model unless the script defines ``model()``, in the parent's work
     dir.
 
+    The child runs on the update thread, which is bound to the task's
+    stop event first: a Stop on the task's tab reaches the child the
+    way it reaches a ``run_parallel`` child (every stop check of the
+    child's loop polls that event), so a stopped task never leaves its
+    update child calling the model until its budget cap.
+
     Its spend is charged to the task whatever way the run ends.  While
     the task still runs it is banked on *parent_agent*'s live counters,
     bound to the usage epoch captured at the start (a parent that has
@@ -431,6 +340,10 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     )
 
     printer = getattr(parent_agent, "printer", None)
+    # Before the child is built: the agent captures its thread's event
+    # at construction for its tools, and the printer bridge records it
+    # as the child's own registry state's ``stop_event``.
+    stop_signal.set_thread_stop_event(_task_stop_event(task_id))
     # The tab the chat pages show the parent under — for a sub-agent
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
@@ -480,19 +393,56 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
-        charge_side_channel_usage(
-            printer, parent_agent, task_id, budget, tokens, steps, epoch=epoch,
-        )
-        if printer is not None:
-            _notify_subagent_done(
-                printer, _persisted_task_id(agent), sub_tab_id, model_name,
-                parent_tab_id,
+        try:
+            charge_side_channel_usage(
+                printer, parent_agent, task_id, budget, tokens, steps, epoch=epoch,
             )
+        except Exception:
+            # The charge (a row update, a usage broadcast, a chat-event
+            # write) must not cost the tabs their ``subagentDone``:
+            # without it every surface watching the parent keeps the
+            # child's nested tab open, spinner and all, until a reload.
+            log.warning(
+                "side-channel spend of task %s not charged", task_id, exc_info=True,
+            )
+        finally:
+            if printer is not None:
+                _notify_subagent_done(
+                    printer, _persisted_task_id(agent), sub_tab_id, model_name,
+                    parent_tab_id,
+                )
     return _extract_result_summary(result), budget
 
 
+def _task_stop_event(task_id: str) -> threading.Event | None:
+    """Return the stop event a Stop on task *task_id* sets, or ``None``.
+
+    Only the registry's event for the task (the one ``_stop_task`` sets,
+    renewed by the task runner for every run of the agent) qualifies: a
+    task no longer registered has nothing to stop, and its agent's
+    current ``_stop_event`` may already belong to the next run of a
+    reused agent (one kept for a pending worktree merge).
+    """
+    state = agent_state.get(task_id)
+    return state.stop_event if state is not None else None
+
+
+def _task_started_at(task_id: str, now: float) -> float:
+    """Return when the task *task_id* started (``time.time()``), or *now* if unknown.
+
+    Read from the task's own ``task_history`` row
+    (:func:`~kiss.agents.sorcar.persistence.task_start_ms`), which every
+    run allocates with its own start; the agent's ``_task_start_ms``
+    would date a later block of a sequential submission by the first
+    one.  Blocks on the history database's lock, so call it off the
+    event loop.
+    """
+    start_ms = task_start_ms(task_id)
+    return start_ms / 1000.0 if start_ms > 0 else now
+
+
 class TaskUpdateRunner:
-    """Keeps one :class:`TaskUpdate` per task: the live digest, plus the agent's answer on refresh.
+    """Keeps one :class:`TaskUpdate` per task and schedules the agent runs.
 
     Args:
         run_sea: Runs the agent for ``(parent_agent, task_id)`` and
@@ -506,29 +456,30 @@ class TaskUpdateRunner:
         self._lock = threading.Lock()
 
     def poll(self, task_id: str, parent_agent: Any, force: bool = False) -> TaskUpdate:
-        """Return the update for *task_id*; refresh its digest, start a run only on *force*.
+        """Return the update for *task_id*, starting a run when one is due.
 
-        The digest is re-read from the task's events at most every
-        :data:`DIGEST_REFRESH_S` (a history-database read: call this off
-        the event loop, ``asyncio.to_thread``).  No timer ever starts
-        the agent: only the panel's refresh button (*force*) does, and
-        a run already in flight is never doubled.
+        A run is due once the task is :data:`FIRST_UPDATE_DELAY_S` old
+        and no run has ended yet, when the last one ended
+        :data:`UPDATE_INTERVAL_S` or more ago, or when *force* is set
+        (the panel's refresh button); a run already in flight is never
+        doubled.
+
+        The first poll for a task reads the task's start from its
+        history row, so call this off the event loop
+        (``asyncio.to_thread``).
 
         Args:
             task_id: The running task's persisted id.
             parent_agent: The running task's agent (the run's parent).
-            force: Run the agent now (the panel's refresh button).
+            force: Start a run now even if the update is fresh.
 
         Returns:
             A snapshot of the task's update state.
         """
         now = time.time()
         upd = self._update_for(task_id, now)
-        digest = progress_digest(task_id) if now - upd.digest_at >= DIGEST_REFRESH_S else None
         with self._lock:
-            if digest is not None:
-                upd.digest, upd.digest_at = digest, now
-            if force and not upd.running:
+            if (force or now >= upd.due_at) and not upd.running:
                 # ``running`` is set only once the thread exists (a
                 # failed ``start()`` under thread exhaustion would
                 # otherwise pin the update on "running" for good);
@@ -547,13 +498,21 @@ class TaskUpdateRunner:
         """Return the update of *task_id* polled at *now*, created on its first poll.
 
         Pruning runs first, then the polled update is touched so no
-        concurrent poll prunes it.
+        concurrent poll prunes it; only a task without an update reads
+        its start from the history row (outside the lock).
         """
         with self._lock:
             self._prune(now)
             upd = self._updates.get(task_id)
+            if upd is not None:
+                upd.polled_at = now
+                return upd
+        started_at = _task_started_at(task_id, now)
+        with self._lock:
+            # A concurrent first poll may have created it meanwhile.
+            upd = self._updates.get(task_id)
             if upd is None:
-                upd = TaskUpdate()
+                upd = TaskUpdate(started_at=started_at)
                 self._updates[task_id] = upd
             upd.polled_at = now
             return upd
@@ -572,6 +531,10 @@ class TaskUpdateRunner:
         text, cost, error = "", 0.0, ""
         try:
             text, cost = self._run_sea(parent_agent, task_id)
+        except KeyboardInterrupt:
+            # The task was stopped while its update ran: the child shares
+            # the task's stop event and ends with it.
+            error = "The task was stopped before this update finished."
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             log.warning("task update for %s failed", task_id, exc_info=True)

@@ -23,46 +23,34 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import pytest
-
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir, socket_path
 from kiss.agents.third_party_agents.muse_auth.client import ensure_daemon, revoke
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     _daemon_pid,
     _process_running,
-    setup_muse_env,
-    teardown_muse_env,
     wait_until,
 )
 
-
-def test_daemon_exits_when_its_home_is_deleted(
-    isolated_kiss_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
-    try:
-        ensure_daemon()
-        pid = _daemon_pid()
-        assert pid is not None, "no daemon is listening after ensure_daemon()"
-        assert muse_auth_dir().is_dir()
-
-        shutil.rmtree(isolated_kiss_home)
-
-        assert wait_until(lambda: not _process_running(pid), timeout=10.0), (
-            "the daemon kept running after its KISS_HOME was deleted"
-        )
-        assert not socket_path().exists(), "the daemon left its socket behind"
-        # The daemon process is gone, so nothing can re-create the home.
-        assert not isolated_kiss_home.exists(), "something re-created the deleted KISS_HOME"
-    finally:
-        teardown_muse_env()
+MUSE_POLICY = {"defaults": {"read": "allow", "write": "ask"}}
 
 
-def test_client_recovers_right_after_home_is_recreated(
-    isolated_kiss_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_daemon_exits_when_its_home_is_deleted(muse_env: Path) -> None:
+    ensure_daemon()
+    pid = _daemon_pid()
+    assert pid is not None, "no daemon is listening after ensure_daemon()"
+    assert muse_auth_dir().is_dir()
+
+    shutil.rmtree(muse_env)
+
+    assert wait_until(lambda: not _process_running(pid), timeout=10.0), (
+        "the daemon kept running after its KISS_HOME was deleted"
+    )
+    assert not socket_path().exists(), "the daemon left its socket behind"
+    # The daemon process is gone, so nothing can re-create the home.
+    assert not muse_env.exists(), "something re-created the deleted KISS_HOME"
+
+
+def test_client_recovers_right_after_home_is_recreated(muse_env: Path) -> None:
     """Delete ``KISS_HOME``, recreate it, and use the client at once.
 
     With a long ``KISS_HOME`` path the socket lives in ``/tmp`` and
@@ -73,15 +61,11 @@ def test_client_recovers_right_after_home_is_recreated(
     directory again) or has already left and a fresh one is spawned —
     either way the call succeeds instead of dying under the request.
     """
-    setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
-    try:
-        ensure_daemon()
-        for _ in range(5):
-            shutil.rmtree(isolated_kiss_home)
-            isolated_kiss_home.mkdir()
-            # A real daemon op (enrolled_services() answers from disk and
-            # never touches the daemon).
-            assert revoke("nothing-enrolled") == 0
-            assert muse_auth_dir().is_dir(), "ensure_daemon did not restore the state dir"
-    finally:
-        teardown_muse_env()
+    ensure_daemon()
+    for _ in range(5):
+        shutil.rmtree(muse_env)
+        muse_env.mkdir()
+        # A real daemon op (enrolled_services() answers from disk and
+        # never touches the daemon).
+        assert revoke("nothing-enrolled") == 0
+        assert muse_auth_dir().is_dir(), "ensure_daemon did not restore the state dir"

@@ -12,6 +12,7 @@ class-level ``_HANDLERS`` dispatch table consumed by
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import queue
@@ -22,6 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar import chrome_bridge
 from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
     _chat_task_tree,
@@ -184,9 +186,10 @@ def _parse_int(value: Any) -> int | None:
 
     Guarded parse for int-typed command fields (e.g. the history
     pager's ``offset`` / ``generation`` / ``limit``) so malformed
-    payloads (e.g. ``"offset": "abc"``) never raise out of a command
-    handler — an escaping exception terminates the transport's whole
-    receive loop and with it the client connection.
+    payloads (e.g. ``"offset": "abc"``) are ignored instead of
+    raising out of the command handler, which would log a traceback
+    and drop the command (the transport keeps the connection either
+    way).
 
     Args:
         value: Arbitrary value taken from a client command dict.
@@ -215,6 +218,11 @@ def _opt_str(value: Any) -> str | None:
         The non-empty string, or ``None`` otherwise.
     """
     return value if isinstance(value, str) and value else None
+
+
+def _open_external_report(url: str) -> dict[str, Any]:
+    """Open *url* in the user's default browser; the ``openExternalResult`` fields."""
+    return {"opened": open_in_default_browser(url, once=False)}
 
 
 def broadcast_to_conn(
@@ -291,16 +299,17 @@ class _CommandsMixin:
     # liveness check runs under ``_state_lock`` but its database write
     # does not (it waits on the event writer, on readers and on SQLite's
     # busy timeout, and must not stall every other command meanwhile);
-    # ``_cmd_run`` waits on the condition while the count is non-zero so
-    # a fresh task cannot insert a row the delete then sweeps away.
-    # Read and written only under ``_state_lock``.
+    # ``_cmd_run`` waits on ``_history_delete_done`` (a condition on
+    # ``_state_lock``, created by ``AgentServer.__init__``) while the
+    # count is non-zero so a fresh task cannot insert a row the delete
+    # then sweeps away.  Read and written only under ``_state_lock``.
     _history_deletes: int = 0
-    _history_delete_done = threading.Condition(agent_state.STATE_LOCK)
 
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
+        _history_delete_done: threading.Condition
         _shutdown_stopping: bool
         _default_model: str
         _model_pick: tuple[int, str]
@@ -321,6 +330,7 @@ class _CommandsMixin:
         browser_tabs: BrowserTabService
 
         def _tab_chat_id_locked(self, tab_id: str) -> str: ...
+        def _tab_model_locked(self, tab_id: str) -> str: ...
         def _broadcast_tabs_state(self) -> None: ...
         def _publish_tabs_state(self) -> None: ...
 
@@ -760,11 +770,10 @@ class _CommandsMixin:
                 # stale undo (gpt-5.6-sol review 2, introduced bug 1).
                 with self._state_lock:
                     closed_while_publishing = state.frontend_closed
-                if closed_while_publishing:
-                    if self.tab_registry.close_tab_if_generation(
-                        tab_id, publish_generation,
-                    ):
-                        self._broadcast_tabs_state()
+                if closed_while_publishing and self.tab_registry.close_tab_if_generation(
+                    tab_id, publish_generation,
+                ):
+                    self._broadcast_tabs_state()
             self.printer.broadcast({
                 "type": "clear",
                 "chat_id": chat_id,
@@ -903,7 +912,7 @@ class _CommandsMixin:
         with self._state_lock:
             if tab_id:
                 if not model:
-                    model = self._tab_models.get(tab_id, "") or self._default_model
+                    model = self._tab_model_locked(tab_id)
                 self._tab_models[tab_id] = model
             if not model:
                 return
@@ -936,10 +945,7 @@ class _CommandsMixin:
 
     def _tab_work_dir(self, tab_id: str) -> str:
         """Return the tab's pinned work directory, else the daemon's."""
-        for entry in self.tab_registry.snapshot():
-            if entry["tabId"] == tab_id:
-                return entry["workDir"] or self.work_dir
-        return self.work_dir
+        return self.tab_registry.work_dir_of(tab_id) or self.work_dir
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
@@ -1002,15 +1008,10 @@ class _CommandsMixin:
         conn_id = str(cmd.get("connId", "") or "")
         if not url or not url.lower().startswith(("http://", "https://")):
             return
-
-        def _open() -> None:
-            opened = open_in_default_browser(url, once=False)
-            self._broadcast_to_conn(
-                {"type": "openExternalResult", "url": url, "opened": opened},
-                conn_id,
-            )
-
-        threading.Thread(target=_open, name="open-external", daemon=True).start()
+        self._reply_from_thread(
+            "openExternalResult", functools.partial(_open_external_report, url), conn_id,
+            "open-external", url=url,
+        )
 
     def _refuse_delete_while_running(self, cmd: dict[str, Any], what: str) -> None:
         """Tell the requesting page that *what* cannot be deleted while its task runs."""
@@ -1190,15 +1191,9 @@ class _CommandsMixin:
                 unrelated tab's current question).
         """
         owner.pending_ask_question = ""
-        while not q.empty():
-            try:
-                q.get_nowait()
-            except queue.Empty:  # pragma: no cover — race guard
-                break
-        try:
+        agent_state.drain_queue(q)
+        with contextlib.suppress(queue.Full):  # drained immediately above
             q.put_nowait(answer)
-        except queue.Full:  # pragma: no cover — drained immediately above
-            pass
         self.printer.broadcast_transient({"type": "askUserDone"}, owner.task_id, ans_tab)
 
     def _route_prompt_to_owner(
@@ -1569,9 +1564,12 @@ class _CommandsMixin:
                 spent = result
                 text, success = result.text, result.success
             except Exception as exc:
-                if isinstance(exc, daemon_client.StoppedOnTimeoutError):
-                    spent = exc.result
-                else:
+                # Both timeout subclasses (confirmed and unconfirmed
+                # stop) carry ``result``; every other abort past the
+                # connect carries ``task_result`` (see
+                # ``daemon_client.run``).
+                spent = getattr(exc, "result", None)
+                if spent is None:
                     spent = getattr(exc, "task_result", None)
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
@@ -1749,7 +1747,12 @@ class _CommandsMixin:
             # through the normal steering queue like any other typed
             # message.
             question = _split_ask_command(prompt)
-            owner_task = _persisted_task_id(owner.agent)
+            # Read once under the lock: task teardown clears
+            # ``owner.agent`` under this same lock, so a re-read after
+            # the ``with`` block could hand the side channel ``None``
+            # and drop its spend.
+            owner_agent = owner.agent
+            owner_task = _persisted_task_id(owner_agent)
             # An empty ``owner_task`` means the running task has not
             # allocated its ``task_history`` row yet (the narrow
             # window between ``run()`` entry and ``_add_task``): the
@@ -1803,7 +1806,7 @@ class _CommandsMixin:
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,
-                owner_agent=owner.agent,
+                owner_agent=owner_agent,
                 chat_id=owner_chat_id,
                 question=ask_question,
                 attachments=raw_attachments if isinstance(raw_attachments, list) else None,
@@ -1980,6 +1983,12 @@ class _CommandsMixin:
         active_content = cmd.get("activeFileContent")
         if not isinstance(active_file, str):
             active_file = None
+        # An explicit ``null`` buffer: the file is open but has no
+        # buffer the client could send (a read-only preview, a page
+        # too big for the editor), so any snapshot kept of the path is
+        # stale and the file on disk is the text to complete against.
+        # An ABSENT buffer (focus inside the chat) keeps the snapshot.
+        no_buffer = "activeFileContent" in cmd and active_content is None
         if not isinstance(active_content, str):
             active_content = None
         conn_id = cmd.get("connId", "")
@@ -1996,14 +2005,14 @@ class _CommandsMixin:
                 self._last_active_content.pop(conn_id, None)
                 active_content = None
             elif active_file:
-                if (
-                    active_content is None
-                    and active_file != self._last_active_file.get(conn_id, "")
+                if active_content is None and (
+                    no_buffer or active_file != self._last_active_file.get(conn_id, "")
                 ):
                     # The client reported a DIFFERENT editor file with
-                    # no buffer snapshot: the stored content belongs to
+                    # no buffer snapshot (the stored content belongs to
                     # the previous file and must not be paired with the
-                    # new path (stale cross-file identifiers).
+                    # new path: stale cross-file identifiers), or a
+                    # file it has no buffer for: the disk is the text.
                     self._last_active_content.pop(conn_id, None)
                 self._last_active_file[conn_id] = active_file
             if active_content is not None:
@@ -2277,6 +2286,10 @@ class _CommandsMixin:
         # that (non-reentrant) lock itself to persist the directory.
         if new_work_dir:
             self._apply_new_work_dir(new_work_dir)
+        # A newly ticked "Chrome bridge" box takes effect now, not at the
+        # next daemon start (a no-op when the bridge already runs or the
+        # box is clear).
+        chrome_bridge.start_if_enabled()
 
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)
@@ -2356,40 +2369,53 @@ class _CommandsMixin:
         )
 
     def _reply_from_thread(
-        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_id: str, name: str,
+        self,
+        reply_type: str,
+        report: Callable[[], dict[str, Any]],
+        conn_id: str,
+        name: str,
+        **echo: Any,
     ) -> None:
         """Answer connection *conn_id* with a *reply_type* event built by *report*.
 
         For the settings sheet's CLI probes (``claude auth status``,
-        ``codex login status``, ``codex login --device-auth``): each a
-        bounded process start-up of seconds, run on a daemon thread
-        *name* rather than in the command loop.  When the thread cannot
-        start (``RuntimeError`` under thread pressure) the event carries
-        the reason as ``error`` instead, so the sheet is never left
-        waiting for an answer that is not coming.
+        ``codex login status``, ``codex login --device-auth``) and the
+        app window's ``openExternal``: each a bounded process start-up
+        of seconds, run on a daemon thread *name* rather than in the
+        command loop.  When the thread cannot start (``RuntimeError``
+        under thread pressure) the event carries the reason as
+        ``error`` instead, so the sheet is never left waiting for an
+        answer that is not coming.
 
         Args:
             reply_type: The event type of the reply.
             report: Builds the reply's fields (never raises).
             conn_id: The ``connId`` of the sender to answer.
             name: The thread's name.
+            **echo: Fields every reply carries, the ``error`` one too
+                (``openExternalResult`` keys its fallback on ``url``).
         """
         try:
             threading.Thread(
-                target=self._report_from_thread, args=(reply_type, report, conn_id),
+                target=self._report_from_thread, args=(reply_type, report, conn_id, echo),
                 name=name, daemon=True,
             ).start()
         except RuntimeError as exc:
             logger.exception("%s thread could not start", name)
             self._broadcast_to_conn(
-                {"type": reply_type, "error": f"{name} could not start: {exc}"}, conn_id,
+                {"type": reply_type, **echo, "error": f"{name} could not start: {exc}"},
+                conn_id,
             )
 
     def _report_from_thread(
-        self, reply_type: str, report: Callable[[], dict[str, Any]], conn_id: str,
+        self,
+        reply_type: str,
+        report: Callable[[], dict[str, Any]],
+        conn_id: str,
+        echo: dict[str, Any],
     ) -> None:
         """Thread body of :meth:`_reply_from_thread`."""
-        self._broadcast_to_conn({"type": reply_type, **report()}, conn_id)
+        self._broadcast_to_conn({"type": reply_type, **echo, **report()}, conn_id)
 
     def _broadcast_my_models(self) -> None:
         """Broadcast the current custom-model list to every client.
@@ -2471,7 +2497,7 @@ class _CommandsMixin:
         self._broadcast_my_models()
 
     def _cmd_add_trick(self, cmd: dict[str, Any]) -> None:
-        """Append a promptlet to ``~/.kiss/MY_INJECTION.md``.
+        """Append a promptlet to the home directory's ``MY_INJECTION.md``.
 
         Services the Inject promptlet panel's Add button.  ``text`` is
         the promptlet body; a rejected body (empty, duplicate, or one
@@ -2486,7 +2512,7 @@ class _CommandsMixin:
         self._edit_my_injection(cmd, append_my_injection_trick, "addTrick")
 
     def _cmd_delete_trick(self, cmd: dict[str, Any]) -> None:
-        """Remove a promptlet from ``~/.kiss/MY_INJECTION.md``.
+        """Remove a promptlet from the home directory's ``MY_INJECTION.md``.
 
         Services the delete button that the Inject promptlet panel shows
         on user-added rows.  ``text`` is the promptlet body as listed;
@@ -2500,7 +2526,7 @@ class _CommandsMixin:
         self._edit_my_injection(cmd, delete_my_injection_trick, "deleteTrick")
 
     def _cmd_edit_trick(self, cmd: dict[str, Any]) -> None:
-        """Rewrite a promptlet of ``~/.kiss/MY_INJECTION.md`` in place.
+        """Rewrite a promptlet of the home directory's ``MY_INJECTION.md`` in place.
 
         Services the edit (pencil) button that the Inject promptlet panel
         shows on user-added rows.  ``text`` is the promptlet body as

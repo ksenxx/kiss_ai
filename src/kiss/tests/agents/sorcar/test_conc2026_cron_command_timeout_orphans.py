@@ -23,17 +23,21 @@ environment/config values (``KISS_HOME``, the timeout constant), never
 for test doubles.
 """
 
+import contextlib
 import os
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.core.processes import pid_alive
 from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.lock_injection import inject
 
 # The pid the tests record and probe must be an OS pid.  Under Git bash on
 # Windows ``$!`` is the MSYS-internal pid, which differs from the Windows
@@ -271,3 +275,58 @@ def test_proc_descendants_sees_multi_level_tree() -> None:
         except (ProcessLookupError, PermissionError):
             pass
         proc.wait(timeout=10)
+
+
+@posix_only("the shell's $$/$! are OS pids and the kill is a POSIX killpg")
+def test_interrupted_command_job_kills_tree(tmp_path: Path) -> None:
+    """A Stop landing in ``_run_command_job``'s wait must kill the command tree.
+
+    ``cron_job("run_now")`` runs ``_execute_job`` on the cron agent's
+    task thread, where the daemon's Stop arrives as the asynchronously
+    injected ``KeyboardInterrupt`` (and ``kiss-cron --run`` gets Ctrl-C
+    the same way).  Before the fix only a ``TimeoutExpired`` killed the
+    tree: the interrupt propagated out of ``communicate`` and the
+    command, in its own process group, ran on unattended.  The command
+    here records the shell's and a background child's pids and prints
+    a line every 50 ms, so ``communicate``'s selector loop keeps
+    returning to Python bytecode where the interrupt can land.
+    """
+    pid_file = tmp_path / "pids"
+    command = (
+        f"sleep 300 & echo $$ $! > {pid_file.as_posix()}; "
+        "while true; do echo tick; sleep 0.05; done"
+    )
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = cron_agent._run_command_job(
+                {"id": "t-int", "command": command}, tmp_path, 300.0,
+            )
+        except BaseException as exc:  # noqa: BLE001 — capture for assert
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 5.0
+    pids: list[int] = []
+    while len(pids) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+        if pid_file.exists():
+            pids = [int(p) for p in pid_file.read_text().split()]
+    assert len(pids) == 2, "the command never ran"
+    shell_pid, child_pid = pids
+    try:
+        assert inject(worker) == 1
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "the interrupt never ended the wait"
+        assert isinstance(outcome.get("exc"), KeyboardInterrupt), outcome
+        for pid in (shell_pid, child_pid):
+            assert _wait_pid_dead(pid), (
+                f"process {pid} of the interrupted cron command survived (orphaned tree)"
+            )
+    finally:
+        for pid in (shell_pid, child_pid):
+            if pid_alive(pid):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, 9)

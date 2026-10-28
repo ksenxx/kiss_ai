@@ -116,7 +116,11 @@ BASE_FOLDER = "base"
 # is silently ignored: the frontend autocomplete recognises the same
 # character class, and _split_slash_command / :func:`get_command` would
 # refuse it downstream anyway.
-_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_COMMAND_NAME_CHARS = r"[A-Za-z0-9_-]+"
+_COMMAND_NAME_RE = re.compile(rf"^{_COMMAND_NAME_CHARS}$")
+# A prompt that invokes a command: ``/<name>`` at the very first character,
+# then whitespace (or the end) and the sub-task text.
+_SLASH_RE = re.compile(rf"/({_COMMAND_NAME_CHARS})(?:\s+(.*))?\Z", re.S)
 
 # Poll interval for the background watcher, in seconds.
 _WATCHER_POLL_SECONDS = 2.0
@@ -523,24 +527,10 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
         stripped so ``/xxx   hi`` yields ``("xxx", "hi")``, and is
         ``""`` when the prompt is just ``/xxx``.
     """
-    if not prompt or not prompt.startswith("/"):
+    match = _SLASH_RE.match(prompt or "")
+    if match is None:
         return None
-    end = 1
-    while end < len(prompt):
-        ch = prompt[end]
-        if ch.isalnum() or ch in ("_", "-"):
-            end += 1
-            continue
-        break
-    if end == 1:
-        return None
-    command = prompt[1:end]
-    rest = prompt[end:]
-    # A slash command must be followed by whitespace or end of prompt,
-    # otherwise ``/xxxfoo`` would be a command too.
-    if rest and not rest[0].isspace():
-        return None
-    return command, rest.strip()
+    return match.group(1), (match.group(2) or "").strip()
 
 
 def load_sea(sea_path: Path) -> BaseSea:
@@ -856,6 +846,34 @@ def base_prompt(seas: list[BaseSea], task: str, task_id: str = "") -> str:
     return task.replace("{task_id}", task_id)
 
 
+def _fold_system_prompt(methods: list[Callable[..., Any]], system_prompt: str) -> str:
+    """Thread *system_prompt* through the ``system_prompt`` *methods* in order."""
+    return _fold_methods(methods, system_prompt, _check_text)
+
+
+def _fold_tools(
+    methods: list[Callable[..., Any]], tools: list[Callable[..., Any]]
+) -> list[Callable[..., Any]]:
+    """Thread a copy of *tools* through the ``tools`` *methods* in order."""
+    return _fold_methods(methods, list(tools), _check_tools)
+
+
+def _fold_llm_call_hook(methods: list[Callable[..., Any]], new_messages: list[Any]) -> list[Any]:
+    """Thread *new_messages* through the ``llm_call_hook`` *methods* in order."""
+    return _fold_methods(methods, new_messages, _check_list)
+
+
+def _first_refusal(
+    methods: list[Callable[..., Any]], name: str, args: dict[str, Any]
+) -> Verdict:
+    """Return the first refusing verdict of the ``tool_call_hook`` *methods*, else ``ALLOW``."""
+    for method in methods:
+        verdict = _check_verdict(_label(method), _call(method, name, args))
+        if not verdict.allowed:
+            return verdict
+    return ALLOW
+
+
 def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
     """Return *system_prompt* after every ``system_prompt`` method of *seas*, base first.
 
@@ -867,12 +885,12 @@ def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
         SeaError: When a ``system_prompt`` method raises or
             returns anything but a string.
     """
-    return _fold(seas, "system_prompt", system_prompt, _check_text)
+    return _fold_system_prompt(_chain(seas, "system_prompt"), system_prompt)
 
 
 def base_tools(seas: list[BaseSea], tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
     """Return *tools* after every ``tools`` method of *seas*, base first (a copy is passed)."""
-    return _fold(seas, "tools", list(tools), _check_tools)
+    return _fold_tools(_chain(seas, "tools"), tools)
 
 
 def base_tool_call_hook(seas: list[BaseSea], name: str, args: dict[str, Any]) -> Verdict:
@@ -883,16 +901,12 @@ def base_tool_call_hook(seas: list[BaseSea], name: str, args: dict[str, Any]) ->
     string — is a broken SEA (``uv run sea lint`` flags such returns as
     ``verdict``).
     """
-    for method in _chain(seas, "tool_call_hook"):
-        verdict = _check_verdict(_label(method), _call(method, name, args))
-        if not verdict.allowed:
-            return verdict
-    return ALLOW
+    return _first_refusal(_chain(seas, "tool_call_hook"), name, args)
 
 
 def base_llm_call_hook(seas: list[BaseSea], new_messages: list[Any]) -> list[Any]:
     """Return *new_messages* after every ``llm_call_hook`` method of *seas*, base first."""
-    return _fold(seas, "llm_call_hook", new_messages, _check_list)
+    return _fold_llm_call_hook(_chain(seas, "llm_call_hook"), new_messages)
 
 
 @dataclass
@@ -944,16 +958,20 @@ def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
             or returns a value of the wrong type, or a hook attribute is
             not a method.
     """
-    for name in ("system_prompt", "tools", "llm_call_hook", "tool_call_hook"):
-        _chain(seas, name)  # a non-method attribute fails now, not at the hook's first call
+    # The chains are built once: a non-method attribute fails now, not at
+    # the hook's first call, and the hooks run over the bound methods.
+    chains = {
+        name: _chain(seas, name)
+        for name in ("system_prompt", "tools", "llm_call_hook", "tool_call_hook")
+    }
     return SeaRun(
         task,
         base_settings(seas),
         base_prompt(seas, task, task_id),
-        functools.partial(base_system_prompt, seas),
-        functools.partial(base_tools, seas),
-        functools.partial(base_llm_call_hook, seas),
-        functools.partial(base_tool_call_hook, seas),
+        functools.partial(_fold_system_prompt, chains["system_prompt"]),
+        functools.partial(_fold_tools, chains["tools"]),
+        functools.partial(_fold_llm_call_hook, chains["llm_call_hook"]),
+        functools.partial(_first_refusal, chains["tool_call_hook"]),
     )
 
 
@@ -1141,8 +1159,7 @@ def model_seas() -> dict[str, Path]:
     Returns:
         ``{command_name: absolute_sea_path}``, sorted by name.
     """
-    list_commands()  # populate the registry on a cold start
-    return {name: path for name, path in _registered_entries() if _registers_as_model(path)}
+    return {name: path for name, path in registered_entries() if _registers_as_model(path)}
 
 
 def model_sea(name: str) -> Path | None:

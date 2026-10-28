@@ -26,18 +26,15 @@
 // concaudit_f4_attachment_prepare_deadline.test.js.
 //
 // The production deadline is 60s; waiting a real minute per run is not
-// acceptable, so main.js is loaded with that ONE constant lowered (and
-// the substitution is asserted, so a rename fails loudly).  Everything
-// else — DOM, events, the attachment pipeline, real timers — is the real
-// code.
+// acceptable, so main.js is loaded with that ONE constant held (the
+// substitution is asserted, so a rename fails loudly) and the deadline
+// timer is fired by hand.  Everything else — DOM, events, the attachment
+// pipeline — is the real code.
 
 'use strict';
 
 const assert = require('assert');
-const {makeWedgedDecoderPage, paste, settle} = require('./attachment_helpers');
-const {sleep} = require('./simplify2_harness');
-
-const SHORT_DEADLINE_MS = 300;
+const {makeHeldDeadlinePage, paste, settle} = require('./attachment_helpers');
 
 function chipText(win) {
   return win.document.getElementById('file-chips').textContent;
@@ -62,8 +59,7 @@ function removeChip(win, name) {
 }
 
 async function main() {
-  const {win, decodeCount} = makeWedgedDecoderPage(
-    SHORT_DEADLINE_MS,
+  const {win, decodeCount, fireDeadline} = makeHeldDeadlinePage(
     'conc2026-attachment-removed-slot-main.js',
   );
   win._testApi.endLaunch();
@@ -86,12 +82,11 @@ async function main() {
     'the chip is gone right after the user removed it',
   );
 
-  // Well past the deadline: the removed slot's withDeadline rejection
-  // lands (the 300 ms timer was armed before this sleep, so it fires
-  // first whatever the load). Post-fix nothing is rendered; pre-fix a
-  // phantom error chip "IMG_0001.HEIC: it could not be read within Ns"
-  // appears.
-  await sleep(SHORT_DEADLINE_MS + 200);
+  // The deadline fires and the removed slot's withDeadline rejection
+  // lands.  Post-fix nothing is rendered; pre-fix a phantom error chip
+  // "IMG_0001.HEIC: it could not be read within Ns" appears.
+  fireDeadline();
+  await settle();
   assert.strictEqual(
     errorChips(win).length,
     0,

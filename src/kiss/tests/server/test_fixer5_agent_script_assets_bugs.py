@@ -30,7 +30,7 @@ from typing import Any
 
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import SeaError
-from kiss.server.tricks import ensure_user_asset_from_default
+from kiss.core.utils import seed_file_atomically
 
 
 def _load_tools(sea_path: Any) -> list:
@@ -252,21 +252,8 @@ class TestUserAssetSeedIsComplete(unittest.TestCase):
         # the buffered writer must publish every byte before linking.
         content = ("# Trick line ...\n" * 64 + "unique-tail-marker\n") * 4800
         with TemporaryDirectory() as home:
-            import os
-
-            old = os.environ.get("KISS_HOME")
-            os.environ["KISS_HOME"] = home
-            try:
-                path = ensure_user_asset_from_default(
-                    "FIXER5_ASSET.md", content,
-                )
-            finally:
-                if old is None:
-                    os.environ.pop("KISS_HOME", None)
-                else:
-                    os.environ["KISS_HOME"] = old
-            self.assertIsNotNone(path)
-            assert path is not None
+            path = Path(home) / "FIXER5_ASSET.md"
+            seed_file_atomically(path, content)
             on_disk = path.read_text(encoding="utf-8")
             self.assertEqual(len(on_disk), len(content))
             self.assertEqual(on_disk, content)
@@ -279,21 +266,10 @@ class TestUserAssetSeedIsComplete(unittest.TestCase):
 
     def test_existing_asset_is_never_overwritten(self) -> None:
         with TemporaryDirectory() as home:
-            import os
-
-            old = os.environ.get("KISS_HOME")
-            os.environ["KISS_HOME"] = home
-            try:
-                first = ensure_user_asset_from_default("A.md", "original\n")
-                assert first is not None
-                second = ensure_user_asset_from_default("A.md", "replacement\n")
-            finally:
-                if old is None:
-                    os.environ.pop("KISS_HOME", None)
-                else:
-                    os.environ["KISS_HOME"] = old
-            assert second is not None
-            self.assertEqual(second.read_text(), "original\n")
+            path = Path(home) / "A.md"
+            seed_file_atomically(path, "original\n")
+            seed_file_atomically(path, "replacement\n")
+            self.assertEqual(path.read_text(), "original\n")
 
 
 if __name__ == "__main__":

@@ -6,30 +6,23 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, readyTabId} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  readyTabId,
+  fakeGeometry,
+  wheel,
+  getAdjacent,
+} = require('./simplify2_harness');
 
-function fakeGeometry(el) {
-  Object.defineProperty(el, 'scrollWidth', {value: 2000, configurable: true});
-  Object.defineProperty(el, 'clientWidth', {value: 400, configurable: true});
-  Object.defineProperty(el, 'scrollHeight', {value: 3000, configurable: true});
-  Object.defineProperty(el, 'clientHeight', {value: 500, configurable: true});
-}
-
-function wheel(win, O, deltaY, n) {
-  for (let i = 0; i < n; i++) {
-    O.dispatchEvent(
-      new win.WheelEvent('wheel', {deltaY, bubbles: true, cancelable: true}),
-    );
-  }
-}
-
-// A page past the welcome screen whose transcript is scrollable.
+// A page past the welcome screen whose transcript is scrollable (the
+// edge-overscroll logic reads scrollHeight/clientHeight only).
 function setupPage() {
   const {win, posted} = makePage();
   const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  fakeGeometry(O, {sh: 3000, ch: 500});
   return {win, posted, tabId, O};
 }
 
@@ -46,10 +39,6 @@ function setupWithHistoryTask() {
     ],
   });
   return {win, posted, tabId, O};
-}
-
-function getAdjacent(posted) {
-  return posted.filter((m) => m.type === 'getAdjacentTask');
 }
 
 function testEarlyPromptPoisoning() {

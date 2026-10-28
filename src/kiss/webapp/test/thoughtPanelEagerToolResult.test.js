@@ -455,6 +455,8 @@ function testProvisionalPanelDiscardedOnTaskStop() {
   send(win, {type: 'tool_result', content: 'q\n', tabId: TAB});
   assert.strictEqual(llmPanels(output).length, 2);
 
+  // A failure's result precedes the stop, as it does on the wire.
+  send(win, {type: 'result', success: false, text: 'boom', tabId: TAB});
   send(win, {type: 'task_stopped', tabId: TAB});
   assert.strictEqual(
     llmPanels(output).length,

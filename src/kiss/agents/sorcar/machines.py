@@ -63,6 +63,7 @@ import atexit
 import ipaddress
 import json
 import logging
+import operator
 import os
 import re
 import secrets
@@ -302,18 +303,18 @@ def is_local_machine(name_or_host: str) -> bool:
     text = name_or_host.strip().strip("[]").lower()
     if not text:
         return False
-    names = {LOCAL_MACHINE, "localhost", local_machine_name().lower(),
-             socket.gethostname().lower()}
-    try:
-        names.add(socket.getfqdn().lower())
-    except OSError:
-        pass
-    if text in names:
+    if text in {LOCAL_MACHINE, "localhost", local_machine_name().lower(),
+                socket.gethostname().lower()}:
         return True
     try:
         address = ipaddress.ip_address(text)
     except ValueError:
-        return False
+        # A host name that is not the short name: only now pay for the
+        # reverse lookup (untimed; a slow resolver stalls it for seconds).
+        try:
+            return text == socket.getfqdn().lower()
+        except OSError:
+            return False
     if address.is_loopback:
         return True
     # An address is this host's when a socket can be bound to it (no
@@ -567,7 +568,9 @@ def remove_machine(name: str) -> bool:
         if len(kept) == len(machines):
             return False
         save_machines(kept)
-        (kiss_home() / MACHINE_CERTS_DIR / f"{name}.pem").unlink(missing_ok=True)
+        for machine in machines:
+            if machine.name == name:
+                machine.cert_file().unlink(missing_ok=True)
     return True
 
 
@@ -987,6 +990,10 @@ class MachineLink:
         self._generation = 0
         self._health = health if health is not None else LinkHealth()
         self._retired = False
+        # Stream handshakes in flight (:meth:`open_connection`), which
+        # run outside the lock; :meth:`retire` waits for them.
+        self._dialing = 0
+        self._idle = threading.Condition(self._lock)
 
     @property
     def _retry_at(self) -> float:
@@ -1054,8 +1061,20 @@ class MachineLink:
         self._health.failures = 0
         self._health.retry_at = 0.0
 
-    def _connect(self, timeout: float, stream: bool = False) -> ClientConnection:
-        """Open and authenticate the socket; the handshake has *timeout* seconds.
+    def _connect(self, timeout: float) -> ClientConnection:
+        """Open and authenticate the shared request socket (under the lock); see :meth:`_dial`."""
+        self._check_available()
+        return self._dial(timeout, stream=False)
+
+    def _dial(self, timeout: float, stream: bool) -> ClientConnection:
+        """Open and authenticate a socket; the handshake has *timeout* seconds.
+
+        Takes no lock: the shared request socket's connect holds the
+        link's lock through :meth:`_connect`, while a stream socket
+        (:meth:`open_connection`) is the caller's own and connects
+        beside a request in flight or another stream's handshake.
+        What is shared, the machine's :class:`LinkHealth`, is written
+        as :meth:`_fail` describes.
 
         The socket is TLS with the machine's pinned certificate as the
         only trust anchor.  An SSH machine is dialled at the local end
@@ -1097,7 +1116,6 @@ class MachineLink:
         """
         machine = self.machine
         where = f"{machine.name} ({machine.address()})"
-        self._check_available()
         enroll_again = (
             f"; run /machine add {machine.name} {machine.ssh} again" if machine.ssh else ""
         )
@@ -1173,7 +1191,10 @@ class MachineLink:
         The command is stamped with a fresh ``generation``; a reply that
         echoes a ``generation`` must echo this one (``history`` does),
         frames already buffered from before the command are discarded
-        and other frames the daemon pushes meanwhile are skipped.  With
+        and other frames the daemon pushes meanwhile are skipped.  A
+        reply the daemon sent in pieces (a ``fileContent`` of many MB:
+        every frame but the last flagged ``more``) comes back joined
+        into one.  With
         *errors*, an ``error`` frame answering the command (a refused
         custom-model name, say) comes back as a *reply_type* reply
         carrying its text as ``error`` instead of being skipped; a
@@ -1235,7 +1256,9 @@ class MachineLink:
         no longer, and the long budget of a slow exchange must not keep
         the request's thread in a dial that will not succeed.
         """
-        if forget_after_sleep():
+        # A dial runs the sleep check itself (``_check_available``);
+        # only a kept socket needs it here.
+        if self._ws is not None and forget_after_sleep():
             self._drop()
         kept = self._ws is not None
         if self._ws is None:
@@ -1295,6 +1318,14 @@ class MachineLink:
             # this request's answer nor delay it.
             self._drain_buffered(deadline)
             send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
+            # A reply sent in pieces (a big file's ``fileContent``, see
+            # ``web_server._reply_frames``): every piece but the last
+            # carries ``more``.  Joined here, so the caller sees one
+            # reply, as from a daemon that sent it whole; each piece
+            # proves the daemon is answering and buys the next one the
+            # whole *timeout* again.
+            head: dict[str, Any] | None = None
+            pieces: list[str] = []
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"no {reply_type} within {timeout:g}s")
@@ -1304,7 +1335,17 @@ class MachineLink:
                 if "generation" in msg and msg["generation"] != generation:
                     continue
                 if msg.get("type") == reply_type:
-                    return msg
+                    if head is None and msg.get("more") is not True:
+                        return msg
+                    if head is None:
+                        head = msg
+                    pieces.append(str(msg.get("content") or ""))
+                    if msg.get("more") is True:
+                        deadline = time.monotonic() + timeout
+                        continue
+                    head["content"] = "".join(pieces)
+                    del head["more"]
+                    return head
                 if msg.get("type") != "error":
                     continue
                 # The daemon rejects the frame's password (changed on
@@ -1364,11 +1405,32 @@ class MachineLink:
         (it needs the tab's task events).  The caller owns the returned
         socket and closes it.
 
+        The handshake runs outside the link's lock (only the
+        availability check takes it, as it may drop the shared socket
+        after a sleep): a stream connects beside a request in flight
+        on the shared socket, and two streams to the machine (a chat
+        tab's and the machine's view stream, opened together by a
+        bind) connect at the same time instead of one after the other.
+
         Raises:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
-        return locked_call(self._lock, self._connect, timeout, True)
+        locked_call(self._lock, self._start_dial)
+        try:
+            return self._dial(timeout, stream=True)
+        finally:
+            locked_call(self._lock, self._end_dial)
+
+    def _start_dial(self) -> None:
+        """Count a stream handshake in, once the link is available (under the lock)."""
+        self._check_available()
+        self._dialing += 1
+
+    def _end_dial(self) -> None:
+        """Count a stream handshake out and wake a waiting :meth:`retire` (under the lock)."""
+        self._dialing -= 1
+        self._idle.notify_all()
 
     def close(self) -> None:
         """Close the socket; the next :meth:`request` re-connects."""
@@ -1385,7 +1447,11 @@ class MachineLink:
         finds the link retired), and only then the lock is taken to
         forget the socket.  A request still in its handshake, which
         the close cannot reach, is waited for (:data:`REQUEST_TIMEOUT`
-        at most, plus its exchange).
+        at most, plus its exchange), and so is a stream handshake
+        (:meth:`open_connection`, outside the lock; the ssh login's
+        :data:`SSH_TIMEOUT` more): the tunnel it opens must exist
+        before :func:`close_links` sweeps the tunnels, or a removed
+        machine's would be opened afresh after the sweep and kept.
         """
         self._retired = True
         ws = self._ws
@@ -1393,6 +1459,13 @@ class MachineLink:
             with suppress(Exception):
                 ws.close()
         locked_call(self._lock, self._drop)
+        locked_call(
+            self._idle, self._idle.wait_for, self._dials_done, SSH_TIMEOUT + REQUEST_TIMEOUT,
+        )
+
+    def _dials_done(self) -> bool:
+        """Whether no stream handshake is in flight (under the lock)."""
+        return self._dialing == 0
 
 
 def _remaining(deadline: float) -> float:
@@ -1659,7 +1732,7 @@ def merged_history(
             order = (*_history_order(session), -source, -rank)
             if key not in best or order > best[key][0]:
                 best[key] = (order, session)
-    ranked = sorted(best.values(), key=_ranked_order, reverse=True)
+    ranked = sorted(best.values(), key=operator.itemgetter(0), reverse=True)
     mins = [p.date_min for p in pages if p.date_min is not None]
     maxs = [p.date_max for p in pages if p.date_max is not None]
     return HistoryPage(
@@ -1677,10 +1750,3 @@ def _history_order(session: dict[str, Any]) -> tuple[bool, float]:
     end_ms = float(session.get("endTs") or 0)
     done = end_ms / 1000.0 if end_ms > 0 else float(session.get("timestamp") or 0.0)
     return bool(session.get("is_running")), done
-
-
-def _ranked_order(
-    item: tuple[tuple[bool, float, int, int], dict[str, Any]],
-) -> tuple[bool, float, int, int]:
-    """The order tuple of a ``(order, session)`` pair kept by :func:`merged_history`."""
-    return item[0]

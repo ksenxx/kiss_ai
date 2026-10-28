@@ -33,6 +33,13 @@ What else the stream carries:
   finished before the chat was opened here announced no ``new_tab``
   to this daemon: the fan-out panel's resume names its
   ``parentTabId``, whose stream the sub-agent tab joins.
+* **A path-only prompt.**  A ``submit`` whose prompt is just the path
+  of a file on the machine starts no task there: the machine answers
+  ``promptOpened`` (the tab takes back the title the prompt displaced
+  in the registry) and the file's ``fileContent``, relayed stamped
+  ``machine`` like the reply to a forwarded ``openFile``, so the
+  editor tab the surface opens saves and reloads the file on the
+  machine.
 * **Replays.**  A client's ``ready`` (a reload, a surface opening)
   replays every bound tab to that connection: a ``resumeSession`` of
   the tab's remote chat is forwarded and the ``task_events`` it
@@ -160,6 +167,19 @@ class RemoteTab(MachineStream):
             latest task: a surface connecting later is replayed at it.
             Cleared by a submit, whose task becomes the latest; never
             set by a relayed frame, whose replay may predate a submit.
+        displaced_titles: By tab (the root tab or a sub-agent tab the
+            stream relays), what the latest forwarded ``submit`` of
+            that tab did to the registry: the id the submit was
+            stamped with (``promptId``, echoed by the machine's
+            ``promptOpened``), the title the prompt replaced ("" when
+            the tab had none) and the generation token of that
+            publication.  A prompt that is just the path of a file on
+            the machine starts no task there: its ``promptOpened`` puts
+            the title back (:meth:`_relay_frame`), as a local tab's
+            page drops the claim it stamped for such a prompt --
+            provided the id is the pending submit's and nothing
+            republished the tab since (a later real submit's title
+            must not be undone by an earlier file prompt's late answer).
         replay_sinks: By replay id, the connection waiting for the
             answer to the forwarded ``resumeSession`` stamped with it
             (:meth:`stamp_replay`).  The remote echoes the id on every
@@ -197,6 +217,7 @@ class RemoteTab(MachineStream):
         self.spawn = ""
         self.chat_id = ""
         self.shown_task_id = ""
+        self.displaced_titles: dict[str, tuple[str, str, int]] = {}
         self.replay_sinks: dict[str, str] = {}
         super().__init__(machine, owner, f"remote-tab-{tab_id}")
 
@@ -228,6 +249,17 @@ class RemoteTab(MachineStream):
         and reaches nobody); an ``openSubagentTab`` (a replay
         announcing a running sub-agent) adopts the sub-agent tab;
         everything else goes to every client.
+
+        A path-only ``submit`` (a prompt that is just the path of a
+        file on the machine) starts no task there: the machine answers
+        ``promptOpened``, which puts the registry title the prompt
+        displaced back, and the file's ``fileContent``, which is
+        stamped with the machine before delivery, as the reply to a
+        forwarded ``openFile`` is
+        (:func:`~kiss.server.sidebar_panels.machine_workspace_reply`):
+        the webapp binds the editor tab to the machine named in the
+        stamp, so its ``saveFile`` and reload go back there instead of
+        to this daemon, which has no such file.
         """
         kind = msg.get("type")
         parent = str(msg.get("parent_tab_id") or "")
@@ -236,6 +268,7 @@ class RemoteTab(MachineStream):
         to: list[str] | None = []  # [] = every client, [conn] = that one, None = nobody
         adopt = ""
         spawn = ""  # the run's own new_tab, learnt to be ours by this frame
+        restore: tuple[str, str, int] | None = None  # a path-only prompt's displaced title
         with self.lock:
             if self.retired:
                 return
@@ -282,10 +315,20 @@ class RemoteTab(MachineStream):
                     self.chat_id = str(msg["chat_id"])
                 if tab_id == self.tab_id and self.subagent:
                     spawn = self._own_run_frame(kind, msg)
+                if kind == "fileContent":
+                    msg["machine"] = self.machine.name
+                    text = json.dumps(msg)
+                elif kind == "promptOpened":
+                    pending = self.displaced_titles.get(tab_id)
+                    if pending and pending[0] == str(msg.get("promptId") or ""):
+                        del self.displaced_titles[tab_id]
+                        restore = (tab_id, pending[1], pending[2])
             else:
                 to = None
         if to is None:
             return
+        if restore:
+            self._owner.retitle(*restore)
         if adopt:
             self._owner.adopt(self, adopt)  # takes the owner's lock: outside ours
         # Delivered under the lock retirement takes: a retired stream
@@ -454,17 +497,24 @@ class RemoteTabs:
         """Bind *tab_id* to the registered machine *machine_name* (None when refused).
 
         *title* is the tab's title in the registry (the prompt of a
-        submit, the task of a resumed chat).  Connecting blocks (up to
-        the link's timeout) outside the lock, so the other tabs'
-        commands keep flowing meanwhile; what
-        happened to the tab in between decides what the new stream is
-        worth: an unbind (``_unbinds`` moved, counted while this bind
-        is in ``_connecting``) stands it down, a bind to the same
-        machine that won the race is kept instead of it, one to
-        another machine is retired for it (its sub-agent tabs ended),
-        and a stream the remote dropped meanwhile (its relay thread
-        ran :meth:`dropped` before this registration) refuses the run
-        instead of binding.
+        submit, the task of a resumed chat).  A tab bound to another
+        machine is taken off its stream first, in the same critical
+        section that counts this bind as connecting: a concurrent bind
+        to the same machine then finds the tab already unbound instead
+        of unbinding it again, which would stand this bind down (see
+        :meth:`_detach`).  Connecting blocks (up to the link's timeout)
+        outside the lock, so the other tabs' commands keep flowing
+        meanwhile; what happened to the tab in between decides what
+        the new stream is worth: an unbind (``_unbinds`` moved, counted
+        while this bind is in ``_connecting``) stands it down, a bind
+        to the same machine that won the race is kept instead of it,
+        one to another machine is retired for it (its sub-agent tabs
+        ended), and a stream the remote dropped meanwhile (its relay
+        thread ran :meth:`dropped` before this registration) refuses
+        the run instead of binding.  The machine's view stream (its pages and
+        terminals, :class:`~kiss.server.remote_views.RemoteViews`) is
+        connected meanwhile, not after the tab's stream: a chat opened
+        from the machine waits for one round of handshakes, not two.
         """
         machine = next((m for m in load_machines() if m.name == machine_name), None)
         if machine is None:
@@ -475,13 +525,17 @@ class RemoteTabs:
             return None
         with self._lock:
             tab = self._tabs.get(tab_id)
+            displaced: RemoteTab | None = None
+            orphans: list[str] = []
+            if tab is not None and tab.machine != machine:
+                displaced, orphans = self._detach(tab_id)
+                tab = None
             self._connecting[tab_id] = self._connecting.get(tab_id, 0) + 1
             unbinds = self._unbinds.get(tab_id, 0)
+        if displaced is not None:
+            self._end_stream(displaced, orphans)
+        warming = self._views.warm(machine.name)
         try:
-            if tab is not None and tab.machine != machine:
-                self._unbind(tab_id)
-                tab = None
-                unbinds += 1
             announce = False
             if tab is None:
                 try:
@@ -494,8 +548,8 @@ class RemoteTabs:
                 except MachineError as exc:
                     self._backend._agent_server._refuse_run(tab_id, str(exc))
                     return None
-                displaced: RemoteTab | None = None
-                orphans: list[str] = []
+                displaced = None
+                orphans = []
                 same: RemoteTab | None = None  # a bind to the same machine that won
                 lost = False
                 with self._lock:
@@ -535,27 +589,41 @@ class RemoteTabs:
             # one running here does not: the surfaces open its nested tab
             # under the caller on the relayed ``new_tab``.
             if not cmd.get("parentTaskId"):
-                self._backend._agent_server._registry_update_tab(
+                # The title the prompt displaces is kept until the machine
+                # has answered: a path-only prompt (promptOpened, echoing
+                # the id stamped here) is no task, and the tab takes its
+                # old title back if nothing republished it meanwhile.
+                old_title = self._registry_title(tab_id)
+                generation = self._backend._agent_server._registry_update_tab(
                     tab_id,
                     title=title,
                     work_dir=str(cmd.get("workDir", "") or ""),
                     task_id="",
                     create=True,
                 )
+                if cmd.get("type") == "submit":
+                    prompt_id = uuid.uuid4().hex
+                    cmd["promptId"] = prompt_id
+                    with tab.lock:
+                        tab.displaced_titles[tab_id] = (prompt_id, old_title, generation)
             if announce:
                 self._announce(tab_id, tab)
-            # The run is forwarded only once the machine's pages are watched
-            # (a stream that could not be opened for an earlier bind is
-            # tried again): the page its agent opens for the user must not
-            # slip by before the stream is subscribed.
-            self._views.open_for(machine.name)
-            return tab
         finally:
+            # A stream warmed for a bind that was refused or stood down
+            # has no binding to keep it: closed when idle.
+            warming.join()
+            self._views.release(machine.name)
             with self._lock:
                 self._connecting[tab_id] -= 1
                 if not self._connecting[tab_id]:
                     del self._connecting[tab_id]
                     self._unbinds.pop(tab_id, None)
+        # The run is forwarded only once the machine's pages are watched
+        # (a stream that could not be opened for an earlier bind is
+        # tried again): the page its agent opens for the user must not
+        # slip by before the stream is subscribed.
+        self._views.open_for(machine.name)
+        return tab
 
     def _retire(self, tab: RemoteTab) -> list[str]:
         """Take a stream out of service (under the lock): its frames dropped, its tabs unmapped.
@@ -647,6 +715,35 @@ class RemoteTabs:
                 pass
         if ended is not None:
             self._end_stream(ended, orphans)
+
+    def _registry_title(self, tab_id: str) -> str:
+        """The title the shared tab registry holds for *tab_id* ("" when it has no entry)."""
+        registry = self._backend._agent_server.tab_registry
+        return next(
+            (str(e.get("title", "")) for e in registry.snapshot() if e.get("tabId") == tab_id),
+            "",
+        )
+
+    def retitle(self, tab_id: str, title: str, generation: int) -> None:
+        """Put *title* back as *tab_id*'s registry title on every surface.
+
+        Called by a tab's stream when the machine answered its
+        forwarded ``submit`` with ``promptOpened``: the prompt was the
+        path of a file, no task started, and the title the bind gave
+        the tab (the prompt) goes back to what it was -- unless a later
+        publication (another submit, a resume) stamped the tab since,
+        whose title stands
+        (:meth:`~kiss.server.tab_registry.TabRegistry.retitle_if_generation`).
+
+        Args:
+            tab_id: The bound tab.
+            title: The title the prompt displaced ("" restores nothing:
+                the tab had no registry entry before).
+            generation: The token of the bind's publication.
+        """
+        server = self._backend._agent_server
+        if title and server.tab_registry.retitle_if_generation(tab_id, title, generation):
+            server._publish_tabs_state()
 
     def adopt(self, tab: RemoteTab, sub_tab_id: str) -> None:
         """Map the sub-agent tab *sub_tab_id* a replay announced to *tab*'s stream.

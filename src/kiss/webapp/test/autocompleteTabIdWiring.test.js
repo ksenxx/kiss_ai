@@ -17,7 +17,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness.js');
+const {makePage, send, waitFor, recordTimers, fireTimers} = require('./simplify2_harness.js');
+
+// requestGhost()'s 300 ms debounce is recorded and fired by hand.
+function prepare(win) {
+  win.ghostTimers = recordTimers(win, 300);
+}
 
 function typeInto(win, text) {
   const inp = win.document.getElementById('task-input');
@@ -40,7 +45,7 @@ function ghostText(win) {
 }
 
 async function main() {
-  const {win, posted} = makePage();
+  const {win, posted} = makePage({beforeScripts: prepare});
   const tabId = win._testApi.getActiveTabId();
   assert.ok(tabId, 'the page has an active tab');
 
@@ -86,10 +91,9 @@ async function main() {
 
   // The ghost-text request carries the stamp too (300 ms debounce).
   typeInto(win, 'write a haiku');
-  const complete = await waitFor(
-    () => posted.find(c => c.type === 'complete'),
-    'typing must post complete',
-  );
+  fireTimers(win.ghostTimers);
+  const complete = posted.find(c => c.type === 'complete');
+  assert.ok(complete, 'typing must post complete');
   assert.strictEqual(
     complete.tabId,
     tabId,

@@ -14,8 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from kiss.agents.seas.bestrouter import bestrouter_sea
 from kiss.agents.seas.orbestrouter import orbestrouter_sea
 from kiss.agents.seas.orbestrouter.orbestrouter_sea import OrbestrouterSea
@@ -113,22 +111,3 @@ def test_agent_run_carries_the_openrouter_protocol_in_its_system_prompt(tmp_path
     after = system.split(orbestrouter_sea.SYSTEM_PROMPT, 1)[1]
     assert "# Task Settings" in after and "<identity>" not in after
     assert "## Model routing protocol (bestrouter)" not in system
-
-
-def test_rsi7d_tunes_the_bestrouter_constant_but_not_the_derived_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``/rsi7d``'s prompt editor sees the bestrouter's f-string; the clone's prompt is derived."""
-    from kiss.agents.seas.rsi7d import rsi7d_sea
-    from kiss.tests.agents.seas.conftest import fake_checkout
-
-    fake_checkout(tmp_path, {
-        "bestrouter": Path(bestrouter_sea.__file__).read_text(encoding="utf-8"),
-        "orbestrouter": _SEA_PATH.read_text(encoding="utf-8"),
-    })
-    monkeypatch.chdir(tmp_path)
-    shown = rsi7d_sea.sea_prompt("bestrouter")
-    assert "# system_prompt() returns SYSTEM_PROMPT, an f-string" in shown, shown[:300]
-    assert "Use '{PRIMARY_MODEL}' model for all tasks" in shown
-    derived = rsi7d_sea.sea_prompt("orbestrouter")
-    assert derived.startswith("Error: ") and "module-level string constant" in derived

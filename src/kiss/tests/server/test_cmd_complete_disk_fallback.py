@@ -153,6 +153,56 @@ class TestCmdCompleteDiskFallback(unittest.TestCase):
             "re-reported the same activeFile",
         )
 
+    def test_same_file_with_null_content_reads_the_disk(self) -> None:
+        """``activeFileContent: null`` for the SAME file drops its buffer.
+
+        The file was open in the editor (its buffer reported), then
+        reopened as a read-only preview (rewritten and grown past the
+        editor cap, Refresh): the client has no buffer for it any more
+        and says so with ``null``, so the daemon completes against the
+        file on disk, not the text the editor held before.
+        """
+        path = self.root / "grown.html"
+        path.write_text("<p>beforeRefreshIdentifier</p>\n", encoding="utf-8")
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "beforeRe",
+            "activeFile": str(path),
+            "activeFileContent": "<p>beforeRefreshIdentifier</p>\n",
+            "connId": "win-5",
+        })
+        self.assertIn(
+            "beforeRefreshIdentifier",
+            [c["text"] for c in self._completions_for("beforeRe")],
+        )
+        self.events.clear()
+        path.write_text("<p>afterRefreshIdentifier</p>\n", encoding="utf-8")
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "afterRe",
+            "activeFile": str(path),
+            "activeFileContent": None,
+            "connId": "win-5",
+        })
+        self.assertIn(
+            "afterRefreshIdentifier",
+            [c["text"] for c in self._completions_for("afterRe")],
+            "a null buffer must drop the stale snapshot and read the disk",
+        )
+        self.events.clear()
+        # And nothing of the old buffer lingers for a later request
+        # that omits the buffer (focus inside the chat).
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "beforeRe",
+            "activeFile": str(path),
+            "connId": "win-5",
+        })
+        self.assertNotIn(
+            "beforeRefreshIdentifier",
+            [c["text"] for c in self._completions_for("beforeRe")],
+        )
+
     def test_empty_active_file_forgets_snapshot(self) -> None:
         """``activeFile: ""`` (the browser closed its last file tab) clears it.
 

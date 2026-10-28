@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 
 import pytest
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     API,
     API_KEY,
@@ -37,7 +39,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingServer,
     raw_post_status,
     recording_server,
-    serving,
+    start_serving,
 )
 
 
@@ -53,18 +55,24 @@ class _HeaderRecorder(RecordingHandler):
 
 
 def test_serving_teardown_does_not_wait_for_the_default_poll() -> None:
-    """Ten start/stop cycles finish well inside ten of the stdlib's 0.5 s polls.
+    """Ten idle teardowns finish well inside ten of the stdlib's 0.5 s polls.
 
-    With the stdlib default every idle teardown waits a whole 0.5 s poll,
-    so ten cycles take about 5 s; the bound is half of that, which leaves
-    room for a loaded machine without accepting the default poll.
+    With the stdlib default an idle teardown waits up to a whole 0.5 s
+    poll (0.25 s on average), so ten of them take about 2.5 s; with the
+    helper's 50 ms poll they take about 0.25 s.  Only the ``stop`` half
+    of each cycle is timed (binding a port and starting a thread is the
+    same either way), and the 4 s bound sits well above the stdlib
+    average (2.5 s) so a loaded machine has ~16x headroom while the
+    default's worst case (5 s) still fails.
     """
-    stdlib_poll = 0.5
-    started = time.monotonic()
+    stopping = 0.0
     for _ in range(10):
-        with serving(ThreadedHTTPServer(("127.0.0.1", 0), _HeaderRecorder)):
-            pass
-    assert time.monotonic() - started < 10 * stdlib_poll / 2
+        server = ThreadedHTTPServer(("127.0.0.1", 0), _HeaderRecorder)
+        thread = start_serving(server)
+        started = time.monotonic()
+        stop_http_server(server, thread)
+        stopping += time.monotonic() - started
+    assert stopping < 4.0
 
 
 def test_raw_post_status_sends_header_values_as_latin1() -> None:
@@ -103,6 +111,79 @@ def test_fake_composio_status_queue_and_refusals(monkeypatch: pytest.MonkeyPatch
         assert requests.get(f"{composio.base_url}/download/0", timeout=10).status_code == 404
         composio.downloads.append(("text/plain", b"hi"))
         assert requests.get(f"{composio.base_url}/download/0", timeout=10).content == b"hi"
+
+
+_BLOB_CALLERS = "abcdefghijklmnop"
+_BLOB_ROUNDS = 40
+
+
+class _BlobServer(RecordingServer):
+    """Upstream whose answers to one round of callers leave together."""
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.barrier = threading.Barrier(len(_BLOB_CALLERS))
+
+
+class _BlobHandler(RecordingHandler):
+    """Answers ``GET /<letter>`` with 64 bytes of that letter (a binary body)."""
+
+    server: _BlobServer  # type: ignore[assignment]
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.server.barrier.wait(timeout=30)  # the proxies then store their bodies at once
+        self._reply(200, self.path[1:2].encode() * 64, "application/octet-stream")
+
+
+def _proxy_blob(composio_url: str, upstream_url: str, letter: str, errors: list[str]) -> None:
+    """Fetch ``/<letter>`` through the proxy every round; record every wrong download."""
+    body = {"connected_account_id": "ca_x", "method": "GET", "endpoint": f"{upstream_url}/{letter}"}
+    try:
+        with requests.Session() as session:
+            for _ in range(_BLOB_ROUNDS):
+                answer = session.post(
+                    f"{composio_url}{API}/tools/execute/proxy",
+                    json=body,
+                    headers={"x-api-key": API_KEY},
+                    timeout=10,
+                ).json()
+                data = session.get(answer["binary_data"]["url"], timeout=10).content
+                if data != letter.encode() * 64:
+                    errors.append(f"{letter}: got {data[:1]!r} from {answer['binary_data']['url']}")
+    except Exception as exc:  # noqa: BLE001 (surfaced on the test thread)
+        errors.append(f"{letter}: {exc!r}")
+
+
+def test_fake_composio_binary_proxy_names_each_callers_own_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent binary proxies never hand one caller another caller's bytes."""
+    with (
+        fake_composio(monkeypatch) as composio,
+        recording_server(_BlobHandler, _BlobServer) as upstream,
+    ):
+        composio.accounts["ca_x"] = "ACTIVE"
+        errors: list[str] = []
+        threads = [
+            threading.Thread(
+                target=_proxy_blob,
+                args=(composio.base_url, upstream.base_url, letter, errors),
+                daemon=True,
+            )
+            for letter in _BLOB_CALLERS
+        ]
+        switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+        finally:
+            sys.setswitchinterval(switch_interval)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(composio.downloads) == len(_BLOB_CALLERS) * _BLOB_ROUNDS
 
 
 def test_eyre_handler_routes_and_records() -> None:

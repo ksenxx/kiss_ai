@@ -11,6 +11,8 @@ const {
   send,
   loadMainCss,
   output,
+  sendToolPanels,
+  summaryPanels,
 } = require('./simplify2_harness');
 
 const HINT = '(click to expand)';
@@ -21,17 +23,6 @@ const DESC =
 
 function makePage() {
   return makeHarnessPage({sourceUrl: 'summaryhint-main.js'}).win;
-}
-
-function sendToolPanels(win, n) {
-  for (let i = 0; i < n; i++) {
-    send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
-    send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
-  }
-}
-
-function summaryPanels(win) {
-  return Array.from(output(win).querySelectorAll('.tc.tc-summary'));
 }
 
 function clickHeader(win, panel) {

@@ -52,11 +52,16 @@ from kiss.tests.server.test_browser_tab_service import (
 
 
 def _driver_processes() -> int | None:
-    """Count this process's Playwright driver children; ``None`` without ``ps``."""
+    """Count this process's Playwright driver children; ``None`` without ``ps``.
+
+    ``-ww``: procps ``ps`` honours the ``COLUMNS=80`` that GNU readline
+    exports into a terminal-less pytest session and would cut
+    ``run-driver`` off the driver's long command line.
+    """
     if os.name != "posix":
         return None
     listing = subprocess.run(
-        ["ps", "-A", "-o", "ppid=,args="], capture_output=True, text=True, check=False
+        ["ps", "-A", "-ww", "-o", "ppid=,args="], capture_output=True, text=True, check=False
     ).stdout
     me = str(os.getpid())
     return sum(

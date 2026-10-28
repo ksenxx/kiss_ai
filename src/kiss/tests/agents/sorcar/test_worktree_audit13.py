@@ -34,6 +34,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
 )
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -100,13 +101,13 @@ class TestBug63DiscardLiesOnDeleteFailure:
         )
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=None,
             wt_dir=repo / ".kiss-worktrees" / "nonexistent",
             baseline_commit=None,
-        )
+        ))
 
         msg = agent.discard()
 
@@ -139,13 +140,13 @@ class TestBug63DiscardLiesOnDeleteFailure:
             capture_output=True,
         )
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="nonexistent-branch",
             wt_dir=repo / ".kiss-worktrees" / "nonexistent",
             baseline_commit=None,
-        )
+        ))
 
         msg = agent.discard()
 
@@ -173,13 +174,13 @@ class TestBug63DiscardLiesOnDeleteFailure:
         GitWorktreeOps.save_original_branch(repo, branch, original)
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=original,
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         msg = agent.discard()
         assert "Discarded branch" in msg

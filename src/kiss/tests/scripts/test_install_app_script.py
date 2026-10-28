@@ -133,6 +133,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
         "src/kiss/agents/sorcar/chat_summary.py",
         "src/kiss/agents/sorcar/history_columns.py",
         "src/kiss/scripts/sync_db.py",
+        "src/kiss/scripts/merge_memory_pages.py",
         "src/kiss/core/_version.py",
     ):
         assert script in py, script
@@ -148,6 +149,7 @@ def test_library_is_byte_compiled_and_scripts_kept(installed_app: Path) -> None:
                 "src/kiss/agents/sorcar/chat_summary.py",
                 "src/kiss/agents/sorcar/history_columns.py",
                 "src/kiss/scripts/sync_db.py",
+                "src/kiss/scripts/merge_memory_pages.py",
                 "src/kiss/core/_version.py",
             }
         ), path
@@ -178,6 +180,12 @@ from kiss.scripts import sync_db
 shipped = [sync_db._shipped_module_path(name) for name in sync_db.SHIPPED_MODULES]
 for source_path in (sync_db._script_path(), *shipped):
     compile(sync_db._read_source(source_path), source_path, "exec")
+# /sync_history_and_memory ships memory_delta.py and merge_memory_pages.py the same way.
+from kiss.agents.seas.sync_history_and_memory import memory_delta, peer_sync
+for source_path in (peer_sync.MEMORY_DELTA_PATH, peer_sync.MERGE_PAGES_PATH):
+    assert source_path.suffix == ".py", source_path
+    compile(source_path.read_bytes(), str(source_path), "exec")
+assert memory_delta.merge_module().TOMBSTONES_DIR == ".tombstones"
 print("ok", len(commands), w._read_version())
 """
     env = dict(os.environ, PYTHONPATH=str(installed_app / "src"))

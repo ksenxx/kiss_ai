@@ -7,9 +7,9 @@
 // menu runs triggerManualGitCommit(), which calls closeSettingsPanel()
 // unconditionally -- even while the settings sheet is closed.
 // closeSettingsPanel() flushes the form through
-// saveSettingsIfPopulated(), and `configFormPopulated` is set by EVERY
-// configData reply (the daemon re-pushes one every 2 s), not only by
-// the one the sheet asked for.  So every Git Commit click posts a full
+// saveSettingsIfPopulated(), and the form used to count as populated
+// after EVERY configData reply (the daemon re-pushes one every 2 s),
+// not only the one the sheet asked for.  So every Git Commit click posted a full
 // `saveConfig` (API keys included) nobody asked for, and a stale form
 // can overwrite a change another window saved since this window's last
 // poll.

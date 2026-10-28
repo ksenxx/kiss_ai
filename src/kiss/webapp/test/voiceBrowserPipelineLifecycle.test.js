@@ -20,129 +20,26 @@
 //  4. A backgrounded browser tab must keep its microphone: the wake word
 //     is listened for even when the tab is not the one on screen.
 //
-// jsdom provides no speech engine, audio graph, or microphone, so the
-// harness supplies the minimal window.Vosk / AudioContext / mediaDevices
-// capabilities the page expects from its embedder. Everything else (the
+// jsdom provides no speech engine, audio graph, or microphone, so
+// voice_page_helpers supplies the window.Vosk / AudioContext /
+// mediaDevices the page expects from its embedder (the microphone grant
+// and the model load are settled by the test).  Everything else (the
 // real voice.js, main.js, DOM, message plumbing) is exercised for real.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {makePage: makeChatPage, stubRaf, sleep} = require('./simplify2_harness');
-const {micBtn, VOICE_CFG} = require('./voice_page_helpers');
+const {makeVoicePage, micBtn, settle, VOICE_CFG} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
-/** A KaldiRecognizer with the surface the pipeline uses. */
-class FakeRecognizer {
-  constructor() {
-    this._handlers = {};
-  }
-  setWords() {}
-  on(event, cb) {
-    this._handlers[event] = cb;
-  }
-  acceptWaveform() {}
-  retrieveFinalResult() {}
-  remove() {}
-}
+// Every page built; closed after the run so no armed timer keeps node
+// alive and a failed assertion cannot hang the suite.
+const windows = [];
 
-/** The model object window.Vosk.createModel resolves with. */
-function fakeModel() {
-  return {KaldiRecognizer: FakeRecognizer};
-}
-
-/** A minimal AudioContext whose close() is observable. */
-function makeAudioContextClass(log) {
-  return class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-      log.push('ctx-open');
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      log.push('ctx-closed');
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      return {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
-    }
-  };
-}
-
-/**
- * Build a page with a scriptable microphone: each getUserMedia call is
- * recorded and settled by the test through the returned `mic.calls` list.
- * With `noVosk` the speech engine is not preloaded, so the page has to
- * inject the vosk bundle itself.
- */
+/** A chat page with the mic off; see voice_page_helpers.makeVoicePage. */
 function makePage(opts) {
-  const options = opts || {};
-  const log = [];
-  const mic = {calls: []};
-  const {win, posted} = makeChatPage({
-    extraScripts: ['voice.js'],
-    beforeScripts: win => stubVoiceBrowser(win, options, log, mic),
-  });
-  return {win, posted, log, mic};
-}
-
-/** The browser APIs the voice pipeline touches, stubbed before the page scripts run. */
-function stubVoiceBrowser(win, options, log, mic) {
-  stubRaf(win);
-  win.Audio = function (src) {
-    return {src, play: () => Promise.resolve()};
-  };
-  Object.defineProperty(win.navigator, 'mediaDevices', {
-    configurable: true,
-    value: {
-      getUserMedia: constraints => {
-        return new Promise((resolve, reject) => {
-          mic.calls.push({
-            constraints,
-            grant: () =>
-              resolve({
-                getTracks: () => [
-                  {
-                    stop: () => log.push('track-stopped'),
-                  },
-                ],
-                getAudioTracks: () => [],
-              }),
-            refuse: message => {
-              const err = new Error(message || 'Permission denied');
-              err.name = 'NotAllowedError';
-              reject(err);
-            },
-          });
-        });
-      },
-      enumerateDevices: () => Promise.resolve([]),
-    },
-  });
-
-  if (!options.noVosk) {
-    win.Vosk = {
-      createModel: () => {
-        if (options.pendingModel) {
-          return new Promise((resolve, reject) => {
-            mic.modelResolve = () => resolve(fakeModel());
-            mic.modelReject = reject;
-          });
-        }
-        return Promise.resolve(fakeModel());
-      },
-    };
-  }
-  win.AudioContext = makeAudioContextClass(log);
-
-  win.__VOICE__ = Object.assign({}, VOICE_CFG);
-  win.localStorage.setItem('kissVoiceEnabled', '0');
+  const page = makeVoicePage(opts);
+  windows.push(page.win);
+  return page;
 }
 
 function setPageVisibility(win, state) {
@@ -159,7 +56,7 @@ function setPageVisibility(win, state) {
 
 async function main() {
   await test('the mic button injects the vosk bundle and starts the pipeline directly', async () => {
-    const {win, mic} = makePage({noVosk: true});
+    const {win, mic, model} = makePage({noVosk: true});
     micBtn(win).click();
     assert.ok(
       micBtn(win).classList.contains('voice-loading'),
@@ -175,12 +72,12 @@ async function main() {
       'no microphone is requested before the engine has loaded',
     );
     // The bundle arrives: the engine loads, then the microphone is asked.
-    win.Vosk = {createModel: () => Promise.resolve(fakeModel())};
+    win.Vosk = {createModel: () => Promise.resolve(model)};
     script.onload();
-    await sleep(20);
+    await settle();
     assert.strictEqual(mic.calls.length, 1, 'pipeline must request the mic');
     mic.calls[0].grant();
-    await sleep(20);
+    await settle();
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `pipeline must be live: ${micBtn(win).className}`,
@@ -195,7 +92,7 @@ async function main() {
     const first = win.document.querySelector(selector);
     assert.ok(first, 'the vosk bundle must be injected');
     first.onerror();
-    await sleep(20);
+    await settle();
     assert.strictEqual(
       win.document.querySelectorAll(selector).length,
       0,
@@ -209,9 +106,10 @@ async function main() {
   });
 
   await test('toggling off while the engine loads settles at off, never stuck loading, mic never opened', async () => {
-    const {win, mic, log} = makePage({pendingModel: true});
+    const page = makePage({pendingModel: true});
+    const {win, mic, log} = page;
     micBtn(win).click(); // on: model pending
-    await sleep(20);
+    await settle();
     assert.ok(
       micBtn(win).classList.contains('voice-loading'),
       `pipeline should be loading: ${micBtn(win).className}`,
@@ -221,8 +119,8 @@ async function main() {
       micBtn(win).classList.contains('voice-off'),
       `off click must paint off immediately: ${micBtn(win).className}`,
     );
-    mic.modelResolve(); // the superseded start now settles
-    await sleep(20);
+    page.resolveModel(); // the superseded start now settles
+    await settle();
     assert.ok(
       micBtn(win).classList.contains('voice-off'),
       `must stay off after the stale start settles: ${micBtn(win).className}`,
@@ -238,11 +136,11 @@ async function main() {
   await test('a microphone granted after the off click is released immediately', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await sleep(20); // model resolves, getUserMedia pending
+    await settle(); // model resolves, getUserMedia pending
     assert.strictEqual(mic.calls.length, 1, 'pipeline must request the mic');
     micBtn(win).click(); // off while getUserMedia is pending
     mic.calls[0].grant(); // the embedder grants it anyway
-    await sleep(20);
+    await settle();
     assert.ok(
       log.includes('track-stopped'),
       `the late-granted stream must be stopped: ${JSON.stringify(log)}`,
@@ -254,10 +152,10 @@ async function main() {
   await test('a failure settling after the off click paints off, not a stale red error', async () => {
     const {win, mic} = makePage();
     micBtn(win).click();
-    await sleep(20);
+    await settle();
     micBtn(win).click(); // off while getUserMedia is pending
     mic.calls[0].refuse('Requested device not found');
-    await sleep(20);
+    await settle();
     const btn = micBtn(win);
     assert.ok(
       !btn.classList.contains('voice-error'),
@@ -269,9 +167,9 @@ async function main() {
   await test('a failure of an attempt the user still wants keeps the red error', async () => {
     const {win, mic} = makePage();
     micBtn(win).click();
-    await sleep(20);
+    await settle();
     mic.calls[0].refuse('Requested device not found');
-    await sleep(20);
+    await settle();
     const btn = micBtn(win);
     assert.ok(
       btn.classList.contains('voice-error'),
@@ -287,13 +185,13 @@ async function main() {
   await test('ON-OFF-ON around a pending microphone: the stale grant is released and exactly one pipeline runs', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click(); // on: getUserMedia 1 pending after the load
-    await sleep(20);
+    await settle();
     assert.strictEqual(mic.calls.length, 1);
     micBtn(win).click(); // off
     micBtn(win).click(); // on again: deferred behind the in-flight start
     assert.ok(micBtn(win).classList.contains('voice-loading'));
     mic.calls[0].grant(); // the stale request is granted
-    await sleep(20);
+    await settle();
     assert.ok(
       log.includes('track-stopped'),
       `the stale stream must be released: ${JSON.stringify(log)}`,
@@ -309,7 +207,7 @@ async function main() {
       'exactly one restarted pipeline may request the mic',
     );
     mic.calls[1].grant();
-    await sleep(20);
+    await settle();
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
@@ -318,21 +216,22 @@ async function main() {
   });
 
   await test('OFF then ON during an in-flight start restarts the pipeline exactly once', async () => {
-    const {win, mic} = makePage({pendingModel: true});
+    const page = makePage({pendingModel: true});
+    const {win, mic} = page;
     micBtn(win).click(); // on: model pending
-    await sleep(20);
+    await settle();
     micBtn(win).click(); // off during the load
     micBtn(win).click(); // on again during the same load
     assert.ok(micBtn(win).classList.contains('voice-loading'));
-    mic.modelResolve(); // the stale start settles and hands over
-    await sleep(20);
+    page.resolveModel(); // the stale start settles and hands over
+    await settle();
     assert.strictEqual(
       mic.calls.length,
       1,
       'exactly one restarted pipeline may request the mic',
     );
     mic.calls[0].grant();
-    await sleep(20);
+    await settle();
     assert.ok(
       micBtn(win).classList.contains('voice-listening'),
       `the re-enabled pipeline must end live: ${micBtn(win).className}`,
@@ -342,9 +241,9 @@ async function main() {
   await test('turning the mic off releases the microphone and closes the audio graph', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await sleep(20);
+    await settle();
     mic.calls[0].grant();
-    await sleep(20);
+    await settle();
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     micBtn(win).click(); // off
     assert.ok(
@@ -359,9 +258,9 @@ async function main() {
   await test('a hidden tab keeps listening for its wake word', async () => {
     const {win, mic, log} = makePage();
     micBtn(win).click();
-    await sleep(20);
+    await settle();
     mic.calls[0].grant();
-    await sleep(20);
+    await settle();
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     setPageVisibility(win, 'hidden');
     assert.ok(
@@ -370,7 +269,7 @@ async function main() {
     );
     assert.ok(micBtn(win).classList.contains('voice-listening'));
     setPageVisibility(win, 'visible');
-    await sleep(20);
+    await settle();
     assert.strictEqual(
       mic.calls.length,
       1,
@@ -378,13 +277,11 @@ async function main() {
     );
   });
 
+  windows.forEach(win => win.close());
   report('voiceBrowserPipelineLifecycle');
 }
 
-main().then(
-  () => process.exit(0),
-  err => {
-    console.error(err);
-    process.exit(1);
-  },
-);
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

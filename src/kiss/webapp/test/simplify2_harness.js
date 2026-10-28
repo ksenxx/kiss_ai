@@ -8,6 +8,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {installTokenisedCss} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -177,6 +178,13 @@ function makePage(opts) {
   return {win, posted, getState};
 }
 
+/** Eval panelCopy.js, api.js and main.js into *win*, in that order. */
+function loadPageScripts(win) {
+  for (const name of DEFAULT_SCRIPTS) {
+    win.eval(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
+  }
+}
+
 /**
  * Build a chat page whose transport already holds one persisted tab
  * *tabId* (selected) and that has received the daemon's matching
@@ -196,9 +204,7 @@ function makePreloadedPage(tabId) {
     activeTabIndex: 0,
     chatId: tabId,
   });
-  for (const name of DEFAULT_SCRIPTS) {
-    win.eval(fs.readFileSync(path.join(MEDIA, name), 'utf8'));
-  }
+  loadPageScripts(win);
   send(win, {
     type: 'tabs_state',
     tabs: [{tabId, chatId: '', title: 'new chat', workDir: ''}],
@@ -206,11 +212,21 @@ function makePreloadedPage(tabId) {
   return {win, posted, close: () => win.close()};
 }
 
-/** Append media/main.css to *win*'s document, for computed-style asserts. */
-function loadMainCss(win) {
+/** Append media/`name` to *win*'s <head> as a <style>, as written. */
+function appendCss(win, name) {
   const styleEl = win.document.createElement('style');
-  styleEl.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  styleEl.textContent = fs.readFileSync(path.join(MEDIA, name), 'utf8');
   win.document.head.appendChild(styleEl);
+}
+
+/**
+ * Append media/main.css to *win*'s document as written, so a computed
+ * style reads back a token as `var(--x)` and a suite can pin that a rule
+ * uses the token.  For the concrete values use
+ * designTokens.installTokenisedCss (or `loadRemoteCss(win, true)`).
+ */
+function loadMainCss(win) {
+  appendCss(win, 'main.css');
 }
 
 /** Dispatch a bubbling click on `el` in `win`. */
@@ -253,14 +269,18 @@ function byId(win, id) {
  * A `beforeScripts` hook: stand a recording `window.monaco` in for the
  * CDN build jsdom never fetches, so `ensureMonaco()` resolves at once.
  * Each `editor.create` is recorded as `{holder, editor, value, language,
- * opts}`; `editor._type(text)` edits the model and fires its content
+ * opts, revealed}` (`revealed` lists the line numbers `setPosition` was
+ * asked for); `editor._type(text)` edits the model and fires its content
  * listeners.
  *
+ * @param {boolean} [install=true] `false` builds the stub without
+ *   setting `win.monaco` (the CDN loader path runs); the returned array's
+ *   `monaco` property is the stub, for the test to install later.
  * @returns {Array<object>} The record of every editor created.
  */
-function stubMonaco(win) {
+function stubMonaco(win, install = true) {
   const created = [];
-  win.monaco = {
+  const monaco = {
     editor: {
       // main.js defines a kiss-light/kiss-dark theme from the page palette
       // before every create(); real Monaco always exposes both calls.
@@ -270,6 +290,7 @@ function stubMonaco(win) {
         let value = String(opts.value === undefined ? '' : opts.value);
         let version = 1;
         const listeners = [];
+        const revealed = [];
         const model = {
           getAlternativeVersionId: () => version,
           getValue: () => value,
@@ -278,7 +299,7 @@ function stubMonaco(win) {
         const editor = {
           getModel: () => model,
           onDidChangeModelContent: cb => listeners.push(cb),
-          setPosition: () => {},
+          setPosition: pos => revealed.push(pos.lineNumber),
           revealLineInCenter: () => {},
           getDomNode: () => holder,
           dispose: () => {},
@@ -296,11 +317,14 @@ function stubMonaco(win) {
           value: opts.value,
           language: opts.language,
           opts,
+          revealed,
         });
         return editor;
       },
     },
   };
+  created.monaco = monaco;
+  if (install) win.monaco = monaco;
   return created;
 }
 
@@ -336,19 +360,39 @@ function answerCheckPaths(win, results) {
 
 /**
  * A `beforeScripts` hook: record every `setTimeout` the page arms as
- * `{cb, ms}` while still arming it for real, so a suite can see which
- * delays main.js chose.
+ * `{cb, ms, id, cleared}` while still arming it for real, so a suite can
+ * see which delays main.js chose, or fire one early with
+ * fireCapturedTimers.  `clearTimeout` marks the entry `cleared`.
  *
- * @returns {Array<{cb: Function, ms: number}>} The timers, in order.
+ * @param {Array} [timers=[]] The ledger to append to, for a caller that
+ *   hands its own array out before the page boots.
+ * @returns {Array<{cb: Function, ms: number, id: *, cleared: boolean}>}
+ *   The timers, in order.
  */
-function captureTimers(win) {
-  const timers = [];
+function captureTimers(win, timers = []) {
   const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
   win.setTimeout = function (cb, ms, ...args) {
-    timers.push({cb, ms});
-    return realSetTimeout.call(win, cb, ms, ...args);
+    const id = realSetTimeout.call(win, cb, ms, ...args);
+    timers.push({cb, ms, id, cleared: false});
+    return id;
+  };
+  win.clearTimeout = function (id) {
+    for (const t of timers) if (t.id === id) t.cleared = true;
+    realClearTimeout.call(win, id);
   };
   return timers;
+}
+
+/**
+ * Cancel and run now every captureTimers timer armed since index *from*
+ * (removing them from *timers*), instead of waiting for its due time.
+ */
+function fireCapturedTimers(win, timers, from = 0) {
+  for (const t of timers.splice(from)) {
+    win.clearTimeout(t.id);
+    t.cb();
+  }
 }
 
 function send(win, data) {
@@ -357,6 +401,15 @@ function send(win, data) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+/**
+ * One timer turn of Node's own loop: every promise chain queued so far
+ * (a page's `then` handlers, an end-of-tick coalescing timer of 0 ms)
+ * has settled.
+ */
+function settle() {
+  return sleep(0);
 }
 
 /**
@@ -369,6 +422,36 @@ function stubRaf(win) {
     return 0;
   };
   win.cancelAnimationFrame = function () {};
+}
+
+/**
+ * Queue animation frames instead of running them, for suites that
+ * assert on what main.js leaves pending or run frames at a chosen
+ * moment.  Install it before main.js (a `beforeScripts` hook) or on a
+ * page already made.
+ *
+ * @param {object} win The jsdom window.
+ * @returns {{frames: Array<{id: number, cb: Function}>, run: Function}}
+ *   `frames` is the pending queue in order (a cancelled frame leaves
+ *   it); `run()` runs the frames queued so far, and the frames they
+ *   queue in turn wait for the next `run()`.
+ */
+function queueRaf(win) {
+  const frames = [];
+  let nextId = 0;
+  win.requestAnimationFrame = function (cb) {
+    const id = ++nextId;
+    frames.push({id, cb});
+    return id;
+  };
+  win.cancelAnimationFrame = function (id) {
+    const i = frames.findIndex(f => f.id === id);
+    if (i >= 0) frames.splice(i, 1);
+  };
+  function run() {
+    for (const f of frames.splice(0)) f.cb();
+  }
+  return {frames, run};
 }
 
 const DESKTOP_QUERY = '(min-width: 900px)';
@@ -428,7 +511,9 @@ function fakeIntervals(win) {
   let nextId = 1;
   const intervals = [];
   win.setInterval = function (cb, ms, ...args) {
-    const period = Number(ms) || 0;
+    // Clamped to 1 ms as browsers do: a 0 ms period would stay due
+    // forever and `tick` would never return.
+    const period = Math.max(1, Number(ms) || 0);
     const iv = {id: nextId++, cb, args, ms: period, next: now + period};
     intervals.push(iv);
     return iv.id;
@@ -680,22 +765,220 @@ function showTips(win, tips) {
   return el;
 }
 
+/**
+ * Record every `win.setTimeout(fn, ms)` armed with exactly *ms* instead
+ * of scheduling it, honouring `clearTimeout`; other delays run for real.
+ * Unlike captureTimers the recorded timers never fire on their own: the
+ * test fires the surviving ones with fireTimers, so no wall-clock sleep
+ * decides whether a stale timer lands before or after a later click.
+ *
+ * @returns {Array<{fn: Function, cleared: boolean}>} The timers, in order.
+ */
+function recordTimers(win, ms) {
+  const timers = [];
+  const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
+  win.setTimeout = function (fn, delay, ...args) {
+    if (delay !== ms) return realSetTimeout.call(win, fn, delay, ...args);
+    const timer = {fn, cleared: false};
+    timers.push(timer);
+    return timer;
+  };
+  win.clearTimeout = function (handle) {
+    if (handle && typeof handle === 'object') handle.cleared = true;
+    else realClearTimeout.call(win, handle);
+  };
+  return timers;
+}
+
+/** Run every timer of recordTimers in *timers* that was not cleared. */
+function fireTimers(timers) {
+  for (const timer of timers) if (!timer.cleared) timer.fn();
+}
+
+/**
+ * Style *win* the way web_server.py serves chat.html: main.css plus
+ * remote-codex.css in <head> and `remote-chat` on <body>.  With `tokens`
+ * the design tokens are inlined (see designTokens.js), so computed
+ * spacing/font/colour values come back concrete; without it `var(--x)`
+ * values are left as written.
+ */
+function loadRemoteCss(win, tokens) {
+  for (const name of ['main.css', 'remote-codex.css']) {
+    if (tokens) installTokenisedCss(win, name);
+    else appendCss(win, name);
+  }
+  win.document.body.classList.add('remote-chat');
+}
+
+/**
+ * Make the page persist its state (a `pagehide`) and return the drafts
+ * it saved, `{tabId: text}` (`{}` when none).
+ */
+function persistedDrafts(win, getState) {
+  win.dispatchEvent(new win.Event('pagehide'));
+  return (getState() || {}).inputDrafts || {};
+}
+
+/**
+ * Give the page what the split layout's resizer needs and jsdom lacks:
+ * recording pointer capture and a `matchMedia` answering `desktop` for
+ * the desktop query.  Usable as a `beforeScripts` hook.
+ *
+ * @returns {{fireChange: Function, captured: Array, released: Array}}
+ *   fakeMatchMedia's `fireChange(matches)` and the pointer ids
+ *   `setPointerCapture` / `releasePointerCapture` were called with.
+ */
+function stubDesktop(win, desktop = true) {
+  const captured = [];
+  const released = [];
+  win.Element.prototype.setPointerCapture = function (id) {
+    captured.push(id);
+  };
+  win.Element.prototype.releasePointerCapture = function (id) {
+    released.push(id);
+  };
+  return {fireChange: fakeMatchMedia(win, desktop), captured, released};
+}
+
+/**
+ * Class-keyed fake scroll geometry (`win._geoByClass[className] =
+ * {sh, ch}`) for panels created *during* event handling; a per-element
+ * `fakeGeometry` own property still takes precedence.  Install from
+ * `beforeScripts`.
+ */
+function stubGeometry(win) {
+  const geoByClass = {};
+  win._geoByClass = geoByClass;
+  Object.defineProperty(win.Element.prototype, 'scrollHeight', {
+    configurable: true,
+    get() {
+      for (const k in geoByClass)
+        if (this.classList && this.classList.contains(k))
+          return geoByClass[k].sh;
+      return 0;
+    },
+  });
+  Object.defineProperty(win.Element.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      for (const k in geoByClass)
+        if (this.classList && this.classList.contains(k))
+          return geoByClass[k].ch;
+      return 0;
+    },
+  });
+}
+
+/** Make `el` report the live `geo.sh` / `geo.ch` as scroll geometry. */
+function fakeGeometry(el, geo) {
+  Object.defineProperty(el, 'scrollHeight', {
+    get: () => geo.sh,
+    configurable: true,
+  });
+  Object.defineProperty(el, 'clientHeight', {
+    get: () => geo.ch,
+    configurable: true,
+  });
+}
+
+/** The scrollTop at the bottom of an element with geometry `geo`. */
+function bottom(geo) {
+  return Math.max(0, geo.sh - geo.ch);
+}
+
+/**
+ * Hide the welcome card and mark the ready tab's task as running (a
+ * `status` only, no prompt echo: see `startTask` for the full open).
+ * Returns the tabId.
+ */
+function startRunningTask(win, posted) {
+  const tabId = readyTabId(posted);
+  win._testApi.hideWelcome();
+  send(win, {
+    type: 'status',
+    running: true,
+    tabId,
+    startTs: Date.now() - 2000,
+  });
+  return tabId;
+}
+
+/**
+ * Stream `n` complete Read tool panels (call + result) into `win`,
+ * numbered from `offset` (default 0).
+ */
+function sendToolPanels(win, n, offset = 0) {
+  for (let i = offset; i < offset + n; i++) {
+    send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
+    send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
+  }
+}
+
+/** Every summary tool panel in the output, in document order. */
+function summaryPanels(win) {
+  return Array.from(output(win).querySelectorAll('.tc.tc-summary'));
+}
+
+/**
+ * Dispatch `n` bubbling, cancelable wheel events of `deltaY` on `el`
+ * (negative scrolls up), the way a reader overscrolls the transcript.
+ */
+function wheel(win, el, deltaY, n = 1) {
+  for (let i = 0; i < n; i++) {
+    el.dispatchEvent(
+      new win.WheelEvent('wheel', {deltaY, bubbles: true, cancelable: true}),
+    );
+  }
+}
+
+/** The `getAdjacentTask` commands the page posted so far, in order. */
+function getAdjacent(posted) {
+  return ofType(posted, 'getAdjacentTask');
+}
+
+/**
+ * Replace `win.navigator.clipboard` with a recorder whose `writeText`
+ * resolves at once.  Usable from `beforeScripts`.
+ *
+ * @returns {{writes: string[], last: Function}} Every text written, in
+ *   order, and `last()` = the latest one (null before any write).
+ */
+function stubClipboard(win) {
+  const writes = [];
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: text => {
+        writes.push(String(text));
+        return Promise.resolve();
+      },
+    },
+  });
+  return {writes, last: () => (writes.length ? writes[writes.length - 1] : null)};
+}
+
 module.exports = {
+  queueRaf,
   showTips,
   MEDIA,
   newDom,
   makePage,
+  loadPageScripts,
   makePreloadedPage,
   loadMainCss,
+  loadRemoteCss,
   click,
   clickTab,
   byId,
   send,
   sleep,
+  settle,
   stubRaf,
   stubMonaco,
   answerCheckPaths,
   captureTimers,
+  fireCapturedTimers,
   fakeMatchMedia,
   fakeIntervals,
   waitFor,
@@ -720,4 +1003,17 @@ module.exports = {
   parsePanelTimeMs,
   twoTabs,
   typeInto,
+  recordTimers,
+  fireTimers,
+  persistedDrafts,
+  stubDesktop,
+  stubGeometry,
+  fakeGeometry,
+  bottom,
+  startRunningTask,
+  sendToolPanels,
+  summaryPanels,
+  wheel,
+  getAdjacent,
+  stubClipboard,
 };

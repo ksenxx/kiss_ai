@@ -14,33 +14,15 @@
 // used to keep the bar only when the task tab was the active tab, so the
 // live bar was silently lost.
 //
-// These end-to-end jsdom tests replay that exact sequence with a fake
-// clock advanced by 18 s and check that the bar is parked in the task
-// tab's own transcript and shown when the user returns to it, without
-// leaking into any other tab and without being shown twice.
+// These end-to-end jsdom tests replay that sequence (the page parks the
+// bar by tab, not by time, so no clock is involved) and check that the
+// bar is parked in the task tab's own transcript and shown when the user
+// returns to it, without leaking into any other tab and without being
+// shown twice.  (A live bar on the still-active task tab is pinned by
+// followupSuggestionClickCopies.test.js.)
 
 const assert = require('assert');
-const {
-  makePage: makeHarnessPage,
-  send,
-  clickTab,
-} = require('./simplify2_harness');
-
-const LATE_MS = 18000;
-
-function makePage() {
-  // A controllable wall clock so the 18 s gap is real page time
-  // without the test having to wait for it.
-  const clock = {now: 1790457672532};
-  const {win} = makeHarnessPage({
-    beforeScripts(win) {
-      win.Date.now = function () {
-        return clock.now;
-      };
-    },
-  });
-  return {win, clock};
-}
+const {makePage, send, clickTab} = require('./simplify2_harness');
 
 function outputBars(win) {
   return Array.from(win.document.querySelectorAll('#output .followup-bar'));
@@ -52,7 +34,7 @@ function activeContentTab(win) {
 
 // A task in tab *tabId* writes an HTML report and finishes; task_done
 // opens the report as a content tab that takes focus.
-function runTaskWithReport(win, clock, tabId, taskId) {
+function runTaskWithReport(win, tabId, taskId) {
   send(win, {type: 'clear', chat_id: 'chat-' + taskId, tabId});
   send(win, {type: 'task_events', tabId, task_id: taskId});
   const file = 'reports/' + taskId + '/index.html';
@@ -75,22 +57,21 @@ function runTaskWithReport(win, clock, tabId, taskId) {
     tabId,
     taskId,
   });
-  send(win, {type: 'task_done', success: true, tabId, taskId, ts: clock.now});
+  send(win, {type: 'task_done', success: true, tabId, taskId});
 }
 
-function lateFollowup(win, clock, tabId, text) {
-  clock.now += LATE_MS;
-  send(win, {type: 'followup_suggestion', tabId, text, ts: clock.now});
+function lateFollowup(win, tabId, text) {
+  send(win, {type: 'followup_suggestion', tabId, text});
 }
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
-test('a bar arriving 18 s after task_done survives the report tab taking focus', () => {
-  const {win, clock} = makePage();
+test('a bar arriving after task_done survives the report tab taking focus', () => {
+  const {win} = makePage();
   const api = win._testApi;
   const taskTab = api.getActiveTabId();
 
-  runTaskWithReport(win, clock, taskTab, 'task-late-QX01');
+  runTaskWithReport(win, taskTab, 'task-late-QX01');
   assert.ok(
     activeContentTab(win),
     'task_done must have opened the report tab and made it active',
@@ -101,7 +82,7 @@ test('a bar arriving 18 s after task_done survives the report tab taking focus',
     'the task tab is now in the background',
   );
 
-  lateFollowup(win, clock, taskTab, 'late_next_step_QX01');
+  lateFollowup(win, taskTab, 'late_next_step_QX01');
   assert.strictEqual(
     outputBars(win).length,
     0,
@@ -137,36 +118,18 @@ test('a bar arriving 18 s after task_done survives the report tab taking focus',
   win.close();
 });
 
-test('the bar is shown once when the task tab is still active', () => {
-  const {win, clock} = makePage();
-  const api = win._testApi;
-  const taskTab = api.getActiveTabId();
-  send(win, {type: 'clear', chat_id: 'chat-QX02', tabId: taskTab});
-  send(win, {type: 'task_events', tabId: taskTab, task_id: 'task-QX02'});
-  send(win, {type: 'task_done', success: true, tabId: taskTab, ts: clock.now});
-
-  lateFollowup(win, clock, taskTab, 'active_next_step_QX02');
-  assert.strictEqual(
-    outputBars(win).length,
-    1,
-    'exactly one bar on the active tab',
-  );
-  assert.ok(outputBars(win)[0].textContent.includes('active_next_step_QX02'));
-  win.close();
-});
-
 test('a late bar never leaks into an unrelated chat tab', () => {
-  const {win, clock} = makePage();
+  const {win} = makePage();
   const api = win._testApi;
   const taskTab = api.getActiveTabId();
-  runTaskWithReport(win, clock, taskTab, 'task-QX03');
+  runTaskWithReport(win, taskTab, 'task-QX03');
 
   api.createNewTab();
   const otherTab = api.getActiveTabId();
   assert.notStrictEqual(otherTab, taskTab);
   send(win, {type: 'clear', chat_id: 'chat-other-QX03', tabId: otherTab});
 
-  lateFollowup(win, clock, taskTab, 'owner_only_QX03');
+  lateFollowup(win, taskTab, 'owner_only_QX03');
   assert.strictEqual(
     outputBars(win).length,
     0,
@@ -187,20 +150,14 @@ test('a late bar never leaks into an unrelated chat tab', () => {
 });
 
 test('a late bar for a closed tab is dropped without error', () => {
-  const {win, clock} = makePage();
+  const {win} = makePage();
   const api = win._testApi;
   const taskTab = api.getActiveTabId();
   api.createNewTab();
   const survivor = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: 'chat-QX04', tabId: survivor});
 
-  clock.now += LATE_MS;
-  send(win, {
-    type: 'followup_suggestion',
-    tabId: 'tab-that-was-closed-QX04',
-    text: 'orphan_QX04',
-    ts: clock.now,
-  });
+  lateFollowup(win, 'tab-that-was-closed-QX04', 'orphan_QX04');
   assert.strictEqual(outputBars(win).length, 0, 'no tab owns the bar');
   clickTab(win, taskTab);
   assert.strictEqual(outputBars(win).length, 0, 'no tab owns the bar');

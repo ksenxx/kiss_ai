@@ -18,41 +18,11 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {installAudio} = require('./speech_helpers');
 
 const B64 = 'SUQzBAAAAAAAAA==';
 const CHECK_MS = 5000;
 const STALL_CHECKS = 6;
-
-/**
- * An Audio stub that models playback progress: currentTime only moves
- * when a test calls advance(), so a stalled clip is one the test stops
- * advancing.
- */
-function installAudio(win) {
-  const players = [];
-  win.Audio = function Audio(src) {
-    this.src = src;
-    this.currentTime = 0;
-    this.playCalls = 0;
-    this.pauseCalls = 0;
-    this.play = () => {
-      this.playCalls++;
-      return Promise.resolve();
-    };
-    this.pause = () => {
-      this.pauseCalls++;
-    };
-    this.advance = seconds => {
-      this.currentTime += seconds;
-    };
-    this.fire = type => {
-      const handler = this['on' + type];
-      if (typeof handler === 'function') handler({type});
-    };
-    players.push(this);
-  };
-  return players;
-}
 
 /**
  * Replace the page's interval timers with a manual clock: every

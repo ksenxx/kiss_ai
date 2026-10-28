@@ -1131,20 +1131,6 @@ def test_classify_task_for_run_enabled_override_beats_config(
     assert spend is not None and spend.budget > 0.0
 
 
-@live_api
-@requires_anthropic
-def test_classifier_sees_substituted_template_arguments(
-    env: IsolatedKissHome,
-) -> None:
-    """{placeholder} templates are substituted before classification."""
-    agent = SorcarAgent("clf-substitution")
-    verdict = agent._classify_task_once(
-        MODEL, "{task}", None, arguments={"task": _DEV_TASK},
-    )
-    assert verdict is not None
-    assert verdict.is_simple is False
-
-
 # ---------------------------------------------------------------------------
 # ChatSorcarAgent.run — the classifier runs only when its verdict matters
 # ---------------------------------------------------------------------------
@@ -1153,6 +1139,54 @@ def test_classifier_sees_substituted_template_arguments(
 def _is_classifier_request(request: dict[str, Any]) -> bool:
     """Whether *request* is the classifier's (its prompt names the verdict key)."""
     return "is_simple" in json.dumps(request.get("messages", []))
+
+
+def test_classifier_sees_substituted_template_arguments(
+    env: IsolatedKissHome,
+) -> None:
+    """{placeholder} templates are substituted before classification.
+
+    ``ChatSorcarAgent.run`` classifies the task once, ahead of
+    ``SorcarAgent.run``, and both hand the classifier the prompt the
+    run will execute — the template with its arguments filled in —
+    never the raw ``{task}`` placeholder.
+    """
+    seen: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def respond(request: dict[str, Any]) -> dict[str, Any]:
+        with lock:
+            seen.append(request)
+        if _is_classifier_request(request):
+            return _verdict_body(False)
+        return finish_response("<p>ok</p>")
+
+    server = StandInModelServer(respond)
+    try:
+        clear_classification_cache()
+        agent = ChatSorcarAgent("clf-substitution")
+        result = agent.run(
+            model_name=STANDIN_MODEL,
+            prompt_template="{task}",
+            arguments={"task": _DEV_TASK},
+            model_config=server.model_config,
+            work_dir=str(env.repo),
+            use_memory=False,
+            web_tools=False,
+            is_parallel=False,
+            max_steps=4,
+            max_budget=1.0,
+            verbose=False,
+            tool_profile="edit",
+        )
+    finally:
+        server.stop()
+    assert yaml.safe_load(result)["success"] is True, result
+    with lock:
+        classifier_requests = [json.dumps(r["messages"]) for r in seen if _is_classifier_request(r)]
+    assert len(classifier_requests) == 1, seen
+    assert _DEV_TASK in classifier_requests[0]
+    assert "{task}" not in classifier_requests[0]
 
 
 def test_chat_agent_classifies_only_when_the_verdict_can_choose_the_prompt(

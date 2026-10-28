@@ -361,6 +361,22 @@ class TestPreserveMarkerIsAFile:
         assert GitWorktreeOps.delete_branch(repo, "kiss/wt-w")
         assert not GitWorktreeOps.load_preserve_marker(repo, "kiss/wt-w")
 
+    def test_volatile_claim_goes_away_with_the_branch(self, tmp_path: Path) -> None:
+        """A claim held only in memory (marker unwritable) dies with its branch.
+
+        Otherwise a later branch of the same name in the same repository
+        would be born preserved-for-review and never reclaimed.
+        """
+        repo = _init(tmp_path)
+        run_git(repo, "branch", "kiss/wt-v")
+        (repo / ".git" / "kiss-preserve").write_text("")  # a file where the directory goes
+        assert not GitWorktreeOps.save_preserve_marker(repo, "kiss/wt-v")
+        assert GitWorktreeOps.load_preserve_marker(repo, "kiss/wt-v")
+        assert GitWorktreeOps.delete_branch(repo, "kiss/wt-v")
+        assert not GitWorktreeOps.load_preserve_marker(repo, "kiss/wt-v")
+        run_git(repo, "branch", "kiss/wt-v")
+        assert not GitWorktreeOps.load_preserve_marker(repo, "kiss/wt-v")
+
 
 _OWNER = """
 import sys

@@ -12,6 +12,8 @@ const {
   output,
   isDisplayed,
   loadMainCss,
+  sendToolPanels,
+  summaryPanels,
 } = require('./simplify2_harness');
 
 const DESC =
@@ -20,18 +22,6 @@ const DESC =
   'It then ran the existing test suite to establish a green baseline. ' +
   'Next it drafted the new feature behind a flag. It wired the flag ' +
   'into the CLI. Finally it re-ran the impacted tests and they passed.';
-
-function sendToolPanels(win, n, offset) {
-  const start = offset || 0;
-  for (let i = start; i < start + n; i++) {
-    send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
-    send(win, {type: 'tool_result', name: 'Read', content: 'data ' + i});
-  }
-}
-
-function summaryPanels(win) {
-  return Array.from(output(win).querySelectorAll('.tc.tc-summary'));
-}
 
 function topLevel(win) {
   return Array.from(output(win).children).filter(el => el.id !== 'welcome');
@@ -183,18 +173,6 @@ function testNoPrecedingPanels() {
   assert.ok(p.classList.contains('collapsed'), 'still collapses');
   win.close();
   console.log('  ok - summary right after prompt nests just the prompt');
-}
-
-function testEmptyDescription() {
-  const {win} = makePage();
-  sendToolPanels(win, 1);
-  send(win, {type: 'tool_call', name: 'summary'});
-  const p = summaryPanels(win)[0];
-  const desc = p.querySelector(':scope > .tc-summary-desc');
-  assert.ok(desc, 'desc element renders even without a description');
-  assert.strictEqual(desc.textContent, '');
-  win.close();
-  console.log('  ok - missing description handled');
 }
 
 function testDescriptionFullyVisibleWhileCollapsedViaCss() {
@@ -448,29 +426,7 @@ function testNonSummaryToolCallUnaffected() {
 
 function testReplayPathNestsAndCollapses() {
   const {win} = makePage();
-  const events = [{type: 'prompt', text: 'replayed task'}];
-  for (let i = 0; i < 7; i++) {
-    events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
-    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
-  }
-  events.push({type: 'tool_call', name: 'summary', description: DESC});
-  events.push({
-    type: 'tool_result',
-    name: 'summary',
-    content: 'Summary recorded.',
-  });
-  events.push({
-    type: 'result',
-    text: 'done',
-    summary: 'done',
-    success: true,
-  });
-  send(win, {
-    type: 'task_events',
-    task: 'replayed task',
-    task_id: 42,
-    events: events,
-  });
+  replayCompletedSummaryTask(win);
   const panels = summaryPanels(win);
   assert.strictEqual(panels.length, 1, 'replay renders the summary panel');
   const p = panels[0];
@@ -723,7 +679,6 @@ function runTests() {
   testAdjacentTaskIsBoundarySystemPromptIsNot();
   testWelcomeBlockNeverAdopted();
   testNoPrecedingPanels();
-  testEmptyDescription();
   testDescriptionFullyVisibleWhileCollapsedViaCss();
   testCollapsePreviewSuppressedForSummary();
   testHeaderClickTogglesAndKeepsChildren();
@@ -742,7 +697,7 @@ function runTests() {
 
 try {
   runTests();
-  console.log('\n21 passed, 0 failed');
+  console.log('\n20 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

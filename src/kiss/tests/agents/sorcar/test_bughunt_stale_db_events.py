@@ -104,7 +104,6 @@ class TestStaleDbEvents:
         th._append_chat_event(
             {"type": "followup_suggestion", "text": "late suggestion"},
             task_id=task_id,
-            task="some other task that completed in the old database",
             origin_db_path="/nonexistent/old/history.db",
         )
         assert self._events_for(task_id) == []

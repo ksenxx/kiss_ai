@@ -229,6 +229,12 @@ def list_jobs(artifact_dir: Path) -> list[dict]:
     return jobs
 
 
+def _trajectory_sort_key(trajectory: dict) -> float:
+    """Sort key for trajectories: ascending run start timestamp (0 when missing or malformed)."""
+    value = trajectory.get("run_start_timestamp", 0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 def load_job_trajectories(
     artifact_dir: Path, job_name: str, job_dir: Path | None = None
 ) -> list[dict]:
@@ -241,10 +247,11 @@ def load_job_trajectories(
     Args:
         artifact_dir: Path to the artifact directory containing job folders.
         job_name: Name of the job directory to load trajectories from.
-        job_dir: Pre-resolved job directory.  Callers that already ran
-            :func:`find_job_dir` (e.g. the route handler, which checks
-            existence first) pass it here so the potentially expensive
-            project-wide discovery walk is not repeated.
+        job_dir: Pre-resolved job directory, read as given (no
+            re-resolution).  Callers that already ran
+            :func:`find_job_dir` (the route handler, which checks
+            existence first) or validated the directory against their
+            own allow-list pass it here.
 
     Returns:
         List of trajectory dictionaries sorted by run_start_timestamp in ascending order.
@@ -254,16 +261,12 @@ def load_job_trajectories(
         job_dir = find_job_dir(artifact_dir, job_name)
     if job_dir is None:
         return trajectories
-    trajectories_dir = job_dir / "trajectories"
-
-    for file_path in sorted(trajectories_dir.glob("trajectory_*.yaml")):
+    for file_path in sorted((job_dir / "trajectories").glob("trajectory_*.yaml")):
         try:
             trajectories.append(_parse_trajectory_yaml(file_path))
-        except Exception as e:
-            logger.debug("Exception caught", exc_info=True)
-            print(f"Error loading {file_path}: {e}")
-
-    trajectories.sort(key=lambda x: x.get("run_start_timestamp", 0))
+        except Exception:
+            logger.debug("Error loading %s", file_path, exc_info=True)
+    trajectories.sort(key=_trajectory_sort_key)
     return trajectories
 
 

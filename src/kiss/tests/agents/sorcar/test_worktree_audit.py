@@ -23,6 +23,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.tests.conftest import seed_worktree
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -174,22 +175,22 @@ class TestFix3MergeInstructionsUseSquash:
 
         from kiss.agents.sorcar.git_worktree import GitWorktree
         assert agent._wt is not None
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=agent._wt.repo_root,
             branch=agent._wt.branch,
             original_branch=None,
             wt_dir=agent._wt.wt_dir,
-        )
+        ))
 
         msg = agent.merge()
         assert "git merge --squash" in msg
 
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=agent._wt.repo_root,
             branch=agent._wt.branch,
             original_branch="main",
             wt_dir=agent._wt.wt_dir,
-        )
+        ))
         agent.discard()
 
 

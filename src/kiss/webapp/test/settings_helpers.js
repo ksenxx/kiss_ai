@@ -10,15 +10,7 @@
 // touch the jsdom window and the harness's `posted` array, so a suite
 // with its own page bootstrap can use them too.
 
-const {click, byId} = require('./simplify2_harness');
-
-/** The last message of `type` the page posted, or null. */
-function lastMsg(posted, type) {
-  for (let i = posted.length - 1; i >= 0; i -= 1) {
-    if (posted[i] && posted[i].type === type) return posted[i];
-  }
-  return null;
-}
+const {click, byId, send} = require('./simplify2_harness');
 
 /** Click the tab bar's settings gear (asserting it is rendered). */
 function openSettings(win) {
@@ -42,12 +34,29 @@ function statusLine(win, subpanel) {
   return byId(win, `cfg-${subpanel}-status`);
 }
 
+/**
+ * Open Settings on a harness page `wv` ({win, posted}) and answer its
+ * `getConfig` with `configData` carrying `config`.
+ */
+function openSettingsWith(wv, config) {
+  openSettings(wv.win);
+  send(wv.win, {type: 'configData', config});
+}
+
+/**
+ * The `machines` fixture of the remote-machine settings suites: this
+ * daemon (`laptop`) and one reachable SSH machine (`gpu-box`).
+ */
+const MACHINES = [
+  {name: 'laptop', status: 'reachable', local: true},
+  {name: 'gpu-box', status: 'reachable', address: 'ssh me@gpu'},
+];
+
 module.exports = {
-  lastMsg,
-  click,
-  byId,
   openSettings,
   closeSettings,
   typeInto,
   statusLine,
+  openSettingsWith,
+  MACHINES,
 };

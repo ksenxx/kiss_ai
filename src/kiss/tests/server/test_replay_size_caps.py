@@ -13,7 +13,7 @@ pinned here:
 * :class:`JsonPrinter` cuts the output one tool call streams at
   ``MAX_SYSTEM_OUTPUT_CHARS`` (a marker line ends the stream; the next
   tool call starts a fresh budget);
-* :func:`persistence._fetch_events_for_task_id` never loads a row
+* :func:`persistence._select_event_rows` never loads a row
   above ``MAX_EVENT_ROW_CHARS`` into Python: SQLite returns the event
   type and the head of its text, and the row becomes a clipped event
   (or a ``system_output`` note when it carries no text);
