@@ -23,10 +23,11 @@ Root causes fixed:
    causing cross-contamination.  Now per-tab via ``_bash_states`` dict.
 
 3. ``_flush_bash`` had a TOCTOU: the buffer was captured, the lock was
-   released before ``broadcast()``, allowing ``reset()`` +
+   released before ``broadcast()``, allowing the task's cleanup +
    ``start_recording()`` to slip in and the stale text to leak into the
    new recording.  Now capture and ``broadcast()`` are one critical
-   section under the task's ``flush_lock``, which ``reset()`` also takes.
+   section under the task's ``flush_lock``, which ``cleanup_task`` also
+   takes.
 """
 
 from __future__ import annotations
@@ -38,50 +39,6 @@ from typing import Any
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
-
-class TestStreamStateIsolation(unittest.TestCase):
-    """Stream parsing state must be per-thread so concurrent tasks don't interfere."""
-
-    def test_reset_does_not_corrupt_concurrent_task_block_type(self) -> None:
-        """When task A calls reset(), task B's _current_block_type is preserved.
-
-        Scenario: task B is mid-thinking-block (_current_block_type="thinking").
-        Task A finishes and calls reset().  After that, task B's
-        _current_block_type must still be "thinking", not "".
-        """
-        printer = JsonPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, str] = {}
-
-        def wt_task() -> None:
-            printer._thread_local.task_id = "B"
-            printer._current_block_type = "thinking"
-            barrier.wait()
-            barrier2.wait()
-            results["B_block_type"] = printer._current_block_type
-
-        def non_wt_task() -> None:
-            printer._thread_local.task_id = "A"
-            printer._current_block_type = "tool_use"
-            barrier.wait()
-            printer.reset()
-            results["A_block_type"] = printer._current_block_type
-            barrier2.wait()
-
-        t_wt = threading.Thread(target=wt_task, daemon=True)
-        t_nwt = threading.Thread(target=non_wt_task, daemon=True)
-        t_wt.start()
-        t_nwt.start()
-        t_wt.join(timeout=5)
-        t_nwt.join(timeout=5)
-
-        assert results["A_block_type"] == "", (
-            f"Task A's block type should be '' after reset, got '{results['A_block_type']}'"
-        )
-        assert results["B_block_type"] == "thinking", (
-            f"Task B's block type should still be 'thinking', got '{results['B_block_type']}'"
-        )
 
 class TestRecordingIsolation(unittest.TestCase):
     """Recording must be per-tab so one task's stop doesn't lose another's events."""
@@ -184,7 +141,7 @@ class TestConcurrentStopScenario(unittest.TestCase):
 
         Simulates the exact interleaving:
         1. Both tasks start and begin streaming
-        2. Non-wt task is stopped (reset + stop_recording called)
+        2. Non-wt task is stopped (stop_recording called)
         3. Wt task continues streaming — its events must use correct types
         """
         printer = JsonPrinter()
@@ -215,7 +172,6 @@ class TestConcurrentStopScenario(unittest.TestCase):
             printer._current_block_type = "tool_use"
             barrier.wait()
             printer.stop_recording()
-            printer.reset()
             barrier2.wait()
 
         t_wt = threading.Thread(target=wt_task, daemon=True)
@@ -228,56 +184,9 @@ class TestConcurrentStopScenario(unittest.TestCase):
         types = [e["type"] for e in wt_events]
         assert types == ["thinking_start", "thinking_delta", "thinking_end"], (
             f"Expected thinking events, got {types}. "
-            "Non-wt task's reset() corrupted wt task's stream state."
+            "Non-wt task's stop corrupted wt task's stream state."
         )
 
-
-class TestStopWtPreservesNonWtStreamState(unittest.TestCase):
-    """Reverse direction: stopping a worktree task must not corrupt the
-    concurrent non-worktree task's stream-parsing state."""
-
-    def test_reset_on_wt_does_not_corrupt_non_wt_block_type(self) -> None:
-        """When the wt task calls reset(), the non-wt task's _current_block_type
-        is preserved.
-
-        Scenario: non-wt task is mid-thinking-block (_current_block_type="thinking").
-        Wt task finishes and calls reset().  After that, non-wt task's
-        _current_block_type must still be "thinking", not "".
-        """
-        printer = JsonPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, str] = {}
-
-        def non_wt_task() -> None:
-            printer._thread_local.task_id = "nwt"
-            printer._current_block_type = "thinking"
-            barrier.wait()
-            barrier2.wait()
-            results["nwt_block_type"] = printer._current_block_type
-
-        def wt_task() -> None:
-            printer._thread_local.task_id = "wt"
-            printer._current_block_type = "tool_use"
-            barrier.wait()
-            printer.reset()
-            results["wt_block_type"] = printer._current_block_type
-            barrier2.wait()
-
-        t_nwt = threading.Thread(target=non_wt_task, daemon=True)
-        t_wt = threading.Thread(target=wt_task, daemon=True)
-        t_nwt.start()
-        t_wt.start()
-        t_nwt.join(timeout=5)
-        t_wt.join(timeout=5)
-
-        assert results["wt_block_type"] == "", (
-            f"Wt task's block type should be '' after reset, got '{results['wt_block_type']}'"
-        )
-        assert results["nwt_block_type"] == "thinking", (
-            f"Non-wt task's block type should still be 'thinking', "
-            f"got '{results['nwt_block_type']}'"
-        )
 
 class TestStopWtPreservesNonWtRecording(unittest.TestCase):
     """Reverse direction: stopping a worktree task's recording must not
@@ -369,7 +278,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
 
         Simulates the exact interleaving:
         1. Both tasks start and begin streaming
-        2. Wt task is stopped (reset + stop_recording called)
+        2. Wt task is stopped (stop_recording called)
         3. Non-wt task continues streaming — its events must use correct types
         """
         printer = JsonPrinter()
@@ -400,7 +309,6 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
             printer._current_block_type = "tool_use"
             barrier.wait()
             printer.stop_recording()
-            printer.reset()
             barrier2.wait()
 
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
@@ -413,7 +321,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
         types = [e["type"] for e in nwt_events]
         assert types == ["thinking_start", "thinking_delta", "thinking_end"], (
             f"Expected thinking events, got {types}. "
-            "Wt task's reset() corrupted non-wt task's stream state."
+            "Wt task's stop corrupted non-wt task's stream state."
         )
 
 
@@ -509,95 +417,6 @@ class TestBashBufferCrossContamination(unittest.TestCase):
         )
 
 
-class TestBashBufferInterference(unittest.TestCase):
-    """Bash buffer must be per-tab.
-
-    Without per-tab bash state, task B's ``reset()`` clears the shared
-    buffer, causing task A's legitimate timer flush to send nothing.
-    """
-
-    def test_reset_on_tab_b_does_not_kill_tab_a_flush(self) -> None:
-        """Task B's reset() does not clear task A's buffered output."""
-        printer = JsonPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, list[str]] = {}
-
-        def task_a() -> None:
-            printer._thread_local.task_id = "A"
-            with printer._bash_lock:
-                printer._bash_state.buffer.append("a-output")
-            barrier.wait()
-            barrier2.wait()
-            with printer._bash_lock:
-                results["A_buffer_after"] = list(printer._bash_state.buffer)
-
-        def task_b() -> None:
-            printer._thread_local.task_id = "B"
-            with printer._bash_lock:
-                printer._bash_state.buffer.append("b-output")
-            barrier.wait()
-            printer.reset()
-            barrier2.wait()
-
-        t_a = threading.Thread(target=task_a, daemon=True)
-        t_b = threading.Thread(target=task_b, daemon=True)
-        t_a.start()
-        t_b.start()
-        t_a.join(timeout=5)
-        t_b.join(timeout=5)
-
-        assert results["A_buffer_after"] == ["a-output"], (
-            f"Task A's buffer became {results['A_buffer_after']} "
-            "— task B's reset() interfered"
-        )
-
-
-class TestBashTimerInterference(unittest.TestCase):
-    """Bash timer must be per-tab.
-
-    Without per-tab bash state, task B's ``reset()`` cancels task A's
-    pending flush timer, causing task A's buffered output to be lost.
-    """
-
-    def test_reset_on_tab_b_does_not_cancel_tab_a_timer(self) -> None:
-        """Task B's reset() does not cancel task A's pending timer."""
-        printer = JsonPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, bool] = {}
-
-        def task_a() -> None:
-            printer._thread_local.task_id = "A"
-            with printer._bash_lock:
-                t = threading.Timer(999, lambda: None)
-                printer._bash_state.timer = t
-            barrier.wait()
-            barrier2.wait()
-            with printer._bash_lock:
-                results["A_timer_alive"] = printer._bash_state.timer is not None
-                if printer._bash_state.timer is not None:
-                    printer._bash_state.timer.cancel()
-                    printer._bash_state.timer = None
-
-        def task_b() -> None:
-            printer._thread_local.task_id = "B"
-            barrier.wait()
-            printer.reset()
-            barrier2.wait()
-
-        t_a = threading.Thread(target=task_a, daemon=True)
-        t_b = threading.Thread(target=task_b, daemon=True)
-        t_a.start()
-        t_b.start()
-        t_a.join(timeout=5)
-        t_b.join(timeout=5)
-
-        assert results["A_timer_alive"] is True, (
-            "Task A's timer should still be alive after task B's reset()"
-        )
-
-
 class _GatedBroadcastPrinter(JsonPrinter):
     """Printer whose ``system_output`` broadcast waits for a release signal."""
 
@@ -618,10 +437,10 @@ class TestFlushBashTOCTOU(unittest.TestCase):
     """``_flush_bash`` TOCTOU: capture and broadcast are one critical section.
 
     Without the fix, after the buffer was captured and the lock was
-    released, ``reset()`` + ``start_recording()`` could slip in before
-    ``broadcast()``, causing stale bash text to leak into the new
-    recording.  Now ``reset()`` blocks on the task's ``flush_lock``
-    until the in-flight broadcast has finished.
+    released, ``cleanup_task()`` + ``start_recording()`` could slip in
+    before ``broadcast()``, causing stale bash text to leak into the new
+    recording.  Now ``cleanup_task()`` blocks on the task's
+    ``flush_lock`` until the in-flight broadcast has finished.
     """
 
     def test_stale_text_does_not_leak_into_new_recording(self) -> None:
@@ -629,8 +448,8 @@ class TestFlushBashTOCTOU(unittest.TestCase):
 
         Interleaving:
         1. The flush captures the text and starts broadcasting.
-        2. ``reset()`` + ``start_recording()`` are requested on another
-           thread and must block until the broadcast completes.
+        2. ``cleanup_task()`` + ``start_recording()`` are requested on
+           another thread and must block until the broadcast completes.
         3. The broadcast completes BEFORE the new recording starts.
         """
         printer = _GatedBroadcastPrinter()
@@ -642,23 +461,23 @@ class TestFlushBashTOCTOU(unittest.TestCase):
             printer._thread_local.task_id = "tab1"
             printer._flush_bash()
 
-        def reset_and_record() -> None:
+        def cleanup_and_record() -> None:
             printer._thread_local.task_id = "tab1"
-            printer.reset()
+            printer.cleanup_task("tab1")
             printer.start_recording()
 
         flusher = threading.Thread(target=flush, daemon=True)
         flusher.start()
         assert printer.in_broadcast.wait(timeout=5)
-        resetter = threading.Thread(target=reset_and_record, daemon=True)
-        resetter.start()
-        resetter.join(timeout=0.3)
+        cleaner = threading.Thread(target=cleanup_and_record, daemon=True)
+        cleaner.start()
+        cleaner.join(timeout=0.3)
         try:
-            assert resetter.is_alive(), "reset() did not wait for the in-flight flush"
+            assert cleaner.is_alive(), "cleanup_task() did not wait for the in-flight flush"
         finally:
             printer.release.set()
         flusher.join(timeout=5)
-        resetter.join(timeout=5)
+        cleaner.join(timeout=5)
 
         events = printer.stop_recording()
         stale = [e for e in events if e.get("type") == "system_output"]
@@ -763,7 +582,6 @@ class TestCleanupTab(unittest.TestCase):
             printer._bash_state.streamed = True
         printer.broadcast({"type": "text_delta", "text": "hello"})
         printer.stop_recording()
-        printer.reset()
 
         assert "tab1" in printer._bash_states
 

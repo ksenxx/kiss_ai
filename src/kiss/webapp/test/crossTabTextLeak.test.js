@@ -228,10 +228,6 @@ test('an @-mention file list for one tab never opens over another tab', () => {
     'a file list answered for a background tab must never render in the ' +
       'dropdown of the tab on screen',
   );
-  assert.notStrictEqual(
-    win.document.getElementById('output').ownerDocument,
-    null,
-  );
   assert.strictEqual(second, win._testApi.getActiveTabId());
 
   win.close();
@@ -1543,63 +1539,26 @@ test('app-global messages and buttons still work with two tabs open', () => {
 // visible surfaces without proving ownership.
 // ---------------------------------------------------------------------------
 
-test('an error for a background tab never prints in the visible output', () => {
-  const {win} = makePage();
-  const {first} = twoTabs(win);
-
-  send(win, {type: 'error', tabId: first, text: 'bg_error_QK75'});
-
-  assert.ok(
-    !visibleText(win).includes('bg_error_QK75'),
-    "another task's failure must not be printed into this conversation",
-  );
-
-  win.close();
-});
-
-test('a notice for a background tab never prints in the visible output', () => {
-  const {win} = makePage();
-  const {first} = twoTabs(win);
-
-  send(win, {type: 'notice', tabId: first, text: 'bg_notice_QK76'});
-
-  assert.ok(
-    !visibleText(win).includes('bg_notice_QK76'),
-    "another task's notice must not be printed into this conversation",
-  );
-
-  win.close();
-});
-
-test('diagnostics for a background tab reach that tab', () => {
-  // Routed to the background tab's parked transcript, not dropped: a
-  // notice, a warning and an error all show once the tab comes on screen.
+test('diagnostics for a background tab reach that tab, not the screen', () => {
+  // Routed to the background tab's parked transcript, not dropped and
+  // not printed into the visible conversation: a notice, a warning and
+  // an error all show once the tab comes on screen.
   const {win} = makePage();
   const {first} = twoTabs(win);
 
   send(win, {type: 'notice', tabId: first, text: 'bg_notice_QK79'});
   send(win, {type: 'warning', tabId: first, message: 'bg_warning_QK79'});
   send(win, {type: 'error', tabId: first, text: 'bg_error_QK79'});
+  const hidden = visibleText(win);
+  assert.ok(!hidden.includes('bg_notice_QK79'), "another task's notice");
+  assert.ok(!hidden.includes('bg_warning_QK79'), "another task's warning");
+  assert.ok(!hidden.includes('bg_error_QK79'), "another task's failure");
   win._testApi.switchToTab(first);
 
   const shown = visibleText(win);
-  assert.ok(shown.includes('Note: bg_notice_QK79'), 'the notice reached its tab');
+  assert.ok(shown.includes('Note: bg_notice_QK79'), 'the notice reached it');
   assert.ok(shown.includes('Warning: bg_warning_QK79'), 'the warning did');
   assert.ok(shown.includes('Error: bg_error_QK79'), 'the error did');
-
-  win.close();
-});
-
-test('a warning for a background tab never prints in the visible output', () => {
-  const {win} = makePage();
-  const {first} = twoTabs(win);
-
-  send(win, {type: 'warning', tabId: first, message: 'bg_warning_QK77'});
-
-  assert.ok(
-    !visibleText(win).includes('bg_warning_QK77'),
-    "another task's warning must not be printed into this conversation",
-  );
 
   win.close();
 });

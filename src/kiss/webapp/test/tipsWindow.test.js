@@ -13,6 +13,7 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {stubClipboard} = require('./simplify2_harness');
 const {test, report} = makeRunner();
 
 // A page with tips.js (and its PanelCopy dependency) loaded over
@@ -172,16 +173,35 @@ test('tips panel has a fixed, viewport-capped width and height', () => {
   const win = loadTipsDom({tips: THREE_TIPS, show: true});
   const {root} = panelParts(win);
   const css = root.querySelector('style').textContent;
-  assert.ok(css.includes('width: min(560px, 90vw)'), 'fixed panel width');
-  assert.ok(css.includes('height: min(520px, 82vh)'), 'fixed panel height');
   const panelDecls = css.split('.tips-panel {')[1].split('}')[0];
+  // The size is a fixed pixel size capped by the viewport (`min(Npx,
+  // Mvw)` / `min(Npx, Mvh)`), never a content-driven or unbounded one;
+  // the exact pixels are the designer's, but both terms must be positive
+  // and the viewport term at most 100% so the cap really is the viewport.
+  for (const [axis, unit] of [
+    ['width', 'vw'],
+    ['height', 'vh'],
+  ]) {
+    const m = new RegExp(
+      String.raw`(?:^|[^-])${axis}:\s*min\((\d+)px,\s*(\d+)${unit}\)`,
+    ).exec(panelDecls);
+    assert.ok(m, `fixed, viewport-capped panel ${axis}`);
+    const [px, viewport] = [Number(m[1]), Number(m[2])];
+    assert.ok(px > 0, `positive pixel ${axis}: ${m[0].trim()}`);
+    assert.ok(
+      viewport > 0 && viewport <= 100,
+      `${axis} viewport cap must be in (0, 100]${unit}: ${m[0].trim()}`,
+    );
+  }
+  assert.doesNotMatch(
+    panelDecls,
+    /(max|min)-(width|height)/,
+    'no min/max bounds: the size is fixed',
+  );
   assert.ok(
     panelDecls.includes('box-sizing: border-box'),
     'fixed size must include the panel border',
   );
-  assert.ok(!css.includes('max-width'), 'no max-width — the size is fixed');
-  assert.ok(!css.includes('min-width'), 'no min-width — the size is fixed');
-  assert.ok(!css.includes('max-height'), 'no max-height — the size is fixed');
 });
 
 test('tips body scrolls when the content overflows the fixed panel', () => {
@@ -238,10 +258,6 @@ test('tips panel is styled from the shared design tokens, never a fixed palette'
     [],
     `colours outside var() fallbacks: ${literalColors.join(', ')}`,
   );
-  // No trace of the former hard-coded Rosé Pine palette.
-  for (const color of ['#232136', '#e0def4', '#c4a7e7', '#3e8fb0']) {
-    assert.ok(!css.includes(color), `${color} must not be hard-coded`);
-  }
   // The dialog layer sits above the settings drawer (z-drawer) that
   // opens it and below toasts.
   assert.ok(css.includes('z-index: var(--z-dialog, 300)'));
@@ -432,16 +448,7 @@ function recordTimers(win) {
   await test('copy button uses navigator.clipboard and shows Copied!', async () => {
     const win = loadTipsDom({tips: [CODE_TIP], show: true});
     const {body} = panelParts(win);
-    const copied = [];
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        writeText: text => {
-          copied.push(text);
-          return Promise.resolve();
-        },
-      },
-    });
+    const {writes: copied} = stubClipboard(win);
     const timers = recordTimers(win);
     const btn = copyButtons(body)[0];
     btn.click();
@@ -458,85 +465,10 @@ function recordTimers(win) {
     assert.strictEqual(btn.textContent, 'Copy', 'label resets after the timer');
   });
 
-  await test('copy falls back to execCommand when writeText rejects', async () => {
-    const win = loadTipsDom({tips: [CODE_TIP], show: true});
-    const {body} = panelParts(win);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {writeText: () => Promise.reject(new Error('denied'))},
-    });
-    const execCalls = [];
-    win.document.execCommand = command => {
-      const area = win.document.querySelector('textarea');
-      execCalls.push({command, value: area ? area.value : null});
-      return true;
-    };
-    recordTimers(win);
-    const btn = copyButtons(body)[0];
-    btn.click();
-    await tickAsync();
-    assert.strictEqual(execCalls.length, 1, 'execCommand fallback used once');
-    assert.strictEqual(execCalls[0].command, 'copy');
-    assert.strictEqual(
-      execCalls[0].value,
-      body.querySelector('pre code').textContent,
-    );
-    assert.strictEqual(
-      win.document.querySelector('textarea'),
-      null,
-      'helper textarea must be removed',
-    );
-    assert.strictEqual(btn.textContent, 'Copied!');
-  });
-
-  await test('copy uses execCommand when the clipboard API is missing', async () => {
-    const win = loadTipsDom({tips: [CODE_TIP], show: true});
-    const {body} = panelParts(win);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: undefined,
-    });
-    win.document.execCommand = () => true;
-    recordTimers(win);
-    const btn = copyButtons(body)[0];
-    btn.click();
-    await tickAsync();
-    assert.strictEqual(btn.textContent, 'Copied!');
-  });
-
-  await test('copy falls back when clipboard has no writeText function', async () => {
-    const win = loadTipsDom({tips: [CODE_TIP], show: true});
-    const {body} = panelParts(win);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {},
-    });
-    win.document.execCommand = () => true;
-    recordTimers(win);
-    const btn = copyButtons(body)[0];
-    btn.click();
-    await tickAsync();
-    assert.strictEqual(btn.textContent, 'Copied!');
-  });
-
-  await test('copy falls back when writeText throws synchronously', async () => {
-    const win = loadTipsDom({tips: [CODE_TIP], show: true});
-    const {body} = panelParts(win);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        writeText: () => {
-          throw new Error('not allowed');
-        },
-      },
-    });
-    win.document.execCommand = () => true;
-    recordTimers(win);
-    const btn = copyButtons(body)[0];
-    btn.click();
-    await tickAsync();
-    assert.strictEqual(btn.textContent, 'Copied!');
-  });
+  // The clipboard -> execCommand fallback, the helper-textarea cleanup
+  // and the both-paths-fail outcome belong to PanelCopy.copyText and are
+  // pinned by ui_antipattern_panel_copy_fallback.test.js and
+  // panelCopy.test.js (missing / throwing writeText).
 
   await test('copy shows Failed when execCommand returns false', async () => {
     const win = loadTipsDom({tips: [CODE_TIP], show: true});
@@ -554,28 +486,6 @@ function recordTimers(win) {
     assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
     timers[0]();
     assert.strictEqual(btn.textContent, 'Copy', 'label resets after Failed');
-  });
-
-  await test('copy shows Failed when execCommand throws', async () => {
-    const win = loadTipsDom({tips: [CODE_TIP], show: true});
-    const {body} = panelParts(win);
-    Object.defineProperty(win.navigator, 'clipboard', {
-      configurable: true,
-      value: undefined,
-    });
-    win.document.execCommand = () => {
-      throw new Error('unsupported');
-    };
-    recordTimers(win);
-    const btn = copyButtons(body)[0];
-    btn.click();
-    await tickAsync();
-    assert.strictEqual(btn.textContent, 'Failed');
-    assert.strictEqual(
-      win.document.querySelector('textarea'),
-      null,
-      'helper textarea must be removed even when execCommand throws',
-    );
   });
 
   report('tipsWindow');

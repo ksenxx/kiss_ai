@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
-const {visibleTitles} = require('./history_helpers');
+const {visibleTitles, makeRow, selectFilter} = require('./history_helpers');
 
 const ALL_TAGS = [
   'work',
@@ -39,24 +39,17 @@ const ALL_TAGS = [
 ];
 
 function session(id, title, timestamp, tags) {
-  return {
+  return makeRow({
     id,
     task_id: Number(id.slice(4)),
     title,
     timestamp,
-    preview: title,
-    has_events: false,
-    failed: false,
-    is_running: false,
     tokens: 0,
-    cost: 0,
     steps: 0,
-    is_favorite: false,
-    work_dir: '',
     startTs: timestamp * 1000,
     endTs: timestamp * 1000 + 10_000,
     tags,
-  };
+  });
 }
 
 const SESSIONS = [
@@ -66,9 +59,7 @@ const SESSIONS = [
 ];
 
 function selectTag(win, value) {
-  const sel = win.document.getElementById('hf-tag');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
+  selectFilter(win, 'hf-tag', value);
 }
 
 function getHistoryPosts(posted) {

@@ -128,6 +128,7 @@ def test_usage_through_kiss_agent_billing() -> None:
         "cache_read": 50_000,
         "cache_write": 0,
         "cost": pytest.approx(expected),
+        "stop_reason": None,  # always present; the stub names no reason
     }
 
 

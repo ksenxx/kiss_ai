@@ -31,7 +31,7 @@ from kiss.server.server import AgentServer
 class TestJsonPrinterBranches:
     """Cover uncovered branches in JsonPrinter."""
 
-    def test_reset_clears_bash_buffer_and_timer(self):
+    def test_cleanup_task_clears_bash_buffer_and_timer(self):
         p = JsonPrinter()
         p._thread_local.task_id = "0"
         with p._bash_lock:
@@ -39,11 +39,11 @@ class TestJsonPrinterBranches:
             bs.buffer.append("some text")
             bs.timer = threading.Timer(10.0, lambda: None)
             bs.timer.start()
-        p.reset()
+        p.cleanup_task("0")
+        assert bs.buffer == []
+        assert bs.timer is None
         with p._bash_lock:
-            bs = p._bash_state
-            assert bs.buffer == []
-            assert bs.timer is None
+            assert "0" not in p._bash_states
 
     def test_check_stop_thread_local(self):
         """_check_stop uses thread_local stop_event."""

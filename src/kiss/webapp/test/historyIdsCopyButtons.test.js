@@ -13,24 +13,17 @@ const {
   click,
   sendEmptyWorkDir,
   rowsByTitle,
+  stubClipboard,
 } = require('./simplify2_harness');
 
 function makePage() {
-  const clipboardWrites = [];
+  let clipboardWrites;
   // Every timer the page arms is recorded (and still runs) so a test can
   // play the clock forward by hand instead of sleeping through it.
   const timeouts = [];
   const {win, posted} = makeHarnessPage({
     beforeScripts(win) {
-      Object.defineProperty(win.navigator, 'clipboard', {
-        configurable: true,
-        value: {
-          writeText: text => {
-            clipboardWrites.push(String(text));
-            return Promise.resolve();
-          },
-        },
-      });
+      clipboardWrites = stubClipboard(win).writes;
       const realSetTimeout = win.setTimeout.bind(win);
       const realClearTimeout = win.clearTimeout.bind(win);
       win.setTimeout = function (fn, ms, ...args) {
@@ -127,8 +120,10 @@ function loadHistory(ctx) {
   return rowsByTitle(ctx.win);
 }
 
+// Every open tab: the strip renders only the chat on screen, so a DOM
+// count of `.chat-tab` is 1 whatever the number of open chats.
 function tabCount(win) {
-  return win.document.querySelectorAll('#tab-bar .chat-tab').length;
+  return win._testApi.openTabs().length;
 }
 
 function testButtonsRenderPerId() {

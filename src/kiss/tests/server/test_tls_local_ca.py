@@ -259,9 +259,9 @@ class TestTlsCerts(TestCase):
         # Expiring CA.
         subject = _load(self.ca).subject
         _write_cert_with_validity(self.ca, self.ca_key, subject, days=5, ca=True)
-        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._current_pair(self.ca, self.ca_key))
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
-        self.assertIsNotNone(tls_certs._usable_ca(self.ca, self.ca_key))
+        self.assertIsNotNone(tls_certs._current_pair(self.ca, self.ca_key))
 
         # CA key that is not an EC key at all.
         ed_key = ed25519.Ed25519PrivateKey.generate()
@@ -270,13 +270,13 @@ class TestTlsCerts(TestCase):
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
         ))
-        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._current_pair(self.ca, self.ca_key))
         tls_certs.ensure_local_tls_pair(self.tls_dir, [])
         _load(self.cert).verify_directly_issued_by(_load(self.ca))
 
         # Missing CA files, and a missing CA when checking the leaf.
         self.ca.unlink()
-        self.assertIsNone(tls_certs._usable_ca(self.ca, self.ca_key))
+        self.assertIsNone(tls_certs._current_pair(self.ca, self.ca_key))
 
     def test_server_cert_names_skips_junk_and_dedups(self) -> None:
         dns_names, ips = tls_certs.server_cert_names(
@@ -567,7 +567,7 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         # The remote_url payload and the URL file advertise the local CA
         # so the chat page shows the trust hint.
         self.assertTrue(server._serves_local_ca)
-        server._write_url_file_sync(None)
+        server._write_url_file_sync()
         self.assertTrue(json.loads((self.tmp / "remote-url.json").read_text())["localCa"])
 
     async def test_explicit_cert_pair_has_no_ca_download_and_no_reissue(self) -> None:
@@ -584,7 +584,7 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         self.assertEqual(cert.read_bytes(), before, "explicit pairs are never rewritten")
         self.assertFalse((ws._TLS_DIR / tls_certs.CA_CERT_FILE).exists())  # type: ignore[operator]
         self.assertFalse(server._serves_local_ca)
-        server._write_url_file_sync(None)
+        server._write_url_file_sync()
         self.assertNotIn("localCa", json.loads((self.tmp / "remote-url.json").read_text()))
 
 

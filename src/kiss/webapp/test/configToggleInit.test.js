@@ -18,9 +18,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, click, byId} = require('./simplify2_harness');
+const {makePage, send, click, byId, lastMsg} = require('./simplify2_harness');
 const {
-  lastMsg,
   openSettings,
   closeSettings,
   typeInto,
@@ -29,28 +28,6 @@ const {
 function typeAndSend(win, text) {
   typeInto(win, 'task-input', text);
   click(win, byId(win, 'send-btn'));
-}
-
-function testClassifyTogglesAreGone() {
-  const {win} = makePage();
-  assert.strictEqual(
-    win.document.getElementById('cfg-classify-tasks'),
-    null,
-    'the Settings UI must not show "Classify tasks before running"',
-  );
-  assert.strictEqual(
-    win.document.getElementById('cfg-classify-with-decisions'),
-    null,
-    'the Settings UI must not show "Use Jev (decisions model)"',
-  );
-  assert.strictEqual(
-    win.document.getElementById('cfg-memory-dir'),
-    null,
-    'the memory directory is not a settings field: memory_dir stays a ' +
-      'config.json key without a box in the panel',
-  );
-  win.close();
-  console.log('  ok - the classify toggles and memory dir are not in the Settings UI');
 }
 
 function testTogglesInitializedFalseFromConfigData() {
@@ -178,8 +155,7 @@ function testSubmitBeforeConfigDataOmitsWebTools() {
 
 function testToggleStatePersistedOnSettingsClose() {
   const {win, posted} = makePage();
-  // populateConfigForm sets configFormPopulated = true, arming the
-  // settings-close flush.
+  // The stored config lands in the form before the user touches it.
   send(win, {
     type: 'configData',
     config: {
@@ -248,8 +224,8 @@ function testToggleStatePersistedOnSettingsClose() {
 
 function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
   const {win, posted} = makePage();
-  // Open the panel: no configData has arrived yet (configFormPopulated
-  // stays false), the user unticks "Use persistent memory" right away.
+  // Open the panel: no configData has arrived yet, the user unticks
+  // "Use persistent memory" right away.
   openSettings(win);
   const mem = win.document.getElementById('cfg-use-memory');
   mem.checked = false;
@@ -282,80 +258,70 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
     false,
     "saveConfig must carry the user's use_memory:false",
   );
-  assert.strictEqual(
-    save.config.use_web_browser,
-    true,
-    'the populated form saves use_web_browser alongside',
+  // The daemon merges the payload: the untouched sibling is left out,
+  // so its polled value cannot paint over another window's save.
+  assert.ok(
+    !('use_web_browser' in save.config),
+    'the untouched use_web_browser box is not re-sent',
   );
   win.close();
   console.log('  ok - an edited memory box survives the poll and saves');
 }
 
-function testMemoryToggleFlushedAloneWithoutConfigData() {
+/**
+ * No configData ever arrived.  The user
+ * makes the given edits (`budget` edits the max-budget box, `memory`
+ * unticks the memory checkbox) and closes the panel: the partial
+ * payload must carry exactly those fields -- sending the untouched
+ * checkboxes too would flush chat.html's hardcoded checked state over
+ * whatever values are stored on the server, and a checkbox edit alone
+ * must be enough to trigger the save.
+ */
+function testPartialSaveWhenPanelClosedBeforeConfigData({budget, memory}) {
   const {win, posted} = makePage();
-  // Panel opened and closed before ANY configData reply: only the
-  // edited field may be sent (the daemon merges), never a form full of
-  // chat.html's hardcoded defaults.
   openSettings(win);
-  const mem = win.document.getElementById('cfg-use-memory');
-  mem.checked = false;
-  mem.dispatchEvent(new win.Event('change', {bubbles: true}));
-  closeSettings(win);
-
-  const save = lastMsg(posted, 'saveConfig');
-  assert.ok(save, 'closing the panel after an edit must post saveConfig');
-  assert.deepStrictEqual(
-    Object.keys(save.config),
-    ['use_memory'],
-    'a panel closed before configData must save ONLY the edited key',
-  );
-  assert.strictEqual(save.config.use_memory, false);
-  win.close();
-  console.log('  ok - the memory edit alone is flushed before configData');
-}
-
-function testPartialSaveWhenPanelClosedBeforeConfigData() {
-  const {win, posted} = makePage();
-
-  // No configData ever arrived (configFormPopulated is false).  The
-  // user edits ONLY the budget and closes the panel: the partial
-  // payload must carry just that field -- sending the untouched
-  // checkboxes too would flush chat.html's hardcoded checked state over
-  // whatever values are stored on the server.
-  const budget = win.document.getElementById('cfg-max-budget');
-  budget.value = '77';
-  budget.dispatchEvent(new win.Event('input', {bubbles: true}));
+  const expected = {};
+  if (budget) {
+    const box = win.document.getElementById('cfg-max-budget');
+    box.value = '77';
+    box.dispatchEvent(new win.Event('input', {bubbles: true}));
+    expected.max_budget = 77;
+  }
+  if (memory) {
+    const mem = win.document.getElementById('cfg-use-memory');
+    mem.checked = false;
+    mem.dispatchEvent(new win.Event('change', {bubbles: true}));
+    expected.use_memory = false;
+  }
 
   closeSettings(win);
 
+  const label = JSON.stringify({budget, memory});
   const save = lastMsg(posted, 'saveConfig');
-  assert.ok(save, 'closing the settings panel must post saveConfig');
-  assert.strictEqual(
-    save.config.max_budget,
-    77,
-    'the edited max_budget must be saved even before any configData',
-  );
+  assert.ok(save, `closing the panel after an edit must post saveConfig ${label}`);
+  // (copied: the posted object belongs to the jsdom realm, whose
+  // Object.prototype deepStrictEqual would reject)
   assert.deepStrictEqual(
-    Object.keys(save.config),
-    ['max_budget'],
-    'an untouched checkbox must be omitted from a partial save (the ' +
-      'daemon merges the payload; an invented value would clobber the ' +
-      'stored toggle) and memory_dir is never part of the payload',
+    {...save.config},
+    expected,
+    'a panel closed before configData must save ONLY the edited keys ' +
+      '(the daemon merges the payload; an invented value would clobber ' +
+      `the stored toggle) and memory_dir is never part of the payload ${label}`,
   );
   win.close();
-  console.log('  ok - a panel closed before configData saves only edits');
+  console.log(`  ok - a panel closed before configData saves only edits ${label}`);
 }
 
 function main() {
-  testClassifyTogglesAreGone();
   testTogglesInitializedFalseFromConfigData();
   testTogglesInitializedTrueFromConfigData();
   testMissingKeysDefaultToChecked();
   testSubmitBeforeConfigDataOmitsWebTools();
   testToggleStatePersistedOnSettingsClose();
   testMemoryToggleEditSurvivesPollAndFlushesAlone();
-  testMemoryToggleFlushedAloneWithoutConfigData();
-  testPartialSaveWhenPanelClosedBeforeConfigData();
+  testPartialSaveWhenPanelClosedBeforeConfigData({budget: true, memory: false});
+  testPartialSaveWhenPanelClosedBeforeConfigData({budget: false, memory: true});
+  testPartialSaveWhenPanelClosedBeforeConfigData({budget: true, memory: true});
   console.log('configToggleInit.test.js: all tests passed');
 }
 

@@ -4,7 +4,7 @@
 # add your name here
 """E2E: a reader never sees a cut ``## Trick`` body while the Add button appends one.
 
-``read_tricks()`` (the autocomplete worker on every keystroke, the page
+``read_tricks_data()`` (the autocomplete worker on every keystroke, the page
 bootstrap) reads ``~/.kiss/MY_INJECTION.md`` with no lock; the delete
 and edit rewrites are therefore atomic (temp file + rename).  The append
 was not: ``open("a")`` + ``write`` lets a concurrent reader hit the end
@@ -29,8 +29,14 @@ import pytest
 from kiss.server.tricks import (
     append_my_injection_trick,
     delete_my_injection_trick,
-    read_tricks,
+    read_tricks_data,
 )
+
+
+def read_tricks() -> list[str]:
+    """The trick list a reader sees right now."""
+    return read_tricks_data()["tricks"]
+
 
 _ROUNDS = 80
 _BODY_SIZE = 4 * 1024 * 1024

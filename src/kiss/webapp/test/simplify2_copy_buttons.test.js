@@ -5,33 +5,19 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, sleep} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  sleep,
+  recordTimers,
+  fireTimers,
+  stubClipboard,
+} = require('./simplify2_harness');
 
 // The 1500 ms flash-revert timers (wireCopyButton in panelCopy.js) are
 // recorded instead of waited for and fired by hand, so no wall-clock
 // sleep decides whether the first click's timer lands before or after
-// the second click.  Same recorder as audit0903_panelcopy_flash_timer.
-function recordFlashTimers(win) {
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (fn, ms, ...args) {
-    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
-    const timer = {fn, cleared: false};
-    timers.push(timer);
-    return timer;
-  };
-  win.clearTimeout = function (handle) {
-    if (handle && typeof handle === 'object') handle.cleared = true;
-    else realClearTimeout(handle);
-  };
-  return timers;
-}
-
-/** Run every timer in *timers* that was not cleared, as the clock would. */
-function fireFlashTimers(timers) {
-  for (const timer of timers) if (!timer.cleared) timer.fn();
-}
+// the second click.
 
 const SESSION = {
   id: 'chatABC',
@@ -54,18 +40,9 @@ const SESSION = {
 async function run() {
   const {win} = makePage();
   const doc = win.document;
-  const timers = recordFlashTimers(win);
+  const timers = recordTimers(win, 1500);
 
-  const copied = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText(text) {
-        copied.push(text);
-        return Promise.resolve();
-      },
-    },
-  });
+  const {writes: copied} = stubClipboard(win);
 
   send(win, {type: 'history', sessions: [SESSION], offset: 0});
 
@@ -104,7 +81,7 @@ async function run() {
   // so the first click's timers of the re-clicked buttons are cleared
   // and firing them (as the clock would at 1.5 s) cuts no second flash
   // short; only the untouched task button reverts.
-  fireFlashTimers(firstClick);
+  fireTimers(firstClick);
   assert.ok(
     rowBtn.classList.contains('copied'),
     'row second click resets its timer',
@@ -118,7 +95,7 @@ async function run() {
     'untouched task flash reverts',
   );
 
-  fireFlashTimers(timers.slice(3));
+  fireTimers(timers.slice(3));
   assert.ok(!rowBtn.classList.contains('copied'), 'reset row timer reverts');
   assert.ok(!chatBtn.classList.contains('copied'), 'reset id timer reverts');
   assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
@@ -127,6 +104,11 @@ async function run() {
   console.log('  ok - history copy buttons copy and flash identically');
 }
 
-run().then(() => {
-  console.log('simplify2_copy_buttons.test.js: all tests passed');
-});
+run()
+  .then(() => {
+    console.log('simplify2_copy_buttons.test.js: all tests passed');
+  })
+  .catch(err => {
+    console.error(err);
+    process.exit(1);
+  });

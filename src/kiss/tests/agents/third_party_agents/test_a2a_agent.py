@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents.a2a.a2a_sea import (
     _config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.conftest import connect_on_ephemeral_port
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.recording_http import raw_post_status
 
@@ -64,29 +65,15 @@ def _configured_backend(token: str = "") -> tuple[A2AChannelBackend, int]:
     """Authenticate on an ephemeral port; return the connected backend and port.
 
     Authenticates with port ``"0"`` and reads the OS-assigned port back
-    from the bound server, avoiding the bind/close/re-bind port race.
-    The bound port is then published into the backend's runtime state so
-    the agent card it serves advertises a USABLE url (with the persisted
-    request left as ``"0"``): ``connect()`` keeps ``_port`` equal to the
-    configured string, so a port-0 bind would otherwise advertise
-    ``http://127.0.0.1:0/`` — a card no peer could call.  The tests
-    below discover the peer THROUGH the advertised card url, so a wrong
-    url fails them.
+    from the bound server.  The tests below discover the peer THROUGH the
+    advertised card url, so ``connect()`` must publish the really bound
+    port rather than the configured ``"0"``.
     """
     agent = A2AAgent()
     result = auth_tools(agent)["authenticate_a2a"](bind_host="127.0.0.1", port="0", token=token)
     assert json.loads(result)["ok"] is True
     backend = a2a_mod._make_backend()
-    assert backend.connect() is True
-    try:
-        assert backend._server is not None
-        port = int(backend._server.server_address[1])
-        assert port != 0
-    except BaseException:
-        backend.disconnect()  # the caller's try/finally does not own it yet
-        raise
-    backend._port = str(port)
-    return backend, port
+    return backend, connect_on_ephemeral_port(_config, backend, "_server")
 
 
 def _discovered_base(port: int) -> str:

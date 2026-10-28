@@ -83,20 +83,44 @@ function openSubTabIds(win) {
 }
 
 /**
+ * The default `deliver(msg)` for *page*: `send`, then (for a transport
+ * client from `transport_page_helpers.makeWebappClient`) `drain()`, so
+ * the frames the message provoked are in `posted` for the caller.
+ */
+function deliverTo(page) {
+  return msg => {
+    send(page.win, msg);
+    if (page.drain) page.drain();
+  };
+}
+
+/**
  * Boot a parent task that spawns *n* sub-agents through run_parallel on
- * *page* (`{win, posted}` from any chat.html builder), exactly the way
+ * *page* (`{win, posted}` from any chat.html builder, or a transport
+ * client, whose frames are drained for you), exactly the way
  * the backend drives the page: `status running`, the run_parallel
  * `tool_call`, then `new_tab` + `openSubagentTab` per sub-agent.
  *
- * @param {{deliver?: Function, done?: boolean}} [opts] `deliver(msg)`
- *   replaces `send(win, msg)` for a page fed through a transport shim;
- *   `done` opens every sub-agent tab already finished (`isDone: true`).
+ * @param {{deliver?: Function, done?: boolean, declared?: number,
+ *   replay?: boolean}} [opts] `deliver(msg)` replaces `send(win, msg)`
+ *   for a page fed through a transport shim; `done` opens every
+ *   sub-agent tab already finished (`isDone: true`); `declared` is how
+ *   many tasks the run_parallel call lists (default *n*: a run may
+ *   spawn fewer children than it declared); `replay` follows every
+ *   `openSubagentTab` with the child's (empty) `task_events` transcript,
+ *   the way the daemon does, which binds the tab to its task id.
  * @returns {{win: object, posted: Array<object>, parentId: string,
  *   panel: Element, taskIds: Array<string>, subTabIds: Array<string>}}
  */
 function bootParallelRun(n, page, opts) {
   const {win, posted} = page;
-  const {deliver = msg => send(win, msg), done = false} = opts || {};
+  const {
+    deliver = deliverTo(page),
+    done = false,
+    declared = n,
+    replay = false,
+  } = opts || {};
+  if (page.drain) page.drain();
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
   const parentId = ready.tabId;
@@ -108,7 +132,7 @@ function bootParallelRun(n, page, opts) {
     startTs: Date.now(),
   });
   const taskNames = [];
-  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
+  for (let i = 0; i < declared; i++) taskNames.push('sub ' + (i + 1));
   deliver({
     type: 'tool_call',
     name: 'run_parallel',
@@ -123,27 +147,20 @@ function bootParallelRun(n, page, opts) {
   for (let i = 0; i < n; i++) {
     const taskId = 'sub-task-' + (i + 1);
     taskIds.push(taskId);
-    const before = posted.length;
-    deliver({
-      type: 'new_tab',
-      task_id: taskId,
-      parent_tab_id: parentId,
-      taskId: '',
+    const tabId = spawnSubagent(page, parentId, taskId, 'sub ' + (i + 1), i, {
+      deliver,
+      extra: {isDone: done},
     });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === taskId);
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    subTabIds.push(resume.tabId);
-    deliver({
-      type: 'openSubagentTab',
-      tab_id: resume.tabId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-      isDone: done,
-    });
+    subTabIds.push(tabId);
+    if (replay) {
+      deliver({
+        type: 'task_events',
+        tabId,
+        task: 'sub ' + (i + 1),
+        task_id: taskId,
+        events: [],
+      });
+    }
   }
   assert.strictEqual(
     subagentTabEls(win).length,
@@ -240,10 +257,6 @@ function activeTabId(win) {
 }
 
 /** The user clicks tab element *el*. */
-function clickTab(win, el) {
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 /** Whether the chat (`#output`) is the surface on screen. */
 function chatSurfaceVisible(win) {
   const out = win.document.getElementById('output');
@@ -265,6 +278,64 @@ function swipeLeftToFileScreen(win) {
   touchEvent(win, 'touchend', page, [], [{clientX: 100, clientY: 100}]);
 }
 
+/**
+ * Spawn one sub-agent the way the daemon does: `new_tab` for `taskId`
+ * under `parentId`, which must make the page post a `resumeSession`
+ * for that task, then `openSubagentTab` on the tab the page chose.
+ *
+ * @param {object} page `{win, posted}` (a harness page or a transport
+ *   client, whose frames are drained into `posted` after each message).
+ * @param {string} parentId The parent tab id.
+ * @param {string} taskId The sub-agent's task id.
+ * @param {string} desc The tab's description.
+ * @param {number} idx The child's index in its fan-out.
+ * @param {object} [opts] `deliver(msg)` plays a daemon frame (default
+ *   `deliverTo(page)`); `extra` adds fields to the `openSubagentTab`
+ *   frame.
+ * @returns {string} The sub-agent's tab id.
+ */
+function spawnSubagent(page, parentId, taskId, desc, idx, opts) {
+  const {win, posted} = page;
+  const {deliver = deliverTo(page), extra = {}} = opts || {};
+  const before = posted.length;
+  deliver({
+    type: 'new_tab',
+    task_id: taskId,
+    parent_tab_id: parentId,
+    taskId: '',
+  });
+  const resume = posted
+    .slice(before)
+    .find(m => m.type === 'resumeSession' && m.taskId === taskId);
+  assert.ok(
+    resume,
+    'new_tab for ' +
+      taskId +
+      ' under parent ' +
+      parentId +
+      ' must make the page post resumeSession (a tab must open for ' +
+      'EVERY sub-agent)',
+  );
+  deliver(
+    Object.assign(
+      {
+        type: 'openSubagentTab',
+        tab_id: resume.tabId,
+        parent_tab_id: parentId,
+        description: desc,
+        task_id: taskId,
+        taskIndex: idx,
+      },
+      extra,
+    ),
+  );
+  assert.ok(
+    subagentTabEls(win).some(el => el.dataset.tabId === resume.tabId),
+    'sub-agent ' + taskId + ' must get its own OPEN tab',
+  );
+  return resume.tabId;
+}
+
 module.exports = {
   announceFinished,
   openSubTabIds,
@@ -283,7 +354,7 @@ module.exports = {
   reportFrames,
   visibleSrcdoc,
   activeTabId,
-  clickTab,
   chatSurfaceVisible,
   swipeLeftToFileScreen,
+  spawnSubagent,
 };

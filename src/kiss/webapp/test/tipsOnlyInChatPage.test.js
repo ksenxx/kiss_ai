@@ -14,7 +14,12 @@
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {makePage, stubRaf, fakeMatchMedia} = require('./simplify2_harness');
+const {
+  makePage,
+  stubRaf,
+  fakeIntervals,
+  fakeMatchMedia,
+} = require('./simplify2_harness');
 const {test, report} = makeRunner();
 
 function loadChatDom() {
@@ -25,10 +30,7 @@ function loadChatDom() {
     beforeScripts(win) {
       win.localStorage.clear();
       stubRaf(win);
-      win.setInterval = function () {
-        return 0;
-      };
-      win.clearInterval = function () {};
+      fakeIntervals(win);
       win.ResizeObserver = class {
         observe() {}
         disconnect() {}

@@ -48,10 +48,13 @@ async function main() {
   await waitForSocket(sockets, 1);
   const first = sockets[0];
   first.onopen();
+  // The shim's auth frames and main.js's daemonStatus dispatch are
+  // synchronous apart from the password modal's setTimeout(…, 0) focus:
+  // one macrotask turn is the exact wait.
   first.onmessage({data: JSON.stringify({type: 'auth_required'})});
-  await sleep(30);
+  await sleep(0);
   first.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  await sleep(30);
+  await sleep(0);
   const once = {};
   for (const type of PANEL_COMMANDS) once[type] = 1;
   assert.deepStrictEqual(
@@ -69,7 +72,7 @@ async function main() {
   const second = sockets[1];
   second.onopen();
   second.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-  await sleep(30);
+  await sleep(0);
   assert.deepStrictEqual(panelCounts(second), once, 'the reconnect asks once');
   win.close();
   console.log('  ok - a password-required startup asks for each subpanel once');

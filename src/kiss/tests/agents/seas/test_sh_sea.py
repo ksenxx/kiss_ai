@@ -18,15 +18,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.sh import sh_sea
 from kiss.agents.seas.sh.sh_sea import ShSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -50,26 +48,8 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert isinstance(sea, WorkerSea)
-    assert sea.settings({}) == {"tool_profile": "bash", "locked": ["tool_profile"]}
-    assert sea.settings({"model": "m"}) == {
-        "model": "m",
-        "tool_profile": "bash",
-        "locked": ["tool_profile"],
-    }
+    assert_worker_contract(sh_sea, sea, {"tool_profile": "bash", "locked": ["tool_profile"]})
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
-    # ``WorkerSea`` turns classifier, browser and memory off under the
-    # class's own keys; ``system_prompt`` is a hook
-    # the daemon applies, so the resolved settings do not carry its text.
-    assert resolve_settings(sea.settings({})) == sea.settings({})
-    assert sea_commands.base_settings([sea]) == {
-        "tool_profile": "bash",
-        "locked": ["tool_profile"],
-        "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
-    }
-    assert_no_removed_getters(sh_sea)
 
 
 def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) -> None:

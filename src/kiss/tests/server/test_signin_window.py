@@ -78,7 +78,7 @@ def forget_status() -> None:
     Under the status lock, so a ``status`` run a previous test's daemon
     still has in flight is what gets dropped rather than what gets kept.
     """
-    locked_call(signin._status_lock, signin._drop_status)
+    locked_call(signin._status_lock, setattr, signin, "_status_cache", None)
 
 
 @unittest.skipIf(sys.platform == "win32", "the stub hook is a bash script")

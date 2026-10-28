@@ -38,6 +38,7 @@ import threading
 import zlib
 from typing import Any
 
+import anthropic
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import _model_family
@@ -680,13 +681,21 @@ _LIVE_CREDENTIALS = bool(_LIVE_AWS["AWS_BEARER_TOKEN_BEDROCK"]) or bool(
 
 @pytest.mark.skipif(not _LIVE_CREDENTIALS, reason="no Bedrock credentials in the environment")
 def test_live_bedrock_generation(monkeypatch) -> None:
-    """One real turn on Bedrock's Claude Haiku 4.5 cross-region profile."""
+    """One real turn on Bedrock's Claude Haiku 4.5 cross-region profile.
+
+    Credentials whose IAM policy does not grant the Bedrock action (a 403
+    ``PermissionDeniedError``) cannot exercise the live path any more than
+    missing ones can, so the test skips instead of blaming the adapter.
+    """
     _set_aws(monkeypatch, **_LIVE_AWS)
     monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
     adapter = model_info.model("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
     assert isinstance(adapter, AnthropicModel) and adapter.bedrock
     adapter.initialize("Reply with the single word: pong")
-    text, _ = adapter.generate()
+    try:
+        text, _ = adapter.generate()
+    except anthropic.PermissionDeniedError as exc:
+        pytest.skip(f"Bedrock credentials are not authorized for the live call: {exc}")
     assert "pong" in text.lower()
 
 
@@ -839,7 +848,10 @@ def test_keep_prompt_cache_warm_sees_a_breakpoint_supplied_through_extra_body(
     is absent.  Two adapters sending byte-identical bodies (one through
     ``system_instruction``, one through ``extra_body``) must both ping;
     an ``extra_body`` system without a breakpoint pings only for the
-    conversation breakpoint, and not at all once caching is off.
+    conversation breakpoint, not at all once caching is off, and not at
+    all when an ``extra_body`` ``messages`` override replaces the outer
+    conversation (and its breakpoint) with blocks that carry none: such
+    a ping would be a full-price request that warms nothing.
     """
     _set_aws(monkeypatch)
     with _bedrock_server() as server:
@@ -870,6 +882,15 @@ def test_keep_prompt_cache_warm_sees_a_breakpoint_supplied_through_extra_body(
         )
         off.initialize("hi")
         assert off.keep_prompt_cache_warm({}) is None
+        assert len(server.requests) == before + 3
+        overridden = AnthropicModel(
+            _OPUS,
+            api_key="t",
+            bedrock=True,
+            model_config={"extra_body": {"messages": [{"role": "user", "content": "Say ok."}]}},
+        )
+        overridden.initialize("hi")
+        assert overridden.keep_prompt_cache_warm({}) is None
         assert len(server.requests) == before + 3
 
 

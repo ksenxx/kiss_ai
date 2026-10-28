@@ -373,6 +373,10 @@ class A2AChannelBackend(ToolMethodBackend):
         if error is not None:
             self._connection_info = error
             return False
+        # A configured port "0" binds an OS-assigned port: advertise the real
+        # one so the agent card's url is callable.
+        assert self._server is not None
+        self._port = str(self._server.server_address[1])
         logger.info("A2A server started on %s:%s", self._bind_host, self._port)
         return True
 

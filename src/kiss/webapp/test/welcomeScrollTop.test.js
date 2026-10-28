@@ -14,7 +14,11 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  fakeGeometry,
+} = require('./simplify2_harness');
 
 function makePage() {
   return makeChatPage({
@@ -22,19 +26,6 @@ function makePage() {
     placeholders: {PRODUCT_NAME: 'KISS Sorcar'},
   });
 }
-
-function fakeGeometry(el, geo) {
-  Object.defineProperty(el, 'scrollHeight', {
-    get: () => geo.sh,
-    configurable: true,
-  });
-  Object.defineProperty(el, 'clientHeight', {
-    get: () => geo.ch,
-    configurable: true,
-  });
-}
-
-const label = 'remote webapp';
 
 // Runs a task in the active tab until its output is parked at the
 // bottom of the chat, which is the state a real finished conversation
@@ -82,7 +73,7 @@ function assertWelcomeAtTop(win, why) {
 // New chat: the backend's showWelcome replaces a scrolled conversation.
 // --------------------------------------------------------------------
 
-async function testShowWelcomeScrollsToTop() {
+function testShowWelcomeScrollsToTop() {
   const {win, posted} = makePage();
   const O = win.document.getElementById('output');
   const geo = {sh: 3000, ch: 500};
@@ -92,9 +83,7 @@ async function testShowWelcomeScrollsToTop() {
   send(win, {type: 'showWelcome', tabId: tabId});
   assertWelcomeAtTop(
     win,
-    'BUG (' +
-      label +
-      '): showWelcome left the chat scrolled where the replaced ' +
+    'BUG: showWelcome left the chat scrolled where the replaced ' +
       'conversation was',
   );
   assert.ok(
@@ -102,7 +91,7 @@ async function testShowWelcomeScrollsToTop() {
     'the welcome greeting must be back in the chat',
   );
   win.close();
-  console.log('  ok - showWelcome lands at the top (' + label + ')');
+  console.log('  ok - showWelcome lands at the top');
 }
 
 // --------------------------------------------------------------------
@@ -110,12 +99,24 @@ async function testShowWelcomeScrollsToTop() {
 // welcome screen through restoreTab.
 // --------------------------------------------------------------------
 
-async function testWelcomeTabActivationScrollsToTop() {
+function testWelcomeTabActivationScrollsToTop() {
   const {win, posted} = makePage();
   const O = win.document.getElementById('output');
   const geo = {sh: 3000, ch: 500};
   fakeGeometry(O, geo);
   const chatTabId = runScrolledConversation(win, posted, geo);
+  // jsdom lays nothing out, so the conversation's first row reports
+  // where it would be in the real column: FIRST_ROW_TOP px into the
+  // transcript, moving with the scroll.  Landing on it is then visible.
+  const FIRST_ROW_TOP = 40;
+  const firstRow = Array.from(O.children).find(el => el.id !== 'welcome');
+  assert.ok(firstRow, 'setup: the conversation has a first row');
+  firstRow.getBoundingClientRect = () => ({
+    top: FIRST_ROW_TOP - O.scrollTop,
+    bottom: FIRST_ROW_TOP + 100 - O.scrollTop,
+    left: 0,
+    right: 400,
+  });
 
   win._testApi.endLaunch();
   win._testApi.createNewTab();
@@ -127,14 +128,13 @@ async function testWelcomeTabActivationScrollsToTop() {
   );
   assertWelcomeAtTop(
     win,
-    'BUG (' +
-      label +
-      '): a new tab kept the previous chat scroll offset instead of ' +
+    'BUG: a new tab kept the previous chat scroll offset instead of ' +
       'showing the welcome screen from the top',
   );
 
-  // Switching back to the conversation (a Chats-panel pick; chats have no
-  // tab row of their own any more) must still land at its end...
+  // Switching back to the finished conversation (a Chats-panel pick;
+  // chats have no tab row of their own any more) must land on its first
+  // row, where the task panel goes, not at its end...
   const openIds = () => win._testApi.openTabs().map(t => t.id);
   assert.ok(
     openIds().includes(chatTabId),
@@ -142,12 +142,12 @@ async function testWelcomeTabActivationScrollsToTop() {
   );
   win._testApi.switchToTab(chatTabId);
   assert.strictEqual(win._testApi.getActiveTabId(), chatTabId);
+  assert.strictEqual(O.firstElementChild, firstRow, 'the conversation is back');
   assert.strictEqual(
     O.scrollTop,
-    Math.max(0, geo.sh - geo.ch),
-    'BUG (' +
-      label +
-      '): switching back to a conversation no longer lands at its end',
+    FIRST_ROW_TOP,
+    'BUG: switching back to a finished conversation must land on its ' +
+      'first row, not at its end',
   );
 
   // ...and switching to the welcome tab again must land at the top.
@@ -159,22 +159,13 @@ async function testWelcomeTabActivationScrollsToTop() {
   assert.strictEqual(win._testApi.getActiveTabId(), welcomeTabId);
   assertWelcomeAtTop(
     win,
-    'BUG (' +
-      label +
-      '): switching back to a welcome tab kept the conversation scroll ' +
+    'BUG: switching back to a welcome tab kept the conversation scroll ' +
       'offset',
   );
   win.close();
-  console.log('  ok - welcome tab activation lands at the top (' + label + ')');
+  console.log('  ok - welcome tab activation lands at the top');
 }
 
-async function main() {
-  await testShowWelcomeScrollsToTop();
-  await testWelcomeTabActivationScrollsToTop();
-  console.log('welcomeScrollTop.test.js: all tests passed');
-}
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+testShowWelcomeScrollsToTop();
+testWelcomeTabActivationScrollsToTop();
+console.log('welcomeScrollTop.test.js: all tests passed');

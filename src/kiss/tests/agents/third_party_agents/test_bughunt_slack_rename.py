@@ -119,9 +119,6 @@ class TestSlackRenameBugs:
         )
         self.backend._bot_user_id = "UBOT"
 
-    def _requests(self) -> list[dict[str, str]]:
-        return list(self.server.requests)
-
     @pytest.mark.parametrize(
         "name,channel_id,used,unused",
         [
@@ -135,7 +132,7 @@ class TestSlackRenameBugs:
     ) -> None:
         """A name is looked up in conversations.list; an ID is confirmed with conversations.info."""
         assert self.backend.find_channel(name) == channel_id
-        paths = [r["path"] for r in self._requests()]
+        paths = [r["path"] for r in self.server.requests]
         assert any(p.endswith(used) for p in paths)
         assert not any(p.endswith(unused) for p in paths)
 
@@ -156,7 +153,7 @@ class TestSlackRenameBugs:
         out = json.loads(self.backend.upload_file("C1", "hello world", "a.txt"))
         assert out["ok"] is True, out
         assert out["file_id"] == "F1"
-        requests = self._requests()
+        requests = self.server.requests
         complete = [r for r in requests if r["path"].endswith("/files.completeUploadExternal")]
         assert len(complete) == 1
         params = urllib.parse.parse_qs(complete[0]["body"])

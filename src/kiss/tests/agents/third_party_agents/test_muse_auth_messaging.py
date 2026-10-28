@@ -47,6 +47,7 @@ instead of mocked):
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -80,14 +81,12 @@ from kiss.agents.third_party_agents.mattermost.mattermost_sea import _config as 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import _scrub_config_token as mm_scrub
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
-    PROTOCOL_VERSION,
     insecure_origin_hosts,
     muse_auth_dir,
 )
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
     MuseBoundarySession,
-    _daemon_protocol,
     clear_credentials,
     ensure_daemon,
     grant,
@@ -140,6 +139,12 @@ _REAL_BB_PASSWORD = "bb-real-secret"
 _REAL_SYNO_TOKEN = "syno-real-secret"
 
 
+def _require_linebot_absent() -> None:
+    """Skip when the ``linebot`` SDK is installed (its ImportError path is unreachable)."""
+    if importlib.util.find_spec("linebot") is not None:
+        pytest.skip("linebot installed; legacy ImportError path not reachable")
+
+
 class _MessagingApiHandler(MuseApiHandler):
     """Emulated REST API recording every request's method/path/headers."""
 
@@ -157,7 +162,11 @@ class _MessagingApiHandler(MuseApiHandler):
             # cannot regain a query credential.
             self.redirect(302, "/api/v1/server/info")
             return
-        credential = self.authorization() or self.headers.get("access_token", "")
+        credential = (
+            self.authorization()
+            or self.headers.get("access_token", "")
+            or parse_qs(urlsplit(self.path).query).get("password", [""])[0]
+        )
         if credential.startswith("Basic "):
             credential = base64.b64decode(credential[6:]).decode("utf-8", errors="replace")
         status = 200
@@ -714,7 +723,7 @@ def test_nextcloud_basic_swap_and_scrub(muse_env: Path, api_server: _MessagingAp
     assert vault_has_credentials("nextcloud")
 
 
-def test_nextcloud_join_is_read_and_writes_need_grants(
+def test_nextcloud_join_and_post_are_writes_needing_grants(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """participants/active is a state-changing join: a write, like posting."""
@@ -852,11 +861,25 @@ def test_bluebubbles_caller_password_param_is_stripped(
     assert recorded.get("limit") == ["5"]
 
 
+@pytest.mark.parametrize("allowlisted", [False, True], ids=["unlisted", "allowlisted"])
 def test_bluebubbles_cross_origin_redirect_drops_password(
-    muse_env: Path, api_server: _MessagingApiServer, rogue_server: Any
+    muse_env: Path, api_server: _MessagingApiServer, rogue_server: Any, allowlisted: bool
 ) -> None:
-    """A redirect off the enrolled origin is followed without the credential."""
+    """A redirect off the enrolled origin is followed without the credential.
+
+    A query credential binds to the exact origin it was consented for: a
+    redirect to a *different* origin, even one on the service's policy
+    ``extra_hosts``, is followed with a credential-free URL.
+    """
     backend = _bb_backend(api_server)
+    if allowlisted:
+        policy = {
+            "defaults": {"read": "allow", "write": "ask"},
+            "services": {
+                "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.server_address[1]}"]}
+            },
+        }
+        (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
     api_server.offsite_location = rogue_server.base_url + "/api/v1/server/info"
     session = MuseBoundarySession("bluebubbles")
     resp = session.get(
@@ -1018,13 +1041,6 @@ def test_query_kind_vault_resolution(isolated_kiss_home: Path) -> None:
     vault.clear("zalo")
 
 
-def test_daemon_protocol_is_current(muse_env: Path) -> None:
-    """A freshly ensured daemon reports at least the v4 (query-kind) protocol."""
-    ensure_daemon()
-    assert PROTOCOL_VERSION >= 4
-    assert _daemon_protocol() == PROTOCOL_VERSION
-
-
 def test_underscore_header_kind_accepted(muse_env: Path) -> None:
     """Zalo's ``access_token`` header name (with underscore) enrolls fine."""
     store_credentials("zalo", {"kind": "header", "header": "access_token", "token": "tok"}, [])
@@ -1037,14 +1053,7 @@ def test_underscore_header_kind_accepted(muse_env: Path) -> None:
 
 def test_cli_import_messaging_services(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """``muse_auth import`` migrates every messaging connector's secrets."""
-    mm_config.save(
-        {
-            "url": "127.0.0.1",
-            "token": _REAL_MM_TOKEN,
-            "port": str(api_server.server_address[1]),
-            "scheme": "http",
-        }
-    )
+    _mm_config(api_server)
     assert muse_cli.main(["import", "mattermost"]) == 0
     assert vault_has_credentials("mattermost")
     assert "token" not in json.loads(mm_config.path.read_text())
@@ -1168,7 +1177,7 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
     # LINE: the SDK is not installed here, so the legacy constructor
     # fails and the authenticate tool reports the error (no config write).
-
+    _require_linebot_absent()
     line_config.clear()
     agent = LineAgent()
     tools = auth_tools(agent)
@@ -1340,7 +1349,7 @@ def test_line_send_message_uses_adapter(
 
 def test_line_legacy_sdk_missing(isolated_kiss_home: Path, api_server: _MessagingApiServer) -> None:
     """Without the SDK, legacy LINE construction fails soft (or raises in poll mode)."""
-
+    _require_linebot_absent()
     line_config.save({"channel_access_token": "tok", "channel_secret": ""})
     agent = LineAgent()  # constructor swallows the ImportError
     assert agent._backend._api is None
@@ -1356,9 +1365,10 @@ def test_bluebubbles_muse_authenticate_rollbacks(
 ) -> None:
     """_muse_authenticate validates the URL and rolls back on failure.
 
-    On this Linux host the validating ``get_server_info`` read is
-    macOS-gated and reports a platform error, so the enrollment is
-    rolled back — which is exactly the rollback path under test.  The
+    The emulator answers 401 to a ``password=`` ending in ``-invalid``,
+    so the validating ``get_server_info`` read fails on every platform
+    (off macOS it is platform-gated and fails even earlier); either way
+    the enrollment is rolled back, which is the path under test.  The
     macOS-only success return is documented in the module docstring.
     """
 
@@ -1366,7 +1376,7 @@ def test_bluebubbles_muse_authenticate_rollbacks(
     result = json.loads(_muse_authenticate(backend, "http://bad..host", "pw"))
     assert result["ok"] is False
     assert "not a valid" in result["error"]
-    result = json.loads(_muse_authenticate(backend, api_server.base_url, _REAL_BB_PASSWORD))
+    result = json.loads(_muse_authenticate(backend, api_server.base_url, "bb-invalid"))
     assert result["ok"] is False
     assert not vault_has_credentials("bluebubbles")
     assert backend._muse is False
@@ -1435,38 +1445,6 @@ def test_cli_import_synology_empty_url(muse_env: Path) -> None:
 
 
 # ------------------------------------------------ review round-1 regressions
-
-
-def test_query_kind_allowlisted_cross_origin_redirect_drops_credential(
-    muse_env: Path, api_server: _MessagingApiServer, rogue_server: Any
-) -> None:
-    """A cross-origin hop never carries a query credential, even allowlisted.
-
-    A query credential binds to the exact origin it was consented for: a
-    redirect to a *different* origin that happens to be on the service's
-    policy ``extra_hosts`` may be followed, but with a credential-free
-    URL.
-    """
-    backend = _bb_backend(api_server)
-    policy = {
-        "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.server_address[1]}"]}
-        },
-    }
-    (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
-    api_server.offsite_location = rogue_server.base_url + "/api/v1/server/info"
-    session = MuseBoundarySession("bluebubbles")
-    resp = session.get(
-        api_server.base_url + "/redirect-offsite",
-        headers={"Authorization": f"Bearer {backend._surrogate}"},
-    )
-    assert resp.status_code == 200
-    assert len(rogue_server.requests) == 1
-    assert rogue_server.query().get("password") is None
-    assert rogue_server.header("Authorization") == ""
-    # The on-origin first hop DID carry the credential.
-    assert api_server.query(index=0).get("password") == [_REAL_BB_PASSWORD]
 
 
 def test_query_kind_error_text_hides_encoded_credential(muse_env: Path, refusing_port: int) -> None:

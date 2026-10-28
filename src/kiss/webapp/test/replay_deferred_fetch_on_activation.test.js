@@ -17,6 +17,7 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {sendHistory, makeRow} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({sourceUrl: 'replay-deferred-main.js'});
@@ -175,32 +176,9 @@ function testHistoryClickOnDeferredTabResumesOnce() {
   // one explicit (broadcast) resume at that task, no deferred fetch
   // first.
   win.document.getElementById('sidebar').classList.add('open');
-  const req = posted.filter(m => m.type === 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req ? req.generation : undefined,
-    sessions: [
-      {
-        id: 'c-b',
-        task_id: 'history-task',
-        title: 'B',
-        preview: 'B',
-        timestamp: 1_700_000_000,
-        has_events: true,
-        failed: false,
-        is_running: false,
-        awaiting_answer: false,
-        tokens: 1,
-        cost: 0,
-        steps: 1,
-        is_favorite: false,
-        work_dir: '',
-        startTs: 1_700_000_000_000,
-        endTs: 1_700_000_000_001,
-      },
-    ],
-  });
+  sendHistory(win, posted, [
+    makeRow({id: 'c-b', task_id: 'history-task', title: 'B', has_events: true}),
+  ]);
   const row = win.document.querySelector('#history-list .sidebar-item');
   assert.ok(row, 'the Chats drawer lists the task');
   row.click();

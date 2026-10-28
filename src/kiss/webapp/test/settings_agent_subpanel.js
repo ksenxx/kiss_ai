@@ -24,11 +24,8 @@
 // `[statusFields, wordingRegExp, 'ok' | 'warn']`.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
+const {makePage, send, lastMsg, click, byId} = require('./simplify2_harness');
 const {
-  lastMsg,
-  click,
-  byId,
   openSettings,
   closeSettings,
   statusLine,

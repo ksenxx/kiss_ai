@@ -89,10 +89,6 @@
     close();
   }
 
-  function onWindowChange() {
-    close();
-  }
-
   let installedOn = null;
 
   function install(doc) {
@@ -103,8 +99,8 @@
     doc.addEventListener('contextmenu', onDocPointerDown, true);
     const win = doc.defaultView;
     if (win) {
-      win.addEventListener('blur', onWindowChange);
-      win.addEventListener('resize', onWindowChange);
+      win.addEventListener('blur', close);
+      win.addEventListener('resize', close);
     }
   }
 

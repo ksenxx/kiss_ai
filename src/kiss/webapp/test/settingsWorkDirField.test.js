@@ -24,13 +24,12 @@
 'use strict';
 
 const assert = require('assert');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 const {
+  makePage: makeSharedPage,
+  send,
   lastMsg,
-  openSettings,
-  closeSettings,
-  typeInto,
-} = require('./settings_helpers');
-const {makePage: makeSharedPage, send} = require('./simplify2_harness');
+} = require('./simplify2_harness');
 
 // The served web page carries body.remote-chat (web_server.py injects the
 // class).  `stalePin` seeds the sessionStorage key an older WS shim used
@@ -48,7 +47,6 @@ function makePage(opts) {
   return {win, posted};
 }
 
-// Typing for real: set the value and fire the event the browser fires.
 function assertNoDirectoryFields(win) {
   assert.strictEqual(
     win.document.getElementById('cfg-work-dir'),
@@ -131,9 +129,11 @@ function testRemoteBlankWhenNothingIsStored() {
   send(win, {type: 'configData', config: {}});
   closeSettings(win);
 
-  const saved = lastMsg(posted, 'saveConfig');
-  assert.ok(saved, 'closing the settings panel must save the form');
-  assert.ok(!('work_dir' in saved.config), 'nothing to save as work_dir');
+  assert.strictEqual(
+    lastMsg(posted, 'saveConfig'),
+    null,
+    'closing an untouched settings panel saves nothing (so no work_dir)',
+  );
   assert.deepStrictEqual(setWorkDirs(posted), [], 'nothing to announce');
   assert.strictEqual(
     mentionWorkDir(win, posted),
@@ -204,100 +204,16 @@ function testRemoteIgnoresStaleSessionPin() {
   );
 }
 
-function testRemoteWorkDirChangesThroughTheHeaderDropDown() {
-  const {win, posted} = makePage();
-  send(win, {
-    type: 'configData',
-    config: {
-      work_dir: '/srv/project',
-      recent_work_dirs: [{path: '/srv/elsewhere', ts: 1}],
-    },
-  });
-
-  // The chat header's working directory drop-down is the one place to
-  // change the folder now that the settings box is gone.
-  const select = win.document.getElementById('chat-workdir');
-  select.value = '/srv/elsewhere';
-  assert.strictEqual(select.value, '/srv/elsewhere', 'the folder is listed');
-  select.dispatchEvent(new win.Event('change', {bubbles: true}));
-
-  const check = lastMsg(posted, 'listDir');
-  assert.ok(
-    check && String(check.token).startsWith('workdir:'),
-    'the daemon is asked to list the picked folder first',
-  );
-  assert.strictEqual(check.path, '/srv/elsewhere');
-  assert.strictEqual(
-    setWorkDirs(posted).length,
-    0,
-    'nothing is sent before the daemon confirms the folder exists',
-  );
-  assert.strictEqual(
-    mentionWorkDir(win, posted),
-    '/srv/project',
-    'and nothing is adopted locally either: commands keep the old folder',
-  );
-  send(win, {
-    type: 'dirListing',
-    token: check.token,
-    path: '/srv/elsewhere',
-    root: '/srv/elsewhere',
-    entries: [],
-  });
-
-  assert.deepStrictEqual(
-    setWorkDirs(posted),
-    ['/srv/elsewhere'],
-    'a real folder is sent as setWorkDir: the daemon persists it as the ' +
-      'global value and broadcasts workDirChanged to every other client',
-  );
-  assert.strictEqual(
-    lastMsg(posted, 'saveConfig'),
-    null,
-    'the drop-down does not go through saveConfig; setWorkDir is the one path',
-  );
-  assert.strictEqual(headerWorkDir(win), '/srv/elsewhere');
-  assert.strictEqual(
-    mentionWorkDir(win, posted),
-    '/srv/elsewhere',
-    'this page re-scopes at once instead of waiting for the broadcast',
-  );
-  win.close();
-  console.log(
-    '  ok - the web client changes the global folder through the header drop-down',
-  );
-}
-
-function testRemoteFollowsWorkDirChangedBroadcast() {
-  const {win, posted} = makePage();
-  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
-  // A pick made in another browser tab reaches this page as the daemon's
-  // broadcast.
-  send(win, {type: 'workDirChanged', workDir: '/srv/picked-elsewhere'});
-  assert.strictEqual(
-    mentionWorkDir(win, posted),
-    '/srv/picked-elsewhere',
-    'every client follows the daemon broadcast so all surfaces agree',
-  );
-  assert.strictEqual(headerWorkDir(win), '/srv/picked-elsewhere');
-  assert.deepStrictEqual(
-    setWorkDirs(posted),
-    [],
-    'a broadcast is adopted, never echoed back as another setWorkDir',
-  );
-  win.close();
-  console.log(
-    '  ok - the web client follows workDirChanged from other surfaces',
-  );
-}
+// Changing the folder through the chat header's drop-down (listDir
+// confirm, then setWorkDir, never saveConfig, re-scoped at once) and
+// following the daemon's workDirChanged broadcast are pinned by
+// chatWorkDirSelect.test.js.
 
 function main() {
   testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   testRemoteBlankWhenNothingIsStored();
   testRemoteAdoptsGlobalWorkDirWithoutEcho();
   testRemoteIgnoresStaleSessionPin();
-  testRemoteWorkDirChangesThroughTheHeaderDropDown();
-  testRemoteFollowsWorkDirChangedBroadcast();
   console.log('settingsWorkDirField.test.js: all tests passed');
 }
 

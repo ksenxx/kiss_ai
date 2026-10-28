@@ -164,6 +164,11 @@ def brand_slug(brand: dict[str, str] = BRAND) -> str:
     return slug or "kiss-sorcar"
 
 
+def macos_bundle_identifier(brand: dict[str, str] = BRAND) -> str:
+    """Return the ``CFBundleIdentifier`` of the brand's app bundle (and its code signature)."""
+    return f"org.kiss-sorcar.{brand_slug(brand)}"
+
+
 def read_loopback_url(url_file: Path) -> str | None:
     """Return the daemon's plain-HTTP loopback URL from *url_file*, or None.
 
@@ -524,15 +529,18 @@ def applications_dir(home: Path) -> Path:
     return base / "applications"
 
 
+def linux_launcher_path(home: Path, brand: dict[str, str] = BRAND) -> Path:
+    """Return ``<applications dir>/<slug>.desktop``, the brand's launcher entry (written or not)."""
+    return applications_dir(home) / f"{brand_slug(brand)}.desktop"
+
+
 def write_linux_launcher(
-    apps_dir: Path, brand: dict[str, str], icon: Path, exe: Path, kiss_home: Path, browser: Path
-) -> Path:
-    """Write ``<apps_dir>/<slug>.desktop`` and return its path."""
-    apps_dir.mkdir(parents=True, exist_ok=True)
-    entry = apps_dir / f"{brand_slug(brand)}.desktop"
+    entry: Path, brand: dict[str, str], icon: Path, exe: Path, kiss_home: Path, browser: Path
+) -> None:
+    """Write the ``.desktop`` file *entry* (see :func:`linux_launcher_path`)."""
+    entry.parent.mkdir(parents=True, exist_ok=True)
     entry.write_text(desktop_entry(brand, icon, exe, kiss_home, browser), encoding="utf-8")
     entry.chmod(0o755)
-    return entry
 
 
 def write_icns(png: Path, icns: Path) -> bool:
@@ -642,7 +650,7 @@ def macos_bundle_plist(
         {
             "CFBundleName": brand["product_name"],
             "CFBundleDisplayName": brand["product_name"],
-            "CFBundleIdentifier": f"org.kiss-sorcar.{brand_slug(brand)}",
+            "CFBundleIdentifier": macos_bundle_identifier(brand),
             "CFBundlePackageType": "APPL",
             "CFBundleExecutable": "launcher",
             "CFBundleIconFile": "AppIcon",
@@ -876,12 +884,18 @@ def quit_closed_app(bundle: Path) -> bool:
     Nothing happens, and False is returned, unless the browser has
     neither popup nor window (:func:`windowless_app_pid`).  Otherwise
     the browser gets SIGTERM, which Chromium answers with a regular
-    quit, and True is returned.
+    quit, and True is returned (False when it exited meanwhile).
     """
     pid = windowless_app_pid(bundle)
-    if pid is None:
+    return pid is not None and _terminate(pid)
+
+
+def _terminate(pid: int) -> bool:
+    """Send *pid* SIGTERM; False when it exited since it was listed (no error on a Timer thread)."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
         return False
-    os.kill(pid, signal.SIGTERM)
     return True
 
 
@@ -910,8 +924,7 @@ def sweep_windowless_app(bundle: Path) -> bool:
         _windowless = (pid, strikes)
         return False
     _windowless = (None, 0)
-    os.kill(pid, signal.SIGTERM)
-    return True
+    return _terminate(pid)
 
 
 def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
@@ -1043,7 +1056,7 @@ def write_macos_launcher(
     """
     bundle = apps_dir / f"{brand['product_name']}.app"
     contents = bundle / "Contents"
-    identifier = f"org.kiss-sorcar.{brand_slug(brand)}"
+    identifier = macos_bundle_identifier(brand)
     browser_bundle = macos_browser_bundle(browser) if browser else None
     browser_info = None
     if browser_bundle:
@@ -1106,13 +1119,11 @@ def install_launcher(
     state_dir = state_dir or kiss_home()
     browser = browser or find_browser(system)
     if system == "Linux":
-        apps_dir = applications_dir(home)
-        entry = write_linux_launcher(
-            apps_dir, brand, icon, exe, state_dir, browser or Path("chrome")
-        )
+        entry = linux_launcher_path(home, brand)
+        write_linux_launcher(entry, brand, icon, exe, state_dir, browser or Path("chrome"))
         refresh = shutil.which("update-desktop-database")
         if refresh:
-            subprocess.run([refresh, str(apps_dir)], check=False, capture_output=True)
+            subprocess.run([refresh, str(entry.parent)], check=False, capture_output=True)
         return entry
     if system == "Darwin":
         bundle = macos_bundle_path(home, brand)
@@ -1132,7 +1143,7 @@ def launcher_path(
     """
     home = home or Path.home()
     if system == "Linux":
-        return applications_dir(home) / f"{brand_slug(brand)}.desktop"
+        return linux_launcher_path(home, brand)
     if system == "Darwin":
         return macos_bundle_path(home, brand)
     return None

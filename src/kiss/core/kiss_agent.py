@@ -43,13 +43,12 @@ from kiss.core.models.model_info import (
     get_max_context_length,
     model,
 )
-from kiss.core.models.stream_abort import stop_error
+from kiss.core.models.stream_abort import is_stall_error, stop_error
 from kiss.core.prompt_cache_keepalive import (
     PromptCacheKeepAlive,
     is_long_running_call,
     keep_alive_max_pings,
 )
-from kiss.core.step_recap import SUMMARY_EVERY_STEPS, ToolRecord, describe_args, first_line, recap
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
     ToolCallInterrupted,
@@ -82,7 +81,22 @@ _NON_RETRYABLE_PHRASES = (
     "credit balance is too low",
 )
 MAX_CONSECUTIVE_ERRORS = 3
+# A stalled stream (the watchdog aborted a silent response, ``stream_abort.stall_error``)
+# is a transport hiccup, not a model failure: it has its own, larger limit so
+# three stalls in a row on a long task do not end it (MAX_CONSECUTIVE_ERRORS).
+MAX_CONSECUTIVE_STALLS = 12
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
+# Sent once after a safety refusal when no fallback model exists: the
+# model re-reads the task with its context stated before the run dies on it.
+REFUSAL_RETRY_MSG = (
+    "Your previous response was a refusal (stop_reason=refusal). Before deciding, "
+    "re-read the task: it is the user's own authorized work in their own sandboxed "
+    "environment, and engineering tasks about security, cryptography, exploits, "
+    "firmware or compatibility testing are legitimate when they stay in that sandbox. "
+    "If a part of the task genuinely requires producing something harmful outside it, "
+    "do the legitimate parts, and say in the final summary which part you declined "
+    "and why. Otherwise continue the task."
+)
 # Sent after a turn in which the model called natively served tools
 # (``Model.native_tools_exposed``) but ended with text alone.
 NATIVE_TOOLS_CONTINUE_MSG = (
@@ -137,6 +151,33 @@ class _UsageTotals(NamedTuple):
 _ZERO_USAGE = _UsageTotals(0.0, 0, 0)
 
 
+class NativeTurn:
+    """The record of one turn's natively run tool calls.
+
+    Codex calls KISS tools over the MCP bridge of
+    :meth:`KISSAgent._native_tools_exposed`, on the bridge's threads,
+    while the agent's thread waits for the turn to end.  Each turn gets
+    a fresh record from :meth:`KISSAgent._execute_step`, and the bridge's
+    handlers write to the record of the turn they were made for: a
+    handler that outlives its turn (a Stop abandoned a tool deaf to the
+    interrupt) can then only ever write to a record the agent has
+    already replaced, never to the running turn's.
+
+    Attributes:
+        calls: Tool calls served during the turn.
+        error: The fatal error a call raised (a limit hit, a sub-agent's
+            budget exceeded), kept for the agent thread to raise once the
+            turn ends; every further call of the turn is refused.
+        closed: Set once the turn's bridge has closed; a call that
+            returns after that leaves the agent's conversation alone.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.error: Exception | None = None
+        self.closed = threading.Event()
+
+
 class _EmptyModelResponseError(KISSError):
     """Raised when a model repeatedly returns no text and no tool calls.
 
@@ -146,10 +187,17 @@ class _EmptyModelResponseError(KISSError):
     """
 
 
-ROUTINE_TOOLS = frozenset({
-    "summary", "memory_search", "memory_pull", "memory_read", "memory_list",
-    "memory_write", "memory_refresh",
-})
+ROUTINE_TOOLS = frozenset(
+    {
+        "summary",
+        "memory_search",
+        "memory_pull",
+        "memory_read",
+        "memory_list",
+        "memory_write",
+        "memory_refresh",
+    }
+)
 """Tools after which the next model turn is routine: the model acknowledges a
 summary or a memory operation rather than plans, debugs or reviews."""
 WAIT_TOOLS = frozenset({"bash_job", "agent_job"})
@@ -261,6 +309,29 @@ def _with_usage_footer(text: str, usage_info: str) -> str:
     return text + "\n```text\n" + usage_info + "\n```\n"
 
 
+def stop_reason_of(response: Any) -> str | None:
+    """Why the provider ended *response*: Anthropic's ``stop_reason``, OpenAI's finish reason.
+
+    Chat completions carry ``choices[0].finish_reason``; the Responses
+    API ``status`` (``completed``) or ``incomplete_details.reason``
+    (``max_output_tokens``).  ``None`` when the response says nothing.
+    """
+    reason = getattr(response, "stop_reason", None)
+    if isinstance(reason, str):
+        return reason
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        reason = getattr(choices[0], "finish_reason", None)
+        if isinstance(reason, str):
+            return reason
+    details = getattr(response, "incomplete_details", None)
+    reason = getattr(details, "reason", None)
+    if isinstance(reason, str):
+        return reason
+    status = getattr(response, "status", None)
+    return status if isinstance(status, str) else None
+
+
 if TYPE_CHECKING:  # pragma: no cover
     from kiss.core.printer import Printer
 
@@ -346,13 +417,6 @@ class KISSAgent(Base):
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
-        self.context_tokens_used = 0
-        self.last_call_usage: dict[str, int | float] | None = None
-        """Tokens and USD cost of the latest model call
-        (``input_tokens``, ``output_tokens``, ``cache_read``,
-        ``cache_write``, ``cost``), as recorded by
-        :meth:`_update_tokens_and_budget_from_response`; reported by
-        the ``llm_call`` event.  ``None`` before the first call."""
         self.tool_calls_made = 0
         """Tool calls other than ``finish`` the model issued during the
         current run (blocked ones included: the model still acted).
@@ -374,20 +438,37 @@ class KISSAgent(Base):
         """Called after old tool outputs were compacted out of the
         conversation, so tools that assume the model still sees an
         earlier output (the Read tool's dedupe) can forget it."""
+        self._reset_run_state()
+
+    def _reset_run_state(self) -> None:
+        """Clear the per-run counters, caches and flags.
+
+        Called at construction and by :meth:`_reset` before every run,
+        so nothing of a previous run leaks into the next one.
+        """
+        self.context_tokens_used = 0
+        # Tokens and USD cost of the latest model call (``input_tokens``,
+        # ``output_tokens``, ``cache_read``, ``cache_write``, ``cost``),
+        # as recorded by ``_update_tokens_and_budget_from_response``;
+        # reported by the ``llm_call`` event.  ``None`` before the first
+        # call.
+        self.last_call_usage: dict[str, Any] | None = None
+        self._cached_tools_schema: list[dict[str, Any]] | None = None
         self._llm_hook_conversation_index = 0
         self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._last_compaction_step = -COMPACTION_MIN_STEP_GAP
+        # Wall-clock start of the last request that read or wrote the
+        # provider's prompt cache (a model call or a keep-alive ping).
         self._prompt_cache_touched_at = 0.0
-        """Wall-clock start of the last request that read or wrote the
-        provider's prompt cache (a model call or a keep-alive ping)."""
+        # Whether the next model call follows a routine tool call (see
+        # ``_turn_effort``), and what the last call was marked as.
         self._routine_next_turn = False
         self._routine_call = False
         self._routine_effort = ""
-        self.recaps: list[str] = []
-        """Every framework recap the current run emitted, oldest first;
-        a failed session's hand-off digest reads them (they are not in
-        the conversation).  Declared here, not only in :meth:`_reset`,
-        so an agent that never ran still has the (empty) list."""
+        # Characters of the last step's tool results (footer "+N tokens").
+        self._last_results_chars = 0
+        self._fallback_used = False
+        self._refusal_retried = False
         self._reset_progress_trackers()
 
     def _reset(
@@ -414,28 +495,9 @@ class KISSAgent(Base):
         self.max_steps = max_steps if max_steps is not None else 10000
         self.max_budget = max_budget if max_budget is not None else 10.0
         self.function_map: dict[str, Callable[..., Any]] = {}
-        self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.reset_usage()
-        self.context_tokens_used = 0
-        self.last_call_usage = None
-        self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
-        self._last_compaction_step = -COMPACTION_MIN_STEP_GAP
-        self._prompt_cache_touched_at = 0.0
-        self._llm_hook_conversation_index = 0
-        # Whether the next model call follows a routine tool call (see
-        # ``_turn_effort``), and what the last call was marked as.
-        self._routine_next_turn = False
-        self._routine_call = False
-        self._routine_effort = ""
-        # The tool log the periodic ``summary`` recap is written from
-        # (:mod:`kiss.core.step_recap`), and the step of the last recap
-        # (the model's own ``summary`` call counts as one).
-        self._tool_records: list[ToolRecord] = []
-        self._last_recap_step = 0
-        self.recaps = []
-        # Characters of the last step's tool results (footer "+N tokens").
-        self._last_results_chars = 0
+        self._reset_run_state()
         # ``run_start_timestamp`` is the real wall clock: the saved record
         # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
         # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
@@ -444,9 +506,13 @@ class KISSAgent(Base):
         # stamp strictly increases per run while keeping the same format.
         self.run_start_timestamp = int(time.time())
         self._trajectory_stamp = max(self.run_start_timestamp, self._trajectory_stamp + 1)
-        self._reset_progress_trackers()
+        # The agent's own copy: ``Model.__init__`` keeps the dict it is
+        # given and ``_turn_effort`` edits it for the length of a turn, so
+        # a dict shared by several agents (or kept by the caller) must
+        # not be the one the model reads.
+        if model_config is not None:
+            model_config = dict(model_config)
         self._model_config: dict[str, Any] | None = model_config
-        self._fallback_used = False
 
         token_callback = self.printer.token_callback if self.printer else None
         thinking_callback = self.printer.thinking_callback if self.printer else None
@@ -480,11 +546,9 @@ class KISSAgent(Base):
         """
         self._consecutive_no_tool_calls = 0
         self._last_response_text = ""
-        # Tool calls the model made natively (over the MCP bridge) during
-        # the current step, counted on the bridge thread, and the fatal
-        # error one of them raised there, if any.
-        self._native_tool_calls = 0
-        self._native_tool_error: Exception | None = None
+        # The record of the current step's natively run tool calls (see
+        # NativeTurn); _execute_step replaces it every step.
+        self._native_turn = NativeTurn()
 
     def _set_prompt(
         self,
@@ -741,6 +805,7 @@ class KISSAgent(Base):
 
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
+        consecutive_stalls = 0
         # The step bound lives here and nowhere else: driving the loop
         # off ``step_count`` (rather than a fixed ``range``) keeps it
         # correct even if steps are ever counted from outside the loop,
@@ -750,7 +815,7 @@ class KISSAgent(Base):
             self._check_limits()
             try:
                 result = self._execute_step()
-                consecutive_errors = 0
+                consecutive_errors = consecutive_stalls = 0
                 if result is not None:
                     self._print_result(result)
                     return result
@@ -767,6 +832,13 @@ class KISSAgent(Base):
                         consecutive_errors = 0
                         self._reset_progress_trackers()
                         continue
+                    if isinstance(e, ModelRefusalError) and not self._refusal_retried:
+                        # One retry with the task's context stated; a second
+                        # refusal is final.
+                        self._refusal_retried = True
+                        self.model.add_message_to_conversation("user", REFUSAL_RETRY_MSG)
+                        self._add_message("user", REFUSAL_RETRY_MSG)
+                        continue
                 raise
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
@@ -777,12 +849,20 @@ class KISSAgent(Base):
                     consecutive_errors = 0
                     self._reset_progress_trackers()
                     continue
-                consecutive_errors += 1
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                    raise KISSError(
-                        f"Agent {self.name} failed with {consecutive_errors} "
-                        f"consecutive errors. Last error: {e}"
-                    ) from e
+                if is_stall_error(e):
+                    consecutive_stalls += 1
+                    if consecutive_stalls >= MAX_CONSECUTIVE_STALLS:
+                        raise KISSError(
+                            f"Agent {self.name} failed with {consecutive_stalls} "
+                            f"consecutive stalled streams. Last error: {e}"
+                        ) from e
+                else:
+                    consecutive_errors += 1
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        raise KISSError(
+                            f"Agent {self.name} failed with {consecutive_errors} "
+                            f"consecutive errors. Last error: {e}"
+                        ) from e
                 content = f"Failed to get response from Model: {e}.\nPlease try again.\n"
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)
@@ -818,21 +898,20 @@ class KISSAgent(Base):
         # already-hooked messages to the hook on the next attempt ...
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
-        self._native_tool_calls = 0
-        self._native_tool_error = None
+        self._native_turn = turn = NativeTurn()
         try:
             function_calls, response_text, _response = self._billed_model_call(
                 self._generate_with_tools
             )
         except Exception:
-            if self._native_tool_error is not None:
-                raise self._native_tool_error
+            if turn.error is not None:
+                raise turn.error
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call —
         # unless tools ran natively during it: their calls and results
         # were appended by the model and are new to the hook.
-        if not self._native_tool_calls:
+        if not turn.calls:
             self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
@@ -853,16 +932,16 @@ class KISSAgent(Base):
         # A fatal error a natively run tool raised (budget exhausted, a
         # limit hit) ends the step now that the turn is billed and in the
         # trajectory; the ordinary tool loop below does the same.
-        if self._native_tool_error is not None:
-            raise self._native_tool_error
-        if self._native_tool_calls or any(fc["name"] != "finish" for fc in function_calls):
+        if turn.error is not None:
+            raise turn.error
+        if turn.calls or any(fc["name"] != "finish" for fc in function_calls):
             self._check_limits()
 
         if not function_calls:
             self._add_message(
                 "model", _with_usage_footer(response_text, usage_info), start_timestamp
             )
-            if self._native_tool_calls:
+            if turn.calls:
                 # The model worked through natively served tools and ended
                 # the turn with text: not a text-only turn, so no implicit
                 # finish — it is told to go on, or to finish through the
@@ -870,7 +949,6 @@ class KISSAgent(Base):
                 self._consecutive_no_tool_calls = 0
                 self._add_message("user", NATIVE_TOOLS_CONTINUE_MSG)
                 self.model.add_message_to_conversation("user", NATIVE_TOOLS_CONTINUE_MSG)
-                self._maybe_emit_recap()
                 return None
             self._consecutive_no_tool_calls += 1
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
@@ -896,9 +974,7 @@ class KISSAgent(Base):
                     return self._implicit_finish_result(
                         f"The model replied with text but no tool call for "
                         f"{self._consecutive_no_tool_calls} consecutive turns "
-                        f"without calling finish.",
-                        success=True,
-                        is_continue=False,
+                        f"without calling finish."
                     )
             retry_msg = (
                 "**Your response MUST have at least one function call. "
@@ -921,8 +997,17 @@ class KISSAgent(Base):
         limit_error: KISSError | None = None
 
         for fc in function_calls:
-            name, response_str, blocked = self._guarded_execute_tool(fc)
-            self._record_tool_call(fc, response_str, blocked is not None)
+            try:
+                name, response_str, blocked = self._guarded_execute_tool(fc)
+            except BudgetExceededError as e:
+                # The tool itself overran the budget (a sub-agent's
+                # spend): the step still happened, so it is recorded
+                # like a limit hit after the tool ran.
+                call_reprs.append(_call_repr(fc))
+                function_results.append((fc["name"], {"result": str(e)}))
+                limit_error = e
+                break
+            self._mark_routine_turn(fc, response_str, blocked is not None)
             call_reprs.append(_call_repr(fc))
             function_results.append((name, {"result": response_str}))
             if name == "finish" and blocked is None:
@@ -968,7 +1053,6 @@ class KISSAgent(Base):
         self._last_results_chars = sum(len(str(r["result"])) for _, r in function_results)
         self.model.set_usage_info_for_messages(self._get_usage_info_string())
         self.model.add_function_results_to_conversation_and_return(function_results)
-        self._maybe_emit_recap()
         return None
 
     @contextlib.contextmanager
@@ -997,13 +1081,18 @@ class KISSAgent(Base):
                 self.function_map.get(tool["function"]["name"]), "runs_between_turns", False
             )
         ]
+        turn = self._native_turn
         execute = functools.partial(
             self._execute_tool_on_helper_thread,
             stop_event=stop_signal.get_thread_stop_event(),
             printer_binding=self.printer.thread_binding() if self.printer else None,
+            turn=turn,
         )
-        with self.model.native_tools_exposed(schema, execute):
-            yield
+        try:
+            with self.model.native_tools_exposed(schema, execute):
+                yield
+        finally:
+            turn.closed.set()
 
     def _guarded_execute_tool(self, function_call: dict[str, Any]) -> tuple[str, str, str | None]:
         """Execute one tool call the way the agent loop does: hook, guard, then tool.
@@ -1067,6 +1156,7 @@ class KISSAgent(Base):
         function_call: dict[str, Any],
         stop_event: threading.Event | None,
         printer_binding: Any,
+        turn: NativeTurn,
     ) -> tuple[str, str]:
         """Execute a tool call that arrived on a thread other than the agent's.
 
@@ -1082,48 +1172,61 @@ class KISSAgent(Base):
         later; the model's conversation is the model's to keep.  The
         limits are checked after every call, as in the ordinary tool
         loop; a fatal error (a limit hit, a sub-agent's budget exceeded)
-        is kept for :meth:`_execute_step` to raise once the turn ends,
-        and every further call of that turn is refused.
+        is kept on *turn* for :meth:`_execute_step` to raise once the
+        turn ends, and every further call of that turn is refused.
+
+        A call the turn's end abandoned (a Stop waited out the tool, see
+        :meth:`~kiss.core.models.codex_mcp_bridge.ToolBridge._wait_for_calls`)
+        may still return later, while the agent thread is past the turn
+        and perhaps saving: ``turn.closed`` tells it to leave the
+        conversation alone, and what it counts or raises lands on its
+        own, already replaced *turn*, never on the running one (a check
+        of ``closed`` before publishing would race with the replacement).
+        A ``KeyboardInterrupt`` (the printer raises one under a Stop)
+        must not escape either: this is the bridge's thread, not the
+        task's, and the bridge records only exceptions.
 
         Args:
             function_call: The tool call dict with ``name`` and
                 ``arguments``.
             stop_event: The agent thread's stop event.
             printer_binding: The agent thread's ``Printer.thread_binding()``.
+            turn: The record of the turn the call belongs to.
 
         Returns:
             tuple[str, str]: (function_name, function_response_string).
 
         Raises:
             Exception: What the tool or the limit check raised, or a
-                ``KISSError`` naming the earlier fatal error.
+                ``KISSError`` naming the earlier fatal error or the Stop
+                that interrupted the call.
         """
         stop_signal.set_thread_stop_event(stop_event)
         if self.printer is not None:
             self.printer.adopt_thread_binding(printer_binding)
-        if self._native_tool_error is not None:
-            raise KISSError(f"The run is ending: {self._native_tool_error}")
+        if turn.error is not None:
+            raise KISSError(f"The run is ending: {turn.error}")
         try:
             name, response, blocked = self._guarded_execute_tool(function_call)
-            self._record_tool_call(function_call, response, blocked is not None)
-            self._native_tool_calls += 1
+            if turn.closed.is_set():
+                return name, response
+            self._mark_routine_turn(function_call, response, blocked is not None)
+            turn.calls += 1
             self._add_message("model", _call_repr(function_call))
             self._add_message("user", f"[{name}]: {response}")
             self._check_limits()
         except Exception as e:
-            self._native_tool_error = e
+            turn.error = e
             raise
+        except BaseException as e:
+            turn.error = KISSError(f"Tool {function_call['name']} stopped: {e}")
+            raise turn.error from e
         return name, response
 
-    def _record_tool_call(
-        self, function_call: dict[str, Any], result: str, refused: bool
-    ) -> None:
-        """Append the call to the tool log the periodic recap is written from.
+    def _mark_routine_turn(self, function_call: dict[str, Any], result: str, refused: bool) -> None:
+        """Note whether the next model call follows a routine tool call.
 
-        A ``summary`` call the model made itself resets the recap
-        cadence: the next framework recap comes :data:`SUMMARY_EVERY_STEPS`
-        steps after it.  ``finish`` is not logged: its own summary ends
-        the run and no recap follows it.
+        See :func:`is_routine_turn`.
 
         Args:
             function_call: The tool call dict with ``name`` and ``arguments``.
@@ -1133,56 +1236,10 @@ class KISSAgent(Base):
         name = function_call["name"]
         if name == "finish":
             return
-        args = _call_args(function_call)
         # A guard inside the tool (a refused foreground sleep, a refused
         # rewrite) reports itself the way a hook refusal does.
         refused = refused or result.startswith("REFUSED:")
-        self._routine_next_turn = is_routine_turn(name, args, result, refused)
-        if name == "summary" and not refused:
-            self._last_recap_step = self.step_count
-            return
-        self._tool_records.append(
-            ToolRecord(
-                step=self.step_count,
-                name=name,
-                args=describe_args(args),
-                result=first_line(result),
-                is_error=refused or result.startswith("Error"),
-            )
-        )
-
-    def _maybe_emit_recap(self) -> None:
-        """Emit the framework-written ``summary`` event once ten steps passed without one.
-
-        Only for an agent that offers a ``summary`` tool (Sorcar): the
-        event is the same ``tool_call`` the chat panel renders for the
-        model's own ``summary`` calls, so the panel keeps folding the
-        last ten steps' panels into a recap, now at no model cost.  The
-        recap does not enter the model's conversation.  Records older
-        than the recap are dropped.
-        """
-        if "summary" not in self.function_map:
-            return
-        if self.step_count - self._last_recap_step < SUMMARY_EVERY_STEPS:
-            return
-        first_step = self._last_recap_step + 1
-        text = recap(self._tool_records, first_step, self.step_count)
-        self._last_recap_step = self.step_count
-        self._tool_records = []
-        self.recaps.append(text)
-        if self.printer:
-            self.printer.print(
-                "summary",
-                type="tool_call",
-                tool_input={"description": text, "source": "framework"},
-            )
-            self.printer.print(
-                "ok", type="tool_result", tool_name="summary",
-                tool_input={"description": text},
-            )
-        logger.info(
-            "Framework recap of steps %d-%d: agent=%s", first_step, self.step_count, self.name
-        )
+        self._routine_next_turn = is_routine_turn(name, _call_args(function_call), result, refused)
 
     def _execute_tool_keeping_cache_warm(self, function_call: dict[str, Any]) -> tuple[str, str]:
         """Run a tool call that may outlive the prompt cache, pinging the cache meanwhile.
@@ -1209,6 +1266,9 @@ class KISSAgent(Base):
             with keep_alive:
                 return self._execute_tool(function_call, blocked=None)
         finally:
+            # A Stop landing on ``__exit__``'s entry skips its join: stop
+            # the pings again here (idempotent) before reading them.
+            keep_alive.stop()
             # The step footer reports the step's generation call, so its
             # usage is restored once the pings have been billed.
             generation_usage = self.last_call_usage
@@ -1302,7 +1362,7 @@ class KISSAgent(Base):
             return False
         return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
 
-    def _implicit_finish_result(self, explanation: str, *, success: bool, is_continue: bool) -> str:
+    def _implicit_finish_result(self, explanation: str) -> str:
         """Build the result for an implicit finish.
 
         Preserves the registered ``finish`` tool's output contract: callers
@@ -1321,8 +1381,6 @@ class KISSAgent(Base):
         Args:
             explanation: Why the run is being finished implicitly (which
                 net fired and for how many turns).
-            success: ``success`` value for the structured contract.
-            is_continue: ``is_continue`` value for the structured contract.
 
         Returns:
             str: The implicit result in the registered finish contract.
@@ -1338,11 +1396,22 @@ class KISSAgent(Base):
         if "summary_in_html" in params:
             summary = explanation + (f" Last status from the model: {text}" if text else "")
             assert finish_fn is not None
-            return str(finish_fn(success=success, is_continue=is_continue, summary_in_html=summary))
+            return str(finish_fn(success=True, is_continue=False, summary_in_html=summary))
         if "result" in params:
             assert finish_fn is not None
             return str(finish_fn(result=text or explanation))
         return text or explanation
+
+    def _print_tool_call(self, name: str, args: dict[str, Any], call_id: int) -> None:
+        """Emit the ``tool_call`` event that opens the UI's panel for one call.
+
+        Args:
+            name: The tool's name.
+            args: The call's arguments.
+            call_id: The id the panel's Stop button sends back.
+        """
+        if self.printer:
+            self.printer.print(name, type="tool_call", tool_input=args, call_id=call_id)
 
     def _execute_tool(
         self,
@@ -1370,15 +1439,8 @@ class KISSAgent(Base):
         # interruptible (its result IS the task's result).
         token = new_tool_call(function_name)
 
-        if self.printer:
-            self.printer.print(
-                function_name,
-                type="tool_call",
-                tool_input=function_args,
-                call_id=token.call_id,
-            )
-
         if blocked is not None:
+            self._print_tool_call(function_name, function_args, token.call_id)
             refused = refusal_result(function_name, blocked)
             if self.printer:
                 self.printer.print(
@@ -1398,10 +1460,14 @@ class KISSAgent(Base):
         # the interrupt lands as ToolCallInterrupted, raised by the tool
         # itself at a safe point, injected into it, or — when the tool
         # returned first — drained by end_tool_call, so it can never
-        # escape into the agent loop.
+        # escape into the agent loop.  Registered BEFORE the ``tool_call``
+        # event goes out: the event carries the ``call_id`` the panel's
+        # Stop button sends back, and a click that arrived between the
+        # two used to find no running call and be rejected.
         try:
             if function_name != "finish":
                 register_tool_call(token)
+            self._print_tool_call(function_name, function_args, token.call_id)
             try:
                 if function_name not in self.function_map:  # pragma: no cover
                     raise KISSError(f"Function {function_name} is not a registered tool")
@@ -1565,8 +1631,8 @@ class KISSAgent(Base):
         raises is billed for what the provider charged anyway: a
         truncated, incomplete or refused response, or a timed-out
         whole-task run, raises an ``Exception`` after the partial usage
-        is billed and the event emitted; a Stop (``KeyboardInterrupt``)
-        does the same without letting an accounting failure replace it.
+        is billed and the event emitted, and a Stop (``KeyboardInterrupt``)
+        does the same; neither lets an accounting failure replace it.
         A Stop already requested of this thread is raised before the
         request is made: a stopped task pays for no further model call,
         whether or not a printer or a tool is there to notice the stop.
@@ -1589,49 +1655,45 @@ class KISSAgent(Base):
         try:
             result = call()
         except Exception as e:
-            self._bill_partial_usage()
-            self._print_llm_call(started)
+            self._bill_failed_call(started)
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
                 ) from e
             raise
         except BaseException:
-            self._bill_stopped_call(started)
+            self._bill_failed_call(started)
             raise
         self._update_tokens_and_budget_from_response(result[-1])
         self._print_llm_call(started)
         return result
 
-    def _bill_partial_usage(self) -> None:
-        """Account the usage of a generation call that raised, if any.
+    def _bill_failed_call(self, started: float) -> None:
+        """Account a generation call that raised (a provider error or a Stop).
 
         The model may have been billed for a call that then failed: a
         complete response the adapter rejected (truncated, incomplete,
         refused) or usage observed mid-stream (Claude Code's per-message
         deltas).  :meth:`Model.take_partial_usage_response` hands it over
-        exactly once.  Duck-typed model stand-ins may predate the hook.
-        """
-        take_partial = getattr(self.model, "take_partial_usage_response", None)
-        partial = take_partial() if callable(take_partial) else None
-        if partial is not None:
-            self._update_tokens_and_budget_from_response(partial)
-
-    def _bill_stopped_call(self, started: float) -> None:
-        """Account a call interrupted by a Stop (``KeyboardInterrupt``).
-
-        Bills the usage seen so far to this run (not to the adapter's
-        next call) and emits its ``llm_call`` event, so the per-call
-        records add up to the task's cost.  Nothing raised here may
-        replace the Stop: an unpriced model's ``KISSError`` and printer
-        failures are swallowed.
+        exactly once (duck-typed model stand-ins may predate the hook);
+        it is billed to this run (not to the adapter's next call) and its
+        ``llm_call`` event emitted, so the per-call records add up to the
+        task's cost.  Nothing raised here may replace the call's own
+        exception: an unpriced model's ``KISSError`` would turn a
+        retryable provider error into a terminal one, and a printer
+        failure would hide the real cause; both are logged and swallowed.
 
         Args:
             started: ``time.time()`` taken right before the call.
         """
-        with contextlib.suppress(Exception):
-            self._bill_partial_usage()
+        try:
+            take_partial = getattr(self.model, "take_partial_usage_response", None)
+            partial = take_partial() if callable(take_partial) else None
+            if partial is not None:
+                self._update_tokens_and_budget_from_response(partial)
             self._print_llm_call(started)
+        except Exception:
+            logger.warning("Billing a failed model call raised", exc_info=True)
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
         """Updates token counter and budget from API response.
@@ -1706,6 +1768,7 @@ class KISSAgent(Base):
                 "cache_read": cache_read,
                 "cache_write": cache_write + cache_write_1h,
                 "cost": cost,
+                "stop_reason": stop_reason_of(response),
             }
             # ONE store publishes tokens and cost together (see the
             # docstring): a stop injected anywhere in this method now
@@ -1760,14 +1823,24 @@ class KISSAgent(Base):
                 spent, cap = self.budget_used, self.max_budget
             added = (
                 f"This step's tool output: ~{self._last_results_chars // 4:,} tokens, "
-                if self._last_results_chars > 0 else ""
+                if self._last_results_chars > 0
+                else ""
             )
-            last_cost = float((self.last_call_usage or {}).get("cost") or 0.0)
+            usage = self.last_call_usage or {}
+            last_cost = float(usage.get("cost") or 0.0)
             step_cost = f"This step's model call: ${last_cost:.4f}, " if last_cost > 0 else ""
+            # The output size and stop reason make an exhausted output cap
+            # visible in the trajectory instead of inferred from totals.
+            output = (
+                f"This step's output: {int(usage.get('output_tokens') or 0):,} tokens"
+                f" (stop: {usage.get('stop_reason') or 'unknown'}), "
+                if usage
+                else ""
+            )
             return (
                 f"Steps: {self.step_count}/{self.max_steps}, "
                 f"Context: {self.context_tokens_used:,}/{max_tokens:,} tokens, "
-                f"{added}{step_cost}"
+                f"{added}{step_cost}{output}"
                 f"Total tokens: {self.total_tokens_used:,}, "
                 f"Budget: ${spent:.4f}/${cap:.2f}, "
             )

@@ -18,36 +18,29 @@
 
 const assert = require('assert');
 const {makePage: makeChatPage, send} = require('./simplify2_harness');
-const {historyRows, visibleTitles, lastGetHistory} = require('./history_helpers');
+const {
+  historyRows,
+  visibleTitles,
+  lastGetHistory,
+  finishedSession,
+} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
   return {win, posted};
 }
 
+/** A finished row, of the registered `machine` when one is given; `extra` on top. */
 function session(id, title, machine, extra) {
-  return Object.assign(
-    {
-      id: 'chat-' + id,
-      task_id: 'task-' + id,
-      title,
-      timestamp: 1_700_000_000 + id * 100,
-      preview: title,
-      has_events: false,
-      failed: false,
-      is_running: false,
-      tokens: 0,
-      cost: 0,
-      steps: 0,
-      is_favorite: false,
-      work_dir: '',
-      startTs: (1_700_000_000 + id * 100) * 1000,
-      endTs: (1_700_000_000 + id * 100) * 1000 + 10_000,
-    },
-    machine
-      ? {machine, machine_url: 'https://' + machine.trim() + ':8787'}
-      : {},
-    extra || {},
+  return finishedSession(
+    id,
+    title,
+    Object.assign(
+      machine
+        ? {machine, machine_url: 'https://' + machine.trim() + ':8787'}
+        : {},
+      extra || {},
+    ),
   );
 }
 
@@ -716,17 +709,7 @@ function testSelectingAMachineKeepsChatsCollapsed() {
     1,
     'the rest stay collapsed',
   );
-  // A search text, by contrast, unfolds the matches.
-  const search = win.document.getElementById('history-search');
-  search.value = 'box';
-  search.dispatchEvent(new win.Event('input', {bubbles: true}));
-  send(win, historyReply(posted, SESSIONS, MACHINES));
-  assert.ok(
-    groups(win)
-      .filter(g => g.style.display !== 'none')
-      .every(g => !g.classList.contains('collapsed')),
-    'a search unfolds its matches',
-  );
+  // (A search text unfolding its matches is historyGroups' subject.)
   win.close();
   console.log('  ok - selecting a machine keeps the chats collapsed');
 }
@@ -746,11 +729,5 @@ function runTests() {
   testAnUnsentMachinePickDoesNotHideTheChatsTab();
 }
 
-try {
-  runTests();
-  console.log('\n12 passed, 0 failed');
-  process.exit(0);
-} catch (err) {
-  console.error('FAIL:', err && err.stack ? err.stack : err);
-  process.exit(1);
-}
+runTests();
+console.log('\nhistoryMachineFilter: all tests passed');

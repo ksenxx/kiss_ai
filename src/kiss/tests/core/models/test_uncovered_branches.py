@@ -13,16 +13,11 @@ from unittest import TestCase
 class TestModelBareListSchema(TestCase):
     def test_bare_list_type_produces_array(self) -> None:
         """list (no type args) should produce {"type": "array"}."""
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel(
-            model_name="gpt-4o-mini",
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-        )
         import typing
 
-        schema = m._python_type_to_json_schema(typing.List)  # noqa: UP006
+        from kiss.core.models.model import _python_type_to_json_schema
+
+        schema = _python_type_to_json_schema(typing.List)  # noqa: UP006
         assert schema == {"type": "array"}
 
 

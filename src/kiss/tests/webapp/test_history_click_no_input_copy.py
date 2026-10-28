@@ -6,7 +6,7 @@
 
 The real assertions live in
 ``src/kiss/webapp/test/historyClickNoInputCopy.test.js`` (run
-under node, mirrors ``historyClickSwitchExistingChat.test.js``).  This
+under node).  This
 wrapper spawns ``node`` on that file so the integration test is also
 picked up by ``uv run pytest`` and shows up in CI alongside the rest of
 the webapp Python tests.

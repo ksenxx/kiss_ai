@@ -39,7 +39,7 @@ from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
 )
-from kiss.tests.server.test_terminal_tab_service import hermetic_shell
+from kiss.tests.server.test_terminal_tab_service import hermetic_shell, session_count
 from kiss.tests.webapp.test_workspace_sections import (
     _dismiss_update_toast,
     _set_work_dir,
@@ -160,7 +160,7 @@ def _wait_for_sizes(page, count: int) -> None:
 
 
 def _sessions(harness: ExplorerHarness) -> int:
-    return harness.server._agent_server.terminals.session_count()
+    return session_count(harness.server._agent_server.terminals)
 
 
 def _wait_sessions(harness: ExplorerHarness, want: int, timeout: float = 15) -> None:

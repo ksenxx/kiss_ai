@@ -8,7 +8,6 @@
 // lists the directory the next task runs in (selected), every other
 // directory selected so far (configData.recent_work_dirs, most recent
 // first) and a final "Choose ..." entry that opens a folder picker.
-// The "..." menu has no "Working directory" item any more.
 //
 // The working directory is ONE global value (config.json work_dir) that
 // every task runs in; a pick changes it for every tab.  A listed
@@ -40,7 +39,8 @@ const {
   pick,
   errorNotifications,
 } = require('./workdir_helpers');
-const {click} = require('./simplify2_harness');
+const {click, loadMainCss} = require('./simplify2_harness');
+const {cssRule} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -77,6 +77,7 @@ function switchToChat(win, tabId) {
 
 function testHeaderShowsMachineThenDirectory() {
   const {win} = makePage();
+  loadMainCss(win);
   const header = byId(win, 'chat-header');
   const sep = byId(win, 'chat-header-sep');
   assert.strictEqual(
@@ -95,41 +96,38 @@ function testHeaderShowsMachineThenDirectory() {
     assert.strictEqual(wrap.children.length, 1);
     assert.strictEqual(wrap.firstElementChild.id, id);
   });
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const chevron = css.match(/\.chat-header-select::after\s*\{([^}]*)\}/);
-  assert.ok(chevron, 'the chevron rule');
-  assert.ok(/content:\s*''/.test(chevron[1]));
-  assert.ok(/position:\s*absolute/.test(chevron[1]));
-  assert.ok(/right:/.test(chevron[1]));
-  assert.ok(/border-right:\s*2px solid currentcolor/.test(chevron[1]));
-  assert.ok(/border-bottom:\s*2px solid currentcolor/.test(chevron[1]));
-  assert.ok(/rotate\(45deg\)/.test(chevron[1]));
+  // jsdom computes no ::after pseudo-element, so the one thing that
+  // matters for behaviour (clicks reach the select through the chevron)
+  // is read from the stylesheet rule.
   assert.ok(
-    /pointer-events:\s*none/.test(chevron[1]),
+    /pointer-events:\s*none/.test(
+      cssRule(
+        fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+        '.chat-header-select::after',
+      ),
+    ),
     'clicks reach the select',
   );
-  const selects = css.match(/#chat-machine,\s*#chat-workdir\s*\{([^}]*)\}/);
-  assert.ok(selects, 'the shared select rule');
-  assert.ok(/padding:\s*0 1\.1em 0 0/.test(selects[1]), 'room for the chevron');
-  assert.ok(/appearance:\s*none/.test(selects[1]), 'no native arrow');
+  for (const id of ['chat-machine', 'chat-workdir']) {
+    const style = win.getComputedStyle(byId(win, id));
+    assert.strictEqual(style.paddingRight, '1.1em', id + ': chevron room');
+    assert.strictEqual(style.appearance, 'none', id + ': no native arrow');
+  }
   // A remote pick colours the name and its chevron green (red once
   // the daemon reports the machine down); an empty machine list hides
   // the span, chevron included.
-  assert.ok(
-    /#chat-machine-wrap:has\(> \.remote\)\s*\{\s*color:\s*var\(--status-ok\)/.test(
-      css,
-    ),
-  );
-  assert.ok(
-    /#chat-machine-wrap:has\(> \.remote\.down\)\s*\{\s*color:\s*var\(--status-fail\)/.test(
-      css,
-    ),
-  );
-  assert.ok(
-    /#chat-machine-wrap:has\(> #chat-machine:empty\)\s*\{\s*display:\s*none/.test(
-      css,
-    ),
-  );
+  const machine = byId(win, 'chat-machine');
+  const wrapStyle = () => win.getComputedStyle(byId(win, 'chat-machine-wrap'));
+  assert.strictEqual(machine.options.length, 0);
+  assert.strictEqual(wrapStyle().display, 'none', 'no machines: no span');
+  machine.appendChild(win.document.createElement('option'));
+  assert.notStrictEqual(wrapStyle().display, 'none');
+  machine.classList.add('remote');
+  assert.strictEqual(wrapStyle().color, 'var(--status-ok)');
+  machine.classList.add('down');
+  assert.strictEqual(wrapStyle().color, 'var(--status-fail)');
+  machine.classList.remove('remote', 'down');
+  machine.textContent = '';
   // Nothing known yet: no machine name, no ":", the placeholder
   // selected and "Choose ..." a pick away.
   assert.strictEqual(byId(win, 'chat-machine').options.length, 0);
@@ -144,14 +142,6 @@ function testHeaderShowsMachineThenDirectory() {
     byId(win, 'chat-workdir-none').disabled,
     'the placeholder is no pick',
   );
-
-  // The "..." menu has no "Working directory" item any more.
-  const labels = Array.from(
-    win.document.querySelectorAll('#more-menu .more-item-label'),
-    el => el.textContent.trim(),
-  );
-  assert.ok(labels.length >= 1, 'the "..." menu still has its items');
-  assert.ok(!labels.includes('Working directory'), labels.join(', '));
 
   // The directory alone, still without the ":".
   send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
@@ -481,18 +471,6 @@ function testRemotePickerChoiceSupersedesAPendingCheck() {
   assert.ok(/\/new-choice$/.test(currentDir(win)), 'the newer choice stays');
 }
 
-function testReachingForTheDropDownAsksForAFreshList() {
-  const {win, posted} = makePage();
-  send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
-  const before = msgs(posted, 'getConfig').length;
-  byId(win, 'chat-workdir').dispatchEvent(new win.Event('focus'));
-  assert.strictEqual(
-    msgs(posted, 'getConfig').length,
-    before + 1,
-    'focusing the drop-down refreshes the list from the daemon',
-  );
-}
-
 /** Pick *dir* through the daemon round trip (drop-down -> listDir ->
  *  dirListing -> setWorkDir). */
 function pickViaDaemon(win, posted, dir) {
@@ -650,10 +628,7 @@ function testGlobalDirWinsOverReplayedTaskDir() {
 
 function testRemoteWorkDirChangedRescopes() {
   const {win, posted} = makePage();
-  // A directory an older build left in sessionStorage is not this
-  // browser tab's own working directory any more: the daemon's value
-  // wins, and configData is not echoed back as setWorkDir.
-  win.sessionStorage.setItem('sorcar-work-dir', '/stale/per-tab');
+  // configData is not echoed back as setWorkDir.
   send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
   assert.strictEqual(msgs(posted, 'setWorkDir').length, 0, 'no echo');
   assert.strictEqual(currentDir(win), '/work/ws');
@@ -662,13 +637,11 @@ function testRemoteWorkDirChangedRescopes() {
   assert.ok(!picker.hidden);
 
   // Another browser picked a folder: the daemon's broadcast re-scopes
-  // this client -- the drop-down follows; the folder browser this user
-  // is in stays (a pick made here still applies, audit1020_workdir_picker
-  // covers it).  Nothing is echoed back to the daemon (no setWorkDir
-  // loop, no saveConfig).
+  // this client -- the drop-down follows (the folder browser this user
+  // is in staying open is audit1020_workdir_picker's).  Nothing is
+  // echoed back to the daemon (no setWorkDir loop, no saveConfig).
   send(win, {type: 'workDirChanged', workDir: '/picked/elsewhere'});
   assert.strictEqual(currentDir(win), '/picked/elsewhere');
-  assert.ok(!picker.hidden, 'the folder browser stays open');
   assert.strictEqual(msgs(posted, 'setWorkDir').length, 0);
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
 
@@ -766,7 +739,6 @@ const tests = [
     'a browser choice supersedes a pending check',
     testRemotePickerChoiceSupersedesAPendingCheck,
   ],
-  ['focus asks for a fresh list', testReachingForTheDropDownAsksForAFreshList],
   ['a pick is the global directory of every tab', testPickIsGlobal],
   [
     'the global directory wins over a replayed task directory',

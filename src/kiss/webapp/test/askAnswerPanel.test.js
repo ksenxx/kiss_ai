@@ -162,20 +162,6 @@ function testAnswerStaysOpenWhileTaskStreams() {
   console.log('  ok - the answer stays open while the task keeps streaming');
 }
 
-function testHeaderClickCollapsesBody() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  const tab = win._testApi.getActiveTabId();
-  send(win, askAnswerEvent({tabId: tab}));
-  const panel = win.document.querySelector('#output .ev.ask-answer');
-  assert.ok(!panel.classList.contains('collapsed'), 'starts expanded');
-  panel.querySelector('.ask-answer-h').click();
-  assert.ok(panel.classList.contains('collapsed'), 'header click collapses');
-  panel.querySelector('.ask-answer-h').click();
-  assert.ok(!panel.classList.contains('collapsed'), 'second click expands');
-  win.close();
-  console.log('  ok - header click toggles the answer panel');
-}
-
 function testBackgroundTabAnswerSurvivesTabSwitch() {
   const {win} = makePage({beforeScripts: stubRaf});
   const api = win._testApi;
@@ -380,22 +366,23 @@ function testStaleAnswerInPreAdoptionWindowIsDropped() {
   );
 }
 
-function runTests() {
-  testLiveAnswerRendersInActiveTab();
-  testFailedAnswerIsMarked();
-  testAnswerStaysOpenWhileTaskStreams();
-  testHeaderClickCollapsesBody();
-  testBackgroundTabAnswerSurvivesTabSwitch();
-  testReplayRendersPersistedAnswer();
-  testForeignTabAnswerDropped();
-  testStaleAnswerForReusedTabIsDropped();
-  testStaleAnswerForReusedBackgroundTabIsDropped();
-  testStaleAnswerInPreAdoptionWindowIsDropped();
-}
+// The header-click fold/unfold of the answer panel is pinned for both
+// panel kinds by askPanelsNeverCollapsed.test.js (testUserStillFoldsByHand).
+const TESTS = [
+  testLiveAnswerRendersInActiveTab,
+  testFailedAnswerIsMarked,
+  testAnswerStaysOpenWhileTaskStreams,
+  testBackgroundTabAnswerSurvivesTabSwitch,
+  testReplayRendersPersistedAnswer,
+  testForeignTabAnswerDropped,
+  testStaleAnswerForReusedTabIsDropped,
+  testStaleAnswerForReusedBackgroundTabIsDropped,
+  testStaleAnswerInPreAdoptionWindowIsDropped,
+];
 
 try {
-  runTests();
-  console.log('\n10 passed, 0 failed');
+  for (const test of TESTS) test();
+  console.log('\n' + TESTS.length + ' passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

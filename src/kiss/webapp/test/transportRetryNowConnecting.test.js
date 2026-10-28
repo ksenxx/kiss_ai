@@ -17,6 +17,8 @@
 const assert = require('assert');
 const {
   installFakeWebSocket,
+  installFakeTimers,
+  pendingTimers,
   newAuthDom,
   bootShim,
 } = require('./transport_page_helpers');
@@ -27,25 +29,10 @@ const {
 function page() {
   const {window} = newAuthDom();
   const sockets = [];
-  const timers = [];
   const intervals = [];
   const clock = {now: 1000000};
   installFakeWebSocket(window, sockets, {connecting: true});
-  window.setTimeout = function (fn, ms) {
-    timers.push({fn, ms, cleared: false});
-    return timers.length;
-  };
-  window.clearTimeout = function (id) {
-    if (timers[id - 1]) timers[id - 1].cleared = true;
-  };
-  window.setInterval = function (fn, ms) {
-    intervals.push({fn, ms, cleared: false});
-    return intervals.length;
-  };
-  window.clearInterval = function (id) {
-    if (intervals[id - 1]) intervals[id - 1].cleared = true;
-  };
-  window.Date.now = () => clock.now;
+  const timers = installFakeTimers(window, {intervals, clock});
   bootShim(window);
   return {window, sockets, timers, intervals, clock};
 }
@@ -63,9 +50,9 @@ function main() {
   // The first socket opened and the session was authenticated, then
   // the server went away: an outage with a reconnect timer pending.
   sockets[0].fireOpen();
-  sockets[0].onmessage({data: JSON.stringify({type: 'auth_ok'})});
+  sockets[0].fireMessage({type: 'auth_ok'});
   sockets[0].fireClose();
-  const pending = timers.filter(t => !t.cleared && t.ms >= 500);
+  const pending = pendingTimers(timers).filter(t => t.ms >= 500);
   assert.strictEqual(pending.length, 1, 'one reconnect timer is pending');
   clock.now += 9000;
   runTicks(intervals);
@@ -95,7 +82,7 @@ function main() {
 
   // The handshake completes on the socket the first click opened.
   inFlight.fireOpen();
-  inFlight.onmessage({data: JSON.stringify({type: 'auth_ok'})});
+  inFlight.fireMessage({type: 'auth_ok'});
   assert.strictEqual(retryButton(window), null, 'auth_ok clears the button');
 
   // The button still works once the socket is closed again.

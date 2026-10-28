@@ -10,8 +10,10 @@ Review R5 of the sign-in window (:mod:`kiss.server.signin`):
    before terminating the hook.  A paste the hook never read fills the
    pipe and leaves its writer blocked on the stream's buffer lock, which
    ``close()`` needs too: cancel, a replacing click and the daemon's
-   shutdown hung behind it.  Now the hook is terminated first and a
-   thread closes the stream once it is dead.
+   shutdown hung behind it.  Now the pipe is non-blocking (a paste that
+   does not fit is refused, never parked), so no writer ever holds the
+   stream: cancel closes it and terminates the hook at once, and a
+   thread kills a hook that ignores SIGTERM.
 2. A ``status`` answer computed before a sign-in succeeded could be
    published after its ``signinDone``, reopening the window.  Now the
    answer is handed to the page under the status lock, in one step with
@@ -41,8 +43,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import FrameType
 
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.server import signin
 from kiss.server.signin import SIGNIN_HOOK
 from kiss.tests.conftest import posix_only
@@ -80,6 +82,11 @@ def _writable(fd: int) -> bool:
     return bool(select.select([], [fd], [], 0)[1])
 
 
+def _pending_send_count(pending: dict[object, set[object]]) -> int:
+    """Sends still in flight across every endpoint of a printer's ``_pending_sends``."""
+    return sum(len(futures) for futures in pending.values())
+
+
 def _pipe_capacity(fd: int) -> int:
     """Bytes the pipe of *fd* takes before a write blocks."""
     get_size = getattr(fcntl, "F_GETPIPE_SZ", None)  # Linux only
@@ -88,22 +95,8 @@ def _pipe_capacity(fd: int) -> int:
     return int(fcntl.fcntl(fd, get_size))
 
 
-def _pastes_in_flight() -> int:
-    """Threads inside :meth:`SigninLogin.paste` right now: pastes the hook has not taken."""
-    code = signin.SigninLogin.paste.__code__
-    count = 0
-    for top in sys._current_frames().values():
-        frame: FrameType | None = top
-        while frame is not None:
-            if frame.f_code is code:
-                count += 1
-                break
-            frame = frame.f_back
-    return count
-
-
-class TestCancelBehindABlockedPaste(SigninHookCase):
-    """Issue 1: a paste the hook never reads cannot hold up cancel, replace or shutdown."""
+class TestCancelBehindAFullPipe(SigninHookCase):
+    """Issue 1: pastes the hook never reads cannot hold up cancel, replace or shutdown."""
 
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
@@ -111,27 +104,54 @@ class TestCancelBehindABlockedPaste(SigninHookCase):
         signin.HOOK_END_TIMEOUT = 0.3
         self.addCleanup(setattr, signin, "HOOK_END_TIMEOUT", saved)
 
+    def _sends_in_flight(self) -> int:
+        """How many replies the printer has scheduled but not yet written."""
+        printer = self.server._printer
+        return locked_call(printer._ws_lock, _pending_send_count, printer._pending_sends)
+
+    async def _landed_signin_events(self, reader) -> list[dict[str, object]]:
+        """The sign-in events every command sent so far on *reader* produced.
+
+        A paste's refusal is a broadcast scheduled on the loop, while
+        the ``pong`` answering a ping is sent inline, so a pong can
+        overtake a refusal queued before the ping and the next batch
+        would then see two.  The pong does guarantee the paste was
+        handled and its refusal, if any, is among the printer's pending
+        sends; once those have all been written, a second ping's batch
+        holds whatever the first one missed.
+        """
+        landed = await self._pending_signin_events(reader)
+        for _ in range(500):
+            if not self._sends_in_flight():
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(self._sends_in_flight(), 0, "a queued reply never landed")
+        return landed + await self._pending_signin_events(reader)
+
     async def _fill_the_hooks_pipe(self, reader) -> subprocess.Popen[str]:
-        """Start the ``stubborn`` hook (never reads stdin) and paste until its pipe is full."""
+        """Start the ``stubborn`` hook (never reads stdin) and paste until its pipe is full.
+
+        The paste that no longer fits is refused at once, as a
+        ``signinError``: the pipe is non-blocking, so no paste is ever
+        parked in it.  One paste is sent per batch and the batch holds
+        every refusal produced so far, so the first non-empty batch
+        holds exactly the refusal of the paste that did not fit.
+        """
         await self._send(reader, {"type": "signinLogin", "provider": "stubborn"})
         await self._wait_for_event(reader, "signinUrl")
         proc = self.server._server_api.signin._proc
         assert proc is not None and proc.stdin is not None
         fd = proc.stdin.fileno()
-        pastes = _pipe_capacity(fd) // signin.PASTE_LIMIT + 2
-        for _ in range(pastes):
+        for _ in range(_pipe_capacity(fd) // signin.PASTE_LIMIT + 2):
             await self._send(reader, {"type": "signinPaste", "text": "x" * signin.PASTE_LIMIT})
-        # The pastes exceed the pipe: once it is full (its write end no
-        # longer writable) and the pastes still in their write have
-        # stopped getting through, one of them is blocked in it.
-        in_flight, stable = 0, 0
-        deadline = time.monotonic() + 10
-        while stable < 30 and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-            now = _pastes_in_flight() if not _writable(fd) else 0
-            stable = stable + 1 if now and now == in_flight else 0
-            in_flight = now
-        self.assertEqual(stable, 30, "no paste is blocked")
+            refused = await self._landed_signin_events(reader)
+            if refused:
+                break
+        else:
+            self.fail("no paste was refused")
+        self.assertEqual([e["type"] for e in refused], ["signinError"])
+        self.assertIn("No sign-in is in progress", str(refused[0]["error"]))
+        self.assertFalse(_writable(fd), "the pipe is not full")
         return proc
 
     async def test_cancel_from_another_window_is_answered_and_the_hook_dies(self) -> None:
@@ -139,15 +159,16 @@ class TestCancelBehindABlockedPaste(SigninHookCase):
         reader_a, _ = await self._ready("tab-a")
         reader_b, _ = await self._ready("tab-b")
         proc = await self._fill_the_hooks_pipe(reader_a)
-        # A's paste is blocked in the hook's pipe; B's cancel must not wait for it.
+        # The hook's pipe is full; B's cancel must not wait for the hook to drain it.
         started = time.monotonic()
         await self._send(reader_b, {"type": "signinCancel"})
         await self._send(reader_b, {"type": "ping"})
         await self._wait_for_event(reader_b, "pong", timeout=3.0)
         self.assertLess(time.monotonic() - started, 3.0)
         self.assertIsNone(self.server._server_api.signin._proc)
-        # SIGTERM is ignored; the fallback kill ends the hook and frees the paste.
+        # SIGTERM is ignored; the fallback kill ends the hook.
         self.assertEqual(await asyncio.to_thread(proc.wait, 5), -9)
+        await self._send(reader_a, {"type": "signinPaste", "text": "late"})
         error = await self._wait_for_event(reader_a, "signinError")
         self.assertIn("No sign-in is in progress", str(error["error"]))
         for _ in range(500):
@@ -157,7 +178,7 @@ class TestCancelBehindABlockedPaste(SigninHookCase):
         self.assertEqual(self.server._server_api.signin._ending, [])
         self.assertTrue(proc.stdin is not None and proc.stdin.closed)
 
-    async def test_a_replacing_click_is_answered_while_a_paste_is_blocked(self) -> None:
+    async def test_a_replacing_click_is_answered_while_the_pipe_is_full(self) -> None:
         self._install_hook()
         reader_a, _ = await self._ready("tab-a")
         reader_b, _ = await self._ready("tab-b")
@@ -170,7 +191,7 @@ class TestCancelBehindABlockedPaste(SigninHookCase):
         done = await self._wait_for_event(reader_b, "signinDone")
         self.assertEqual(done["email"], "me@example.com")
 
-    async def test_shutdown_is_bounded_while_a_paste_is_blocked(self) -> None:
+    async def test_shutdown_is_bounded_while_the_pipe_is_full(self) -> None:
         self._install_hook()
         reader_a, _ = await self._ready("tab-a")
         proc = await self._fill_the_hooks_pipe(reader_a)

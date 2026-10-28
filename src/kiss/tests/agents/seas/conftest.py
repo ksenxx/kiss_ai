@@ -20,7 +20,7 @@ import yaml
 
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
 from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import machines, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -97,8 +97,8 @@ def git(
     ).stdout.strip()
 
 
-def seed_repo(repo: Path) -> None:
-    """Create a git repository at *repo*, on branch ``main``, with one committed ``seed.txt``.
+def init_repo(repo: Path) -> None:
+    """Create an empty git repository at *repo*, on branch ``main``, ready to commit in.
 
     The repository gets its own identity and ``commit.gpgsign = false``
     for the commits the SEA under test makes in it with the process
@@ -109,6 +109,11 @@ def seed_repo(repo: Path) -> None:
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "config", "user.name", "Test User")
     git(repo, "config", "commit.gpgsign", "false")
+
+
+def seed_repo(repo: Path) -> None:
+    """Create a git repository at *repo* (:func:`init_repo`) with one committed ``seed.txt``."""
+    init_repo(repo)
     commit(repo, "seed", {"seed.txt": "seed\n"})
 
 
@@ -150,6 +155,40 @@ def reset_registry() -> Iterator[None]:
     yield
     sea_commands._reset_for_tests()
     (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+
+
+@pytest.fixture
+def empty_machines() -> Iterator[None]:
+    """Run the test with no registered machine; restore the registry afterwards.
+
+    The machine registry lives in the session-wide ``KISS_HOME``: a test
+    that lists or registers machines must not see (or leave behind) the
+    ones another test registered.
+    """
+    previous = machines.load_machines()
+    machines.save_machines([])
+    yield
+    machines.save_machines(previous)
+
+
+@pytest.fixture
+def no_connected_apps() -> Iterator[Path]:
+    """Run the test with no third-party app signed in; yield the Brave Search config path.
+
+    The one credential a test can leave behind in the session-wide
+    ``KISS_HOME`` is the Brave Search key file: it is removed before the
+    test (a test that wants an app connected writes it) and whatever was
+    there before is restored afterwards.
+    """
+    brave = kiss_home() / "third_party_agents" / "brave_search" / "config.json"
+    saved = brave.read_text(encoding="utf-8") if brave.exists() else None
+    brave.unlink(missing_ok=True)
+    yield brave
+    if saved is None:
+        brave.unlink(missing_ok=True)
+    else:
+        brave.parent.mkdir(parents=True, exist_ok=True)
+        brave.write_text(saved, encoding="utf-8")
 
 
 @pytest.fixture

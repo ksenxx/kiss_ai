@@ -16,20 +16,17 @@
 
 const assert = require('assert');
 const {typeAndEnter, submits} = require('./attachment_helpers');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  persistedDrafts,
+} = require('./simplify2_harness');
 
 function makePage() {
   const {win, posted, getState} = makeChatPage({beforeScripts: stubRaf});
   win._testApi.endLaunch();
   return {win, posted, getState};
-}
-
-// The drafts the page would hand back after a reload: what the
-// `pagehide` handler persists (persistTabState).
-function persistedDrafts(win, getState) {
-  win.dispatchEvent(new win.Event('pagehide'));
-  const state = getState();
-  return (state && state.inputDrafts) || {};
 }
 
 // The task the visible tab has claimed, as main.js reports it to voice.js.

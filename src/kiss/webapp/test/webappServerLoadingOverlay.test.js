@@ -18,14 +18,11 @@ const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
-  waitForSocket,
+  ok,
 } = require('./transport_page_helpers');
+const {captureTimers} = require('./simplify2_harness');
 
 const RECONNECTING = 'Reconnecting to KISS Sorcar Server ...';
-
-function ok(msg) {
-  console.log('  ok -', msg);
-}
 
 /** A booted shim page: its fake sockets and every daemonStatus it dispatched. */
 function boot(prepare) {
@@ -92,17 +89,22 @@ async function run() {
   }
 
   {
-    const {window, sockets, sock} = boot();
+    // transport.js reconnects after onclose: _scheduleReconnect arms
+    // the first backoff at 500-1000 ms (jittered).  The timer is
+    // recorded and fired by hand rather than waited for.
+    let timers;
+    const {window, sockets, sock} = boot(window => {
+      timers = captureTimers(window);
+    });
     sock.fireOpen();
     sock.fireMessage({type: 'auth_ok'});
+    timers.length = 0;
     sock.fireClose();
-    // transport.js reconnects after onclose: _scheduleReconnect arms
-    // the first backoff at 500-1000 ms (jittered), and the wake-up
-    // listeners (pageshow, which jsdom fires right after load, and
-    // visibilitychange / online) reconnect at once.  The second socket
-    // is awaited with a bound well past the backoff, so a busy box
-    // cannot turn the backoff's jitter into a spurious failure.
-    await waitForSocket(sockets, 2);
+    const backoff = timers.filter(t => t.ms >= 500 && t.ms < 1000);
+    assert.strictEqual(backoff.length, 1, 'onclose arms one 0.5-1 s backoff');
+    assert.strictEqual(sockets.length, 1, 'no socket before the backoff fires');
+    backoff[0].cb();
+    assert.strictEqual(sockets.length, 2, 'the backoff opens a 2nd socket');
     ok('onclose reconnects: a 2nd socket is opened');
     window.close();
   }

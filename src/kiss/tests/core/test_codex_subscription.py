@@ -51,7 +51,8 @@ FINAL_TEXT = "SUBSCRIPTION-OK"
 # The fake ``codex``: ``login status`` prints $cfg[status] on stderr and
 # exits per $cfg[status_exit]; ``login --device-auth`` prints the
 # device-code banner (ANSI colored like the real CLI), then sleeps
-# $cfg[login_sleep] and exits per $cfg[login_exit]; ``exec`` records argv
+# $cfg[login_sleep] and exits per $cfg[login_exit], after writing
+# $cfg[stderr_noise_lines] log lines to stderr; ``exec`` records argv
 # + the credential variables it sees, waits for the file $cfg[turn_gate]
 # to exist when one is named, prints the events and exits per
 # $cfg[turn_exit].
@@ -66,6 +67,9 @@ if sys.argv[1:3] == ["login", "status"]:
     sys.exit(cfg.get("status_exit", 0))
 if sys.argv[1:3] == ["login", "--device-auth"]:
     pathlib.Path({login_path!r}).write_text(json.dumps(seen))
+    for i in range(cfg.get("stderr_noise_lines", 0)):
+        sys.stderr.write("2026-10-26T20:45:33Z DEBUG codex_core::auth: polling %d\\n" % i)
+    sys.stderr.flush()
     if cfg.get("login_banner", True):
         print("\\nWelcome to Codex [v\\x1b[90m0.163.0\\x1b[0m]\\n")
         print("1. Open this link in your browser and sign in to your account")
@@ -417,6 +421,22 @@ def test_device_login_returns_the_url_and_code_and_leaves_the_cli_polling(
     reaper[0].join(10)
     assert not reaper[0].is_alive()
     assert fake_codex.env_seen_by(fake_codex.login_path)["CODEX_API_KEY"] is None
+
+
+def test_device_login_survives_a_cli_that_floods_stderr_first(fake_codex: _FakeCodex) -> None:
+    """A CLI that logs more than a pipe holds (64 KiB) before the banner still logs in.
+
+    Nothing read stderr while stdout was scanned for the code, so such a
+    CLI blocked on its full stderr pipe and never printed the banner:
+    the login "timed out" every time.
+    """
+    fake_codex.configure(stderr_noise_lines=4000)  # about 230 KiB
+    prompt = codex_device_login(timeout=5)
+    assert prompt == {"url": "https://auth.openai.com/codex/device", "code": "2YCJ-GJHWN"}
+    reaper = [t for t in threading.enumerate() if t.name == "codex-device-login"]
+    assert len(reaper) == 1
+    reaper[0].join(10)
+    assert not reaper[0].is_alive()
 
 
 def test_device_login_without_a_banner_is_an_error(fake_codex: _FakeCodex) -> None:

@@ -12,38 +12,31 @@ function panels(win, cls) {
   return win.document.querySelectorAll('#output .ev.' + cls);
 }
 
-function testEarlyPanelsRenderImmediately() {
+// The early panels render at once; the authoritative events then
+// replace them in place (one panel each, the authoritative text: pinned
+// by promptPanelsCollapsedAndSummarized.test.js) and the replaced panel
+// sheds its `early` mark and carries the authoritative raw text.
+function testEarlyPanelsRenderThenShedTheirMark() {
   const {win} = makePage();
 
   send(win, {type: 'system_prompt', text: 'early SYSTEM text', early: true});
   send(win, {type: 'prompt', text: 'early USER text', early: true});
 
-  const sys = panels(win, 'system-prompt');
-  const pr = panels(win, 'prompt');
+  let sys = panels(win, 'system-prompt');
+  let pr = panels(win, 'prompt');
   assert.strictEqual(sys.length, 1, 'one early system-prompt panel');
   assert.strictEqual(pr.length, 1, 'one early prompt panel');
   assert.ok(sys[0].textContent.includes('early SYSTEM text'));
   assert.ok(pr[0].textContent.includes('early USER text'));
   assert.strictEqual(sys[0].dataset.early, '1');
   assert.strictEqual(pr[0].dataset.early, '1');
-  win.close();
   console.log('  ok - early panels render immediately at submit');
-}
 
-// That the authoritative events replace the early panels (one panel each,
-// the authoritative text) is pinned by
-// promptPanelsCollapsedAndSummarized.test.js; here: the replaced panel
-// sheds its `early` mark and carries the authoritative raw text.
-function testReplacedPanelShedsEarlyMark() {
-  const {win} = makePage();
-
-  send(win, {type: 'system_prompt', text: 'early SYSTEM text', early: true});
-  send(win, {type: 'prompt', text: 'early USER text', early: true});
   send(win, {type: 'system_prompt', text: 'authoritative SYSTEM text'});
   send(win, {type: 'prompt', text: 'authoritative FULL prompt'});
 
-  const sys = panels(win, 'system-prompt');
-  const pr = panels(win, 'prompt');
+  sys = panels(win, 'system-prompt');
+  pr = panels(win, 'prompt');
   assert.strictEqual(sys[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.rawText, 'authoritative FULL prompt');
@@ -87,8 +80,7 @@ function testReplayWithoutEarlyEventsUnchanged() {
 }
 
 const TESTS = [
-  testEarlyPanelsRenderImmediately,
-  testReplacedPanelShedsEarlyMark,
+  testEarlyPanelsRenderThenShedTheirMark,
   testLaterSessionsStillAppend,
   testReplayWithoutEarlyEventsUnchanged,
 ];

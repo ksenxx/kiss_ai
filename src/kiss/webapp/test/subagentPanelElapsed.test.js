@@ -31,8 +31,7 @@
 'use strict';
 
 const assert = require('assert');
-const {send, clickTab: activateTab} = require('./simplify2_harness');
-const {makeWebappClient} = require('./transport_page_helpers');
+const {makePage, send, clickTab: activateTab} = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
 
 /**
@@ -63,26 +62,15 @@ function parseElapsedMs(text) {
 }
 
 /**
- * Boot a client, run a one-task fan-out and capture the sub-agent tab
- * id the client minted when it resumed the sub-agent's session.
+ * Boot a page, run a one-task fan-out and capture the sub-agent tab
+ * id the page minted when it resumed the sub-agent's session.
  *
- * @returns {object} {win, all, parentId, taskId, subTabId}.
+ * @returns {object} {win, parentId, taskId, subTabId}.
  */
 function bootSubagent() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  // The shim buffers frames until drained, so drain after every delivery
-  // for the helper to see the page's resumeSession reply.
-  function deliver(msg) {
-    send(win, msg);
-    all();
-  }
-  const {parentId, taskIds, subTabIds} = bootParallelRun(
-    1,
-    {win, posted: all()},
-    {deliver},
-  );
+  const page = makePage();
+  const {win} = page;
+  const {parentId, taskIds, subTabIds} = bootParallelRun(1, page);
   const subTabId = subTabIds[0];
   send(win, {
     type: 'status',
@@ -90,7 +78,7 @@ function bootSubagent() {
     tabId: subTabId,
     startTs: Date.now(),
   });
-  return {win, all, parentId, taskId: taskIds[0], subTabId};
+  return {win, parentId, taskId: taskIds[0], subTabId};
 }
 
 // A sub-agent transcript replayed mid-run (`task_events` for a RUNNING
@@ -232,10 +220,8 @@ function testLiveSubagentPanelsShowElapsed() {
 // durations, but the interrupted trailing tool_call must NOT tick --
 // no event ever closed it, so no duration exists.
 function testFinishedReplayOpenPanelDoesNotTick() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  const tabId = all().find(m => m.type === 'ready').tabId;
+  const {win, posted} = makePage();
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   const t0 = new Date(2021, 2, 5, 14, 7).getTime();
   send(win, {
     type: 'task_events',
@@ -322,10 +308,8 @@ function testCloseWithoutTimestampSealsWithoutLabel() {
 // transcript: its open panels never join the live tick, even though
 // the owner tab is running its own live task.
 function testAdjacentReplayNeverTicks() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  const tabId = all().find(m => m.type === 'ready').tabId;
+  const {win, posted} = makePage();
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   send(win, {type: 'status', running: true, tabId: tabId, startTs: Date.now()});
   send(win, {type: 'prompt', text: 'live task', tabId: tabId, taskId: '77'});
   const t0 = Date.now() - 40000;
@@ -370,10 +354,8 @@ function testAdjacentReplayNeverTicks() {
 // at the task's own end timestamp, and the sealed panel can never
 // rejoin the live tick.
 function testTerminalEventSealsOpenPanels() {
-  const client = makeWebappClient();
-  const {win} = client;
-  const all = () => client.drain();
-  const tabId = all().find(m => m.type === 'ready').tabId;
+  const {win, posted} = makePage();
+  const tabId = posted.find(m => m.type === 'ready').tabId;
   const t0 = Date.now() - 60000;
   send(win, {type: 'status', running: true, tabId: tabId, startTs: t0});
   send(win, {

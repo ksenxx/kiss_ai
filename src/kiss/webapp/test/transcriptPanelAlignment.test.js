@@ -16,12 +16,8 @@
 // boxed "Thinking" subpanel with a header of its own.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 const harness = require('./simplify2_harness');
 const {readyTabId, output} = harness;
-
-const MEDIA = path.join(__dirname, '..', 'media');
 
 /** The harness page with main.css applied; `win.__posted` is its ledger. */
 function makePage() {
@@ -204,6 +200,16 @@ function testThinkingIsPlainTextInsideThoughts() {
   const cs = win.getComputedStyle(think);
   assert.strictEqual(cs.fontStyle, 'italic', 'the thinking text is italic');
   assert.strictEqual(cs.borderStyle, 'none', 'the thinking text draws no box');
+  // The Thoughts panel is the one scroller: the thinking text has no
+  // height cap and no scrollbar of its own.
+  assert.ok(
+    ['', 'none'].includes(cs.maxHeight),
+    `.think is no scroller of its own (max-height ${cs.maxHeight})`,
+  );
+  assert.ok(
+    !['auto', 'scroll'].includes(cs.overflowY),
+    `.think is no scroller of its own (overflow-y ${cs.overflowY})`,
+  );
   win.close();
   console.log(
     '  ok - thinking tokens are plain text inside the Thoughts panel',
@@ -251,6 +257,12 @@ function testBubbleTintsAndTailCorners() {
       'the ' + name + ' keeps its round corners elsewhere',
     );
   }
+  const taskText = userPanels['task panel'].querySelector('.task-panel-text');
+  assert.strictEqual(
+    win.getComputedStyle(taskText).color,
+    'var(--fg)',
+    'the task text is the transcript foreground, not an inverted palette',
+  );
   const result = out.querySelector(':scope > .ev.rc');
   assert.ok(result, 'the transcript rendered the result card');
   const rcs = win.getComputedStyle(result);
@@ -296,15 +308,22 @@ function testBubbleTintsAndTailCorners() {
     'var(--radius-sm)',
     'a tool call has no tail corner',
   );
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  const remote = fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8');
-  for (const token of ['--bubble-user-tint', '--bubble-agent-tint']) {
-    assert.ok(css.includes(token + ':'), 'main.css defines ' + token);
-    assert.ok(
-      remote.includes(token + ':'),
-      'remote-codex.css re-derives ' + token + ' for the remote themes',
-    );
+  // Both tints resolve on this main.css page and on a remote page (whose
+  // remote-codex.css re-derives them for its themes).
+  const remote = harness.makePage({
+    bodyClass: 'remote-chat',
+    beforeScripts: harness.loadRemoteCss,
+  }).win;
+  for (const page of [win, remote]) {
+    const root = page.getComputedStyle(page.document.documentElement);
+    for (const token of ['--bubble-user-tint', '--bubble-agent-tint']) {
+      assert.ok(
+        root.getPropertyValue(token).includes('color-mix('),
+        `${token} is a defined colour mix on the page`,
+      );
+    }
   }
+  remote.close();
   win.close();
   console.log(
     '  ok - the user and result bubbles carry their own tint and tail corner',

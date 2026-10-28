@@ -19,7 +19,7 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor} = require('./simplify2_harness');
+const {makePage, send} = require('./simplify2_harness');
 
 const NOTICE = {
   type: 'notification',
@@ -35,15 +35,15 @@ const NOTICE = {
 
 const TOAST = '.kiss-notification[data-notification-id="vscode-retired"]';
 
-async function runTests() {
+// The page renders and removes toasts synchronously, so `send` and a
+// click are followed by plain assertions.
+function runTests() {
   {
     const {win, posted} = makePage();
     try {
       send(win, NOTICE);
-      const toast = await waitFor(
-        () => win.document.querySelector(TOAST),
-        'the notice must render a toast',
-      );
+      const toast = win.document.querySelector(TOAST);
+      assert.ok(toast, 'the notice must render a toast');
       const label = toast.querySelector('label.kiss-notification-opt-out');
       assert.ok(label, 'the toast must carry the opt-out label');
       assert.strictEqual(label.textContent.trim(), 'Do not show this again');
@@ -62,8 +62,9 @@ async function runTests() {
 
       // Replaying the notice (reconnect) keeps one toast, box unticked.
       send(win, NOTICE);
-      await waitFor(
-        () => win.document.querySelectorAll(TOAST).length === 1,
+      assert.strictEqual(
+        win.document.querySelectorAll(TOAST).length,
+        1,
         'a replayed notice must not stack a second toast',
       );
       assert.strictEqual(
@@ -81,8 +82,9 @@ async function runTests() {
         JSON.stringify(dismissals),
         JSON.stringify([{type: 'dismissNotice', id: 'vscode-retired'}]),
       );
-      await waitFor(
-        () => !win.document.querySelector(TOAST),
+      assert.strictEqual(
+        win.document.querySelector(TOAST),
+        null,
         'the toast must leave once the box is ticked',
       );
     } finally {
@@ -96,10 +98,11 @@ async function runTests() {
     const {win, posted} = makePage();
     try {
       send(win, NOTICE);
-      await waitFor(() => win.document.querySelector(TOAST), 'toast renders');
+      assert.ok(win.document.querySelector(TOAST), 'toast renders');
       send(win, {type: 'notification', id: 'vscode-retired', close: true});
-      await waitFor(
-        () => !win.document.querySelector(TOAST),
+      assert.strictEqual(
+        win.document.querySelector(TOAST),
+        null,
         'the close must remove the toast',
       );
       assert.strictEqual(posted.filter(m => m && m.type === 'dismissNotice').length, 0);
@@ -118,10 +121,10 @@ async function runTests() {
         severity: 'info',
         message: 'Just a note',
       });
-      const toast = await waitFor(
-        () => win.document.querySelector('.kiss-notification[data-notification-id="plain"]'),
-        'plain toast renders',
+      const toast = win.document.querySelector(
+        '.kiss-notification[data-notification-id="plain"]',
       );
+      assert.ok(toast, 'plain toast renders');
       assert.strictEqual(toast.querySelector('.kiss-notification-opt-out'), null);
       assert.strictEqual(toast.querySelector('input[type="checkbox"]'), null);
     } finally {
@@ -130,13 +133,11 @@ async function runTests() {
   }
 }
 
-runTests().then(
-  () => {
-    console.log('\nAll tests passed');
-    process.exit(0);
-  },
-  err => {
-    console.error('FAIL:', err && err.stack ? err.stack : err);
-    process.exit(1);
-  },
-);
+try {
+  runTests();
+  console.log('\nAll tests passed');
+  process.exit(0);
+} catch (err) {
+  console.error('FAIL:', err && err.stack ? err.stack : err);
+  process.exit(1);
+}

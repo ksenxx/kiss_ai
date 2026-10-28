@@ -44,6 +44,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 class _CapturePrinter(JsonPrinter):
@@ -78,7 +79,7 @@ class _StopDuringRetireAgent(ChatSorcarAgent):
         )
         self.server._stop_task(self.tab_id)
         time.sleep(1.6)
-        self._wt = None
+        self._wts = {}
         self.retire_completed = True
         return True
 
@@ -117,12 +118,12 @@ def test_stop_during_pre_run_retire_is_not_injected() -> None:
     agent.server = server
     agent.tab_id = tab_id
     # The previous run on this tab left its worktree pending.
-    agent._wt = GitWorktree(
+    seed_worktree(agent, GitWorktree(
         repo_root=repo,
         branch="kiss/pending-task",
         original_branch="main",
         wt_dir=repo / ".kiss-worktrees" / "pending-task",
-    )
+    ))
     # ``_cmd_run`` installs the stop event and the thread before start.
     state = AgentState(
         f"pre-{tab_id}",

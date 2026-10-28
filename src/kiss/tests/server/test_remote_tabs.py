@@ -198,14 +198,26 @@ class RemoteTabsHarness(IsolatedAsyncioTestCase):
         })
 
     async def _run_until_idle(self, tab_id: str) -> list[dict[str, Any]]:
-        """Collect the tab's frames up to the first ``status running:false``."""
+        """Collect the tab's frames up to the run's own ``status running:false``.
+
+        A ``status`` stamped with a ``replayId`` answers a replay (a
+        ``ready`` replays every bound tab to its connection, a history
+        click resumes one) and says nothing about the run just
+        submitted: the answer to a replay asked for before the submit
+        can land after it, so such a frame is kept but not taken as
+        the end of the run.
+        """
         frames: list[dict[str, Any]] = []
         for _ in range(500):
             msg = await self._next()
             if msg.get("tabId") != tab_id:
                 continue
             frames.append(msg)
-            if msg.get("type") == "status" and not msg.get("running"):
+            if (
+                msg.get("type") == "status"
+                and not msg.get("running")
+                and not msg.get("replayId")
+            ):
                 return frames
         raise AssertionError("the tab never went idle")
 

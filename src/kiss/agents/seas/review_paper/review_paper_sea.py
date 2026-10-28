@@ -358,6 +358,7 @@ class ReviewPaperSea(BaseSea):
             "use_web_tools": True,
             "auto_classify": False,
             "timeout": DISPATCH_TIMEOUT_SECONDS,
+            "model": "bestrouter",
         }
 
 
@@ -438,17 +439,17 @@ def read_paper(paper_path: str, first_page: int = 1, last_page: int = 0) -> str:
     return "\n".join(lines)
 
 
-def _unwrap(review: str) -> str:
+def _unwrap(review: str, headings: tuple[str, ...] = _HEADINGS) -> str:
     """Join the hard-wrapped lines of each paragraph so phrases and sentences are not split.
 
     The joined paragraph sits on its first source line and the lines it
     absorbed become empty, so the ``L<n>`` numbers of the gates still point
-    into the file.  Bullets and headings start their own paragraph.
+    into the file.  Bullets and *headings* start their own paragraph.
     """
     out: list[str] = []
     head = -1
     for line in review.splitlines():
-        if not line.strip() or _heading(line):
+        if not line.strip() or _heading(line, headings):
             head = -1
         elif head < 0 or _BULLET.match(line):
             head = len(out)
@@ -460,19 +461,19 @@ def _unwrap(review: str) -> str:
     return "\n".join(out)
 
 
-def _heading(line: str) -> str | None:
-    """Return the required heading that *line* is, or ``None``.
+def _heading(line: str, headings: tuple[str, ...] = _HEADINGS) -> str | None:
+    """Return the one of *headings* that *line* is, or ``None``.
 
     Headings are matched case-insensitively on their own line; a trailing
     colon and Markdown ``#`` or ``**`` decorations are tolerated here (the
     markdown gates flag them).
     """
     bare = line.strip().strip("#*").strip().rstrip(":").strip().lower()
-    return next((h for h in _HEADINGS if bare == h.lower()), None)
+    return next((h for h in headings if bare == h.lower()), None)
 
 
-def _parts(review: str) -> dict[str, tuple[int, list[str]]]:
-    """Split *review* at the required headings into ``{heading: (line number, body lines)}``.
+def _parts(review: str, headings: tuple[str, ...] = _HEADINGS) -> dict[str, tuple[int, list[str]]]:
+    """Split *review* at *headings* into ``{heading: (line number, body lines)}``.
 
     A missing heading is absent from the result; a repeated heading does not
     start a new part.
@@ -480,7 +481,7 @@ def _parts(review: str) -> dict[str, tuple[int, list[str]]]:
     parts: dict[str, tuple[int, list[str]]] = {}
     current = ""
     for number, line in enumerate(review.splitlines(), 1):
-        heading = _heading(line)
+        heading = _heading(line, headings)
         if heading is not None and heading not in parts:
             current = heading
             parts[current] = (number, [])

@@ -50,7 +50,8 @@ def test_canonical_resolver_is_lazy(fresh_home: Path) -> None:
 
 
 def test_persistence_resolves_lazily(fresh_home: Path) -> None:
-    assert persistence._default_kiss_dir() == fresh_home
+    """persistence resolves its home through the lazy ``kiss_home()``."""
+    assert persistence.kiss_home() == fresh_home
 
 
 def test_user_config_resolves_lazily(fresh_home: Path) -> None:

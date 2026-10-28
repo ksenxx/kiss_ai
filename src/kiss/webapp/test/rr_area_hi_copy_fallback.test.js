@@ -63,7 +63,7 @@ function testHelperReportsFailure() {
   console.log('  ok - fallbackCopyText fails closed and still cleans up');
 }
 
-async function testMainTaskPanelUsesSharedFallback() {
+function testMainTaskPanelUsesSharedFallback() {
   const {win} = makePage();
 
   const calls = [];
@@ -92,18 +92,12 @@ async function testMainTaskPanelUsesSharedFallback() {
     [{cmd: 'copy', value: 'the task text'}],
     'task-panel copy must use the shared execCommand fallback',
   );
+  win.close();
   console.log('  ok - main.js task-panel copy uses the shared fallback');
 }
 
-async function main() {
-  testHelperCopiesAndCleansUp();
-  testHelperReportsFailure();
-  await testMainTaskPanelUsesSharedFallback();
-  console.log('rr_area_hi_copy_fallback: all tests passed');
-  process.exit(0);
-}
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+testHelperCopiesAndCleansUp();
+testHelperReportsFailure();
+testMainTaskPanelUsesSharedFallback();
+console.log('rr_area_hi_copy_fallback: all tests passed');
+process.exit(0);

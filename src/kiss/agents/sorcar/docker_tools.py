@@ -67,9 +67,8 @@ def _python_edit_command(file_path: str, payload: str, old_len: int, replace_all
     """The Edit replacement in Python, reading ``old``/``new`` from *payload*.
 
     The payload file holds ``old`` followed by ``new`` (UTF-8); the first
-    *old_len* bytes are ``old``.  It is removed once the replacement ran,
-    whatever its outcome, and kept when there is no Python so the Perl
-    fallback can read it.
+    *old_len* bytes are ``old``.  The caller (:meth:`DockerTools.Edit`)
+    removes it once the replacement ran, whatever its outcome.
 
     Args:
         file_path: Absolute path to the file to modify.
@@ -109,7 +108,7 @@ def _python_edit_command(file_path: str, payload: str, old_len: int, replace_all
         f"open(path, 'w', encoding='utf-8', newline='').write(new_content)\n"
         f"replaced = count if ra else 1\n"
         f"print(f'Successfully replaced {{replaced}} occurrence(s) in {{path}}')\n"
-        f'" {shlex.quote(file_path)} {payload}; KISS_STATUS=$?; rm -f {payload}; exit $KISS_STATUS'
+        f'" {shlex.quote(file_path)} {payload}'
     )
 
 
@@ -117,7 +116,7 @@ def _perl_edit_command(file_path: str, payload: str, old_len: int, replace_all: 
     """The Edit replacement as a Perl one-liner, for containers without Python.
 
     Reads the same *payload* file as :func:`_python_edit_command`, as
-    raw bytes, and removes it afterwards.
+    raw bytes.
 
     Args:
         file_path: Absolute path to the file to modify.
@@ -148,7 +147,7 @@ def _perl_edit_command(file_path: str, payload: str, old_len: int, replace_all: 
         f"print $fh $content; close $fh;\n"
         f"my $replaced = {ra} ? $count : 1;\n"
         f"print \"Successfully replaced $replaced occurrence(s) in $path\\n\";\n"
-        f"' {shlex.quote(file_path)} {payload}; KISS_STATUS=$?; rm -f {payload}; exit $KISS_STATUS"
+        f"' {shlex.quote(file_path)} {payload}"
     )
 
 
@@ -287,6 +286,10 @@ class DockerTools:
             results: list[str] = []
             for index, (old_text, new_text, every) in enumerate(pairs, 1):
                 result = self.Edit(file_path, old_text, new_text, every)
+                if STOPPED_MESSAGE in result:
+                    # A task Stop: every later edit would be killed the
+                    # same way (an exec and a reaper wait each).
+                    return result
                 if result.startswith("Error"):
                     applied = f"edits 1-{index - 1} applied; " if index > 1 else ""
                     return f"Error: edit {index}: {applied}{result.removeprefix('Error: ')}"
@@ -310,11 +313,16 @@ class DockerTools:
             _python_edit_command(file_path, payload, len(old), replace_all),
             f"Edit {file_path}",
         )
-        if _NO_PYTHON not in result:
-            return result
-        # Images without Python (Rust, R, C toolchains) still have
-        # perl-base, so the same replacement is done in Perl.
-        return self.bash(
-            _perl_edit_command(file_path, payload, len(old), replace_all),
-            f"Edit {file_path}",
-        )
+        if _NO_PYTHON in result:
+            # Images without Python (Rust, R, C toolchains) still have
+            # perl-base, so the same replacement is done in Perl.
+            result = self.bash(
+                _perl_edit_command(file_path, payload, len(old), replace_all),
+                f"Edit {file_path}",
+            )
+        # The payload goes whatever the outcome, a timed-out replacement
+        # included; after a Stop the removal would be killed the same way
+        # (as in _store), so only the uniquely named payload file stays.
+        if STOPPED_MESSAGE not in result:
+            self.bash(f"rm -f {payload}", f"Edit {file_path} (discard)")
+        return result

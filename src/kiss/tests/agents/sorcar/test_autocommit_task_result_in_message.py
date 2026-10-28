@@ -30,6 +30,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo(path: Path) -> Path:
@@ -175,13 +176,13 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             (wt_dir / "new.txt").write_text("hello\n")
 
             agent = ChatSorcarAgent("test")
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 branch="kiss/wt-test-result",
                 original_branch="main",
                 wt_dir=wt_dir,
                 baseline_commit=None,
-            )
+            ))
             agent._last_user_prompt = "implement feature Z"
             agent._last_result_summary = "Implemented feature Z in z.py"
 
@@ -198,13 +199,13 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             (wt_dir / "new.txt").write_text("hi\n")
 
             agent = ChatSorcarAgent("test")
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=repo,
                 branch="kiss/wt-test-nores",
                 original_branch="main",
                 wt_dir=wt_dir,
                 baseline_commit=None,
-            )
+            ))
             agent._last_user_prompt = "implement feature Q"
             with _LLMUnavailable():
                 assert agent._commit_worktree() is True

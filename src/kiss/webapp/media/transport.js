@@ -727,11 +727,10 @@
   /** "Enter password" on the overlay after a Cancel: show the dialog again. */
   function _reopenPasswordPrompt() {
     _promptDeclined = false;
-    _setOverlayAction(null, null);
     _updateLoadingMsg(_hadAuthThenClosed);
     _dispatchToApp({type: 'daemonStatus', connected: true});
     _promptForPassword();
-    if (!_ws || _ws.readyState !== WebSocket.OPEN) _reconnectNowIfNeeded();
+    _reconnectNowIfNeeded();
   }
 
   window.acquireTransport = function () {

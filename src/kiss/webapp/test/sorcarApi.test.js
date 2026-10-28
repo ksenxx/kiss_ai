@@ -51,7 +51,7 @@ test('catalog omits the commands only other clients send', () => {
   ].forEach(name => assert.ok(!SORCAR_API_COMMANDS.includes(name), name));
 });
 
-test('the real chat page only sends API commands', async () => {
+test('the real chat page only sends API commands', () => {
   const {win, posted} = makePage();
   const inp = win.document.getElementById('task-input');
   inp.value = 'do something';

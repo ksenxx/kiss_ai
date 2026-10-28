@@ -20,18 +20,14 @@ entry is refused unless the client confirmed the replacement
 
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
-import subprocess
-import threading
-import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.processes import run_capped
 
 FS_ACTIONS: frozenset[str] = frozenset(
     {
@@ -53,8 +49,8 @@ FIND_MAX_MATCHES = 2000
 TEXT_MAX_BYTES = 4 * 1024 * 1024
 """Cap on the UTF-8 bytes of text one ``findInFolder`` / ``compare`` reply carries."""
 
-_FIND_TIMEOUT_S = 30
-_DIFF_TIMEOUT_S = 30
+_TOOL_TIMEOUT_S = 30
+"""Deadline of the ``git grep`` / ``git diff`` child of one request."""
 
 _FIND_EXCLUDED_DIRS = (".git", ".svn", ".hg", "node_modules", ".venv", "__pycache__")
 
@@ -269,136 +265,9 @@ def _transfer(move: bool, src: Path, target: Path) -> None:
         shutil.copy2(src, target, follow_symlinks=False)
 
 
-class _CappedOutput:
-    """Result of :func:`_run_capped`."""
-
-    def __init__(self) -> None:
-        self.returncode = -1
-        self.stdout = b""
-        self.stderr = ""
-        self.truncated = False
-        self.timed_out = False
-        # Set (under ``guard``) once the result is decided: the cap was
-        # hit or the process exited.  Stdout EOF alone does not decide
-        # it (a process may close stdout and run on), so the timer can
-        # tell a slow command from a finished one.
-        self.finished = False
-        self.guard = threading.Lock()
-
-
-def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
-    """Kill *proc* together with every process in its group.
-
-    A group that is already gone is fine; ``proc.kill()`` is the
-    fallback when the group cannot be signalled (it is a no-op on an
-    exited process).
-    """
-    try:
-        kill_process_group(proc.pid, SIGKILL)
-    except OSError:
-        proc.kill()
-
-
-def _on_timeout(proc: subprocess.Popen[bytes], out: _CappedOutput) -> None:
-    """Flag the timeout and kill the tree unless the result is already decided.
-
-    Decided on *out.finished* rather than ``proc.poll()``: the leader
-    may have exited while a descendant still holds the stdout pipe, and
-    that read would otherwise block for as long as the descendant lives.
-    Runs from the timer (the reader is blocked on the pipe) and from
-    the reader itself when the process outlives stdout EOF.
-    """
-    with out.guard:
-        if out.finished:
-            return
-        out.timed_out = True
-    _kill_tree(proc)
-
-
-def _drain_stderr(stream: Any, out: _CappedOutput) -> None:
-    """Read *stream* (stderr) to the end, keeping its first 64 KiB."""
-    chunks: list[bytes] = []
-    size = 0
-    while True:
-        chunk = stream.read(65536)
-        if not chunk:
-            break
-        if size < 65536:
-            chunks.append(chunk)
-            size += len(chunk)
-    out.stderr = b"".join(chunks).decode("utf-8", "replace")
-
-
-def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> _CappedOutput:
-    """Run *cmd*, keeping at most *limit* bytes of its stdout.
-
-    Unlike ``subprocess.run(capture_output=True)`` the whole output is
-    never held in memory: stdout is read in chunks and the process is
-    killed as soon as the cap is exceeded (``truncated``) or *timeout*
-    seconds pass (``timed_out``), so a search over a huge tree or a
-    diff of two huge files costs the daemon at most *limit* bytes.
-    """
-    out = _CappedOutput()
-    # Own process group: ``read()`` below returns EOF only once every
-    # writer of the pipe is gone, so a grandchild that inherited stdout
-    # (an external diff tool, a pager) must die with git or the timeout
-    # could never be enforced.
-    proc = popen_process_group(
-        cmd, cwd=cwd, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    assert proc.stdout is not None and proc.stderr is not None
-    err_thread = threading.Thread(
-        target=_drain_stderr, args=(proc.stderr, out), daemon=True,
-    )
-    err_thread.start()
-    deadline = time.monotonic() + timeout
-    timer = threading.Timer(timeout, _on_timeout, args=(proc, out))
-    timer.start()
-    chunks: list[bytes] = []
-    size = 0
-    try:
-        while True:
-            chunk = proc.stdout.read(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > limit:
-                # Decided under the guard, before the kill: a timer
-                # firing meanwhile must not relabel the capped result
-                # as timed out, and a timer that already did wins.
-                with out.guard:
-                    if not out.timed_out:
-                        out.truncated = out.finished = True
-                break
-        if out.truncated:
-            _kill_tree(proc)
-        proc.stdout.close()
-        # Stdout EOF is not exit: the deadline stays armed until the
-        # process is gone (the timer may fire meanwhile and kill it).
-        try:
-            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            _on_timeout(proc, out)
-            # A SIGKILLed process that still does not exit is stuck in
-            # the kernel; report it (returncode -1) rather than wait.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5)
-        with out.guard:
-            out.finished = True
-        err_thread.join(timeout=1)
-        if err_thread.is_alive():
-            # The command is done but a stray group member still holds
-            # the stderr pipe: it has nothing left to say.
-            _kill_tree(proc)
-            err_thread.join(timeout=5)
-    finally:
-        timer.cancel()
-    if proc.returncode is not None:
-        out.returncode = proc.returncode
-    out.stdout = b"".join(chunks)[:limit]
-    return out
+#: Stderr bytes :func:`find_in_folder` and :func:`compare_files` keep
+#: for their error reply.
+_STDERR_KEEP_BYTES = 65536
 
 
 def find_in_folder(folder: str, query: str) -> dict[str, Any]:
@@ -430,18 +299,19 @@ def find_in_folder(folder: str, query: str) -> dict[str, Any]:
     ]
     cmd += [f":(exclude,glob)**/{d}/**" for d in _FIND_EXCLUDED_DIRS]
     try:
-        proc = _run_capped(cmd, folder, TEXT_MAX_BYTES, _FIND_TIMEOUT_S)
+        # A stream cut mid-line ends with a partial match: ``last_full_line``
+        # drops it.
+        proc = run_capped(
+            cmd, cwd=folder, limit=TEXT_MAX_BYTES, timeout=_TOOL_TIMEOUT_S,
+            keep_stderr=_STDERR_KEEP_BYTES, last_full_line=True,
+        )
     except OSError as exc:
         return {"error": f"git grep failed: {exc}"}
     if proc.timed_out:
         return {"error": "Search timed out"}
     if not proc.truncated and proc.returncode not in (0, 1):
         return {"error": proc.stderr.strip() or "git grep failed"}
-    # A stream cut mid-line ends with a partial match: drop it.
-    raw = proc.stdout
-    if proc.truncated:
-        raw = raw[: raw.rfind(b"\n") + 1]
-    lines = raw.decode("utf-8", "replace").splitlines()
+    lines = proc.stdout.decode("utf-8", "replace").splitlines()
     truncated = proc.truncated or len(lines) > FIND_MAX_MATCHES
     kept = [
         line[2:] if line.startswith("./") else line
@@ -471,9 +341,9 @@ def compare_files(a: str, b: str) -> dict[str, Any]:
         if not os.path.isfile(p):
             return {"error": f"Not a file: {p}"}
     try:
-        proc = _run_capped(
+        proc = run_capped(
             ["git", "diff", "--no-color", "--no-ext-diff", "--no-index", "--", a, b],
-            None, TEXT_MAX_BYTES, _DIFF_TIMEOUT_S,
+            limit=TEXT_MAX_BYTES, timeout=_TOOL_TIMEOUT_S, keep_stderr=_STDERR_KEEP_BYTES,
         )
     except OSError as exc:
         return {"error": f"diff failed: {exc}"}

@@ -32,62 +32,31 @@
 // no `result` event yet). Rather than restate that rule here -- or read
 // it out of the daemon's source, which would fail for a harmless
 // refactor and pass for a real change of behaviour --
-// `persistedTranscript()` below runs the run through the daemon's OWN
-// recorder and replays whatever comes back.
+// `persistedTranscript()` below replays what the daemon's OWN recorder
+// kept of the run.  `fixtures/bgTabStreamParity.json` holds both the
+// runs (`runs`) and the daemon's recording of each (`recorded`);
+// `src/kiss/tests/server/test_bg_tab_stream_parity_fixture.py` keeps
+// the recording current by running `JsonPrinter._filter_and_coalesce`
+// over `runs` and fails when the file is stale (run it with
+// `--regenerate` to rewrite it).
 
 'use strict';
 
 const assert = require('assert');
-const path = require('path');
-const {spawnSync} = require('child_process');
 const harness = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
+const FIXTURE = require('./fixtures/bgTabStreamParity.json');
 
 const {send, clickTab} = harness;
-const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
-
-// `JsonPrinter._filter_and_coalesce` is the function `stop_recording()`
-// and `peek_recording()` run every event list through on its way to the
-// database, so its answer IS what a reload, a history click or a
-// background tab's `task_events` gets back.  The probe records every run
-// of the list it is fed, so the suite spawns it exactly once.
-const RECORDER_PROBE = [
-  'import json, sys',
-  'from kiss.server.json_printer import JsonPrinter',
-  'runs = json.load(sys.stdin)',
-  'json.dump([JsonPrinter._filter_and_coalesce(run) for run in runs], sys.stdout)',
-].join('\n');
-
-let recordedRuns = null;
 
 /**
- * Record the suite's two runs the way the daemon does, once per process,
- * and hand back a fresh copy of what survived of the requested one.
- *
- * Four `uv run` spawns at 30 s each would equal the runner's two-minute
- * cap on the suite, and `uv run` contends for the project lock with any
- * concurrent `uv sync`; one spawn keeps a stalled `uv` reported by the
- * assertion below instead of as a hung suite.
+ * A fresh copy of what the daemon stored of the requested fixture run.
  *
  * @param {number} index 0 for `recordedRun()`, 1 for `parentFanOutRun()`.
  * @returns {Array<object>} The transcript the daemon would store.
  */
 function recordAsDaemon(index) {
-  if (recordedRuns === null) {
-    const res = spawnSync('uv', ['run', 'python', '-c', RECORDER_PROBE], {
-      cwd: REPO_ROOT,
-      input: JSON.stringify([recordedRun(), parentFanOutRun()]),
-      encoding: 'utf8',
-      timeout: 30000,
-    });
-    assert.ok(
-      !res.error && res.status === 0,
-      'the daemon\u2019s recorder must be runnable from the repo root: ' +
-        `${res.error || ''} ${res.stderr || ''}`,
-    );
-    recordedRuns = res.stdout;
-  }
-  return JSON.parse(recordedRuns)[index];
+  return JSON.parse(JSON.stringify(FIXTURE.recorded[index]));
 }
 
 function makePage() {
@@ -107,77 +76,13 @@ const TS = 1767225600000;
 // Three tool calls do not mean three steps: the agent was seven steps in
 // by the time it finished, and only the daemon knows that.
 function recordedRun() {
-  return [
-    {type: 'thinking_start', ts: TS},
-    {type: 'thinking_delta', text: 'let me look', ts: TS},
-    {type: 'thinking_end', ts: TS},
-    {type: 'text_delta', text: 'Reading the file.', ts: TS},
-    {type: 'text_end', text: 'Reading the file.', ts: TS},
-    {type: 'tool_call', name: 'Read', path: 'src/one.py', ts: TS},
-    {type: 'tool_result', content: 'one', ts: TS},
-    {type: 'thinking_start', ts: TS},
-    {type: 'thinking_delta', text: 'now the second', ts: TS},
-    {type: 'thinking_end', ts: TS},
-    {type: 'tool_call', name: 'Read', path: 'src/two.py', ts: TS},
-    {type: 'tool_result', content: 'two', ts: TS},
-    {type: 'text_delta', text: 'Both read.', ts: TS},
-    {type: 'text_end', text: 'Both read.', ts: TS},
-    {type: 'tool_call', name: 'Write', path: 'src/three.py', ts: TS},
-    {type: 'tool_result', content: 'written', ts: TS},
-    {
-      type: 'usage_info',
-      text: 'Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00',
-      total_tokens: 12345,
-      cost: '$0.42',
-      total_steps: 7,
-      ts: TS,
-    },
-    {
-      type: 'result',
-      text: 'summary: Done.\nsuccess: true\n',
-      summary: 'Done.',
-      success: true,
-      total_tokens: 12345,
-      cost: '$0.42',
-      step_count: 7,
-      ts: TS,
-    },
-  ];
+  return JSON.parse(JSON.stringify(FIXTURE.runs[0]));
 }
 
 // A parent that fanned out one sub-agent and finished: the run
 // `testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers` replays.
 function parentFanOutRun() {
-  return [
-    {type: 'thinking_start', ts: TS},
-    {type: 'thinking_delta', text: 'fanning out', ts: TS},
-    {type: 'thinking_end', ts: TS},
-    {
-      type: 'tool_call',
-      name: 'run_parallel',
-      extras: {tasks: JSON.stringify(['sub 1'])},
-      ts: TS,
-    },
-    {type: 'tool_result', content: 'sub done', ts: TS},
-    {
-      type: 'usage_info',
-      text: 'Steps: 7/100, Context: 12,345/500,000 tokens, Budget: $0.42/$10.00',
-      total_tokens: 12345,
-      cost: '$0.42',
-      total_steps: 7,
-      ts: TS,
-    },
-    {
-      type: 'result',
-      text: 'summary: Done.\nsuccess: true\n',
-      summary: 'Done.',
-      success: true,
-      total_tokens: 12345,
-      cost: '$0.42',
-      step_count: 7,
-      ts: TS,
-    },
-  ];
+  return JSON.parse(JSON.stringify(FIXTURE.runs[1]));
 }
 
 // What is left of that run once the daemon has recorded it: what a

@@ -15,7 +15,13 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {makePage, sleep, stubRaf, MEDIA} = require('./simplify2_harness');
+const {
+  makePage,
+  settle,
+  stubRaf,
+  captureTimers,
+  MEDIA,
+} = require('./simplify2_harness');
 
 const VOICE_CFG = {
   voskSrc: '/media/vosk.js',
@@ -57,12 +63,72 @@ function makeFakeModel(state) {
 }
 
 /**
+ * An audio track of a granted microphone: a `win.EventTarget` whose
+ * `ended` the test fires with `end()` (the browser does so when the
+ * device is unplugged or the permission revoked); `stop()` is what the
+ * page calls to release it.
+ */
+function makeTrack(win, state, log) {
+  const track = new win.EventTarget();
+  track.kind = 'audio';
+  track.label = 'Test mic';
+  track.readyState = 'live';
+  track.onended = null;
+  track.getSettings = () => ({});
+  track.stop = () => {
+    track.readyState = 'ended';
+    state.tracksStopped++;
+    log.push('track-stopped');
+  };
+  track.end = () => {
+    track.readyState = 'ended';
+    const ev = new win.Event('ended');
+    track.dispatchEvent(ev);
+    if (typeof track.onended === 'function') track.onended(ev);
+  };
+  state.tracks.push(track);
+  return track;
+}
+
+/**
+ * The record a voice page's stubs write to (see stubVoiceSurface) and
+ * the knobs they read.
+ *
+ * @param {{noVosk?: boolean, pendingModel?: boolean, autoGrant?: boolean}}
+ *   [opts] `noVosk` leaves `win.Vosk` undefined (the page must inject the
+ *   vosk bundle itself); `pendingModel` holds `createModel` until the test
+ *   calls `page.resolveModel()`; `autoGrant` grants every microphone
+ *   request at once instead of waiting for the test's `grant()`.
+ * @returns {{state: {recognizers: Array, processors: Array, tracks: Array,
+ *   tracksStopped: number}, mic: {calls: Array}, clock: {now: number},
+ *   model: object, timers: Array, log: Array<string>, options: object,
+ *   resolveModel: ?Function}} `state.tracks` lists every microphone
+ *   track granted (see makeTrack); `log` lists the audio-graph and
+ *   microphone events in order (`ctx-open`, `ctx-closed`,
+ *   `track-stopped`).
+ */
+function voicePageState(opts) {
+  const state = {recognizers: [], processors: [], tracks: [], tracksStopped: 0};
+  return {
+    state,
+    mic: {calls: []},
+    clock: {now: 1000000},
+    model: makeFakeModel(state),
+    timers: [],
+    log: [],
+    options: opts || {},
+    resolveModel: null,
+  };
+}
+
+/**
  * Install the voice pipeline's embedder surface on *win* before the page
  * scripts run: the clock, a silent `Audio`, the scriptable microphone,
- * the fake Vosk model, the audio context and the timer ledger.
+ * the fake Vosk model, the audio context and the timer ledger.  *page*
+ * is a voicePageState record.
  */
 function stubVoiceSurface(win, page) {
-  const {state, mic, clock, model, timers} = page;
+  const {state, mic, clock, model, timers, log, options} = page;
   stubRaf(win);
   // triggerWake enforces a 2 s cooldown between wakes via Date.now(), so
   // tests advance the clock instead of sleeping.
@@ -75,40 +141,48 @@ function stubVoiceSurface(win, page) {
     value: {
       getUserMedia: constraints =>
         new Promise((resolve, reject) => {
-          mic.calls.push({
+          const call = {
             constraints,
-            grant: () =>
+            grant: () => {
+              const track = makeTrack(win, state, log);
               resolve({
-                getTracks: () => [
-                  {
-                    stop: () => {
-                      state.tracksStopped++;
-                    },
-                  },
-                ],
-                getAudioTracks: () => [],
-              }),
+                getTracks: () => [track],
+                getAudioTracks: () => [track],
+              });
+            },
             refuse: message => {
               const err = new Error(message || 'Permission denied');
               err.name = 'NotAllowedError';
               reject(err);
             },
-          });
+          };
+          mic.calls.push(call);
+          if (options.autoGrant) call.grant();
         }),
       enumerateDevices: () => Promise.resolve([]),
     },
   });
-  win.Vosk = {createModel: () => Promise.resolve(model)};
+  if (!options.noVosk) {
+    win.Vosk = {
+      createModel: () =>
+        new Promise(resolve => {
+          page.resolveModel = () => resolve(model);
+          if (!options.pendingModel) page.resolveModel();
+        }),
+    };
+  }
   win.AudioContext = class FakeAudioContext {
     constructor() {
       this.sampleRate = 16000;
       this.state = 'running';
       this.destination = {};
+      log.push('ctx-open');
     }
     resume() {
       return Promise.resolve();
     }
     close() {
+      log.push('ctx-closed');
       return Promise.resolve();
     }
     createMediaStreamSource() {
@@ -127,49 +201,37 @@ function stubVoiceSurface(win, page) {
   // The page's safety timers (the 45 s wake flash, the 60 s transcribing
   // flash) are recorded, still armed, so a test can fire one without
   // waiting (see fireTimer).
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (cb, ms) {
-    const id = realSetTimeout(cb, ms);
-    timers.push({id, cb, ms, cleared: false});
-    return id;
-  };
-  win.clearTimeout = function (id) {
-    for (const t of timers) if (t.id === id) t.cleared = true;
-    realClearTimeout(id);
-  };
+  captureTimers(win, timers);
 }
 
 /**
  * Build a chat page running the real main.js + voice.js over the stubbed
  * voice surface.
  *
- * @param {{enabled?: boolean, debug?: boolean, sourceUrl?: *}} [opts]
+ * @param {{enabled?: boolean, debug?: boolean, sourceUrl?: *,
+ *   noVosk?: boolean, pendingModel?: boolean, autoGrant?: boolean}} [opts]
  *   `enabled` remembers the mic ON (`kissVoiceEnabled=1`, the pipeline
  *   starts on load; default off, so a test clicks the mic button);
  *   `debug` sets `kissVoiceDebug=1` (a free-text recognizer runs next to
- *   the wake one); `sourceUrl` is passed to simplify2_harness.makePage.
+ *   the wake one); `sourceUrl` is passed to simplify2_harness.makePage;
+ *   `noVosk` / `pendingModel` / `autoGrant` as for voicePageState.
  * @returns {{win: object, posted: Array<object>, getState: Function,
- *   state: {recognizers: Array, processors: Array, tracksStopped: number},
+ *   state: {recognizers: Array, processors: Array, tracks: Array,
+ *   tracksStopped: number},
  *   mic: {calls: Array<{constraints: *, grant: Function, refuse: Function}>},
- *   clock: {now: number}, model: object, timers: Array<object>}}
+ *   clock: {now: number}, model: object, timers: Array<object>,
+ *   log: Array<string>, resolveModel: ?Function}}
  *   `state.recognizers` / `state.processors` list every recognizer and
  *   audio processor node the pipeline ever built; `mic.calls` every
  *   getUserMedia request, settled by the test; `clock.now` is what the
  *   page's Date.now() returns; `model` is the fake Vosk model
  *   (`model.recognizers` maps the ids of the live recognizers); `timers`
- *   is the ledger of the page's setTimeout calls.
+ *   is the ledger of the page's setTimeout calls; `log` and
+ *   `resolveModel` as for voicePageState.
  */
 function makeVoicePage(opts) {
   const options = opts || {};
-  const state = {recognizers: [], processors: [], tracksStopped: 0};
-  const page = {
-    state,
-    mic: {calls: []},
-    clock: {now: 1000000},
-    model: makeFakeModel(state),
-    timers: [],
-  };
+  const page = voicePageState(options);
   function beforeScripts(win) {
     stubVoiceSurface(win, page);
     win.__VOICE__ = Object.assign({}, VOICE_CFG);
@@ -181,7 +243,9 @@ function makeVoicePage(opts) {
     extraScripts: ['voice.js'],
     sourceUrl: options.sourceUrl,
   });
-  return Object.assign({win, posted, getState}, page);
+  // The stubs write to `page` itself (resolveModel), so it is returned,
+  // not copied.
+  return Object.assign(page, {win, posted, getState});
 }
 
 /** The mic trigger button. */
@@ -192,12 +256,15 @@ function micBtn(win) {
 /**
  * Grant the pipeline its microphone and wait until it is listening.  A
  * page built with `enabled: true` starts the pipeline on load; otherwise
- * the test clicks the mic button first (see startPipeline).
+ * the test clicks the mic button first (see startPipeline).  On an
+ * `autoGrant` page the request is already granted, so this only waits.
  */
 async function startMic(page) {
-  await sleep(20);
-  page.mic.calls[page.mic.calls.length - 1].grant();
-  await sleep(20);
+  await settle();
+  if (!page.options.autoGrant) {
+    page.mic.calls[page.mic.calls.length - 1].grant();
+  }
+  await settle();
   assert.ok(
     micBtn(page.win).classList.contains('voice-listening'),
     `pipeline must be live: ${micBtn(page.win).className}`,
@@ -210,22 +277,19 @@ async function startPipeline(page) {
   await startMic(page);
 }
 
-/** One onaudioprocess block: 4096 samples at 16 kHz = 256 ms. */
-function audioBlock(loud) {
+/**
+ * Feed `blocks` onaudioprocess blocks (4096 samples at 16 kHz = 256 ms
+ * each), loud or silent, to a processor node.
+ */
+function feed(proc, loud, blocks) {
   const samples = new Float32Array(4096);
   if (loud) samples.fill(0.5);
-  return {
-    inputBuffer: {
-      getChannelData: () => samples,
-      sampleRate: 16000,
-      numberOfChannels: 1,
-    },
+  const inputBuffer = {
+    getChannelData: () => samples,
+    sampleRate: 16000,
+    numberOfChannels: 1,
   };
-}
-
-/** Feed `blocks` audio blocks, loud or silent, to a processor node. */
-function feed(proc, loud, blocks) {
-  for (let i = 0; i < blocks; i++) proc.onaudioprocess(audioBlock(loud));
+  for (let i = 0; i < blocks; i++) proc.onaudioprocess({inputBuffer});
 }
 
 /** The audio processor node of the current pipeline. */
@@ -305,14 +369,17 @@ function makeBareVoiceWindow(cfg, beforeScript) {
 
 module.exports = {
   VOICE_CFG,
+  voicePageState,
+  stubVoiceSurface,
   makeVoicePage,
   makeBareVoiceWindow,
   micBtn,
+  settle,
   startMic,
   startPipeline,
-  audioBlock,
   feed,
   lastProcessor,
+  lastRecognizer,
   fireWake,
   wake,
   speak,

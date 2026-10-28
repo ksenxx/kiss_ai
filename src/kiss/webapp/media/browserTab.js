@@ -425,13 +425,17 @@
     };
 
     view.setBadge = function (browserName, isDefault, note) {
+      const product =
+        (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
       badge.textContent = browserName || '';
       badge.title = note
         ? note + ' Showing ' + browserName + ' instead.'
         : isDefault
           ? browserName +
-            ' (default browser of the machine running KISS Sorcar)'
-          : browserName + ' (browser on the machine running KISS Sorcar)';
+            ' (default browser of the machine running ' +
+            product +
+            ')'
+          : browserName + ' (browser on the machine running ' + product + ')';
     };
 
     view.dispose = function () {

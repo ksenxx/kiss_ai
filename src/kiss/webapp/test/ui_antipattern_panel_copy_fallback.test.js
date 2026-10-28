@@ -15,16 +15,22 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep, waitFor, click} = require('./simplify2_harness');
+const {sleep, click} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// Every page built; closed at the end so the buttons' 1.5 s flash timers
-// do not keep node alive after the last assertion.
+// Every page built; closed at the end so nothing keeps node alive after
+// the last assertion.
 const windows = [];
 
+/**
+ * Build a page running panelCopy.js over a clipboard whose writeText is
+ * *writeTextImpl*.  The button's 1.5 s flash-revert timers are recorded
+ * in `timers` (`{fn, cleared}`) instead of armed, so a test fires one by
+ * hand, as audit0903_panelcopy_flash_timer does, rather than waiting.
+ */
 function makePage(writeTextImpl) {
   const dom = new JSDOM('<!DOCTYPE html><body><div id="panel"></div></body>', {
     runScripts: 'dangerously',
@@ -37,13 +43,26 @@ function makePage(writeTextImpl) {
     configurable: true,
     value: {writeText: writeTextImpl},
   });
+  const timers = [];
+  const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
+  win.setTimeout = function (fn, ms, ...args) {
+    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
+    const timer = {fn, cleared: false};
+    timers.push(timer);
+    return timer;
+  };
+  win.clearTimeout = function (handle) {
+    if (handle && typeof handle === 'object') handle.cleared = true;
+    else realClearTimeout(handle);
+  };
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   const panel = win.document.getElementById('panel');
   panel.textContent = 'panel body text';
   win.PanelCopy.addCopyButton(panel);
   const btn = panel.querySelector('.panel-copy-btn');
   assert.ok(btn, 'addCopyButton must append a copy button');
-  return {win, btn};
+  return {win, btn, timers};
 }
 
 function isCheck(btn) {
@@ -79,7 +98,7 @@ async function main() {
   });
 
   await test('when both clipboard paths fail the button shows a visible failure state', async () => {
-    const {win, btn} = makePage(() =>
+    const {win, btn, timers} = makePage(() =>
       Promise.reject(new Error('Write permission denied')),
     );
     win.document.execCommand = () => false;
@@ -99,10 +118,10 @@ async function main() {
     );
     // The failure state reverts like the success flash does (panelCopy.js
     // arms the same 1.5 s timer for both).
-    await waitFor(
-      () => !btn.classList.contains('copy-failed'),
-      'the failure state never reverted',
-    );
+    const live = timers.filter(t => !t.cleared);
+    assert.strictEqual(live.length, 1, 'the failure armed one 1.5 s revert timer');
+    live[0].fn();
+    assert.ok(!btn.classList.contains('copy-failed'), 'the failure state reverted');
     assert.strictEqual(btn.title, 'Copy panel text');
     assert.ok(!isCross(btn) && !isCheck(btn), 'the copy icon is back');
   });
@@ -132,7 +151,12 @@ async function main() {
   });
 }
 
-main().then(() => {
-  windows.forEach(win => win.close());
-  report('ui_antipattern_panel_copy_fallback');
-});
+main()
+  .then(() => {
+    windows.forEach(win => win.close());
+    report('ui_antipattern_panel_copy_fallback');
+  })
+  .catch(err => {
+    console.error(err);
+    process.exit(1);
+  });

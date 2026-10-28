@@ -45,6 +45,7 @@ from kiss.tests.agents.seas.sea_contract import (
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
+from kiss.tests.conftest import posix_only
 
 _SEA_PATH = Path(sync_sea.__file__).resolve()
 
@@ -88,36 +89,40 @@ def _commit(repo: Path, name: str, text: str) -> str:
 
 
 def _remote_main(repo: Path) -> str:
-    """Return the sha ``origin``'s ``main`` is at, as *repo* sees it after a fresh fetch."""
+    """Return the sha ``origin``'s ``main`` is at (asked of the remote, nothing fetched)."""
     return git(repo, "ls-remote", "origin", "refs/heads/main").split()[0]
 
 
-def _pre_push_hook(repo: Path, body: str) -> None:
-    """Install a ``pre-push`` hook running the shell *body* in *repo*."""
-    hooks = Path(git(repo, "rev-parse", "--git-path", "hooks"))
-    if not hooks.is_absolute():
-        hooks = repo / hooks
+def _git_path(repo: Path, name: str) -> Path:
+    """Return the absolute path of *name* (``hooks``, ``info/exclude``, ...) in *repo*'s git dir."""
+    path = Path(git(repo, "rev-parse", "--git-path", name))
+    return path if path.is_absolute() else repo / path
+
+
+def _hook(repo: Path, name: str, body: str) -> None:
+    """Install the git hook *name* (``pre-push``, ``pre-commit``) running shell *body* in *repo*."""
+    hooks = _git_path(repo, "hooks")
     hooks.mkdir(exist_ok=True)
-    hook = hooks / "pre-push"
+    hook = hooks / name
     hook.write_text("#!/bin/sh\n" + body, encoding="utf-8")
     hook.chmod(0o755)
 
 
-def _race_once(repo: Path, other: Path, branch: str, marker: Path) -> Path:
+def _race_once(repo: Path, other: Path, branch: str, marker: Path) -> None:
     """Make *repo*'s first push race: *other* pushes a commit to *branch* from the hook.
 
     The hook plays the colleague who pushes between our fetch and our
     push, exactly once (*marker* records that it did).
     """
-    _pre_push_hook(
+    _hook(
         repo,
+        "pre-push",
         f"if [ ! -e '{marker}' ]; then\n"
         f"  touch '{marker}'\n"
         f"  cd '{other}' && echo theirs > a.txt && git add a.txt && git commit -q -m race "
         f"&& git push -q origin HEAD:{branch}\n"
         "fi\nexit 0\n",
     )
-    return marker
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
@@ -125,6 +130,7 @@ def test_sea_methods_follow_the_user_contract() -> None:
     sea = SyncSea()
     assert isinstance(sea, WorkerSea)
     assert "origin/main" in sea.description()
+    assert sea.description().startswith("Commits the uncommitted changes")
     assert "`/sync`" in sea.description()
     assert sea.prompt("") == sync_sea.ADD_TO_PROMPT
     assert sea.prompt("   ") == sync_sea.ADD_TO_PROMPT
@@ -134,13 +140,9 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert prompt == sync_sea.SYSTEM_PROMPT
     assert "ASSEMBLED" not in prompt
     assert "`git_sync`" in prompt
-    assert "git merge --abort" in prompt
     # The sub-task sent to a machine names the repository by URL, never by this
     # machine's path (the checkout lives elsewhere there).
     assert f'{sync_sea.THIS_MACHINE_ONLY}"' in prompt
-    assert "task=\"<ref> of <the remote's URL" in prompt
-    assert "Pass no `options` and no `work_dir`" in prompt
-    assert '"work_dir": "<the work' not in prompt
     assert sea.settings({"model": "m"}) == {
         "model": "m",
         "tool_profile": "shell+edit+agents",
@@ -174,30 +176,29 @@ def test_slash_sync_resolves_bare() -> None:
     assert run.prompt == sync_sea.ADD_TO_PROMPT
 
 
+@pytest.mark.usefixtures("empty_machines")
 def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> None:
     """With machines registered the task names them in order, unless it says
     "this machine only" (what the sub-task sent to a machine says); the budget
     is one share per checkout."""
     sea = SyncSea()
     save_machines([Machine("box", url="https://box:8787"), Machine("lab", ssh="u@lab")])
-    try:
-        listed = f"\n\n{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box, lab."
-        assert sea.prompt("") == listed.strip()
-        assert sea.prompt("upstream/dev") == "upstream/dev" + listed
-        assert sea.prompt("preamble\n/sync upstream/dev") == "preamble\n/sync upstream/dev" + listed
-        local = f"origin/main {sync_sea.THIS_MACHINE_ONLY}"
-        assert sea.prompt(local) == f"{local}\n\n{sync_sea.ADD_TO_PROMPT}"
-        assert sea.prompt(f"/sync {sync_sea.THIS_MACHINE_ONLY}") == (
-            f"/sync {sync_sea.THIS_MACHINE_ONLY}\n\n{sync_sea.ADD_TO_PROMPT}"
-        )
-        assert sync_sea.machine_names("") == ["box", "lab"]
-        assert sync_sea.machine_names(local) == []
-        assert sea.settings({})["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
-        run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
-        assert run.prompt == listed.strip()
-        assert run.settings["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
-    finally:
-        save_machines([])
+    listed = f"\n\n{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box, lab."
+    assert sea.prompt("") == listed.strip()
+    assert sea.prompt("upstream/dev") == "upstream/dev" + listed
+    assert sea.prompt("preamble\n/sync upstream/dev") == "preamble\n/sync upstream/dev" + listed
+    local = f"origin/main {sync_sea.THIS_MACHINE_ONLY}"
+    assert sea.prompt(local) == f"{local}\n\n{sync_sea.ADD_TO_PROMPT}"
+    assert sea.prompt(f"/sync {sync_sea.THIS_MACHINE_ONLY}") == (
+        f"/sync {sync_sea.THIS_MACHINE_ONLY}\n\n{sync_sea.ADD_TO_PROMPT}"
+    )
+    assert sync_sea.machine_names("") == ["box", "lab"]
+    assert sync_sea.machine_names(local) == []
+    assert sea.settings({})["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
+    assert run.prompt == listed.strip()
+    assert run.settings["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+    save_machines([])
     assert sea.prompt("") == sync_sea.ADD_TO_PROMPT
     assert sea.settings({})["max_budget"] == sync_sea.MAX_BUDGET_USD
 
@@ -233,30 +234,53 @@ def test_sync_merges_and_pushes_when_both_sides_moved(tmp_path: Path) -> None:
     _commit(theirs, "a.txt", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
+    # A new file is committed before the merge (`git add -A`); an ignored one is not.
     (mine / "untracked.txt").write_text("scratch\n", encoding="utf-8")
+    (mine / "ignored.log").write_text("noise\n", encoding="utf-8")
+    exclude = _git_path(mine, "info/exclude")
+    exclude.parent.mkdir(exist_ok=True)
+    exclude.write_text("*.log\n", encoding="utf-8")
     report = sync(str(mine))
-    assert "main is 1 ahead and 1 behind." in report
+    assert "Committed 1 uncommitted change(s) on main as " in report
+    assert ": untracked.txt\n" in report
+    assert "ignored.log" not in report
+    assert "main is 2 ahead and 1 behind." in report
     assert "Merged origin/main: now at " in report
     assert "(1 files changed)." in report  # the merge brought a.txt
-    assert "uncommitted change" not in report  # untracked files are not changes
     head = git(mine, "rev-parse", "HEAD")
-    assert git(mine, "rev-parse", "HEAD^1") == own
+    gathered = git(mine, "rev-parse", "HEAD^1")
+    assert git(mine, "rev-parse", f"{gathered}^") == own
+    assert git(mine, "log", "-1", "--format=%s", gathered) == git_sync.commit_message(
+        1, "main", git_sync._hostname()
+    )
+    assert git(mine, "show", "--format=", "--name-only", gathered) == "untracked.txt"
     assert "Pushed main to origin:" in report
     assert _remote_main(mine) == head
     assert (mine / "untracked.txt").read_text(encoding="utf-8") == "scratch\n"
+    assert git(mine, "status", "--porcelain", "--ignored") == "!! ignored.log"
 
 
 def test_sync_pushes_when_there_is_nothing_to_merge(tmp_path: Path) -> None:
-    """A branch that is only ahead is pushed without a merge; a dirty tree is reported."""
+    """A branch that is only ahead is pushed without a merge; an edit is committed first."""
     (mine,) = remote_and_clones(tmp_path, "mine")
     own = _commit(mine, "b.txt", "mine\n")
     (mine / "README.md").write_text("edited, not committed\n", encoding="utf-8")
+    (mine / "b.txt").unlink()
     report = sync(str(mine))
-    assert "1 uncommitted change(s) in the working tree, left as they are." in report
-    assert "main is 1 ahead and 0 behind." in report
+    head = git(mine, "rev-parse", "HEAD")
+    assert f"Committed 2 uncommitted change(s) on main as {head[:12]}: README.md, b.txt" in report
+    assert "left as they are" not in report
+    assert "main is 2 ahead and 0 behind." in report
     assert "Nothing to merge: origin/main is already part of main." in report
-    assert _remote_main(mine) == own
+    assert git(mine, "rev-parse", "HEAD^") == own
+    assert _remote_main(mine) == head
+    assert git(mine, "status", "--porcelain") == ""
     assert (mine / "README.md").read_text(encoding="utf-8") == "edited, not committed\n"
+    assert not (mine / "b.txt").exists()
+    # A clean tree commits nothing and the report says nothing about it.
+    report = sync(str(mine))
+    assert "Committed" not in report
+    assert git(mine, "rev-parse", "HEAD") == head
 
 
 def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
@@ -284,16 +308,178 @@ def test_sync_leaves_a_conflicted_merge_in_place_and_finishes_after_resolution(
     assert _remote_main(mine) == git(mine, "rev-parse", "HEAD")
 
 
-def test_sync_refuses_a_merge_that_would_overwrite_local_edits(tmp_path: Path) -> None:
-    """git refuses to merge over an uncommitted edit of a file the remote changed."""
+def test_sync_commits_a_local_edit_of_a_file_the_remote_changed_then_conflicts(
+    tmp_path: Path,
+) -> None:
+    """An uncommitted edit no longer blocks the merge: it is committed, and the conflict
+    it makes with the remote's change is reported after the commit line."""
     mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(theirs, "README.md", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     (mine / "README.md").write_text("edited, not committed\n", encoding="utf-8")
-    with pytest.raises(GitSyncError, match="git merge origin/main did not start"):
+    with pytest.raises(GitSyncError) as info:
         sync(str(mine))
-    assert (mine / "README.md").read_text(encoding="utf-8") == "edited, not committed\n"
-    assert not (mine / ".git" / "MERGE_HEAD").exists()
+    message = str(info.value)
+    gathered = git(mine, "rev-parse", "HEAD")
+    assert message.startswith(
+        f"Committed 1 uncommitted change(s) on main as {gathered[:12]}: README.md\n"
+        "Merging origin/main stopped on 1 conflicted file(s)"
+    )
+    assert "did not start" not in message
+    assert git(mine, "show", f"{gathered}:README.md") == "edited, not committed"
+    assert "<<<<<<<" in (mine / "README.md").read_text(encoding="utf-8")
+    assert git(mine, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+
+
+def test_sync_refuses_to_commit_over_unmerged_paths(tmp_path: Path) -> None:
+    """Conflicted files left without a MERGE_HEAD (a failed stash pop) are not swept into
+    the commit, markers and all: the sync stops and says what to do."""
+    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    _commit(theirs, "README.md", "theirs\n")
+    git(theirs, "push", "-q", "origin", "main")
+    _commit(mine, "README.md", "mine\n")
+    git(mine, "fetch", "-q", "origin")
+    git(mine, "merge", "origin/main", check=False)
+    (mine / ".git" / "MERGE_HEAD").unlink()  # what a failed stash pop leaves behind
+    (mine / "other.txt").write_text("new\n", encoding="utf-8")
+    with pytest.raises(GitSyncError) as info:
+        sync(str(mine))
+    assert str(info.value) == (
+        "1 unmerged path(s) in the working tree, left from an earlier merge: README.md\n"
+        "Resolve them, `git add` the files and `git commit`, then call git_sync again."
+    )
+    assert git(mine, "rev-parse", "HEAD") == git(mine, "rev-parse", "main")
+    assert "<<<<<<<" in (mine / "README.md").read_text(encoding="utf-8")
+    assert "?? other.txt" in git(mine, "status", "--porcelain")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mine",
+        pytest.param(
+            "mine ", marks=posix_only("Windows strips a trailing space from a directory name")
+        ),
+    ],
+)
+def test_sync_commits_the_whole_tree_from_a_subdirectory_whatever_git_is_configured(
+    tmp_path: Path, name: str
+) -> None:
+    """Run in a subdirectory with ``diff.relative`` on, the unmerged-path check and the
+    file list still cover the whole tree; ``status.showUntrackedFiles=no`` does not
+    hide a new file from the commit; a checkout name ending in a space is kept."""
+    mine, theirs = remote_and_clones(tmp_path, name, "theirs")
+    assert mine.name == name
+    git(mine, "config", "diff.relative", "true")
+    git(mine, "config", "status.showUntrackedFiles", "no")
+    sub = mine / "sub"
+    sub.mkdir()
+    # Only an untracked file, which this configuration hides from a plain `git status`.
+    (sub / "new.txt").write_text("new\n", encoding="utf-8")
+    assert git(mine, "status", "--porcelain") == ""
+    report = sync(str(sub))
+    first = git(mine, "rev-parse", "HEAD")
+    assert f"Committed 1 uncommitted change(s) on main as {first[:12]}: sub/new.txt" in report
+    assert f"Checkout {mine.resolve().as_posix()}, branch main" in report
+    # A tracked edit outside sub/ is seen and listed from sub/ although diffs are relative.
+    (mine / "README.md").write_text("root edit\n", encoding="utf-8")
+    report = sync(str(sub))
+    head = git(mine, "rev-parse", "HEAD")
+    assert f"Committed 1 uncommitted change(s) on main as {head[:12]}: README.md" in report
+    assert git(mine, "rev-parse", "HEAD^") == first
+    assert git(mine, "status", "--porcelain", "--untracked-files=all") == ""
+    assert _remote_main(mine) == head
+    # An unresolved conflict at the root is seen from sub/ too, and nothing is committed.
+    git(theirs, "fetch", "-q", "origin")
+    git(theirs, "reset", "-q", "--hard", "origin/main")
+    _commit(theirs, "README.md", "theirs\n")
+    git(theirs, "push", "-q", "origin", "main")
+    own = _commit(mine, "README.md", "mine again\n")
+    git(mine, "fetch", "-q", "origin")
+    git(mine, "merge", "origin/main", check=False)
+    (mine / ".git" / "MERGE_HEAD").unlink()
+    (sub / "more.txt").write_text("more\n", encoding="utf-8")
+    with pytest.raises(GitSyncError, match="1 unmerged path\\(s\\) .*: README.md"):
+        sync(str(sub))
+    assert git(mine, "rev-parse", "HEAD") == own
+    assert "<<<<<<<" in (mine / "README.md").read_text(encoding="utf-8")
+    assert "?? sub/more.txt" in git(mine, "status", "--porcelain", "--untracked-files=all")
+
+
+def test_sync_reports_the_edits_inside_a_submodule_it_cannot_commit(tmp_path: Path) -> None:
+    """``git add -A`` in the superproject stages a submodule's new HEAD, not edits inside
+    it: those are reported as left in place instead of silently passing as committed."""
+    (mine,) = remote_and_clones(tmp_path, "mine")
+    lib_origin = tmp_path / "lib.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(lib_origin))
+    lib_seed = tmp_path / "lib_seed"
+    git(tmp_path, "clone", "-q", str(lib_origin), str(lib_seed))
+    git(lib_seed, "checkout", "-q", "-b", "main")
+    commit(lib_seed, "lib: v1", {"lib.txt": "v1\n"})
+    git(lib_seed, "push", "-q", "origin", "main")
+    git(mine, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib_origin), "lib")
+    git(mine, "commit", "-q", "-m", "add lib")
+    (mine / "lib" / "lib.txt").write_text("edited inside the submodule\n", encoding="utf-8")
+    before = git(mine, "rev-parse", "HEAD")
+    report = sync(str(mine))
+    assert "Committed" not in report
+    assert (
+        "1 change(s) `git add -A` cannot stage from this checkout (edits inside a "
+        "submodule?), left as they are: lib\n"
+    ) in report
+    assert git(mine, "rev-parse", "HEAD") == before
+    assert _remote_main(mine) == before
+    assert (mine / "lib" / "lib.txt").read_text(encoding="utf-8") == "edited inside the submodule\n"
+    # With a top-level edit as well, the commit line comes first, the leftover second.
+    (mine / "README.md").write_text("edited\n", encoding="utf-8")
+    report = sync(str(mine))
+    head = git(mine, "rev-parse", "HEAD")
+    assert (
+        f"Committed 1 uncommitted change(s) on main as {head[:12]}: README.md\n"
+        "1 change(s) `git add -A` cannot stage from this checkout"
+    ) in report
+    assert git(mine, "show", "--format=", "--name-only", head) == "README.md"
+
+
+def test_sync_reports_a_commit_that_fails(tmp_path: Path) -> None:
+    """A pre-commit hook that refuses the commit stops the sync before the fetch."""
+    (mine,) = remote_and_clones(tmp_path, "mine")
+    _hook(mine, "pre-commit", "echo 'lint says no' >&2\nexit 1\n")
+    before = git(mine, "rev-parse", "HEAD")
+    (mine / "README.md").write_text("edited\n", encoding="utf-8")
+    with pytest.raises(GitSyncError, match=r"git commit -q -m .* failed:\nlint says no"):
+        sync(str(mine))
+    assert git(mine, "rev-parse", "HEAD") == before
+    assert (mine / "README.md").read_text(encoding="utf-8") == "edited\n"
+
+
+def test_commit_message_and_the_report_name_the_host_and_cap_the_file_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The commit says where the changes were left; the report lists at most 20 files."""
+    assert git_sync.commit_message(3, "main", "my-laptop") == (
+        "sync: commit 3 uncommitted change(s) on main (my-laptop)"
+    )
+    assert git_sync._hostname()  # whatever the machine is called, never empty
+    monkeypatch.setattr(git_sync.socket, "gethostname", lambda: "")
+    assert git_sync._hostname() == "unknown"
+    monkeypatch.setattr(git_sync.socket, "gethostname", lambda: "box")
+    (mine,) = remote_and_clones(tmp_path, "mine")
+    git(mine, "checkout", "-q", "-b", "feature")
+    for index in range(git_sync.LISTED_FILES + 2):
+        (mine / f"f{index:02d}.txt").write_text(f"{index}\n", encoding="utf-8")
+    report = sync(str(mine), "origin/main")
+    shown = ", ".join(f"f{index:02d}.txt" for index in range(git_sync.LISTED_FILES))
+    assert "Committed 22 uncommitted change(s) on feature as " in report
+    assert f": {shown} ... and 2 more\n" in report
+    assert git(mine, "log", "-1", "--format=%s") == (
+        "sync: commit 22 uncommitted change(s) on feature (box)"
+    )
+    assert "Pushed feature to origin:" in report
+    assert git(mine, "ls-remote", "origin", "refs/heads/feature").split()[0] == git(
+        mine, "rev-parse", "HEAD"
+    )
 
 
 def test_sync_warns_about_conflict_markers_the_remote_committed(tmp_path: Path) -> None:
@@ -313,7 +499,8 @@ def test_sync_retries_the_round_when_the_remote_moves_during_the_push(tmp_path: 
     """A push the remote rejects because it moved is retried from the fetch, once per round."""
     mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
     _commit(mine, "b.txt", "mine\n")
-    marker = _race_once(mine, theirs, "main", tmp_path / "raced")
+    marker = tmp_path / "raced"
+    _race_once(mine, theirs, "main", marker)
     report = sync(str(mine))
     assert marker.exists()
     assert "origin/main moved since the fetch; merging it, then pushing again." in report
@@ -328,7 +515,7 @@ def test_sync_reports_a_push_the_remote_refuses(tmp_path: Path) -> None:
     """A push rejected for a reason other than a race is reported with git's words, no retry."""
     (mine,) = remote_and_clones(tmp_path, "mine")
     _commit(mine, "b.txt", "mine\n")
-    _pre_push_hook(mine, "echo 'pushes are frozen today' >&2\nexit 1\n")
+    _hook(mine, "pre-push", "echo 'pushes are frozen today' >&2\nexit 1\n")
     with pytest.raises(GitSyncError) as info:
         sync(str(mine))
     message = str(info.value)
@@ -370,6 +557,7 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     _commit(theirs, "a.txt", "theirs\n")
     git(theirs, "push", "-q", "origin", "main")
     own = _commit(mine, "b.txt", "mine\n")
+    (mine / "notes.txt").write_text("not committed yet\n", encoding="utf-8")
     script = [
         tool_call_body("git_sync", {"repo": str(mine), "ref": "origin/main"}, prompt_tokens=500),
         finish_body("<p>Merged origin/main into main and pushed.</p>", prompt_tokens=600),
@@ -379,7 +567,10 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     parsed, agentic = run_sea(run, script, mine, max_steps=4)
     assert parsed["success"] is True
     assert "pushed" in parsed["summary"]
-    assert git(mine, "rev-parse", "HEAD^1") == own
+    # The tool committed notes.txt on main (between own and the merge) and pushed it.
+    assert git(mine, "rev-parse", "HEAD^1^") == own
+    assert git(mine, "show", "--format=", "--name-only", "HEAD^1") == "notes.txt"
+    assert git(mine, "status", "--porcelain") == ""
     assert _remote_main(mine) == git(mine, "rev-parse", "HEAD")
 
     assert len(agentic) == 2, [list(r) for r in agentic]
@@ -392,6 +583,7 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
         assert f"Work dir: {mine}" in system
     results = tool_results(agentic[1])
     assert len(results) == 1, agentic[1]["messages"]
+    assert "Committed 1 uncommitted change(s) on main as " in results[0]
     assert "Merged origin/main: now at" in results[0]
     assert "Pushed main to origin:" in results[0]
 
@@ -400,7 +592,6 @@ def test_git_sync_tool_returns_the_failure_report_instead_of_raising(tmp_path: P
     """The tool hands the model the error text (conflicts included) as its result."""
     missing = tmp_path / "missing"
     assert sync_sea.git_sync(str(missing)) == f"{missing} is not a directory"
-    assert git_sync.PUSH_ATTEMPTS == 3
 
 
 def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Path) -> None:
@@ -447,7 +638,8 @@ def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path:
     _commit(mine, "g.txt", "more\n")
     git(theirs, "fetch", "-q", "origin", "feature")
     git(theirs, "checkout", "-q", "-b", "feature", "origin/feature")
-    marker = _race_once(mine, theirs, "feature", tmp_path / "raced")
+    marker = tmp_path / "raced"
+    _race_once(mine, theirs, "feature", marker)
     report = sync(str(mine))
     assert marker.exists()
     assert "origin/feature moved since the fetch; merging it, then pushing again." in report

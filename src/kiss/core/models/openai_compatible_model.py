@@ -37,11 +37,15 @@ from kiss.core.models.model import (
     _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
+    checked_nonempty,
+    normalize_content_blocks,
     parse_tool_arguments,
     responses_items_to_chat_messages,
+    text_of_parts,
 )
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
+    shutdown_pool_sockets,
     stop_error,
     stop_or_stall_error,
 )
@@ -66,6 +70,25 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+
+# How often ``_blocking_request`` looks at the stop event while its worker
+# thread waits on the provider; the stream watchdog's stop poll rate.
+_BLOCKING_STOP_POLL_SECONDS = 0.1
+
+
+def _call_into(outcome: dict[str, Any], create: Callable[..., Any], kwargs: dict[str, Any]) -> None:
+    """Worker-thread body of ``_blocking_request``: store ``create``'s result or error in *outcome*.
+
+    Args:
+        outcome: Receives ``"response"`` on success, else ``"error"``.
+        create: The SDK call to run.
+        kwargs: Its keyword arguments.
+    """
+    try:
+        outcome["response"] = create(**kwargs)
+    except BaseException as error:  # noqa: BLE001 - re-raised on the requesting thread
+        outcome["error"] = error
+
 
 # Per-request timeout for embeddings calls.  The client's own timeout is
 # the 1800 s a long generation may legitimately need, but an embeddings
@@ -125,13 +148,6 @@ def _openai_fast_multiplier(model_name: str) -> float:
         if bare.startswith(prefix):
             return factor
     return _OPENAI_FAST_MULTIPLIER
-
-
-# Streaming requests get a per-request ``httpx.Timeout`` instead of the
-# client's scalar 1800 s, so the wait for the response headers is bounded
-# by the stall timeout too (see ``stream_abort.CONNECT_TIMEOUT``).
-# Non-streaming calls keep the scalar: a long reasoning turn with no token
-# callback legitimately sends nothing for minutes.
 
 
 def _provider_model_name(model_name: str) -> str:
@@ -430,13 +446,11 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return _text_of_parts(content)
+        return text_of_parts(content)
     return "" if content is None else str(content)
 
 
-def _merge_tools_prompt_into_content(
-    content: Any, tools_prompt: str, part_type: str = "text"
-) -> Any:
+def _merge_tools_prompt_into_content(content: Any, tools_prompt: str, part_type: str) -> Any:
     """Append *tools_prompt* to a user message content of either shape.
 
     The first user message's ``content`` is a plain string in the common
@@ -444,7 +458,9 @@ def _merge_tools_prompt_into_content(
     attachments (images/PDFs/audio).
 
     Args:
-        content: The existing message content (str or list of parts).
+        content: The existing message content (str, list of parts, or
+            ``None`` for a message without text; the Responses transport
+            merges before its normaliser runs).
         tools_prompt: The text-based tools prompt to append.
         part_type: The text part type of the API in use: ``"text"`` for
             Chat Completions, ``"input_text"`` for Responses.
@@ -454,7 +470,7 @@ def _merge_tools_prompt_into_content(
     """
     if isinstance(content, list):
         return [*content, {"type": part_type, "text": tools_prompt}]
-    return str(content) + "\n" + tools_prompt
+    return ("" if content is None else str(content)) + "\n" + tools_prompt
 
 
 def _conversation_with_tools_prompt(
@@ -496,21 +512,22 @@ def _function_call_entry(call_id: str, name: str, args_json: str) -> dict[str, A
     return {"id": call_id, "name": name, "arguments": parse_tool_arguments(args_json)}
 
 
-def _text_of_parts(parts: list[Any]) -> str:
-    """Join the ``text`` of the ``text``-typed parts of a Chat Completions content array.
+def _function_call_item(
+    call_id: str, name: str, args_json: str, item_id: str = ""
+) -> dict[str, Any]:
+    """Return the Responses ``function_call`` input item that replays one call.
 
     Args:
-        parts: Content parts (dicts with a ``type``); anything that is not
-            a ``text`` part dict is skipped.
-
-    Returns:
-        The concatenated text.
+        call_id: The provider's call id.
+        name: The tool name.
+        args_json: The call's arguments as a JSON string.
+        item_id: The provider's output item id (``fc_…``), kept when known
+            so a Responses provider recognises its own item on replay.
     """
-    return "".join(
-        str(part.get("text", "") or "")
-        for part in parts
-        if isinstance(part, dict) and part.get("type") == "text"
-    )
+    item = {"type": "function_call", "call_id": call_id, "name": name, "arguments": args_json}
+    if item_id:
+        item["id"] = item_id
+    return item
 
 
 def _accumulate_tool_call_deltas(
@@ -579,9 +596,6 @@ class OpenAICompatibleBase(Model):
         self.base_url = base_url
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
-        # The (base_url, api_key, headers) triple the current client was
-        # built from, so _ensure_client rebuilds only on a real change.
-        self._client_inputs: tuple[Any, ...] | None = None
         thinking_level = _model_thinking_level(self.model_name)
         reasoning_cfg = self.model_config.get("reasoning")
         has_native_effort = isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
@@ -602,31 +616,24 @@ class OpenAICompatibleBase(Model):
     def _ensure_client(self) -> None:
         """Build the SDK client once, so its connection pool is reused.
 
-        ``initialize()`` used to build a fresh client on every call — and
-        the delegated tool-calling transport called it before every
-        single agent step — so a 100-step run built 100 ``OpenAI``
-        clients and 100 httpx connection pools, each paying a fresh TLS
-        handshake while the previous pool waited on the garbage
-        collector.  The client is rebuilt only when the inputs it was
-        constructed from (``base_url``, ``api_key``, ``extra_headers``)
-        have actually changed, and the replaced client is closed so its
-        pool is released at once.
+        Every request builder calls this first (the delegated tool-calling
+        transport before every agent step), so the client is rebuilt only
+        when ``base_url``, ``api_key`` or ``extra_headers`` changed between
+        turns; see :meth:`Model._reuse_client`.
         """
         extra_headers = self.model_config.get("extra_headers") or {}
         inputs = (self.base_url, self.api_key, tuple(sorted(extra_headers.items())))
-        if self.client is not None and inputs == self._client_inputs:
-            return
-        replaced = self.client
-        self.client = OpenAI(
+        self._reuse_client(inputs, self._build_client)
+
+    def _build_client(self) -> OpenAI:
+        """Return a new ``OpenAI`` client for the current endpoint, key and headers."""
+        return OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=1800.0,
             max_retries=_MAX_RETRIES,
-            default_headers=extra_headers,
+            default_headers=self.model_config.get("extra_headers") or {},
         )
-        self._client_inputs = inputs
-        if replaced is not None:
-            replaced.close()
 
     def _stream_request(
         self,
@@ -668,17 +675,111 @@ class OpenAICompatibleBase(Model):
             raise stop_error()
         return result
 
+    def _blocking_request(self, create: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
+        """Issue one non-streamed request, aborting it as soon as the user presses Stop.
+
+        The callback-less turn keeps the client's long timeout on purpose:
+        a non-streamed reasoning turn legitimately sends nothing for
+        minutes, so no stall clock applies.  But a thread blocked in the
+        SDK call cannot notice a Stop, and no stream watchdog can reach a
+        request that has no response yet.  So the call runs on a worker
+        thread while this one watches the stop event (at the watchdog's
+        poll rate).  On a Stop the pending socket is shut down, which
+        wakes the worker, and the client is closed and dropped so the
+        SDK's retry of the woken call fails at once instead of re-sending
+        the stopped request and the next turn builds a fresh pool.  If the
+        socket could not be reached the worker is simply abandoned (a
+        daemon thread) until the client timeout.
+
+        A reply that arrived was billed, whatever the caller then makes
+        of it (a Stop already set, a failed status, a tool call the agent
+        rejects), so it is recorded in ``_rejected_response`` (as the
+        streamed path records its usage chunk) before anything can raise.
+        Outside a stoppable task (no stop event bound) the call runs
+        inline.
+
+        Args:
+            create: The SDK call (``client.chat.completions.create``,
+                ``client.responses.create`` or an adaptive wrapper of one).
+            kwargs: The request kwargs.
+
+        Returns:
+            The SDK response object.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop during the request.
+        """
+        stop_event = stop_signal.get_thread_stop_event()
+        if stop_event is None:
+            response = create(**kwargs)
+            self._rejected_response = response
+            return response
+        outcome: dict[str, Any] = {}
+        worker = threading.Thread(
+            target=_call_into,
+            args=(outcome, create, kwargs),
+            name="model-blocking-request",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            while worker.is_alive():
+                if stop_event.wait(_BLOCKING_STOP_POLL_SECONDS):
+                    # A reply landing this very moment is billed too: give
+                    # the worker one poll interval to store it.
+                    worker.join(_BLOCKING_STOP_POLL_SECONDS)
+                    break
+        finally:
+            # Also on a KeyboardInterrupt raised into this thread (the
+            # runner's forced stop): the pending request is torn down
+            # and a reply the worker already stored is still billed.
+            if worker.is_alive():
+                self._abort_pending_request()
+                # The shutdown wakes the worker; one that already had the
+                # whole reply in hand stores it now, so wait a poll
+                # interval before looking at the outcome rather than only
+                # at the worker's liveness: a reply that landed between
+                # the alive check and the abort was billed and must not
+                # be dropped.
+                worker.join(_BLOCKING_STOP_POLL_SECONDS)
+            if "response" in outcome:
+                self._rejected_response = outcome["response"]
+        if stop_event.is_set():
+            raise stop_error()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["response"]
+
+    def _abort_pending_request(self) -> None:
+        """Tear down the client whose blocking request the user stopped.
+
+        Shuts the pool's sockets down (the only thing that wakes the
+        worker parked in ``recv()``), then closes the client and drops it
+        so :meth:`_ensure_client` builds a new one for the next turn.
+        """
+        client, self.client = self.client, None
+        if client is None:
+            return
+        shutdown_pool_sockets(client._client)
+        client.close()
+
     def _config_request_params(self) -> dict[str, Any]:
         """Return the ``model_config`` entries that may be request parameters.
 
         Framework-only keys (:data:`FRAMEWORK_ONLY_CONFIG_KEYS`) are left
-        out; the transport reshapes what it must and then keeps the subset
-        its SDK call accepts via :meth:`_finish_request_kwargs`.
+        out, as is ``extra_headers``, which :meth:`_ensure_client` already
+        installed as the client's default headers; the transport reshapes
+        what it must and then keeps the subset its SDK call accepts via
+        :meth:`_finish_request_kwargs`.
 
         Returns:
             A fresh dict of the forwardable config entries.
         """
-        return {k: v for k, v in self.model_config.items() if k not in FRAMEWORK_ONLY_CONFIG_KEYS}
+        return {
+            k: v
+            for k, v in self.model_config.items()
+            if k not in FRAMEWORK_ONLY_CONFIG_KEYS and k != "extra_headers"
+        }
 
     def _finish_request_kwargs(
         self, kwargs: dict[str, Any], supported: frozenset[str], label: str
@@ -1126,15 +1227,11 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
     def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
         """Normalize content blocks to JSON-serializable dicts.
 
-        Drops text blocks whose text is empty or whitespace-only, because
-        many APIs reject them with invalid_request_error about non-whitespace text.
-
-        Also drops Anthropic ``thinking`` / ``redacted_thinking`` blocks: the
-        OpenAI Chat Completions API has no such content-part type and rejects
-        them with ``invalid_value`` (thinking blocks are hidden provider state
-        that must not be replayed to a different provider).  Such blocks enter
-        the conversation when it is handed off from an :class:`AnthropicModel`
-        (e.g. via the Sorcar ``set_model`` tool).
+        See :func:`normalize_content_blocks`: Anthropic ``image`` /
+        ``document`` blocks left by a conversation hand-off are converted,
+        and ``thinking`` / ``redacted_thinking`` blocks are dropped because
+        the OpenAI Chat Completions API has no such content-part type and
+        rejects them with ``invalid_value``.
 
         Args:
             content: The content blocks from a response.
@@ -1142,51 +1239,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             list[dict[str, Any]]: Normalized content blocks as dictionaries.
         """
-        blocks: list[dict[str, Any]] = []
-        if content is None:
-            return blocks
-        for block in content:
-            if isinstance(block, dict):
-                block_type = block.get("type")
-                if block_type in ("thinking", "redacted_thinking"):
-                    continue
-                if block_type == "text" and not block.get("text", "").strip():
-                    continue
-                if block_type in ("image", "document"):
-                    converted = _anthropic_media_block_to_openai_part(block)
-                    if converted is not None:
-                        blocks.append(converted)
-                    continue
-                blocks.append(block)
-                continue
-            block_type = getattr(block, "type", None)
-            if block_type in ("thinking", "redacted_thinking"):
-                continue
-            if block_type == "text":
-                text = getattr(block, "text", "")
-                if not text.strip():
-                    continue
-                blocks.append({"type": "text", "text": text})
-            elif block_type == "tool_use":
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": getattr(block, "id", ""),
-                        "name": getattr(block, "name", ""),
-                        "input": getattr(block, "input", {}) or {},
-                    }
-                )
-            elif hasattr(block, "model_dump"):
-                dumped = block.model_dump(exclude_none=True)
-                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
-                    continue
-                blocks.append(dumped)
-            else:
-                text = str(block)
-                if not text.strip():
-                    continue
-                blocks.append({"type": "text", "text": text})
-        return blocks
+        return normalize_content_blocks(
+            content,
+            ("image", "document"),
+            _anthropic_media_block_to_openai_part,
+            keep_thinking=False,
+        )
 
     def _normalize_conversation_for_api(
         self,
@@ -1240,7 +1298,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             parts = cls._attachments_to_content_parts(attachments)
             prior = msg_copy.get("content")
             if isinstance(prior, str) and prior.strip():
-                parts.append({"type": "text", "text": prior})
+                parts.append(cls._text_part(prior))
             elif isinstance(prior, list):
                 parts.extend(prior)
             msg_copy["content"] = parts
@@ -1260,18 +1318,13 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         rest = [b for b in blocks if b.get("type") not in ("tool_result", "tool_use")]
 
         if tool_uses:
-            text = _text_of_parts(rest)
+            text = text_of_parts(rest)
             tool_calls = list(msg_copy.get("tool_calls") or [])
             for b in tool_uses:
                 tool_calls.append(
-                    {
-                        "id": b.get("id", ""),
-                        "type": "function",
-                        "function": {
-                            "name": b.get("name", ""),
-                            "arguments": json.dumps(b.get("input") or {}),
-                        },
-                    }
+                    _chat_tool_call_entry(
+                        b.get("id", ""), b.get("name", ""), json.dumps(b.get("input") or {})
+                    )
                 )
             return [
                 {
@@ -1488,7 +1541,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         kwargs["stream_options"] = {"include_usage": True}
         if adaptive:
-            create: Callable[..., Any] = self._create_chat_completion_adaptive
+            create: Callable[..., Any] = partial(self._create_chat_completion_adaptive, self.client)
             watchdog_name = "openai-tools-stream-abort-watchdog"
         else:
             create = self.client.chat.completions.create
@@ -1611,7 +1664,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             A tuple of (content, response).
         """
         if self.token_callback is None:
-            response = self.client.chat.completions.create(**kwargs)
+            response = self._blocking_request(self.client.chat.completions.create, kwargs)
             self._raise_for_failed_completion(response)
             return response.choices[0].message.content or "", response
 
@@ -1624,9 +1677,11 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Build the base kwargs dict for a Chat Completions request.
 
-        Copies ``model_config`` (dropping keys that are not Chat Completions
-        parameters), attaches the provider model name and ``messages``, and
-        applies OpenRouter Anthropic cache control.
+        Re-syncs the SDK client with the current endpoint inputs
+        (:meth:`_ensure_client`), copies ``model_config`` (dropping keys
+        that are not Chat Completions parameters), attaches the provider
+        model name and ``messages``, and applies OpenRouter Anthropic cache
+        control.
 
         Args:
             messages: The normalized messages to send.
@@ -1634,6 +1689,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The kwargs dict for ``client.chat.completions.create(...)``.
         """
+        self._ensure_client()
         kwargs = self._config_request_params()
         kwargs.update({"model": self._api_model_name, "messages": messages})
         return self._finish_request_kwargs(kwargs, _CHAT_REQUEST_PARAMS, "OpenAI Chat Completions")
@@ -1653,13 +1709,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Raises:
             KISSError: When every message was filtered out as whitespace-only.
         """
-        normalized = self._normalize_conversation_for_api(self.conversation)
-        if not normalized:
-            raise KISSError(
-                "Cannot generate response: all messages have whitespace-only "
-                "content that was filtered out. At least one message with "
-                "non-whitespace content is required."
-            )
+        normalized = checked_nonempty(self._normalize_conversation_for_api(self.conversation))
         system_instruction = self.system_instruction_text()
         if system_instruction and not any(
             message.get("role") == "system" for message in normalized
@@ -1732,7 +1782,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             self._raise_for_finish_reason(finish_reason)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
-            response = self._create_chat_completion_adaptive(**kwargs)
+            response = self._blocking_request(
+                partial(self._create_chat_completion_adaptive, self.client), kwargs
+            )
             self._raise_for_failed_completion(response)
             message = response.choices[0].message
             content = message.content or ""
@@ -1823,7 +1875,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             return declared
         return _tool_effort_verdict(self._effort_verdict_key)
 
-    def _create_chat_completion_adaptive(self, **kwargs: Any) -> Any:
+    def _create_chat_completion_adaptive(self, client: OpenAI, **kwargs: Any) -> Any:
         """Create a chat completion, learning the effort capability if unknown.
 
         For endpoints whose ``tools`` + ``reasoning_effort`` capability is
@@ -1836,7 +1888,13 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         without the effort straight away; other known endpoints and
         requests without tools or effort pass straight through.
 
+        Both sends go through *client*, bound by the caller when the turn
+        began: a Stop meanwhile drops ``self.client`` (and a later turn
+        rebuilds it), and the retry of a stopped turn must neither
+        re-send its messages through the next turn's client nor at all.
+
         Args:
+            client: The SDK client the turn started with.
             kwargs: Fully-built Chat Completions request arguments
                 (``reasoning_effort`` is left out of the request when the
                 endpoint rejects it).
@@ -1859,18 +1917,20 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             )
         unverified = capability is None
         try:
-            response = self.client.chat.completions.create(**kwargs)
+            response = client.chat.completions.create(**kwargs)
         except BadRequestError as e:
             if unverified and "reasoning_effort" in str(e):
                 _record_tool_effort_verdict(self._effort_verdict_key, False)
                 dropped = kwargs.pop("reasoning_effort")
+                if client is not self.client:
+                    raise  # the user stopped this turn meanwhile
                 logger.debug(
                     "Endpoint %s rejected tools + reasoning_effort=%r; "
                     "retrying without it and caching the verdict.",
                     self.base_url,
                     dropped,
                 )
-                return self.client.chat.completions.create(**kwargs)
+                return client.chat.completions.create(**kwargs)
             raise
         if unverified:
             _record_tool_effort_verdict(self._effort_verdict_key, True)
@@ -1988,7 +2048,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             ]
         if role == "assistant":
             if isinstance(content, list):
-                text = _text_of_parts(content)
+                text = text_of_parts(content)
             else:
                 text = content if isinstance(content, str) else ""
             if text.strip():
@@ -1996,14 +2056,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 args = fn.get("arguments")
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": tc.get("id", ""),
-                        "name": fn.get("name", ""),
-                        "arguments": args if isinstance(args, str) else json.dumps(args or {}),
-                    }
-                )
+                args_json = args if isinstance(args, str) else json.dumps(args or {})
+                items.append(_function_call_item(tc.get("id", ""), fn.get("name", ""), args_json))
             return items
         if isinstance(content, list):
             parts = cls._chat_parts_to_responses_parts(content)
@@ -2098,6 +2152,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             rejected = delegate.take_partial_usage_response()
             if rejected is not None:
                 self._rejected_response = rejected
+            # A Stop during the delegate's pending request closed the
+            # SHARED client (_abort_pending_request) and dropped only the
+            # delegate's reference; drop this model's too, or _reuse_client
+            # keeps the closed pool and the next turn fails to send.
+            if delegate.client is None:
+                self.client = None
             raise
 
         # Everything the delegate appended is this turn's native output
@@ -2122,8 +2182,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             )
             for fc in function_calls
         ]
-        for fc in function_calls:
-            self._delegate_raw_items[fc["id"]] = new_items
+        if function_calls:
+            self._delegate_raw_items[function_calls[0]["id"]] = new_items
         self._append_assistant_turn(content, function_calls, raw_tool_calls)
         self._prune_delegate_raw_items()
         return function_calls, content, response
@@ -2133,10 +2193,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         The cache exists so a follow-up turn can replay a delegated
         turn's raw output items (reasoning included) verbatim, keyed by
-        call_id.  An entry whose call_id is no longer anywhere in the
-        conversation can never be looked up again, so keeping it only
+        the turn's first call_id (the one
+        :meth:`_chat_conversation_to_responses_input` looks up).  An entry
+        whose call_id is no longer anywhere in the conversation can never
+        be looked up again, so keeping it only
         grows the process's memory — one whole turn's payload per tool
-        call, for the lifetime of a model instance that Sorcar reuses
+        turn, for the lifetime of a model instance that Sorcar reuses
         across sub-sessions.
         """
         live = {
@@ -2152,7 +2214,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """Reset the conversation and the raw Responses items cached for it.
 
         The base implementation clears only the conversation, but this
-        transport also caches raw Responses items per call_id, dead
+        transport also caches raw Responses items per tool turn, dead
         weight once the conversation they describe is gone.  The
         Responses delegate needs no reset here: every delegated turn
         resets it before use (:meth:`_generate_with_tools_via_responses`).
@@ -2186,9 +2248,11 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             content: The response without the DeepSeek reasoning block.
             function_calls: The parsed tool calls (may be empty).
         """
-        self.conversation.append({"role": "assistant", "content": content})
-        if function_calls:
-            self._replace_last_assistant_with_tool_calls(content, function_calls)
+        raw_tool_calls = [
+            _chat_tool_call_entry(fc["id"], fc["name"], json.dumps(fc["arguments"]))
+            for fc in function_calls
+        ]
+        self._append_assistant_turn(content, function_calls, raw_tool_calls)
         self._rejected_response = None
 
     def extract_input_output_token_counts_from_response(

@@ -33,6 +33,8 @@ from pathlib import Path
 from kiss.agents.sorcar import sorcar_agent as wta_mod
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
+from kiss.agents.sorcar.sorcar_agent import _WorktreeCleanupOutcome
+from kiss.tests.conftest import seed_worktree
 
 
 def _make_repo_with_worktree(tmp: Path) -> tuple[Path, Path, str]:
@@ -106,20 +108,20 @@ def test_finalize_worktree_no_spurious_hook_warning(
         )
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         with caplog.at_level(  # type: ignore[attr-defined]
             logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
             ok = agent._finalize_worktree()
 
-        assert ok is True, (
+        assert ok is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, (
             "_finalize_worktree should succeed: the race-write must "
             "have been committed by the re-stage in auto_commit_changes "
             "(or by the late-arriver retry inside _finalize_worktree)."
@@ -181,20 +183,20 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
         )
 
         agent = ChatSorcarAgent("test")
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=None,
-        )
+        ))
 
         with caplog.at_level(  # type: ignore[attr-defined]
             logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
             ok = agent._finalize_worktree()
 
-        assert ok is False
+        assert ok is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
         assert wt_dir.exists(), "Stuck worktree must be preserved."
 
         joined = "\n".join(

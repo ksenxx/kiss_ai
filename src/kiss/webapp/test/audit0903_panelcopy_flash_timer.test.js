@@ -22,32 +22,17 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const {sleep, click} = require('./simplify2_harness');
+const {
+  sleep,
+  click,
+  recordTimers,
+  fireTimers,
+  stubClipboard,
+} = require('./simplify2_harness');
 
 // The 1500 ms revert timers are recorded instead of waited for: the
 // test fires them by hand, so no wall-clock sleep decides whether the
 // stale one lands before or after the second click.
-function recordFlashTimers(win) {
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  const realClearTimeout = win.clearTimeout;
-  win.setTimeout = function (fn, ms, ...args) {
-    if (ms !== 1500) return realSetTimeout(fn, ms, ...args);
-    const timer = {fn, cleared: false};
-    timers.push(timer);
-    return timer;
-  };
-  win.clearTimeout = function (handle) {
-    if (handle && typeof handle === 'object') handle.cleared = true;
-    else realClearTimeout(handle);
-  };
-  return timers;
-}
-
-/** Run every recorded timer that was not cleared, as the clock would. */
-function fireFlashTimers(timers) {
-  for (const timer of timers) if (!timer.cleared) timer.fn();
-}
 
 function makePage() {
   const dom = new JSDOM('<!DOCTYPE html><body><div id="panel"></div></body>', {
@@ -56,17 +41,8 @@ function makePage() {
     url: 'https://localhost/',
   });
   const win = dom.window;
-  const timers = recordFlashTimers(win);
-  const clipboardWrites = [];
-  Object.defineProperty(win.navigator, 'clipboard', {
-    configurable: true,
-    value: {
-      writeText: text => {
-        clipboardWrites.push(String(text));
-        return Promise.resolve();
-      },
-    },
-  });
+  const timers = recordTimers(win, 1500);
+  const {writes: clipboardWrites} = stubClipboard(win);
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8') +
       '\n//# sourceURL=audit0903-panelcopy.js',
@@ -105,14 +81,14 @@ async function testStaleTimerDoesNotEndSecondFlash() {
 
   // 1500 ms after the FIRST click: whatever the first click left armed
   // fires now, before the second click's timer is due.
-  fireFlashTimers(timers.slice(0, 1));
+  fireTimers(timers.slice(0, 1));
   assert.ok(
     isCheck(btn) && btn.classList.contains('copied'),
     "the first click's stale timer must not end the second flash early",
   );
 
   // The second flash still reverts on its own.
-  fireFlashTimers(timers);
+  fireTimers(timers);
   assert.ok(
     !isCheck(btn) && !btn.classList.contains('copied'),
     'the flash must still revert after the second timer',
@@ -141,7 +117,7 @@ async function testSecondPanelFlashesIndependently() {
   await sleep(0);
   assert.ok(isCheck(b1) && isCheck(b2), 'both buttons flash');
   assert.strictEqual(timers.length, 2, 'each button arms its own revert timer');
-  fireFlashTimers(timers);
+  fireTimers(timers);
   assert.ok(
     !isCheck(b1) && !isCheck(b2),
     'both flashes revert on their own timers',

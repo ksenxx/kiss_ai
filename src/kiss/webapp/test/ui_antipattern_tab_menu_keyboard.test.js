@@ -56,7 +56,7 @@ function twoTabs() {
     'none',
     'the group strip is shown',
   );
-  return {win, posted, tabA, tabB};
+  return {win, posted, tabA};
 }
 
 async function main() {

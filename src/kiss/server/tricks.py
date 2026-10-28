@@ -6,7 +6,7 @@
 
 The "Inject instruction" panel and the ghost-text fast-complete
 suggestions both consume a single ordered list of trick strings
-returned by :func:`read_tricks`, built from two sources:
+returned by :func:`read_tricks_data`, built from two sources:
 
 1. ``$KISS_HOME/MY_INJECTION.md`` — user-curated tricks.  Auto-seeded on
    first read with the default starter
@@ -97,27 +97,23 @@ def _parse_trick_sections(text: str) -> list[str]:
     return tricks
 
 
-def ensure_user_asset_from_default(name: str, default_content: str) -> Path | None:
-    """Return ``$KISS_HOME/<name>``, seeding it with *default_content* if absent.
+def _ensure_my_injection() -> Path | None:
+    """Return ``$KISS_HOME/MY_INJECTION.md``, seeded with :data:`DEFAULT_MY_INJECTION` if absent.
 
     The seed is :func:`kiss.core.utils.seed_file_atomically`: atomic and
     non-clobbering, so a concurrent reader (the autocomplete worker
-    calling :func:`read_tricks` while a command-handler thread seeds
-    ``MY_INJECTION.md``) never observes an empty or partially written
-    file, and an existing file always wins.
-
-    Args:
-        name: Asset file name (``"MY_INJECTION.md"``).
-        default_content: UTF-8 text written on first read only.
+    calling :func:`read_tricks_data` while a command-handler thread seeds
+    the file) never observes an empty or partially written file, and
+    an existing file always wins.
 
     Returns:
         The path when the file exists or was just created; ``None``
         when the brand home (``$KISS_HOME``) is not writable (read-only FS, missing
         ``HOME``) so callers can skip silently.
     """
-    user_path = kiss_home() / name
+    user_path = kiss_home() / "MY_INJECTION.md"
     try:
-        seed_file_atomically(user_path, default_content)
+        seed_file_atomically(user_path, DEFAULT_MY_INJECTION)
     except OSError:
         return None
     return user_path
@@ -130,14 +126,9 @@ def _read_my_injection_tricks() -> list[str]:
     Returns an empty list when the brand home (``$KISS_HOME``) is not writable (so the
     seed cannot be written) or when the file is unreadable / corrupt.
     """
-    user_path = ensure_user_asset_from_default(
-        "MY_INJECTION.md", DEFAULT_MY_INJECTION,
-    )
-    if user_path is None:
-        return []
     try:
-        text = user_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        _, text = _read_my_injection("read")
+    except _TrickError:
         return []
     return _parse_trick_sections(text)
 
@@ -197,18 +188,6 @@ def read_tricks_data() -> TricksData:
     return {"tricks": user + _read_bundled_tricks(), "userCount": len(user)}
 
 
-def read_tricks() -> list[str]:
-    """Return the ordered "Inject instruction" trick list.
-
-    See :func:`read_tricks_data` for the sources and their order.
-
-    Returns:
-        Ordered list of trick text strings, MY_INJECTION first then
-        bundled.
-    """
-    return read_tricks_data()["tricks"]
-
-
 class _TrickError(Exception):
     """User-facing refusal of a ``MY_INJECTION.md`` edit; ``str(e)`` is the message."""
 
@@ -222,7 +201,7 @@ def _read_my_injection(verb: str) -> tuple[Path, str]:
     the file), when the file cannot be read, or when it is not UTF-8
     text.
     """
-    user_path = ensure_user_asset_from_default("MY_INJECTION.md", DEFAULT_MY_INJECTION)
+    user_path = _ensure_my_injection()
     if user_path is None:
         raise _TrickError(f"Could not {verb} ~/{HOME_DIR}/MY_INJECTION.md")
     try:
@@ -451,7 +430,7 @@ def current_sentence_partial(query: str) -> str:
     return partial
 
 
-def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
+def prefix_match_tricks(query: str) -> list[str]:
     """Return every trick whose prefix matches *query*'s current-sentence start.
 
     Identifies the partial currently being typed *at the start of the
@@ -470,11 +449,6 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
 
     Args:
         query: The full input string from the chat textarea.
-        min_partial_len: Minimum length the sentence partial must have
-            before a match is attempted.  Defaults to 2 — the same
-            threshold ``_AutocompleteMixin._complete`` uses for ghost
-            text generally, so a single keystroke at the start of a
-            sentence does not pop suggestions.
 
     Returns:
         Ordered list of full trick strings that the partial prefixes,
@@ -482,11 +456,14 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
         the tricks files are unavailable).
     """
     partial = current_sentence_partial(query)
-    if len(partial) < min_partial_len:
+    # The same threshold ``_AutocompleteMixin._complete`` uses for ghost
+    # text, so a single keystroke at the start of a sentence does not
+    # pop suggestions.
+    if len(partial) < 2:
         return []
     seen: set[str] = set()
     out: list[str] = []
-    for trick in read_tricks():
+    for trick in read_tricks_data()["tricks"]:
         if trick in seen:
             continue
         if trick.startswith(partial) and len(trick) > len(partial):

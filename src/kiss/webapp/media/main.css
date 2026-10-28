@@ -1848,12 +1848,6 @@ body.content-tab-open #send-btn { display: none !important; }
 .more-item-icon svg { width: 16px; height: 16px; }
 .more-item-label { overflow: hidden; text-overflow: ellipsis; }
 
-#theme-btn, #contrast-btn, #theme-auto-btn { display: none; }
-
-body.remote-chat #theme-btn,
-body.remote-chat #contrast-btn,
-body.remote-chat #theme-auto-btn { display: flex; }
-
 /* The "Auto mode" item is a checkbox item: it reads as the current
    choice (accent text, bold) while the palette follows the clock. */
 
@@ -1861,9 +1855,6 @@ body.remote-chat #theme-auto-btn { display: flex; }
   color: var(--accent);
   font-weight: 600;
 }
-
-#terminal-btn { display: none; }
-body.remote-chat #terminal-btn { display: flex; }
 
 /* Anchored to the pill's right edge; positionModelDD() in main.js
    shifts it right when that anchor would push it past the left
@@ -2182,8 +2173,6 @@ body.remote-chat #terminal-btn { display: flex; }
   touch-action: none;
 }
 
-.meta-section-resizer[hidden] { display: none; }
-
 .meta-section-resizer::after {
   content: '';
   position: absolute;
@@ -2283,7 +2272,11 @@ body.meta-section-resizing {
 }
 
 .sched-row:hover,
-.sched-row:focus-visible {
+.sched-row:focus-visible,
+.machine-row:hover,
+.machine-row:focus-visible,
+.recommendation-row:hover,
+.recommendation-row:focus-visible {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   outline: none;
 }
@@ -2303,14 +2296,6 @@ body.meta-section-resizing {
 
 .sched-row .sidebar-item-edit:disabled,
 .machine-row .sidebar-item-delete:disabled { opacity: 0.2; cursor: default; }
-
-.machine-row:hover,
-.machine-row:focus-visible,
-.recommendation-row:hover,
-.recommendation-row:focus-visible {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
-  outline: none;
-}
 
 /* A Recommendations row is a click target (it opens a new chat with
    the task in the composer); the whole sentence shows, wrapped, inside
@@ -2571,7 +2556,7 @@ button.app-row-main .app-state { color: var(--accent); }
   color: var(--dim);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--dur-base) var(--ease);
   z-index: var(--z-raised);
 }
 
@@ -3034,8 +3019,6 @@ button.app-row-main .app-state { color: var(--accent); }
   text-overflow: ellipsis;
 }
 
-.explorer-kids[hidden] { display: none; }
-
 /* Top-level folder rows: the working directory is bold and carries a
    check mark; an added folder shows "Set as Working Directory" and
    "Remove Folder from Explorer" buttons on hover / focus. */
@@ -3155,8 +3138,6 @@ button.app-row-main .app-state { color: var(--accent); }
    title (readable while the section is folded). */
 #scm-hdr-count { margin-left: 0; text-transform: none; }
 
-.scm-list[hidden] { display: none; }
-
 /* Under a worktree header (several worktrees) the group headers indent
    by --depth; a single worktree keeps them flush. */
 .scm-group-hdr {
@@ -3264,7 +3245,10 @@ button.app-row-main .app-state { color: var(--accent); }
   text-overflow: ellipsis;
 }
 
-.scm-ref.is-head {
+/* HEAD, and another worktree checked out at this commit (its folder
+   name), take the accent. */
+.scm-ref.is-head,
+.scm-ref.is-worktree {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -3272,12 +3256,6 @@ button.app-row-main .app-state { color: var(--accent); }
 .scm-ref.is-tag {
   border-color: color-mix(in srgb, var(--fg) 45%, transparent);
   color: color-mix(in srgb, var(--fg) 75%, transparent);
-}
-
-/* Another worktree checked out at this commit (its folder name). */
-.scm-ref.is-worktree {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 /* Multiple worktrees: one header per worktree (folder name, branch,
@@ -3306,8 +3284,6 @@ button.app-row-main .app-state { color: var(--accent); }
 }
 
 .scm-worktree-hdr.expanded > .explorer-chevron { transform: rotate(90deg); }
-
-.scm-worktree-body[hidden] { display: none; }
 
 .scm-worktree-hdr.is-current .scm-worktree-name::after {
   content: ' (current)';
@@ -3362,8 +3338,6 @@ button.app-row-main .app-state { color: var(--accent); }
   color: var(--fg);
   user-select: none;
 }
-
-.tree-ctx-menu[hidden] { display: none; }
 
 .tree-ctx-item {
   display: flex;
@@ -3486,8 +3460,6 @@ button.app-row-main .app-state { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
-
-.folder-picker-recent[hidden] { display: none; }
 
 /* With the recent section shown, the subfolder list yields some of its
    room so both stay usable on a short screen. */
@@ -3702,8 +3674,6 @@ button.app-row-main .app-state { color: var(--accent); }
 }
 
 .scm-commit-files { padding-bottom: var(--space-0-5); }
-
-.scm-commit-files[hidden] { display: none; }
 
 .scm-commit.is-worktree .scm-commit-subject { font-style: italic; }
 
@@ -4330,16 +4300,9 @@ body.remote-chat .running-item.history-active-task:hover {
   color: color-mix(in srgb, var(--fg) 65%, transparent);
 }
 
-.running-item-workspace {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The row's machine / max budget / agent line, under the workspace line. */
+/* The row's workspace line and, under it, its machine / max budget /
+   agent line. */
+.running-item-workspace,
 .running-item-settings {
   flex-basis: 100%;
   font-size: var(--fs-sm);
@@ -4504,7 +4467,10 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 .sidebar-empty { font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 50%, transparent); padding: var(--space-2) 0; }
 
-#auth-modal {
+/* The auth modal and the sign-in window (chat.html#signin-modal) share
+   the scrim. */
+#auth-modal,
+#signin-modal {
   position: fixed; inset: 0; background: var(--scrim-strong);
   display: flex; align-items: center; justify-content: center; z-index: var(--z-modal);
 }
@@ -4551,15 +4517,11 @@ body.remote-chat .running-item.history-active-task:hover {
 .auth-modal-ok,
 .server-reset-confirm-ok {
   background: var(--accent); border: 1px solid var(--accent);
-  color: var(--theme-button-foreground);
+  color: var(--theme-button-foreground, var(--on-accent));
 }
 
 /* The sign-in window (chat.html#signin-modal): the auth modal's scrim,
    box and buttons, with one full-width provider button per row. */
-#signin-modal {
-  position: fixed; inset: 0; background: var(--scrim-strong);
-  display: flex; align-items: center; justify-content: center; z-index: var(--z-modal);
-}
 .signin-modal-buttons { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
 
 .signin-modal-buttons .auth-modal-btn { width: 100%; padding: var(--space-2-5) var(--space-3); font-size: var(--fs-lg); }
@@ -4732,7 +4694,6 @@ code { font-family: var(--font-mono); }
   padding: 0 var(--space-2-5) var(--space-1-5);
 }
 .config-field-note-error { color: var(--red); }
-.config-field-note[hidden] { display: none !important; }
 
 /* "New output ↓": the sibling right after #output in #app's column while
    the user has scrolled up and new output arrived below. The negative
@@ -4748,25 +4709,22 @@ code { font-family: var(--font-mono); }
 }
 .new-output-btn:hover { background: color-mix(in srgb, var(--accent) 15%, var(--bg)); }
 .new-output-btn:focus-visible { outline: 1px solid var(--accent); }
-.new-output-btn[hidden] { display: none !important; }
 
-.wt-result-ok {
-  color: var(--green); padding: var(--space-2) var(--space-3);
-  border-left: 3px solid var(--green); margin: var(--space-1-5) 0;
-}
-
-.wt-result-err {
-  color: var(--red); padding: var(--space-2) var(--space-3);
-  border-left: 3px solid var(--red); margin: var(--space-1-5) 0;
-}
-
-/* The live "Staging changes… / Generating commit message… / Committing…"
-   line of an auto-commit or worktree merge, replaced in place and removed
-   by the terminal autocommit_done / worktree_result. */
+/* The result line of an auto-commit or worktree merge, and the live
+   "Staging changes… / Generating commit message… / Committing…" line
+   before it (replaced in place and removed by the terminal
+   autocommit_done / worktree_result).  The bar takes the text colour. */
+.wt-result-ok,
+.wt-result-err,
 .wt-progress {
-  color: var(--dim); padding: var(--space-2) var(--space-3); font-style: italic;
-  border-left: 3px solid var(--dim); margin: var(--space-1-5) 0;
+  padding: var(--space-2) var(--space-3); border-left: 3px solid; margin: var(--space-1-5) 0;
 }
+
+.wt-result-ok { color: var(--green); }
+
+.wt-result-err { color: var(--red); }
+
+.wt-progress { color: var(--dim); font-style: italic; }
 
 .adjacent-loader {
   text-align: center;

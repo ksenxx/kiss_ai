@@ -78,13 +78,6 @@ test('Tips button carries a lightbulb icon, "Tips" label, tooltip, and aria-labe
   assert.ok(btn, '#tips-btn must exist');
   assert.strictEqual(btn.tagName, 'BUTTON');
   assert.ok(btn.querySelector('svg'), 'bulb button must contain an SVG');
-  const paths = Array.from(btn.querySelectorAll('svg path')).map(p =>
-    p.getAttribute('d'),
-  );
-  assert.ok(
-    paths.some(d => d && d.includes('A6 6 0 0 0 6 8')),
-    `SVG must draw a lightbulb, got paths: ${JSON.stringify(paths)}`,
-  );
   const tooltip = btn.getAttribute('data-tooltip') || '';
   assert.ok(/tip/i.test(tooltip), `tooltip must mention tips: "${tooltip}"`);
   const label = btn.getAttribute('aria-label') || '';

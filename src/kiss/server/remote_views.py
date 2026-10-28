@@ -333,10 +333,38 @@ class RemoteViews:
             if machine_name:
                 self._bound[tab_id] = machine_name
 
+    def warm(self, machine_name: str) -> threading.Thread:
+        """Start opening the stream of *machine_name* in the background; return the thread.
+
+        For a bind (:meth:`kiss.server.remote_tabs.RemoteTabs._bind`):
+        the stream is connected alongside the tab's own stream instead
+        of after it (each is a TLS handshake and a login away, several
+        round trips on a remote link), so the chat opened from the
+        machine, or the run sent to it, waits for one round of
+        handshakes, not two.  The caller joins the thread before
+        :meth:`open_for`, which then finds the stream open (or opens
+        it, when this could not), and calls :meth:`release` when the
+        bind did not bind after all: a stream opened for nothing is
+        closed when idle.  A stream that cannot be opened is reported
+        by :meth:`open_for`, not here.
+        """
+        thread = threading.Thread(
+            target=self._warm, args=(machine_name,), daemon=True,
+            name=f"remote-views-warm-{machine_name}",
+        )
+        thread.start()
+        return thread
+
+    def _warm(self, machine_name: str) -> None:
+        """:meth:`warm`'s body: open the stream, quietly."""
+        with contextlib.suppress(MachineError):
+            self._stream_for(machine_name)
+
     def open_for(self, machine_name: str) -> None:
         """Open (or keep) the stream of *machine_name* while a tab is bound to it.
 
-        Blocks on the handshake: a bound tab's task is forwarded only
+        Blocks on the handshake (already done when :meth:`warm` opened
+        the stream): a bound tab's task is forwarded only
         once the stream is open, so the page its agent opens for the
         user finds it subscribed.  Nothing is opened once the binding
         is gone (an unbind while the reopen of :meth:`dropped` waited)

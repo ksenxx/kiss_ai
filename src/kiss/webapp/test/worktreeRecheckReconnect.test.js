@@ -122,40 +122,12 @@ function testReconnectReissuesPostWorktreeRecheck() {
   console.log('  ok - reconnect reissues the post-worktree recheck');
 }
 
-function testReconnectStillReissuesCandidateSpans() {
-  const {win, posted} = makePage();
-  const pending = path.join(tmpDir, 'pending.txt');
-  fs.writeFileSync(pending, 'x\n');
-  try {
-    // The candidate's very first check is swallowed by the outage.
-    send(win, {type: 'prompt', text: 'see ' + pending});
-    assert.strictEqual(checkPathsPosts(posted).length, 1);
-    send(win, {type: 'daemonStatus', connected: false});
-    const before = checkPathsPosts(posted).length;
-    send(win, {type: 'daemonStatus', connected: true});
-    const reissued = checkPathsPosts(posted).slice(before);
-    const asked = [];
-    for (const msg of reissued) asked.push(...msg.paths);
-    assert.ok(
-      asked.includes(pending),
-      'the reconnect must still re-ask about unresolved candidates',
-    );
-    for (const msg of reissued) replyOnRealFs(win, msg);
-    assert.strictEqual(
-      findLinks(win, pending).length,
-      1,
-      'the candidate must resolve from the reissued check',
-    );
-  } finally {
-    fs.rmSync(pending, {force: true});
-  }
-  win.close();
-  console.log('  ok - reconnect still reissues unresolved candidates');
-}
+// A reconnect re-asking about spans that were still candidates (their
+// first check swallowed by the outage) is fileLinkReissueOnReconnect's
+// 'a reconnect reissues the checks whose reply was lost'.
 
 try {
   testReconnectReissuesPostWorktreeRecheck();
-  testReconnectStillReissuesCandidateSpans();
   console.log('worktreeRecheckReconnect.test.js: all tests passed');
 } finally {
   fs.rmSync(tmpDir, {recursive: true, force: true});

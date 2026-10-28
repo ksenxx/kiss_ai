@@ -32,6 +32,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
     repo_lock,
 )
+from kiss.tests.conftest import seed_worktree
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -152,13 +153,13 @@ class TestBug20MergeCheckoutWarning:
             _git("checkout", "feature", cwd=repo)
             (repo / "README.md").write_text("dirty local change\n")
 
-            agent._wt = GitWorktree(
+            seed_worktree(agent, GitWorktree(
                 repo_root=wt.repo_root,
                 branch=wt.branch,
                 original_branch="no-such-branch",
                 wt_dir=wt.wt_dir,
                 baseline_commit=wt.baseline_commit,
-            )
+            ))
 
             result = agent.merge()
             assert "Cannot checkout 'no-such-branch'" in result

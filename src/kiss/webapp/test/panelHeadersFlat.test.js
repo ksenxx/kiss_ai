@@ -17,22 +17,21 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 
-/** The harness page with main.css applied; `win.__posted` is its ledger. */
-function makePage() {
-  const {win, posted} = harness.makePage();
-  harness.loadMainCss(win);
-  win.__posted = posted;
-  return win;
-}
-
 const send = harness.send;
 
-function renderTranscript(win) {
+/**
+ * One harness page with main.css applied and a transcript rendered: a
+ * system prompt, a prompt, a thought and two tool calls.  Every test
+ * reads (or folds and unfolds) the same headers, so they share it.
+ */
+function renderTranscript() {
+  const {win, posted} = harness.makePage();
+  harness.loadMainCss(win);
   send(win, {
     type: 'task_events',
     events: [],
     task: 'Flatten the headers',
-    tabId: harness.readyTabId(win.__posted),
+    tabId: harness.readyTabId(posted),
     chat_id: 'chat-flat-headers',
   });
   send(win, {type: 'status', running: true});
@@ -43,11 +42,10 @@ function renderTranscript(win) {
   send(win, {type: 'thinking_end'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', description: 'list'});
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/x.txt'});
+  return win;
 }
 
-function testNoChevronInAnyHeader() {
-  const win = makePage();
-  renderTranscript(win);
+function testNoChevronInAnyHeader(win) {
   const out = win.document.getElementById('output');
   assert.strictEqual(out.querySelectorAll('.collapse-chv').length, 0, 'no chevron span');
   // The thinking text having no header of its own is
@@ -75,13 +73,10 @@ function testNoChevronInAnyHeader() {
   assert.strictEqual(hdr.getAttribute('aria-expanded'), 'true');
   hdr.click();
   assert.ok(bash.classList.contains('collapsed'), 'a second click folds it');
-  win.close();
   console.log('  ok - no event panel header starts with a chevron');
 }
 
-function testToolCallHeaderIsFlat() {
-  const win = makePage();
-  renderTranscript(win);
+function testToolCallHeaderIsFlat(win) {
   const out = win.document.getElementById('output');
   const flat = ['.tc-h', '.system-prompt-h', '.prompt-h'];
   for (const sel of flat) {
@@ -95,7 +90,7 @@ function testToolCallHeaderIsFlat() {
   }
   // JSDOM drops a `border: 1px solid var(--border)` shorthand from the
   // computed style (var() in a shorthand), so the panel's outer border
-  // is read from the parsed stylesheet rule instead.
+  // is read from the parsed stylesheet rule's CSSOM style instead.
   let tcRule = null;
   for (const sheet of win.document.styleSheets) {
     for (const rule of sheet.cssRules) {
@@ -109,8 +104,11 @@ function testToolCallHeaderIsFlat() {
     }
   }
   assert.ok(tcRule, 'main.css declares .tc');
-  assert.ok(/border:\s*1px solid/.test(tcRule.cssText), 'the panel keeps its outer border: ' + tcRule.cssText);
-  win.close();
+  assert.strictEqual(
+    tcRule.style.border,
+    '1px solid var(--border)',
+    'the panel keeps its outer border in the --border token',
+  );
   console.log('  ok - the tool call header has no background and no border of its own');
 }
 
@@ -125,9 +123,7 @@ function headerNamed(win, name) {
   return null;
 }
 
-function testBashHeaderMatchesTheOtherToolHeaders() {
-  const win = makePage();
-  renderTranscript(win);
+function testBashHeaderMatchesTheOtherToolHeaders(win) {
   const bash = headerNamed(win, 'Bash');
   const read = headerNamed(win, 'Read');
   assert.ok(bash && read, 'both tool calls render a .tc-h header');
@@ -147,7 +143,6 @@ function testBashHeaderMatchesTheOtherToolHeaders() {
     !/var\(\s*--accent/.test(b.getPropertyValue('color')),
     'the Bash header is not painted in the accent: ' + b.getPropertyValue('color'),
   );
-  win.close();
   console.log('  ok - the Bash header matches the other tool headers');
 }
 
@@ -163,8 +158,7 @@ const HEADER_MARKUP = [
   '<div class="tc-h tc-h-bash">Bash</div>',
 ];
 
-function testNoCollapsibleHeaderIsBold() {
-  const win = makePage();
+function testNoCollapsibleHeaderIsBold(win) {
   const output = win.document.getElementById('output');
   for (const markup of HEADER_MARKUP) {
     output.insertAdjacentHTML('beforeend', markup);
@@ -182,15 +176,17 @@ function testNoCollapsibleHeaderIsBold() {
       `${markup} is not painted in the accent: ${style.getPropertyValue('color')}`,
     );
   }
-  win.close();
   console.log('  ok - no collapsible panel header is bold');
 }
 
 function runTests() {
-  testNoChevronInAnyHeader();
-  testToolCallHeaderIsFlat();
-  testBashHeaderMatchesTheOtherToolHeaders();
-  testNoCollapsibleHeaderIsBold();
+  const win = renderTranscript();
+  testToolCallHeaderIsFlat(win);
+  testBashHeaderMatchesTheOtherToolHeaders(win);
+  testNoCollapsibleHeaderIsBold(win);
+  // Last: its clicks leave the Bash header in jsdom's :hover colour.
+  testNoChevronInAnyHeader(win);
+  win.close();
 }
 
 try {

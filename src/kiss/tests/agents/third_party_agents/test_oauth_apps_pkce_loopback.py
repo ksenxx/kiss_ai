@@ -469,6 +469,10 @@ def test_pkce_concurrent_constructors_leave_one_port_owner(
     # The port comes from a session that already owns it (``_start`` retries
     # a probed port another process grabbed first); the racing constructors
     # below take it over from that owner, so no bare probe-then-bind remains.
+    # The constructor body runs under ``_port_lock``, so the two constructors
+    # of a round are serialised and every round is deterministic; four rounds
+    # (each costing two 0.25 s ``handle_request`` joins) are enough to pin the
+    # repeated take-over.
     seed = _start(service, token_server)
     port = _port(seed)
     provider = seed.provider
@@ -489,7 +493,7 @@ def test_pkce_concurrent_constructors_leave_one_port_owner(
             sessions.append(session)
 
     try:
-        for round_no in range(20):
+        for round_no in range(4):
             go = threading.Event()
             threads = [
                 threading.Thread(target=construct, args=(f"race_{round_no}_{i}", go))

@@ -40,6 +40,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.tests.conftest import seed_worktree
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -133,13 +134,13 @@ class TestBug25MergeBranchKeptOnNoneOriginal:
         (wt.wt_dir / "work.txt").write_text("agent work\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent changes")
 
-        agent._wt = GitWorktree(
+        seed_worktree(agent, GitWorktree(
             repo_root=wt.repo_root,
             branch=wt.branch,
             original_branch=None,
             wt_dir=wt.wt_dir,
             baseline_commit=wt.baseline_commit,
-        )
+        ))
 
         result = agent.merge()
 

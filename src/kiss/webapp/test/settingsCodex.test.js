@@ -17,8 +17,15 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, fakeIntervals} = require('./simplify2_harness');
-const {lastMsg, click, byId, openSettings, closeSettings} = require('./settings_helpers');
+const {
+  makePage,
+  send,
+  fakeIntervals,
+  lastMsg,
+  click,
+  byId,
+} = require('./simplify2_harness');
+const {openSettings, closeSettings} = require('./settings_helpers');
 const {runAgentSubpanelTests} = require('./settings_agent_subpanel');
 
 const BASE = {installed: true, loggedIn: false, authMethod: 'none', useSubscription: true,

@@ -13,39 +13,17 @@
 // leaves the old block empty.
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-
-/** A page whose animation frames are queued and run by the test. */
-function makeQueuedRafPage() {
-  const frames = [];
-  let nextId = 0;
-  const page = makePage({
-    beforeScripts(win) {
-      win.requestAnimationFrame = function (cb) {
-        const id = ++nextId;
-        frames.push({id, cb});
-        return id;
-      };
-      win.cancelAnimationFrame = function (id) {
-        const i = frames.findIndex(f => f.id === id);
-        if (i >= 0) frames.splice(i, 1);
-      };
-    },
-  });
-  return Object.assign(page, {frames});
-}
-
-function runFrames(frames) {
-  let guard = 0;
-  while (frames.length) {
-    const batch = frames.splice(0, frames.length);
-    for (const f of batch) f.cb();
-    assert.ok(++guard < 50, 'frames must not re-arm forever');
-  }
-}
+const {makePage, send, queueRaf} = require('./simplify2_harness');
 
 function testThinkingStartFlushesPendingBlock() {
-  const {win, posted, frames} = makeQueuedRafPage();
+  // A page whose animation frames are queued and run by the test.
+  let raf;
+  const {win, posted} = makePage({
+    beforeScripts(w) {
+      raf = queueRaf(w);
+    },
+  });
+  const {frames} = raf;
   const ready = posted.find(m => m.type === 'ready');
   win._testApi.hideWelcome();
   send(win, {type: 'status', running: true, tabId: ready.tabId, startTs: 1});
@@ -63,7 +41,7 @@ function testThinkingStartFlushesPendingBlock() {
   );
   send(win, {type: 'thinking_delta', text: 'B'});
   assert.strictEqual(thinks[1].textContent, '', 'B is still buffered');
-  runFrames(frames);
+  raf.run();
   assert.strictEqual(thinks[0].textContent, 'A', 'A stays in its block');
   assert.strictEqual(thinks[1].textContent, 'B', 'B lands in the new one');
   assert.strictEqual(frames.length, 0, 'no frame may stay queued');

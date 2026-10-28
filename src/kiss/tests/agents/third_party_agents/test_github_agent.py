@@ -260,12 +260,10 @@ def gh_server():
 @pytest.fixture()
 def backend(gh_server):
     """A backend pointed at the emulated server with the valid token."""
-    server = gh_server
-    base_url = server.base_url
     b = GitHubChannelBackend()
-    b._base_url = base_url
+    b._base_url = gh_server.base_url
     b._token = _TOKEN
-    return b, server
+    return b, gh_server
 
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")

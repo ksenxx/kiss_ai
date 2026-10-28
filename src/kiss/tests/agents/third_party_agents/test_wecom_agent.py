@@ -44,21 +44,17 @@ def _webhook_url(receiver: JsonWebhookServer) -> str:
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def test_agent_unauthenticated_exposes_only_auth_trio() -> None:
-    """Unauthenticated agents expose exactly the auth tool trio."""
+def test_authenticate_persists_and_clear_removes() -> None:
+    """authenticate_wecom persists 0600 config; clear removes it.
+
+    The fresh-agent auth-trio contract is pinned for every channel by
+    test_base_channel_agent.py; only the name and the unconfigured check
+    wording are channel-specific.
+    """
     agent = WeComAgent()
     assert agent.name == "WeCom Agent"
-    assert agent._is_authenticated() is False
-    tool_names = {t.__name__ for t in agent._get_tools()}
-    assert tool_names == _AUTH_TRIO
-    check = next(t for t in agent._get_tools() if t.__name__ == "check_wecom_auth")
-    assert "authenticate_wecom" in check()
-
-
-def test_authenticate_persists_and_clear_removes() -> None:
-    """authenticate_wecom persists 0600 config; clear removes it."""
-    agent = WeComAgent()
     tools = tools_by_name(agent)
+    assert "authenticate_wecom" in tools["check_wecom_auth"]()
     result = tools["authenticate_wecom"]("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k")
     assert json.loads(result)["ok"] is True
 

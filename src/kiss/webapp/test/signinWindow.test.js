@@ -12,12 +12,12 @@
 // shows the paste row; `signinDone` closes the window; `signinError`
 // keeps it open with the reason; "Not now" sends `signinCancel`.
 
-/* global require, console, process, setTimeout */
+/* global require, console */
 
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, waitFor, captureTimers} = require('./simplify2_harness');
+const {makePage, send, captureTimers} = require('./simplify2_harness');
 
 const SIGNIN = {
   type: 'signin',
@@ -98,7 +98,11 @@ function pasteRow(win) {
   return win.document.getElementById('signin-modal-paste');
 }
 
-async function runTests() {
+// The sign-in window path in main.js (showSigninWindow, signinPageArrived,
+// signinFinished, signinFailed) is synchronous: no timer, promise or frame
+// sits between an inbound event and the DOM it paints, so every
+// assertion below follows its `send` directly.
+function runTests() {
   // The window is hidden until a `signin` event, then shows the title and
   // one button per provider, in order.
   {
@@ -110,8 +114,9 @@ async function runTests() {
         'hidden before any signin event',
       );
       send(win, SIGNIN);
-      await waitFor(
-        () => modal(win).style.display === 'flex',
+      assert.strictEqual(
+        modal(win).style.display,
+        'flex',
         'the signin event shows the window',
       );
       assert.strictEqual(
@@ -168,10 +173,9 @@ async function runTests() {
       // Once dismissed, a missing title falls back to "Sign in".
       win.document.getElementById('signin-modal-later').click();
       send(win, {type: 'signin', providers: [{id: 'x', label: 'X'}]});
-      await waitFor(
-        () =>
-          win.document.getElementById('signin-modal-title').textContent ===
-          'Sign in',
+      assert.strictEqual(
+        win.document.getElementById('signin-modal-title').textContent,
+        'Sign in',
         'default title',
       );
     } finally {
@@ -186,7 +190,7 @@ async function runTests() {
     const {win, posted, tabs} = signinPage();
     try {
       send(win, SIGNIN);
-      await waitFor(() => buttons(win).length === 2, 'buttons');
+      assert.strictEqual(buttons(win).length, 2, 'buttons');
       buttons(win)[0].click();
       assert.strictEqual(
         tabs.length,
@@ -205,7 +209,6 @@ async function runTests() {
         provider: 'apple',
         url: 'https://stale.example/',
       });
-      await new Promise(r => setTimeout(r, 20));
       assert.strictEqual(tabs[0].navigatedTo, 'about:blank');
       assert.strictEqual(pasteRow(win).style.display, 'none');
 
@@ -214,8 +217,9 @@ async function runTests() {
         provider: 'google',
         url: 'https://accounts.example/auth?x=1',
       });
-      await waitFor(
-        () => tabs[0].navigatedTo === 'https://accounts.example/auth?x=1',
+      assert.strictEqual(
+        tabs[0].navigatedTo,
+        'https://accounts.example/auth?x=1',
         'the sign-in page loads in the tab the click opened',
       );
       const link = note(win).querySelector('a');
@@ -255,22 +259,16 @@ async function runTests() {
 
       // `signinDone` closes the window and says who signed in.
       send(win, {type: 'signinDone', email: 'me@example.com'});
-      await waitFor(
-        () => modal(win).style.display === 'none',
+      assert.strictEqual(
+        modal(win).style.display,
+        'none',
         'signinDone closes the window',
       );
-      await waitFor(
-        () =>
-          win.document.querySelector(
-            '.kiss-notification[data-notification-id="signin"]',
-          ),
-        'a toast names the account',
+      const toast = win.document.querySelector(
+        '.kiss-notification[data-notification-id="signin"]',
       );
-      assert.ok(
-        win.document
-          .querySelector('.kiss-notification[data-notification-id="signin"]')
-          .textContent.includes('Signed in as me@example.com'),
-      );
+      assert.ok(toast, 'a toast names the account');
+      assert.ok(toast.textContent.includes('Signed in as me@example.com'));
       assert.ok(
         !tabs[0].closed,
         'the tab showing the sign-in page is left alone',
@@ -287,7 +285,6 @@ async function runTests() {
       });
       send(win, {type: 'signinError', provider: 'google', error: 'late'});
       send(win, {type: 'signinDone'});
-      await new Promise(r => setTimeout(r, 20));
       assert.strictEqual(modal(win).style.display, 'none');
       assert.strictEqual(tabs.length, 1);
     } finally {
@@ -302,7 +299,7 @@ async function runTests() {
     const {win, posted, tabs} = signinPage();
     try {
       send(win, SIGNIN);
-      await waitFor(() => buttons(win).length === 2, 'buttons');
+      assert.strictEqual(buttons(win).length, 2, 'buttons');
       buttons(win)[1].click();
       assert.deepStrictEqual(sent(posted, 'signinLogin').pop(), {
         type: 'signinLogin',
@@ -313,9 +310,9 @@ async function runTests() {
         provider: 'apple',
         error: 'the hub is unreachable',
       });
-      await waitFor(
-        () =>
-          note(win).textContent === 'Sign-in failed: the hub is unreachable',
+      assert.strictEqual(
+        note(win).textContent,
+        'Sign-in failed: the hub is unreachable',
         'the error is shown',
       );
       assert.ok(note(win).classList.contains('signin-modal-error'));
@@ -331,8 +328,9 @@ async function runTests() {
       assert.strictEqual(tabs.length, 2);
       assert.ok(!note(win).classList.contains('signin-modal-error'));
       send(win, {type: 'signinError', provider: 'google'});
-      await waitFor(
-        () => note(win).textContent === 'Sign-in failed: unknown error',
+      assert.strictEqual(
+        note(win).textContent,
+        'Sign-in failed: unknown error',
         'an error without a reason',
       );
 
@@ -345,14 +343,16 @@ async function runTests() {
         provider: 'google',
         url: 'https://accounts.example/2',
       });
-      await waitFor(
-        () => tabs[2].navigatedTo === 'https://accounts.example/2',
+      assert.strictEqual(
+        tabs[2].navigatedTo,
+        'https://accounts.example/2',
         'navigated',
       );
       assert.throws(() => tabs[2].location.href, /SecurityError/);
       send(win, {type: 'signinError', provider: 'google', error: 'expired'});
-      await waitFor(
-        () => note(win).textContent === 'Sign-in failed: expired',
+      assert.strictEqual(
+        note(win).textContent,
+        'Sign-in failed: expired',
         'error shown',
       );
       assert.ok(!tabs[2].closed, 'the navigated tab is not touched');
@@ -371,8 +371,8 @@ async function runTests() {
         provider: 'google',
         url: 'https://accounts.example/',
       });
-      await waitFor(
-        () => note(win).textContent.includes('page this link opens'),
+      assert.ok(
+        note(win).textContent.includes('page this link opens'),
         'the link-only note',
       );
       assert.strictEqual(
@@ -401,7 +401,7 @@ async function runTests() {
     const {win, posted, tabs} = signinPage();
     try {
       send(win, SIGNIN);
-      await waitFor(() => buttons(win).length === 2, 'buttons');
+      assert.strictEqual(buttons(win).length, 2, 'buttons');
       buttons(win)[0].click();
       win.document.getElementById('signin-modal-later').click();
       assert.strictEqual(modal(win).style.display, 'none');
@@ -411,7 +411,7 @@ async function runTests() {
       assert.ok(tabs[0].closed, 'the blank tab is closed');
       // A later `signin` (the next page load) shows the window afresh.
       send(win, SIGNIN);
-      await waitFor(() => modal(win).style.display === 'flex', 'shown again');
+      assert.strictEqual(modal(win).style.display, 'flex', 'shown again');
       assert.strictEqual(note(win).textContent, '');
       assert.strictEqual(pasteRow(win).style.display, 'none');
       assert.strictEqual(
@@ -427,7 +427,4 @@ async function runTests() {
   console.log('signinWindow.test.js passed');
 }
 
-runTests().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+runTests();

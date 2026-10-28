@@ -33,6 +33,7 @@ from kiss.tests.agents.sorcar.test_100pct_branch_coverage import (
     _redirect_db,
     _restore_db,
 )
+from kiss.tests.conftest import seed_worktree
 from kiss.tests.server.worktree_helpers import merge_conflict
 
 
@@ -86,7 +87,7 @@ class TestAgentServerUncoveredBranches:
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
-            state.agent._wt = None
+            seed_worktree(state.agent, None)
             assert merge_conflict(server, "0") is False
         finally:
             agent_state.unregister(state.task_id, state)
@@ -97,7 +98,7 @@ class TestAgentServerUncoveredBranches:
         state = _register_worktree_state("0")
         try:
             assert state.agent is not None
-            state.agent._wt = None
+            seed_worktree(state.agent, None)
             assert server._get_worktree_changed_files("0") == []
         finally:
             agent_state.unregister(state.task_id, state)
@@ -143,11 +144,11 @@ class TestAgentServerUncoveredBranches:
             server = AgentServer()
             state = _register_worktree_state("0")
             assert state.agent is not None
-            state.agent._wt = GitWorktree(
+            seed_worktree(state.agent, GitWorktree(
                 repo_root=repo, branch="test-wt",
                 original_branch="main",
                 wt_dir=wt_dir,
-            )
+            ))
             server.work_dir = str(repo)
 
             try:

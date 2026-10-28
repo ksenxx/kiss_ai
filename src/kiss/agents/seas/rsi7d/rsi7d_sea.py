@@ -322,6 +322,8 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   findings file right after the call. `sea_runs()` returns about 220k chars: call it once
   per sweep, write the per-SEA numbers into `tmp/rsi7d/baseline.md` at once, and never
   call it again, with or without `name` / `days`.
+- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
+  otherwise the 10th, 20th, ... call is refused.
 - In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash
   command, heredoc bodies included: the guard rejects the whole call. Read the main
   branch's copy with `git show main:<path>`; quote such paths only in `Write`d notes.
@@ -449,8 +451,8 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   longer row is refused and the whole block is re-sent (cde195d4 [10]).
 - Before adding a bullet about a framework mechanism (a gate, a refusal text), confirm it
   still exists in the current code (`grep -rn "<refusal text>" src/kiss`): the summary
-  gate seen in the window's runs was removed by 1509b8cc0 (`core/step_recap.py` writes the
-  recap), so a bullet about it would have been stale (sweep 23b4cc21).
+  gate was removed by 1509b8cc0 and restored two days later, so a bullet written against
+  either state alone would have been stale (sweep 23b4cc21).
 """
 
 
@@ -593,16 +595,15 @@ def _rows_since(days: float) -> list[dict[str, Any]]:
     """Return every task_history row inserted in the last *days* days, oldest first."""
     persistence._flush_chat_events()
     since = time.time() - days * DAY_S
+    # The connection is opened before the lock: a fresh thread's first
+    # ``_get_db()`` may sit in a migration busy wait or a sidecar
+    # recovery, which must not hold the read token (see ``task_digest``).
+    db = persistence._get_db()
     with persistence._rw_lock.read_lock():
-        rows = (
-            persistence._get_db()
-            .execute(
-                persistence._HISTORY_SELECT
-                + "WHERE timestamp > ? ORDER BY timestamp ASC, rowid ASC",
-                (since,),
-            )
-            .fetchall()
-        )
+        rows = db.execute(
+            persistence._HISTORY_SELECT + "WHERE timestamp > ? ORDER BY timestamp ASC, rowid ASC",
+            (since,),
+        ).fetchall()
     return [persistence._history_row_to_dict(r) for r in rows]
 
 
@@ -616,8 +617,8 @@ def _events_like(
     if any_of:
         clauses.append("(" + " OR ".join("event_json LIKE ?" for _ in any_of) + ")")
     where = " AND ".join(clauses)
+    db = persistence._get_db()
     with persistence._rw_lock.read_lock():
-        db = persistence._get_db()
         for i in range(0, len(task_ids), _CHUNK):
             chunk = task_ids[i : i + _CHUNK]
             marks = ",".join("?" * len(chunk))
@@ -2293,12 +2294,9 @@ def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str
 
 def _task_row(task_id: str) -> dict[str, Any] | None:
     """Return the task_history row of *task_id* as a dict, or ``None``."""
+    db = persistence._get_db()
     with persistence._rw_lock.read_lock():
-        row = (
-            persistence._get_db()
-            .execute(persistence._HISTORY_SELECT + "WHERE id = ?", (task_id,))
-            .fetchone()
-        )
+        row = db.execute(persistence._HISTORY_SELECT + "WHERE id = ?", (task_id,)).fetchone()
     return persistence._history_row_to_dict(row) if row is not None else None
 
 

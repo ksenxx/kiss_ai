@@ -23,11 +23,15 @@ import os
 import shutil
 import time
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 
 from kiss.agents.seas.autorouter import autorouter_sea
+from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.orautorouter import orautorouter_sea
+from kiss.agents.seas.orbestrouter import orbestrouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -40,6 +44,7 @@ from kiss.tests.agents.seas.conftest import (
     commit,
     fake_checkout,
     git,
+    init_repo,
     persist_task,
     registered,
     run_sea,
@@ -279,6 +284,40 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
     foreign = rows["slack"]
     assert foreign["registered_path"].endswith("slack_sea.py")
     assert foreign["editable_path"] == "" and foreign["prompt_constant"] == ""
+
+
+@pytest.mark.parametrize(
+    ("picker", "clone", "anchors"),
+    [
+        (
+            autorouter_sea,
+            orautorouter_sea,
+            ("{EVIDENCE}", "You are the autorouter. Finish the task"),
+        ),
+        (bestrouter_sea, orbestrouter_sea, ("Use '{PRIMARY_MODEL}' model for all tasks",)),
+    ],
+    ids=["autorouter", "bestrouter"],
+)
+def test_rsi7d_tunes_a_picker_constant_but_not_its_clones_derived_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    picker: ModuleType,
+    clone: ModuleType,
+    anchors: tuple[str, ...],
+) -> None:
+    """The prompt editor sees a picker's f-string; its OpenRouter clone's prompt is derived."""
+    paths = {module: Path(str(module.__file__)) for module in (picker, clone)}
+    names = {module: path.stem.removesuffix("_sea") for module, path in paths.items()}
+    fake_checkout(tmp_path, {
+        names[module]: path.read_text(encoding="utf-8") for module, path in paths.items()
+    })
+    monkeypatch.chdir(tmp_path)
+    shown = sea.sea_prompt(names[picker])
+    assert "# system_prompt() returns SYSTEM_PROMPT, an f-string" in shown, shown[:300]
+    for anchor in anchors:
+        assert anchor in shown, anchor
+    derived = sea.sea_prompt(names[clone])
+    assert derived.startswith("Error: ") and "module-level string constant" in derived
 
 
 def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None:
@@ -1202,10 +1241,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     assert prepared["work_dir"] == clone_docs
 
     rooted = tmp_path / "rooted"
-    rooted.mkdir()
-    git(rooted, "init", "-q")
-    git(rooted, "config", "user.email", "kiss-test@example.com")
-    git(rooted, "config", "user.name", "Kiss Test")
+    init_repo(rooted)
     root = commit(rooted, f"first{USER_PROMPT_HEADING}Start the notes", {"notes.md": "n\n"})
     first = persist_task("Start the notes", [], work_dir=str(rooted), sea="demo_sea")
     prepared = sea.prepare_replay_clone(first)  # a root auto-commit has no parent to go back to

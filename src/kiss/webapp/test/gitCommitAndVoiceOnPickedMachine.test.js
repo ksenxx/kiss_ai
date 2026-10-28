@@ -72,13 +72,9 @@ function testTheButtonCommitsTheMachinesFolder() {
       type: 'autocommitAction',
     },
   ]);
-  assert.ok(
-    byId(win, 'autocommit-btn').disabled,
-    'in flight until the outcome',
-  );
-
-  // The outcome re-arms the button; back on this machine the next
-  // commit is this daemon's folder, with no machine.
+  // The outcome re-arms the button (editorTitleGitCommit pins the
+  // in-flight state); back on this machine the next commit is this
+  // daemon's folder, with no machine.
   send(win, {
     type: 'autocommit_done',
     success: true,
@@ -87,7 +83,6 @@ function testTheButtonCommitsTheMachinesFolder() {
     message: 'gpu-box: Committed: x',
     tabId: tabId(win),
   });
-  assert.ok(!byId(win, 'autocommit-btn').disabled, 're-armed');
   pickMachine(win, '');
   posted.length = 0;
   byId(win, 'autocommit-btn').click();

@@ -67,12 +67,17 @@ class TestSendTypingHappyPath:
     """send_typing must PUT the spec path with the spec body."""
 
     def test_put_arrives_with_typing_true(self) -> None:
-        """A real PUT with {"typing": true, "timeout": 15000} reaches the server."""
+        """One authenticated JSON PUT with {"typing": true, "timeout": 15000} reaches the server.
+
+        The parity ``thread_ts`` argument does not alter the request.
+        """
         with _matrix_server() as server, _backend_for(server.base_url) as backend:
-            backend.send_typing("!room123:example.org")
+            backend.send_typing("!room123:example.org", thread_ts="1234.5678")
             assert len(server.requests) == 1
             req = server.requests[0]
             assert req["method"] == "PUT"
+            assert server.header("Authorization") == "Bearer syt_secret_token"
+            assert server.header("Content-Type") == "application/json"
             expected_path = (
                 "/_matrix/client/v3/rooms/"
                 + urllib.parse.quote("!room123:example.org", safe="")
@@ -94,13 +99,6 @@ class TestSendTypingHappyPath:
             assert "/rooms/%21ro%20om%2F1%3Aexample.org/typing/" in path
             assert path.endswith("/%40we%20ird%2Fuser%3Aexample.org")
             assert " " not in path and "!" not in path and "@" not in path
-
-    def test_bearer_token_and_content_type_sent(self) -> None:
-        """The stored access token is sent as a Bearer Authorization header."""
-        with _matrix_server() as server, _backend_for(server.base_url) as backend:
-            backend.send_typing("!room123:example.org")
-            assert server.header("Authorization") == "Bearer syt_secret_token"
-            assert server.header("Content-Type") == "application/json"
 
     def test_trailing_slash_homeserver_normalized(self) -> None:
         """A homeserver URL with a trailing slash yields no double slash in the path."""
@@ -136,10 +134,3 @@ class TestSendTypingBestEffort:
         backend = MatrixChannelBackend()
         assert backend._client is None
         backend.send_typing("!room123:example.org")
-
-    def test_thread_ts_argument_is_ignored(self) -> None:
-        """The parity thread_ts argument does not alter the request."""
-        with _matrix_server() as server, _backend_for(server.base_url) as backend:
-            backend.send_typing("!room123:example.org", thread_ts="1234.5678")
-            assert len(server.requests) == 1
-            assert server.requests[0]["json"] == {"typing": True, "timeout": 15000}

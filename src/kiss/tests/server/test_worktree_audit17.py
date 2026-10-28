@@ -44,6 +44,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import seed_worktree
 
 
 def _register_state(
@@ -102,7 +103,7 @@ def _create_wt(
         original_branch="main",
         wt_dir=wt_dir,
     )
-    agent._wt = wt
+    seed_worktree(agent, wt)
     return wt
 
 
@@ -139,7 +140,7 @@ class TestNewChatSimpleBroadcast:
 
         tab_id = "tab-bug71-ok"
         agent = ChatSorcarAgent("Sorcar")
-        agent._wt = None
+        seed_worktree(agent, None)
         state = _register_state("task-bug71-ok", tab_id, agent)
         try:
             server._new_chat(tab_id)

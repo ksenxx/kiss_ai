@@ -16,8 +16,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send} = require('./simplify2_harness');
-const {lastMsg, openSettings, closeSettings, typeInto} = require('./settings_helpers');
+const {makePage, send, lastMsg} = require('./simplify2_harness');
+const {openSettings, closeSettings, typeInto} = require('./settings_helpers');
 
 // The full first-party inventory the daemon's key store supports (see
 // chat.html's cfg-key-* inputs).

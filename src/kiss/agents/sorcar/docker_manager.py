@@ -24,7 +24,7 @@ import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.fanout_guard import parse_tasks_json
+from kiss.agents.sorcar.edit_guards import rewrite_guard
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _output_budget,
@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 #: straight into the conversation and blows the model's context window.
 MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_default_chars
 
-#: Last line of a ``Bash`` result whose command was killed by a task
-#: Stop or a tool-panel Stop; ``DockerTools`` reads it to know that a
-#: follow-up command would be killed the same way.
+#: Line of a ``Bash`` result (before its ``[exit code: -1]`` line) whose
+#: command was killed by a task Stop or a tool-panel Stop; ``DockerTools``
+#: reads it to know that a follow-up command would be killed the same way.
 STOPPED_MESSAGE = "Killed: the task was stopped."
 
 #: Environment variable used to tag an exec — and every process
@@ -203,6 +203,56 @@ def _collapse_progress(output: str) -> str:
     return "\n".join(lines)
 
 
+def kill_tagged_tree_script(token: str) -> str:
+    """Return a ``sh`` script that kills every process whose environment carries *token*.
+
+    A command the agent runs is tagged with ``KISS_EXEC_TOKEN=<token>``
+    (see :func:`tagged_command`); every child inherits the variable, so
+    matching on ``/proc/<pid>/environ`` finds the whole tree.  The tree
+    is collected first, frozen with SIGSTOP, then killed: killing one
+    process per scan step let ``bash -c "sleep 20; touch f"`` continue
+    to ``touch f`` when the glob visited ``sleep`` before its parent
+    shell (``/proc/[0-9]*`` sorts lexically, not by pid).
+
+    Args:
+        token: The unique tag planted in the command's environment.
+    """
+    return (
+        "pids=\n"
+        "for d in /proc/[0-9]*; do\n"
+        '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
+        f'  case "$env" in *"{_EXEC_TOKEN_VAR}={token}"*)\n'
+        '    pids="$pids ${d#/proc/}";;\n'
+        "  esac\n"
+        "done\n"
+        '[ -n "$pids" ] || exit 0\n'
+        "kill -STOP $pids 2>/dev/null\n"
+        "kill -9 $pids 2>/dev/null"
+    )
+
+
+def tagged_command(command: str, token: str) -> str:
+    """Return a shell line that runs *command* in a bash whose process tree carries *token*.
+
+    For environments whose ``exec`` takes a shell string and no
+    environment dict (the exec bridge); :meth:`DockerManager._tagged_exec_create`
+    plants the same variable through the Docker API instead.  The tag must
+    be in the environment block the shell is *exec'd* with (that is what
+    ``/proc/<pid>/environ`` shows, for the shell and every subshell it
+    forks); an ``export`` inside the running shell would tag only the
+    programs it later execs, and a background subshell would survive the
+    sweep.  ``sh`` is used when the environment has no bash.
+
+    Args:
+        command: The shell command to run.
+        token: The unique tag (hex) :func:`kill_tagged_tree_script` later matches on.
+    """
+    return (
+        "kiss_sh=bash; command -v bash >/dev/null 2>&1 || kiss_sh=sh; "
+        f'exec env {_EXEC_TOKEN_VAR}={token} "$kiss_sh" -c {shlex.quote(command)}'
+    )
+
+
 def _timeout_message(timeout_seconds: float, output: str) -> str:
     """Return the error text for a command killed at *timeout_seconds*.
 
@@ -218,6 +268,23 @@ def _timeout_message(timeout_seconds: float, output: str) -> str:
     if output:
         message += " and was killed. Output before the timeout:\n" + _collapse_progress(output)
     return message
+
+
+def _refuse_or_lift(
+    command: str, workdir: str, timeout_seconds: float,
+) -> tuple[str | None, float]:
+    """Apply the guards of the container ``Bash`` tools to *command*.
+
+    The destructive and install-timeout guards of the host ``Bash``
+    (:func:`refuse_or_lift`) and its refusal of shell rewrites that
+    belong in ``Edit`` (:func:`rewrite_guard`).
+
+    Returns:
+        ``(refusal, timeout_seconds)``: the guard's message (``None``
+        when the command may run) and the possibly lifted deadline.
+    """
+    guard, timeout_seconds = refuse_or_lift(command, workdir, timeout_seconds)
+    return guard or rewrite_guard(command), timeout_seconds
 
 
 def _with_exit_code(output: str, exit_code: int) -> str:
@@ -580,13 +647,27 @@ class DockerManager:
         container_id = self.container.id[:12] if self.container.id else "unknown"
         print(f"Container {container_id} is now running")
 
+    def _open_container(self) -> Container:
+        """Return ONE snapshot of the open container, or raise :class:`KISSError`.
+
+        ``close()`` (under the lifecycle lock, which command paths
+        deliberately do not take: a running command must not block a
+        teardown) nulls ``self.container``; the caller uses the snapshot
+        only, since a second read after this guard would turn the
+        orderly refusal into an AttributeError.
+        """
+        container = self.container
+        if container is None:
+            raise KISSError("No container is open. Please call open() first.")
+        return container
+
     def Bash(  # noqa: N802
         self,
         command: str,
         description: str,
         timeout_seconds: int = 30,
         max_output_chars: int = MAX_OUTPUT_CHARS,
-    ) -> str:  # noqa: N802
+    ) -> str:
         """
         Execute a bash command in the running Docker container.
 
@@ -601,22 +682,15 @@ class DockerManager:
             The output of the command, including stdout, stderr, and exit code
         """
         max_output_chars = _output_budget(max_output_chars)
-        # ONE snapshot of the container reference: ``close()`` (under
-        # the lifecycle lock, which command paths deliberately do not
-        # take — a running command must not block a teardown) nulls
-        # ``self.container``, and a second read after the guard below
-        # turned the orderly KISSError refusal into an AttributeError.
-        container = self.container
-        if container is None:
-            raise KISSError("No container is open. Please call open() first.")
+        container = self._open_container()
         # Test hook (no-op in production): widens the window between
         # the guard above and the uses of the snapshot below so the
         # close() race is deterministic under KISS_RACE_DELAY.
         _race_delay()
 
-        print(f"{description}")
+        print(description)
 
-        guard, deadline = refuse_or_lift(command, self.workdir, timeout_seconds)
+        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds)
         if guard is not None:
             return guard
         exit_code, output = self._exec(
@@ -672,22 +746,11 @@ class DockerManager:
             KISSError: If no container is open.
         """
         del description
-        container = self.container
-        if container is None:
-            raise KISSError("No container is open. Please call open() first.")
-        try:
-            command_list = parse_tasks_json(commands, name="commands")
-        except ValueError as e:
-            return f"Error: {e.args[0]}"
-        if max_workers < 0:
-            return f"Error: max_workers must be 0 or a positive integer, got {max_workers}."
-
+        container = self._open_container()
         run_one = functools.partial(
             self._timed_exec, container, timeout_seconds=timeout_seconds,
         )
-        return run_commands_pool(
-            command_list, run_one, max_workers, self.stop_event, max_output_chars,
-        )
+        return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
 
     def _timed_exec(
         self,
@@ -709,7 +772,7 @@ class DockerManager:
             timeout, ``-1`` when the exec failed to run or was stopped),
             the output and the wall time spent.
         """
-        guard, timeout_seconds = refuse_or_lift(command, self.workdir, timeout_seconds)
+        guard, timeout_seconds = _refuse_or_lift(command, self.workdir, timeout_seconds)
         if guard is not None:
             return -1, guard, 0.0
         started = time.monotonic()
@@ -867,25 +930,8 @@ class DockerManager:
         container = self.container
         if container is None:
             return
-        # Collect the whole tree first, freeze it, then kill it.  Killing
-        # one process per scan step let ``bash -c "sleep 20; touch f"``
-        # continue to ``touch f`` when the glob visited ``sleep`` before
-        # its parent shell (``/proc/[0-9]*`` sorts lexically, not by
-        # pid); SIGSTOP on every member first closes that window.
-        script = (
-            "pids=\n"
-            "for d in /proc/[0-9]*; do\n"
-            '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
-            f'  case "$env" in *"{_EXEC_TOKEN_VAR}={token}"*)\n'
-            '    pids="$pids ${d#/proc/}";;\n'
-            "  esac\n"
-            "done\n"
-            '[ -n "$pids" ] || exit 0\n'
-            "kill -STOP $pids 2>/dev/null\n"
-            "kill -9 $pids 2>/dev/null"
-        )
         try:
-            container.exec_run(["/bin/sh", "-c", script])
+            container.exec_run(["/bin/sh", "-c", kill_tagged_tree_script(token)])
         except Exception:  # pragma: no cover — container already gone
             logger.debug("could not kill timed-out exec", exc_info=True)
 
@@ -898,12 +944,7 @@ class DockerManager:
         Returns:
             The host port mapped to the container port, or None if not mapped.
         """
-        # One snapshot, same reason as in Bash: a concurrent close()
-        # nulling ``self.container`` between the guard and the reload
-        # must yield the KISSError refusal, never an AttributeError.
-        container = self.container
-        if container is None:
-            raise KISSError("No container is open. Please call open() first.")
+        container = self._open_container()
         _race_delay()  # test hook: widens the guard-to-use window
 
         container.reload()

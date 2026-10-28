@@ -25,29 +25,26 @@
 // against the alphabet.
 
 const assert = require('assert');
-const {makePreloadedPage, send} = require('./simplify2_harness');
 const {
+  makePreloadedPage,
+  send,
   click,
   byId,
-  openSettings,
-  closeSettings,
   lastMsg,
-} = require('./settings_helpers');
+} = require('./simplify2_harness');
+const {closeSettings, typeInto, openSettingsWith} = require('./settings_helpers');
 
 const TAB_ID = 'tab-remote-password-refresh-test';
 const ALPHABET_RE = /^[A-Za-z0-9]{20}$/;
 
-function openSettingsWith(wv, stored) {
-  openSettings(wv.win);
-  send(wv.win, {
-    type: 'configData',
-    config: {remote_password: stored, max_budget: 5},
-  });
+/** Open Settings with `stored` as the remote password. */
+function openWithPassword(wv, stored) {
+  openSettingsWith(wv, {remote_password: stored, max_budget: 5});
 }
 
 function testRefreshButtonIsALabelledIconButton() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
+  openWithPassword(wv, 'Old-Password-1');
   const refresh = byId(wv.win, 'cfg-remote-password-refresh');
   assert.strictEqual(
     refresh.type,
@@ -65,7 +62,7 @@ function testRefreshButtonIsALabelledIconButton() {
 
 function testClickFillsRevealsAndSavesARandomPassword() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
+  openWithPassword(wv, 'Old-Password-1');
   const box = byId(wv.win, 'cfg-remote-password');
   const refresh = byId(wv.win, 'cfg-remote-password-refresh');
   const toggle = byId(wv.win, 'cfg-remote-password-toggle');
@@ -112,7 +109,10 @@ function testClickFillsRevealsAndSavesARandomPassword() {
     !wv.posted.some(m => m.type === 'rotateRemotePassword'),
     'the refresh asks nothing of the daemon',
   );
-  assert.ok(!lastMsg(wv.posted, 'saveConfig'), 'nothing is saved until Settings closes');
+  assert.ok(
+    !lastMsg(wv.posted, 'saveConfig'),
+    'nothing is saved until Settings closes',
+  );
   closeSettings(wv.win);
   const save = lastMsg(wv.posted, 'saveConfig');
   assert.ok(save, 'closing Settings saves the form');
@@ -129,11 +129,9 @@ function testClickFillsRevealsAndSavesARandomPassword() {
 
 function testManualEditAfterRefreshWins() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, 'Old-Password-1');
-  const box = byId(wv.win, 'cfg-remote-password');
+  openWithPassword(wv, 'Old-Password-1');
   click(wv.win, byId(wv.win, 'cfg-remote-password-refresh'));
-  box.value = 'Typed-After-3';
-  box.dispatchEvent(new wv.win.Event('input', {bubbles: true}));
+  typeInto(wv.win, 'cfg-remote-password', 'Typed-After-3');
   closeSettings(wv.win);
   assert.strictEqual(
     lastMsg(wv.posted, 'saveConfig').config.remote_password,
@@ -146,7 +144,7 @@ function testManualEditAfterRefreshWins() {
 
 function testEveryGeneratedPasswordIsWellFormed() {
   const wv = makePreloadedPage(TAB_ID);
-  openSettingsWith(wv, '');
+  openWithPassword(wv, '');
   const box = byId(wv.win, 'cfg-remote-password');
   const refresh = byId(wv.win, 'cfg-remote-password-refresh');
   const seen = new Set();

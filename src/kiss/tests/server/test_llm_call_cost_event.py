@@ -129,6 +129,9 @@ class TestAgentEmitsLlmCall:
             "cache_read": 300,
             "cache_write": 20,
             "cost": expected_cost,
+            # Always present: the step footer prints it ("stop: unknown"
+            # when the response names no reason, as the stub does).
+            "stop_reason": None,
         }
 
     def test_seven_field_usage_and_no_printer(self) -> None:

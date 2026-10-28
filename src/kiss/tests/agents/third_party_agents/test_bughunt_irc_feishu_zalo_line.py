@@ -36,7 +36,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
-    serving,
+    recording_server,
 )
 
 
@@ -271,7 +271,7 @@ def _zalo_backend(server: RecordingServer | None = None) -> ZaloChannelBackend:
 def _zalo_api(body: bytes) -> Iterator[ZaloChannelBackend]:
     """Serve *body* to every POST and yield a backend whose API base is that server."""
     handler = type("Handler", (_JSONResponder,), {"body": body})
-    with serving(RecordingServer(("127.0.0.1", 0), handler)) as server:
+    with recording_server(handler) as server:
         yield _zalo_backend(server)
 
 

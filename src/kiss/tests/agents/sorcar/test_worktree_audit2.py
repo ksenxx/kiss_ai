@@ -29,7 +29,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.agents.sorcar.relentless_agent import resolve_work_dir
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _WorktreeCleanupOutcome
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -138,7 +138,7 @@ class TestBug6FinalizeIgnoresCommitFailure:
         assert GitWorktreeOps.commit_all(wt_dir, "test") is False
 
         result = agent._finalize_worktree()
-        assert result is False
+        assert result is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
 
         assert wt_dir.exists()
         assert (wt_dir / "agent_work.txt").read_text() == "important work\n"

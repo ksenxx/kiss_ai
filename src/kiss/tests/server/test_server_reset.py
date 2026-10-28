@@ -194,6 +194,50 @@ class TestServerReset(IsolatedAsyncioTestCase):
         self.assertIn("requested_at", payload)
         self.assertIsInstance(payload["requested_at"], (int, float))
 
+    async def test_second_server_reset_while_pending_is_a_noop(self) -> None:
+        """Two clicks schedule one SIGTERM and one acknowledgement (F9)."""
+        reader, writer = await self._connect()
+        await self._send(writer, {"type": "serverReset"})
+        await self._send(writer, {"type": "serverReset"})
+        await self._drain_until(
+            reader,
+            lambda m: m.get("type") == "notification"
+            and m.get("id") == "server-reset-restarting",
+        )
+        handle = self.server._server_reset_handle
+        self.assertIsNotNone(handle)
+
+        await self._send(writer, {"type": "activeTasksQuery"})
+        acks = 0
+
+        def _is_probe_response(msg: dict[str, Any]) -> bool:
+            nonlocal acks
+            if msg.get("id") == "server-reset-restarting":
+                acks += 1
+            return msg.get("type") == "activeTasksResponse"
+
+        await self._drain_until(reader, _is_probe_response)
+        self.assertEqual(acks, 0, "the second click was acknowledged again")
+        self.assertIs(self.server._server_reset_handle, handle)
+        await asyncio.wait_for(self._reset_fired.wait(), timeout=5.0)
+
+    async def test_stop_async_cancels_pending_server_reset(self) -> None:
+        """A server stopped before the delay elapses never SIGTERMs itself (F9)."""
+        reader, writer = await self._connect()
+        await self._send(writer, {"type": "serverReset"})
+        await self._drain_until(
+            reader,
+            lambda m: m.get("type") == "notification"
+            and m.get("id") == "server-reset-restarting",
+        )
+        handle = self.server._server_reset_handle
+        assert handle is not None
+        await self.server.stop_async()
+        self.assertTrue(handle.cancelled())
+        self.assertIsNone(self.server._server_reset_handle)
+        await asyncio.sleep(web_server_mod._SERVER_RESET_DELAY + 0.3)
+        self.assertFalse(self._reset_fired.is_set(), "the cancelled reset fired")
+
 
 class TestServerResetComplete(IsolatedAsyncioTestCase):
     """The post-restart "Server restart complete" broadcast.
