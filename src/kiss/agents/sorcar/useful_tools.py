@@ -56,6 +56,9 @@ from kiss.core.processes import (
     popen_process_group,
 )
 
+if sys.platform != "win32":
+    import resource
+
 logger = logging.getLogger(__name__)
 
 _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
@@ -535,15 +538,120 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
 
 _WINDOWS_BASH: str | None = find_bash() if sys.platform == "win32" else None
 
+# Memory limit of the container the agent runs in: cgroup v2, then v1.
+# ``max`` (v2) or a huge number (v1) means no limit.
+_CGROUP_MEMORY_LIMIT_FILES = (
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+)
+# Share of the container's memory a single Bash child may take.  The
+# rest is for the agent process itself, which must survive the child.
+_CHILD_MEMORY_SHARE = 0.75
+_MEMORY_SIZE_RE = re.compile(r"^(\d+)\s*([kmgt]?)b?$", re.IGNORECASE)
+_MEMORY_SIZE_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+_OUT_OF_MEMORY_RE = re.compile(
+    r"MemoryError|Cannot allocate memory|bad_alloc|out of memory", re.IGNORECASE
+)
+
+
+def parse_memory_size(text: str) -> int | None:
+    """Return the byte count written as *text*, e.g. ``8G``, ``512M``, ``1024``.
+
+    Args:
+        text: A whole number with an optional K, M, G or T suffix (an
+            optional trailing ``B`` is accepted, case does not matter).
+
+    Returns:
+        The number of bytes, or ``None`` when *text* is not such a size.
+    """
+    match = _MEMORY_SIZE_RE.match(text.strip())
+    if match is None:
+        return None
+    return int(match.group(1)) * _MEMORY_SIZE_UNITS[match.group(2).lower()]
+
+
+def format_memory_size(size: int) -> str:
+    """Return *size* bytes as ``N.N GiB`` or, below one GiB, ``N MiB``."""
+    if size >= 1 << 30:
+        return f"{size / (1 << 30):.1f} GiB"
+    return f"{size / (1 << 20):.0f} MiB"
+
+
+def child_memory_limit(
+    cgroup_files: tuple[str, ...] = _CGROUP_MEMORY_LIMIT_FILES,
+) -> int | None:
+    """Return the ``RLIMIT_DATA`` cap, in bytes, for a child of the Bash tool.
+
+    When the agent runs in a container with a memory limit (an s10s pod,
+    a Docker container) and a Bash child grows past that limit, the
+    kernel's ``memory.oom.group`` kills every process in the container,
+    the agent included: every running task ends with "Task terminated
+    unexpectedly".  A per-process cap below the container limit makes
+    the child fail with ``MemoryError`` (or ``ENOMEM``) instead, so the
+    agent sees the failure and can change course.
+
+    The cap is ``KISS_BASH_MEMORY_LIMIT`` when set (a size such as
+    ``8G`` or ``512M``; ``0``, ``off`` or ``none`` disables the cap, an
+    unparsable value or one ``setrlimit`` would refuse is ignored with a
+    warning).  Otherwise it is
+    ``_CHILD_MEMORY_SHARE`` of the cgroup memory limit read from
+    *cgroup_files*, and ``None`` (no cap) when no limit is found, as
+    on a laptop or a bare VM.
+
+    Args:
+        cgroup_files: Candidate files holding the container's memory
+            limit; the first one that exists is used.
+
+    Returns:
+        The byte cap, or ``None`` for no cap.
+    """
+    override = os.environ.get("KISS_BASH_MEMORY_LIMIT", "").strip()
+    if override:
+        if override.lower() in {"0", "off", "none"}:
+            return None
+        size = parse_memory_size(override)
+        if size is not None and size < 1 << 63:
+            return size
+        logger.warning("Ignoring unusable KISS_BASH_MEMORY_LIMIT=%r", override)
+    for path in cgroup_files:
+        try:
+            text = Path(path).read_text().strip()
+        except OSError:
+            continue
+        # v1 reports "no limit" as a number near the address-space size.
+        if text.isdigit() and int(text) < 1 << 60:
+            return int(int(text) * _CHILD_MEMORY_SHARE)
+        return None
+    return None
+
+
+def _limit_child_memory(limit: int) -> None:
+    """``preexec_fn`` of a Bash child: cap its ``RLIMIT_DATA`` at *limit* bytes.
+
+    Runs in the child between fork and exec, so it only calls
+    ``setrlimit``.  Both the soft and the hard limit are set (never
+    above the inherited hard limit), so the child cannot lift the cap,
+    and every process it starts inherits it.  ``RLIMIT_DATA`` counts the
+    heap and private writable anonymous mappings (Linux 4.7 and later),
+    which is what a script loading a dataset or a model allocates, but
+    not file-backed mappings or ``PROT_NONE`` reservations, so JVM and
+    Go runtimes that reserve a large address space keep working.
+    """
+    _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+    if hard != resource.RLIM_INFINITY:
+        limit = min(limit, hard)
+    resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
+
 
 def _popen_kwargs(command: str) -> dict[str, Any]:
     """Return Popen kwargs appropriate for the current platform.
 
-    On Unix, uses ``shell=True``; on Windows with Git bash available,
-    invokes bash directly; on Windows without bash, falls back to
-    PowerShell.  Spawn with :func:`popen_process_group` so
-    :func:`kill_process_group` can stop the child together with
-    everything it spawned.
+    On Unix, uses ``shell=True`` and caps the child's memory at
+    :func:`child_memory_limit` (when there is one) through a
+    ``preexec_fn``; on Windows with Git bash available, invokes bash
+    directly; on Windows without bash, falls back to PowerShell.  Spawn
+    with :func:`popen_process_group` so :func:`kill_process_group` can
+    stop the child together with everything it spawned.
 
     Args:
         command: The command string to execute.
@@ -552,7 +660,11 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
         Dict of keyword arguments for ``subprocess.Popen``.
     """
     if sys.platform != "win32":
-        return {"args": command, "shell": True}
+        kwargs: dict[str, Any] = {"args": command, "shell": True}
+        limit = child_memory_limit()
+        if limit is not None:
+            kwargs["preexec_fn"] = functools.partial(_limit_child_memory, limit)
+        return kwargs
     if _WINDOWS_BASH:  # pragma: no cover — Windows only
         return {"args": [_WINDOWS_BASH, "-c", command]}
     ps = shutil.which("pwsh") or shutil.which("powershell") or "powershell"  # pragma: no cover
@@ -765,8 +877,28 @@ def _format_bash_result(
         msg = f"Error (exit code {returncode}):"
         if output:
             msg += f"\n{output}"
+        msg += _memory_limit_hint(output)
         return _truncate_output(msg, max_output_chars, spilled_to)
     return _truncate_output(output, max_output_chars, spilled_to)
+
+
+def _memory_limit_hint(output: str) -> str:
+    """Explain a memory failure of a Bash child when a per-child cap is in force.
+
+    Without this the model reads ``MemoryError`` as the machine being
+    full and retries the same command.
+    """
+    if sys.platform == "win32" or not _OUT_OF_MEMORY_RE.search(output):
+        return ""
+    limit = child_memory_limit()
+    if limit is None:
+        return ""
+    return (
+        f"\nNote: each process started by this tool is capped at "
+        f"{format_memory_size(limit)} of memory (RLIMIT_DATA, KISS_BASH_MEMORY_LIMIT) "
+        f"so it fails alone instead of taking the whole container down. Process the "
+        f"data in a streaming or batched way, or run fewer processes at once."
+    )
 
 
 def _format_bash_timeout(
@@ -1043,6 +1175,8 @@ def _format_job_report(job: BackgroundJob, tail_lines: int, max_output_chars: in
         f"--- last {tail_lines} log lines ---\n"
     )
     tail = _tail_lines(job.log_path, tail_lines, max_output_chars - len(report))
+    if job.process.poll() not in (None, 0):
+        tail += _memory_limit_hint(tail)
     return _truncate_output(report + tail, max_output_chars)
 
 
