@@ -256,7 +256,6 @@ function activeTabId(win) {
   return win._testApi.getActiveTabId();
 }
 
-/** The user clicks tab element *el*. */
 /** Whether the chat (`#output`) is the surface on screen. */
 function chatSurfaceVisible(win) {
   const out = win.document.getElementById('output');

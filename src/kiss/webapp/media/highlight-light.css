@@ -4,14 +4,13 @@
  * Light Modern includes light_plus.json, which includes light_vs.json
  * (extensions/theme-defaults/themes in microsoft/vscode); the values
  * below are those files' tokenColors, mapped onto highlight.js's
- * scope classes exactly like highlight-dark.css.  The block
- * background is Light Modern's textCodeBlock.background.
+ * scope classes exactly like highlight-dark.css.  The block's
+ * background and padding come from main.css's .hljs rule (the
+ * theme's textCodeBlock.background).
  */
-pre code.hljs { display: block; overflow-x: auto; padding: 1em; }
+pre code.hljs { display: block; overflow-x: auto; }
 
-code.hljs { padding: 3px 5px; }
-
-.hljs { color: #3b3b3b; background: #f8f8f8; }
+.hljs { color: #3b3b3b; }
 
 /* keyword, storage, constant.language, variable.language */
 .hljs-doctag,

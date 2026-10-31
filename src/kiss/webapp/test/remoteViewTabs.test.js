@@ -25,6 +25,7 @@ const {
   click,
   stubRaf,
   ofType,
+  installXtermStub,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 
@@ -38,33 +39,7 @@ function makePage() {
 
 function withTabViews(win) {
   stubRaf(win);
-  win.Terminal = class {
-    constructor() {
-      this.cols = 80;
-      this.rows = 24;
-      this.options = {};
-    }
-    open() {}
-    loadAddon() {}
-    attachCustomKeyEventHandler() {}
-    write() {}
-    onData() {}
-    onResize() {}
-    focus() {}
-    getSelection() {
-      return '';
-    }
-    dispose() {}
-  };
-  win.FitAddon = {
-    FitAddon: class {
-      fit() {}
-    },
-  };
-  win.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
-  };
+  installXtermStub(win);
 }
 
 /** Structural equality across the jsdom realm (its arrays are not ours), key order aside. */

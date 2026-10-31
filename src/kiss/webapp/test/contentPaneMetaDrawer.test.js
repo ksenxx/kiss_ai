@@ -43,6 +43,9 @@ const {
   loadMainCss,
   MEDIA,
   ofType,
+  recordTimers,
+  fireTimers,
+  installXtermStub,
 } = require('./simplify2_harness');
 const {installTokenisedCss, cssRule} = require('./designTokens');
 
@@ -246,6 +249,7 @@ test('the workspace views catch up on task news once the panel is back', () => {
   press(win, byId(win, 'content-tab-area'));
   assert.ok(hasClass(win, 'meta-hidden'));
   const before = ofType(posted, 'listDir').length;
+  const statusBefore = ofType(posted, 'gitStatus').length;
   // Any timer the page arms on the news is run by hand, so no
   // wall-clock wait decides whether a deferred reload would have shown.
   const armed = [];
@@ -262,10 +266,24 @@ test('the workspace views catch up on task news once the panel is back', () => {
     before,
     'hidden: the Explorer does not reload yet',
   );
+  assert.strictEqual(
+    ofType(posted, 'gitStatus').length,
+    statusBefore,
+    'hidden: Source Control does not re-read git yet',
+  );
+  // Source Control reloads through its 400 ms debounce, recorded here
+  // and fired by hand.
+  const debounce = recordTimers(win, 400);
   click(win, byId(win, 'meta-drawer'));
   assert.ok(
     ofType(posted, 'listDir').length > before,
     'back on screen: the Explorer reloads',
+  );
+  fireTimers(debounce);
+  assert.strictEqual(
+    ofType(posted, 'gitStatus').length,
+    statusBefore + 1,
+    'back on screen: Source Control re-reads git',
   );
   win.close();
 });
@@ -497,37 +515,11 @@ test('replaying a finished task leaves no header pulsing', () => {
  * Give the page the browser and terminal tab views.  jsdom has no
  * xterm.js (terminalTab.js fetches it from a CDN unless window.Terminal
  * and window.FitAddon exist) and no ResizeObserver, so the terminal
- * gets the same minimal stand-ins terminalTabView.test.js uses; the
- * browser view runs as is.
+ * gets simplify2_harness's stand-ins (installXtermStub); the browser
+ * view runs as is.
  */
 function addBrowserAndTerminal(win) {
-  class Terminal {
-    constructor() {
-      this.cols = 80;
-      this.rows = 24;
-      this.options = {};
-    }
-    open() {}
-    loadAddon() {}
-    attachCustomKeyEventHandler() {}
-    write() {}
-    onData() {}
-    onResize() {}
-    focus() {}
-    getSelection() {
-      return '';
-    }
-    dispose() {}
-  }
-  class FitAddon {
-    fit() {}
-  }
-  win.Terminal = Terminal;
-  win.FitAddon = {FitAddon};
-  win.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
-  };
+  installXtermStub(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
 }

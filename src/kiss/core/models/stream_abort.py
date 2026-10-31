@@ -22,10 +22,14 @@ then closes.
 import logging
 import os
 import socket
+import ssl
 import threading
 import time
-from collections.abc import Generator
+import weakref
+from collections.abc import Generator, Iterable
 from typing import Any
+
+import httpcore
 
 from kiss.core import stop_signal
 from kiss.core.locked import locked_call
@@ -43,6 +47,11 @@ DEFAULT_STREAM_STALL_TIMEOUT = 180.0
 # attempt, deaf to Stop.  Headers that take longer than the stall
 # timeout are, by the watchdog's own policy, a stall.
 CONNECT_TIMEOUT = 10.0
+
+# How long a read on a stream of an abortable pool waits in the kernel
+# before it checks whether its socket was closed under it
+# (``_AbortableStream.read``).
+_READ_SLICE_SECONDS = 0.5
 
 
 class StreamAbortWatchdog:
@@ -75,7 +84,7 @@ class StreamAbortWatchdog:
         stop_event: threading.Event | None = None,
         name: str = "model-stream-abort-watchdog",
     ) -> None:
-        """Start watching *stream*.
+        """Prepare to watch *stream*; :meth:`start` starts the watching thread.
 
         Args:
             stream: The SDK stream object.  Its ``close()`` and its
@@ -97,6 +106,15 @@ class StreamAbortWatchdog:
         self.stalled = False
         self.stopped = False
         self._thread = threading.Thread(target=self._watch, name=name, daemon=True)
+
+    def start(self) -> None:
+        """Start the watching thread.
+
+        Not part of construction: ``stop_aware_events`` starts the thread
+        inside the ``try`` whose ``finally`` calls :meth:`stop`.  A thread
+        started by ``__init__`` would be running before that ``try``, and
+        a Stop injected in between would leave it with nobody to disarm it.
+        """
         self._thread.start()
 
     def beat(self) -> None:
@@ -130,8 +148,11 @@ class StreamAbortWatchdog:
         try:
             self._thread.join(timeout=self._STOP_JOIN_SECONDS)
         except RuntimeError:
-            # Joining is impossible during interpreter finalization,
-            # which is when an abandoned stream's generator is collected.
+            # Joining is impossible before the thread started (a Stop
+            # landed before or inside start(); the set ``_done`` ends a
+            # thread starting now at once) and during interpreter
+            # finalization, when an abandoned stream's generator is
+            # collected.
             logger.debug("Exception caught", exc_info=True)
 
     def _poll_interval(self) -> float:
@@ -289,11 +310,18 @@ def shutdown_pool_sockets(http_client: Any) -> bool:
     so there is no ``response`` whose socket a :class:`StreamAbortWatchdog`
     could reach, and (as the module docstring explains) closing the
     client does not wake a thread parked in ``recv()``.  The one socket
-    carrying the request is only reachable through httpx's transport and
-    httpcore's pool, so this walks ``_transport._pool.connections`` and
-    each connection's ``_connection._network_stream`` best-effort: the
-    pool's ``connections`` and the stream's ``get_extra_info("socket")``
-    are httpcore's documented API, the rest private attributes a future
+    carrying the request is only reachable through httpx's transports and
+    httpcore's pools (:func:`_client_pools`: the default one and every
+    proxy mount's).  A pool given an :class:`AbortableNetworkBackend`
+    (:func:`make_pool_abortable`, as the OpenAI-compatible adapters'
+    pools are) is aborted for good: the backend kept every stream the pool's
+    connections hold, so its abort shuts them all down, and a connection
+    still being set up (an SDK retry's included) has no stream in the
+    pool yet and is shut down as soon as it is up.  Any other pool is
+    walked best-effort, each of its ``connections`` and each
+    connection's ``_connection._network_stream``: the pool's
+    ``connections`` and the stream's ``get_extra_info("socket")`` are
+    httpcore's documented API, the rest private attributes a future
     httpx may rename, in which case nothing is shut down and the caller
     falls back to abandoning the call until the client timeout.  Idle
     keep-alive sockets go down too, so the caller closes the client
@@ -305,17 +333,232 @@ def shutdown_pool_sockets(http_client: Any) -> bool:
     Returns:
         ``True`` when at least one socket was shut down.
     """
-    try:
-        connections = list(http_client._transport._pool.connections)
-    except Exception:
-        logger.debug("Exception caught", exc_info=True)
-        return False
     shut_down = False
-    for connection in connections:
-        inner = getattr(connection, "_connection", None)
-        if _shutdown_network_stream(getattr(inner, "_network_stream", None)):
+    for pool in _client_pools(http_client):
+        backend = getattr(pool, "_network_backend", None)
+        if isinstance(backend, AbortableNetworkBackend):
+            if backend.abort():
+                shut_down = True
+            continue
+        try:
+            connections = list(pool.connections)
+        except Exception:
+            logger.debug("Exception caught", exc_info=True)
+            continue
+        streams = [
+            getattr(getattr(connection, "_connection", None), "_network_stream", None)
+            for connection in connections
+        ]
+        if _shutdown_network_streams(streams):
             shut_down = True
     return shut_down
+
+
+def _client_pools(http_client: Any) -> list[Any]:
+    """Return the httpcore connection pools an httpx client may send through.
+
+    The default transport's pool, and the pool of every mounted
+    transport: a client built with proxies (``HTTP_PROXY`` /
+    ``HTTPS_PROXY`` / ``ALL_PROXY`` from the environment, or explicit
+    ``mounts``) sends each request whose URL a mount's pattern matches
+    through that mount (``httpx.Client._transport_for_url``), never
+    through the default pool.  Private attributes read best-effort: a
+    transport without a ``_pool`` (a custom or mock transport, or the
+    ``None`` a ``NO_PROXY`` pattern maps to) is skipped.
+
+    Args:
+        http_client: The ``httpx.Client`` the SDK sends through.
+
+    Returns:
+        The distinct pools, the default transport's first (those found
+        before an unexpected attribute error, which is logged).
+    """
+    pools: list[Any] = []
+    try:
+        transports = [getattr(http_client, "_transport", None)]
+        mounts = getattr(http_client, "_mounts", None)
+        if isinstance(mounts, dict):
+            transports.extend(mounts.values())
+        for transport in transports:
+            pool = getattr(transport, "_pool", None)
+            if pool is not None and all(pool is not seen for seen in pools):
+                pools.append(pool)
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+    return pools
+
+
+def _shutdown_network_streams(streams: Iterable[Any]) -> bool:
+    """Shut down the socket behind each of *streams*; return whether any was shut down."""
+    shut_down = False
+    for stream in streams:
+        if _shutdown_network_stream(stream):
+            shut_down = True
+    return shut_down
+
+
+class AbortableNetworkBackend(httpcore.NetworkBackend):
+    """An httpcore network backend whose sockets one :meth:`abort` shuts down, for good.
+
+    It wraps the backend of an httpx client's connection pool
+    (:func:`make_pool_abortable`) and keeps every stream it opens, and
+    every stream a TLS upgrade of one of them yields (the upgrade hands
+    back a new socket object and detaches the plain one).  A request
+    whose connection is still being set up when the user stops it has
+    no stream in the pool to shut down: after :meth:`abort` such a
+    connection is shut down the moment it is up, before httpcore writes
+    the request on it, so the provider never sees (nor bills) the
+    stopped request and the thread sending it fails at once.  And a
+    read whose socket is closed under it ends within a slice
+    (:meth:`_AbortableStream.read`) instead of at the client timeout.
+    """
+
+    def __init__(self, backend: httpcore.NetworkBackend) -> None:
+        self._backend = backend
+        # Taken on the task thread (``track`` while it connects, ``abort``
+        # when it stops a blocking request), so only through
+        # ``locked_call``: a Stop injected there cannot leak it.
+        self._lock = threading.RLock()
+        self._streams: weakref.WeakSet[httpcore.NetworkStream] = weakref.WeakSet()
+        self._aborted = False
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.NetworkStream:
+        """Open a TCP connection through the wrapped backend and keep its stream."""
+        return self.track(
+            self._backend.connect_tcp(host, port, timeout, local_address, socket_options)
+        )
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.NetworkStream:
+        """Open a Unix-socket connection through the wrapped backend and keep its stream."""
+        return self.track(self._backend.connect_unix_socket(path, timeout, socket_options))
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep as the wrapped backend does (httpcore's connect retries)."""
+        self._backend.sleep(seconds)
+
+    def track(self, stream: httpcore.NetworkStream) -> httpcore.NetworkStream:
+        """Keep *stream* for :meth:`abort`, or shut it down at once after one.
+
+        Args:
+            stream: A stream the wrapped backend (or a TLS upgrade) opened.
+
+        Returns:
+            *stream* wrapped so that its TLS upgrade is kept too.
+        """
+        if locked_call(self._lock, self._keep, stream):
+            _shutdown_network_stream(stream)
+        return _AbortableStream(self, stream)
+
+    def _keep(self, stream: httpcore.NetworkStream) -> bool:
+        """Keep *stream*; return whether :meth:`abort` already ran.  Called under the lock."""
+        self._streams.add(stream)
+        return self._aborted
+
+    def abort(self) -> bool:
+        """Shut down every socket opened so far, and from now on every new one.
+
+        Returns:
+            ``True`` when at least one socket was shut down.
+        """
+        return _shutdown_network_streams(locked_call(self._lock, self._abort_kept))
+
+    def _abort_kept(self) -> list[httpcore.NetworkStream]:
+        """Mark the backend aborted; return the streams kept so far.  Called under the lock."""
+        self._aborted = True
+        return list(self._streams)
+
+
+class _AbortableStream(httpcore.NetworkStream):
+    """A stream of an :class:`AbortableNetworkBackend`: the wrapped stream, TLS upgrade kept."""
+
+    def __init__(self, backend: AbortableNetworkBackend, stream: httpcore.NetworkStream) -> None:
+        self._backend = backend
+        self._stream = stream
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        """Read from the wrapped stream, in slices that notice the socket closed under it.
+
+        Closing a socket wakes no thread already waiting on it, and the
+        shutdown of an abort that lands just as the read enters the
+        kernel's wait can be missed too (seen on macOS under load): the
+        read would then wait out *timeout*, 30 minutes on the OpenAI
+        clients.  So it waits at most :data:`_READ_SLICE_SECONDS` at a
+        time and fails once its socket is closed (the stopped client is
+        closed right after its sockets are shut down).  *timeout* still
+        bounds the whole read.
+
+        Raises:
+            httpcore.ReadTimeout: Nothing arrived within *timeout*.
+            httpcore.ReadError: The socket was closed during the read.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            wait = _READ_SLICE_SECONDS
+            if deadline is not None:
+                wait = min(wait, deadline - time.monotonic())
+                if wait <= 0:
+                    raise httpcore.ReadTimeout("timed out")
+            try:
+                return self._stream.read(max_bytes, wait)
+            except httpcore.ReadTimeout:
+                sock = self._stream.get_extra_info("socket")
+                if sock is not None and sock.fileno() == -1:
+                    raise httpcore.ReadError("the socket was closed during the read") from None
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        """Write to the wrapped stream."""
+        self._stream.write(buffer, timeout)
+
+    def close(self) -> None:
+        """Close the wrapped stream."""
+        self._stream.close()
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        """Upgrade the wrapped stream to TLS; the backend keeps the upgraded stream."""
+        return self._backend.track(self._stream.start_tls(ssl_context, server_hostname, timeout))
+
+    def get_extra_info(self, info: str) -> Any:
+        """Return the wrapped stream's extra info (its ``socket``, ``ssl_object``, ...)."""
+        return self._stream.get_extra_info(info)
+
+
+def make_pool_abortable(http_client: Any) -> None:
+    """Give each of an httpx client's connection pools an :class:`AbortableNetworkBackend`.
+
+    Every pool the client may send through (:func:`_client_pools`: the
+    default transport's and each proxy mount's) gets one, so a Stop also
+    reaches a proxied request whose connection is still being set up.
+    Best-effort like :func:`shutdown_pool_sockets`, through the same
+    private attributes (``_transport._pool``, ``_mounts`` and httpcore's
+    ``_network_backend``): without them a pool keeps its backend and an
+    abort reaches only the connections already in it.
+
+    Args:
+        http_client: The ``httpx.Client`` the SDK sends through.
+    """
+    for pool in _client_pools(http_client):
+        try:
+            if not isinstance(pool._network_backend, AbortableNetworkBackend):
+                pool._network_backend = AbortableNetworkBackend(pool._network_backend)
+        except Exception:
+            logger.debug("Exception caught", exc_info=True)
 
 
 def _abort_error(
@@ -364,7 +607,7 @@ def stop_error() -> KeyboardInterrupt:
     return KeyboardInterrupt("Agent stop requested")
 
 
-def stall_error(stall_timeout: float | None) -> TimeoutError:
+def stall_error(stall_timeout: float | None, label: str = "") -> TimeoutError:
     """Build the retryable error for a stream the watchdog aborted as stalled.
 
     Public so a transport whose byte-level clock fired first (an httpx
@@ -373,6 +616,10 @@ def stall_error(stall_timeout: float | None) -> TimeoutError:
 
     Args:
         stall_timeout: The tolerated silence, for the message.
+        label: What stalled (``"Anthropic model <name>"``), put in front
+            of the message for a transport whose stalls are diagnosed
+            from log lines that do not say which model was asked; empty
+            for none.
 
     Returns:
         A ``TimeoutError`` the agentic loop retries, rather than the
@@ -380,14 +627,15 @@ def stall_error(stall_timeout: float | None) -> TimeoutError:
         look like (the iterator just ends at EOF).
     """
     seconds = stall_timeout if stall_timeout is not None else 0.0
+    prefix = f"{label}: " if label else ""
     return TimeoutError(
-        f"{STALL_MARKER}: no data received for {seconds:.0f}s "
+        f"{prefix}{STALL_MARKER}: no data received for {seconds:.0f}s "
         f"(model_config 'stream_stall_timeout'). The request was aborted "
         f"instead of hanging; it will be retried."
     )
 
 
-#: Start of every :func:`stall_error` message; :func:`is_stall_error` keys on it.
+#: Start of every :func:`stall_error` message after its label; :func:`is_stall_error` keys on it.
 STALL_MARKER = "Model stream stalled"
 
 
@@ -398,7 +646,7 @@ def is_stall_error(error: BaseException) -> bool:
     is the transport's, not the model's), so it needs to tell them apart
     without a dedicated exception class that every transport would have
     to import.  A transport may prefix the message with its model name
-    (``AnthropicModel._stall_error``), so the marker is searched, not
+    (the *label* of :func:`stall_error`), so the marker is searched, not
     matched at the start.
 
     Args:
@@ -407,7 +655,7 @@ def is_stall_error(error: BaseException) -> bool:
     return isinstance(error, TimeoutError) and STALL_MARKER in str(error)
 
 
-def stop_or_stall_error(stall_timeout: float | None) -> BaseException:
+def stop_or_stall_error(stall_timeout: float | None, label: str = "") -> BaseException:
     """Classify a timeout raised BEFORE the response headers arrived.
 
     No watchdog exists yet in that window, so a Stop pressed while the
@@ -418,6 +666,7 @@ def stop_or_stall_error(stall_timeout: float | None) -> BaseException:
 
     Args:
         stall_timeout: The tolerated silence, for the stall message.
+        label: Put in front of the stall message (:func:`stall_error`).
 
     Returns:
         :func:`stop_error` when the user stopped the task, else
@@ -425,7 +674,7 @@ def stop_or_stall_error(stall_timeout: float | None) -> BaseException:
     """
     if stop_signal.stop_requested():
         return stop_error()
-    return stall_error(stall_timeout)
+    return stall_error(stall_timeout, label)
 
 
 def _close_stream(stream: Any) -> None:
@@ -488,6 +737,7 @@ def stop_aware_events(
     )
     failure: Exception | None = None
     try:
+        watchdog.start()
         for event in stream:
             watchdog.beat()
             yield event

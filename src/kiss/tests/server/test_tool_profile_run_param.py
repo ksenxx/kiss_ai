@@ -235,7 +235,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         call = self._single_call(calls)
         assert set(call["tool_names"]) == {
             "finish", "Bash", "bash_job", "Read", "run_commands_parallel",
-            "Edit", "Write", "create_worktree", "commit_and_merge",
+            "Edit", "Write", "create_worktree", "commit_and_merge", "checkpoint", "rollback",
             "summary", "set_model",
         }, call
         assert "# Restricted tool profile: shell+edit+control" in call["system_prompt"]

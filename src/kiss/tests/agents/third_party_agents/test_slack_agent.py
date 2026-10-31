@@ -174,7 +174,7 @@ class TestDeleteWorkspace:
 
 
 _SLACK_TOOL_ERROR_CASES = [
-    ("list_third_party_agents", {}),
+    ("list_channels", {}),
     ("read_messages", {"channel": "C01234567"}),
     ("post_message", {"channel": "C01234567", "text": "test"}),
     ("list_users", {}),

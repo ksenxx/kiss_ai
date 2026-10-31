@@ -584,7 +584,8 @@ def failure_backoff_seconds(streak: int) -> float:
     """
     if streak <= 0:
         return 0.0
-    return float(min(FAILURE_BACKOFF_BASE_SECONDS * 2 ** (streak - 1), FAILURE_BACKOFF_MAX_SECONDS))
+    doublings = min(streak - 1, 64)  # capped: 2 ** 1024 does not convert to a float
+    return min(FAILURE_BACKOFF_BASE_SECONDS * 2.0**doublings, FAILURE_BACKOFF_MAX_SECONDS)
 
 
 def _same_failure(job: dict[str, Any], text: str | None) -> bool:
@@ -625,8 +626,9 @@ CONNECTOR_WORDS: dict[str, tuple[str, str]] = {
 CONNECTOR_OK_STATUSES = ("ACTIVE", "UNKNOWN")
 
 #: A prompt that (re)connects a connector is the fix, not a victim, of a
-#: dead connection: it is never held back by the pre-flight.
-CONNECTOR_AUTH_WORDS = ("authenticate", "reconnect", "re-connect", "log in", "login", "sign in")
+#: dead connection: it is never held back by the pre-flight.  Each word
+#: must start a word of the prompt ("blog in" is not "log in").
+CONNECTOR_AUTH_WORDS = re.compile(r"\b(?:(?:re-?)?authenticate|re-?connect|log ?in|sign in)")
 
 
 def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
@@ -651,7 +653,7 @@ def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
         the identical-failure back-off applies.
     """
     lowered = prompt.lower()
-    if in_chat or any(word in lowered for word in CONNECTOR_AUTH_WORDS):
+    if in_chat or CONNECTOR_AUTH_WORDS.search(lowered):
         return None
     seen: set[str] = set()
     for word, (sea, label) in CONNECTOR_WORDS.items():
@@ -743,13 +745,15 @@ def run_context(job: dict[str, Any], now: float | None = None) -> str:
     return "\n".join(lines)
 
 
+UNATTENDED_MARKER = "Nobody can answer questions; never ask the user anything."
+"""Sentence shared by both unattended preambles."""
+
 PROMPT_PREAMBLE = (
     # The first sentence is CRON_TASK_MARKER: the history migration
     # (history_columns.backfill_is_cron) recognises a prompt job's row by
     # it, so reword the rest of the preamble freely but keep that one.
-    CRON_TASK_MARKER + " "
-    "Nobody can answer questions; never ask the user anything. Do not "
-    "create, modify, or remove scheduled jobs during this run. Your "
+    CRON_TASK_MARKER + " " + UNATTENDED_MARKER + " "
+    "Do not create, modify, or remove scheduled jobs during this run. Your "
     "final summary is delivered verbatim to the job's delivery targets; "
     "reply with exactly [SILENT] if there is nothing worth reporting — "
     "never a bare acknowledgement such as 'OK' or 'tick-OK' — and never "
@@ -757,9 +761,6 @@ PROMPT_PREAMBLE = (
     "yourself.\n\n"
 )
 """Hermes-style preamble prepended to every prompt job's prompt."""
-
-UNATTENDED_MARKER = "Nobody can answer questions; never ask the user anything."
-"""Sentence shared by both unattended preambles."""
 
 UNATTENDED_CHILD_PREAMBLE = (
     "You are a sub-task of an unattended scheduled automation (cron job). "
@@ -1033,8 +1034,9 @@ def _run_prompt_job(
         nobody to collect it later, so this function kills it.
 
     Raises:
-        TimeoutError: When the run timed out but the daemon never
-            confirmed the stop — the task may still be running, so the
+        TimeoutError: When the task may still be running: the run timed
+            out and the daemon never confirmed the stop, or the
+            connection to the daemon failed while the task ran.  The
             caller must keep *scratch_dir*; the message is the complete
             error to record.
     """
@@ -1046,8 +1048,8 @@ def _run_prompt_job(
         forget_agent_job,
         kill_agent_job,
         make_run_agent_tool,
+        may_still_run,
         notice_job_id,
-        unconfirmed_stop_error,
     )
     from kiss.agents.sorcar.sea_commands import slash_command_task
     from kiss.agents.sorcar.sea_settings import script_name
@@ -1060,6 +1062,7 @@ def _run_prompt_job(
     # text; any other prompt runs the generic cron prompt SEA.
     command = slash_command_task(prompt)
     sea_path = PROMPT_SEA_PATH if command is None else command[1]
+    name = script_name(str(sea_path))
     task = PROMPT_PREAMBLE + run_context(job) + "\n\n" + (
         prompt if command is None else command[0]
     )
@@ -1089,8 +1092,7 @@ def _run_prompt_job(
             # ever collects an ownerless job from the registry.
             forget_agent_job(detached)
         bound = f"the scheduled task did not finish within {timeout:g}s"
-        unconfirmed = unconfirmed_stop_error(script_name(str(sea_path)))
-        if not detached.finished or detached.outcome == unconfirmed:
+        if not detached.finished or may_still_run(detached.outcome, name):
             raise TimeoutError(
                 f"prompt job timed out after {timeout:g}s; the stop was not "
                 f"confirmed, so the task may still be running in {run_dir} (its "
@@ -1100,6 +1102,11 @@ def _run_prompt_job(
             )
         if isinstance(detached.outcome, str):  # stopped (a finished one falls through)
             return "error", f"Error: {bound}; {reply.removeprefix('Error: ')}"
+    if may_still_run(reply, name):
+        raise TimeoutError(
+            f"prompt job lost its connection to the daemon, so the task may still be "
+            f"running in {run_dir} (its scratch directory {scratch_dir} is kept): {reply}"
+        )
     if reply.startswith("Error:"):
         return "error", reply
     result = yaml.safe_load(reply)
@@ -1159,11 +1166,12 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
     misses — walks ``/proc`` for surviving descendants by parent chain
     and kills each one's group and pid.  Descendants are snapshotted
     BEFORE the group kill: once the shell dies its orphans re-parent to
-    init and the chain is lost.  The scan-and-kill pass is repeated a
-    bounded number of times to catch processes spawned mid-kill.
-    Residual limitation (documented, not guaranteed): a process that
-    double-detaches faster than the bounded rescan, or any descendant
-    on a POSIX system without ``/proc``, can still escape.
+    init and the chain is lost (which is also why a second scan would
+    find nothing).  Residual limitation (documented, not guaranteed): a
+    process that detaches into a new group after the snapshot (spawned
+    mid-kill by an escapee), a descendant of a shell that had already
+    exited, or any descendant on a POSIX system without ``/proc``, can
+    still escape.
 
     Windows: :func:`kill_process_group` runs ``taskkill /T /F`` on the
     shell's pid (kills the process tree Windows tracks), then
@@ -1179,28 +1187,23 @@ def _kill_command_tree(proc: subprocess.Popen) -> None:
             kill_process_group(proc.pid, SIGKILL)
         proc.kill()
         return
-    for _ in range(3):
-        survivors = _proc_descendants(proc.pid)
-        with contextlib.suppress(OSError):  # group already gone
-            kill_process_group(proc.pid, SIGKILL)
-        escaped = False
-        for pid in survivors:
-            try:
-                pgid = os.getpgid(pid)
-            except OSError:
-                continue  # already dead
-            if pgid == proc.pid:
-                continue  # covered by the group kill above
-            escaped = True
-            # Kill the escapee's own group first (a setsid child leads
-            # a new group holding its subtree; the command's session is
-            # not ours, so the group is never our own), then the pid.
-            with contextlib.suppress(OSError):
-                os.killpg(pgid, 9)
-            with contextlib.suppress(OSError):
-                os.kill(pid, 9)
-        if not escaped:
-            break
+    survivors = _proc_descendants(proc.pid)
+    with contextlib.suppress(OSError):  # group already gone
+        kill_process_group(proc.pid, SIGKILL)
+    for pid in survivors:
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            continue  # already dead
+        if pgid == proc.pid:
+            continue  # covered by the group kill above
+        # Kill the escapee's own group first (a setsid child leads a new
+        # group holding its subtree; the command's session is not ours,
+        # so the group is never our own), then the pid.
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, 9)
+        with contextlib.suppress(OSError):
+            os.kill(pid, 9)
 
 
 def _reap_killed_command(proc: subprocess.Popen) -> None:
@@ -1294,9 +1297,10 @@ def _execute_job(job: dict[str, Any]) -> None:
     :func:`_job_work_dir`) — so jobs running concurrently never share
     one; the directory is removed when the run ends, whatever the
     outcome, so stale run directories never accumulate.  The one
-    exception is a timed-out prompt job whose stop the daemon never
-    confirmed: the task may still be running from the directory, so it
-    is kept and its path reported.
+    exception is a prompt job whose task may still be running (a
+    timeout whose stop the daemon never confirmed, a daemon connection
+    lost while the task ran): the task may still use the directory, so
+    it is kept and its path reported.
 
     Never raises: failures are recorded in the job's ``last_status`` /
     ``last_summary`` fields (a damaged store is logged and left as it
@@ -1343,9 +1347,9 @@ def _execute_job(job: dict[str, Any]) -> None:
         else:
             status, text = _run_prompt_job(job, work_dir, run_dir, timeout)
     except TimeoutError as e:
-        # Only the unconfirmed-stop timeout reaches here (_run_prompt_job
-        # reports the confirmed-stop timeout itself): the task may still
-        # be running, so its scratch directory is kept, as the error says.
+        # Raised only by _run_prompt_job when its task may still be
+        # running (a confirmed-stop timeout is reported as an ordinary
+        # error): the scratch directory is kept, as the error says.
         keep_work_dir = True
         status, text = "error", str(e)
     except Exception as e:
@@ -1417,6 +1421,22 @@ def running_job_ids() -> set[str]:
         for job_id in [jid for jid, thread in _running.items() if not thread.is_alive()]:
             del _running[job_id]
         return set(_running)
+
+
+def _disable_malformed(job: dict[str, Any], error: Exception) -> None:
+    """Disable *job* in place because its next run cannot be computed.
+
+    The job stays in the store with its ``next_run_at``, and the error
+    in ``last_summary`` tells the user why it stopped.
+
+    Args:
+        job: The stored job.
+        error: Why its schedule or next run could not be read.
+    """
+    logger.error("Disabling malformed cron job %s: %s", job.get("id"), error)
+    job["enabled"] = False
+    job["last_status"] = "error"
+    job["last_summary"] = f"disabled: malformed job: {error}"
 
 
 def tick(now: float | None = None, wait: bool = True) -> int:
@@ -1496,10 +1516,7 @@ def tick(now: float | None = None, wait: bool = True) -> int:
                     changed = True
                     continue
             except (TypeError, ValueError, KeyError, OverflowError) as e:
-                logger.error("Disabling malformed cron job %s: %s", job.get("id"), e)
-                job["enabled"] = False
-                job["last_status"] = "error"
-                job["last_summary"] = f"disabled: malformed job: {e}"
+                _disable_malformed(job, e)
                 changed = True
                 continue
             job["previous_run_at"] = job.get("last_run_at")
@@ -1750,7 +1767,9 @@ def adopt_previous_home_jobs(now: float | None = None) -> list[str]:
     next run; a one-shot keeps its deadline, and a finished job (a
     one-shot that ran, a delivered ``until_delivered`` poll: no next
     run) stays finished, so it is neither resumed nor a duplicate of a
-    job created anew.  A job already here under the same name, a
+    job created anew.  A job whose schedule cannot be parsed comes over
+    disabled, as :func:`tick` would leave it, so it does not cost the
+    others their hand-over.  A job already here under the same name, a
     default's former name included, stands as it is.
     Never raises: a store that cannot be read, locked or written is
     left alone and the marker still moves on, so a later start does not
@@ -1784,10 +1803,12 @@ def adopt_previous_home_jobs(now: float | None = None) -> list[str]:
                 name = str(job.get("name"))
                 if _current_default_name(name) in names:
                     continue
-                next_run = job.get("next_run_at")
-                if next_run is not None and not job.get("one_shot"):
-                    next_run = compute_next_run(str(job.get("schedule", "")), now)
-                job = {**job, "next_run_at": next_run, "failure_streak": 0}
+                job = {**job, "failure_streak": 0}
+                if job.get("next_run_at") is not None and not job.get("one_shot"):
+                    try:
+                        job["next_run_at"] = compute_next_run(str(job.get("schedule", "")), now)
+                    except (ValueError, OverflowError) as e:
+                        _disable_malformed(job, e)
                 if job["id"] in ids:
                     job["id"] = uuid.uuid4().hex[:8]
                 jobs.append(job)
@@ -2109,6 +2130,29 @@ def _find_duplicate(
     return None
 
 
+def _parse_amount(option: str, text: str) -> float:
+    """Parse the optional ``max_budget`` or ``timeout`` of a new job.
+
+    Args:
+        option: The option's name, for the error message.
+        text: The value as passed; empty means ``0`` (the default).
+
+    Returns:
+        The number, ``0.0`` for an empty *text*.
+
+    Raises:
+        ValueError: With the message for the user when *text* is not a
+            finite number of at least ``0``.
+    """
+    try:
+        number = float(text) if text.strip() else 0.0
+    except ValueError:
+        raise ValueError(f"{option} {text!r} is not a number") from None
+    if not (number >= 0 and math.isfinite(number)):
+        raise ValueError(f"{option} {text!r} must be a positive number")
+    return number
+
+
 def _create_or_ensure(
     action: str,
     name: str,
@@ -2163,15 +2207,10 @@ def _create_or_ensure(
     if next_run is None:
         return {"error": f"schedule {schedule!r} never fires (in the past?)"}
     try:
-        budget = float(max_budget) if max_budget.strip() else 0.0
-    except ValueError:
-        return {"error": f"max_budget {max_budget!r} is not a number"}
-    try:
-        timeout_seconds = float(timeout) if timeout.strip() else 0.0
-    except ValueError:
-        return {"error": f"timeout {timeout!r} is not a number"}
-    if not (timeout_seconds >= 0 and math.isfinite(timeout_seconds)):
-        return {"error": f"timeout {timeout!r} must be a positive number"}
+        budget = _parse_amount("max_budget", max_budget)
+        timeout_seconds = _parse_amount("timeout", timeout)
+    except ValueError as e:
+        return {"error": str(e)}
     run_dir = ""
     if work_dir.strip():
         run_dir = str(Path(work_dir.strip()).expanduser().resolve())

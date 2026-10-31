@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import concurrent.futures
 import functools
 import hashlib
 import inspect
@@ -83,62 +84,6 @@ milliseconds, so a wait past this bound is a wedged holder (a process
 stopped in a debugger, a stuck filesystem): the ``TimeoutError`` is the
 caller's error instead of a tool thread parked for good.
 """
-
-#: Length of one blocking wait slice on the tool thread.  One
-#: ``future.result(timeout)`` or ``Event.wait(timeout)`` over the whole
-#: deadline blocks in C for all of it, where an injected Stop
-#: (``ToolCallInterrupted`` from the tool panel, ``KeyboardInterrupt``
-#: from the task's stop watchdog) cannot land; short slices return to
-#: Python between them, and the tool panel's Stop is honoured
-#: cooperatively there too.
-_WAIT_SLICE_S = 0.2
-
-
-def _result_interruptible(future: Any, timeout: float) -> Any:
-    """Return *future*'s result, waiting in :data:`_WAIT_SLICE_S` slices.
-
-    Args:
-        future: A ``concurrent.futures.Future``.
-        timeout: Seconds to wait at most.
-
-    Raises:
-        TimeoutError: When *timeout* passes first.
-        ToolCallInterrupted: When the calling thread's tool call was
-            interrupted meanwhile.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            return future.result(timeout=min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_S))
-        except TimeoutError:
-            # concurrent.futures.TimeoutError is builtins.TimeoutError: a
-            # finished operation that raised one looks like an expired
-            # slice, so only an unfinished future is waited for again.
-            if future.done() or time.monotonic() >= deadline:
-                raise
-            tool_interrupt.raise_if_interrupted()
-
-
-def _wait_interruptible(event: threading.Event, timeout: float) -> bool:
-    """Wait for *event* in :data:`_WAIT_SLICE_S` slices; see :func:`_result_interruptible`.
-
-    Args:
-        event: The event to wait for.
-        timeout: Seconds to wait at most.
-
-    Returns:
-        Whether *event* was set before *timeout* passed.
-
-    Raises:
-        ToolCallInterrupted: When the calling thread's tool call was
-            interrupted meanwhile.
-    """
-    deadline = time.monotonic() + timeout
-    while not event.wait(min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_S)):
-        if time.monotonic() >= deadline:
-            return False
-        tool_interrupt.raise_if_interrupted()
-    return True
 
 CONNECT_TIMEOUT = 60.0
 _CONNECT_STRAGGLER_GRACE_S = 5.0
@@ -227,6 +172,16 @@ def project_mcp_config_path(work_dir: str) -> Path:
 def claude_project_mcp_config_path(work_dir: str) -> Path:
     """Return Claude Code's project MCP file (``<work_dir>/.mcp.json``)."""
     return Path(work_dir) / ".mcp.json"
+
+
+def _config_lock_path() -> Path:
+    """Return the lock file every MCP config edit holds (``$KISS_HOME/mcp.lock``).
+
+    One lock in ``$KISS_HOME`` for every config file: a lock next to
+    each file left an untracked ``.mcp.lock`` beside Claude Code's
+    checked-in ``<project>/.mcp.json`` in the user's project.
+    """
+    return kiss_home() / "mcp.lock"
 
 
 def mcp_auth_dir() -> Path:
@@ -324,23 +279,33 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
 
     Returns:
         The path of the config file written.
+
+    Raises:
+        ValueError: When the file exists but is not JSON whose top
+            level and ``mcpServers`` are objects; it is left untouched
+            (a hand-edited file with a syntax error must not lose its
+            other servers).
+        OSError: When the file cannot be read or written, or another
+            process held the config lock for :data:`_LOCK_TIMEOUT_S`
+            (``TimeoutError``).
     """
     path = (
         user_mcp_config_path() if scope == "user"
         else project_mcp_config_path(work_dir)
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with exclusive_file_lock(path.with_suffix(".lock"), timeout=_LOCK_TIMEOUT_S):
+    with exclusive_file_lock(_config_lock_path(), timeout=_LOCK_TIMEOUT_S):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             raw = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        entries = raw.setdefault("mcpServers", {})
-        if not isinstance(entries, dict):  # pragma: no cover - corrupt file guard
-            entries = {}
-            raw["mcpServers"] = entries
+        except ValueError as exc:
+            raise ValueError(f"{path} is not valid JSON ({exc}); fix or remove it") from exc
+        entries = raw.setdefault("mcpServers", {}) if isinstance(raw, dict) else None
+        if not isinstance(entries, dict):
+            raise ValueError(
+                f'{path} is not an MCP config ({{"mcpServers": {{...}}}}); fix or remove it'
+            )
         entries[cfg.name] = cfg.to_json()
         _atomic_write_config(path, raw)
     return path
@@ -359,14 +324,12 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
         The config files the server was actually removed from.
     """
     removed: list[Path] = []
-    for path in (
-        user_mcp_config_path(),
-        claude_project_mcp_config_path(work_dir),
-        project_mcp_config_path(work_dir),
-    ):
-        if not path.exists():
-            continue
-        with exclusive_file_lock(path.with_suffix(".lock"), timeout=_LOCK_TIMEOUT_S):
+    with exclusive_file_lock(_config_lock_path(), timeout=_LOCK_TIMEOUT_S):
+        for path in (
+            user_mcp_config_path(),
+            claude_project_mcp_config_path(work_dir),
+            project_mcp_config_path(work_dir),
+        ):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -762,6 +725,29 @@ def describe_exception(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+async def _list_all_tools(session: Any) -> list[Any]:
+    """Return the tools of every page of *session*'s ``tools/list``.
+
+    The SDK's ``list_tools`` returns one page and its ``nextCursor``;
+    the pages are requested until a page has no cursor, or hands out
+    one already followed (a server repeating a cursor would otherwise
+    be paged for ever).
+    """
+    from mcp.types import PaginatedRequestParams
+
+    tools: list[Any] = []
+    followed: set[str] = set()
+    params = None
+    while True:
+        listed = await session.list_tools(params=params)
+        tools.extend(listed.tools)
+        cursor = listed.nextCursor
+        if not cursor or cursor in followed:
+            return tools
+        followed.add(cursor)
+        params = PaginatedRequestParams(cursor=cursor)
+
+
 async def _maintain_connection(
     conn: _Connection, auth: Any, health_interval: float = HEALTH_INTERVAL,
 ) -> None:
@@ -785,9 +771,8 @@ async def _maintain_connection(
             read, write = await _enter_transport(stack, conn.config, auth)
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            listed = await session.list_tools()
+            conn.tools = await _list_all_tools(session)
             conn.session = session
-            conn.tools = list(listed.tools)
             conn.ready.set()
             await _park_until_stopped(conn, session, health_interval)
     except BaseException as exc:
@@ -803,6 +788,49 @@ def _release_lease(conn: _Connection) -> None:
     """Return the lease :meth:`MCPManager._lease` took on *conn* (under the manager lock)."""
     conn.in_flight -= 1
     conn.last_used = time.monotonic()
+
+
+def _start_call(
+    future: concurrent.futures.Future[Any], session: Any, tool: str, arguments: dict[str, Any],
+) -> None:
+    """Loop-thread side of :meth:`MCPManager.call_tool`: run the call, its outcome in *future*.
+
+    The caller made *future* before it queued this callback, so it holds
+    the call's handle wherever a Stop interrupts the submission: a
+    *future* cancelled before this runs never starts the call, one
+    cancelled later cancels the call's task.
+
+    Args:
+        future: The caller's handle on the call.
+        session: The leased connection's MCP session.
+        tool: The MCP tool name.
+        arguments: The tool arguments.
+    """
+    if future.cancelled():
+        return
+    task = asyncio.get_running_loop().create_task(
+        session.call_tool(tool, arguments, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT)),
+    )
+    future.add_done_callback(functools.partial(_cancel_task, task))
+    task.add_done_callback(functools.partial(_settle, future))
+
+
+def _cancel_task(task: asyncio.Task[Any], future: concurrent.futures.Future[Any]) -> None:
+    """Done callback of a call's *future*: once it is cancelled, cancel *task* on its loop."""
+    if future.cancelled():
+        task.get_loop().call_soon_threadsafe(task.cancel)
+
+
+def _settle(future: concurrent.futures.Future[Any], task: asyncio.Task[Any]) -> None:
+    """Done callback of a call's *task*: hand its outcome to the caller's *future*."""
+    if task.cancelled():
+        future.cancel()
+    elif future.set_running_or_notify_cancel():
+        error = task.exception()
+        if error is None:
+            future.set_result(task.result())
+        else:
+            future.set_exception(error)
 
 
 class MCPManager:
@@ -944,7 +972,7 @@ class MCPManager:
         task = conn.task
         if task is None:
             return
-        if _wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
+        if tool_interrupt.wait_interruptible(conn.ready, max(0.0, deadline - time.monotonic())):
             return
         if locked_call(self._lock, self._orphan_timed_out, key, conn):
             self._loop.call_soon_threadsafe(conn.stop.set)
@@ -1081,7 +1109,9 @@ class MCPManager:
         except ValueError:
             pass
 
-    def _lease(self, server: str) -> tuple[_Connection | None, Any]:
+    def _lease(
+        self, server: str, leases: list[_Connection],
+    ) -> tuple[_Connection | None, Any]:
         """Atomically look up *server*'s connection and lease it.
 
         The lookup and the ``in_flight`` increment happen under one
@@ -1091,25 +1121,32 @@ class MCPManager:
         evicted the connection, and tore down the session underneath
         the call about to run on it.  The session is captured under the
         same lock so the caller always uses exactly the session it
-        leased.
+        leased.  The leased connection is appended to *leases* with no
+        check point between it and the increment, so a caller leasing
+        inside its ``try`` returns exactly the leases it took even when
+        a Stop's injected ``KeyboardInterrupt`` lands right after one.
 
         Args:
             server: A connection key, or a bare server name when it is
                 unambiguous.
+            leases: The caller's record of its leases; the caller
+                returns each with :func:`_release_lease`.
 
         Returns:
             ``(conn, session)`` — *session* is non-``None`` only when
-            the connection is live and was leased (the caller must
-            release the lease by decrementing ``in_flight``).
+            the connection is live and was leased.
         """
-        return locked_call(self._lock, self._lease_locked, server)
+        return locked_call(self._lock, self._lease_locked, server, leases)
 
-    def _lease_locked(self, server: str) -> tuple[_Connection | None, Any]:
+    def _lease_locked(
+        self, server: str, leases: list[_Connection],
+    ) -> tuple[_Connection | None, Any]:
         """Body of :meth:`_lease`; the caller holds the lock."""
         conn = _pick(self._connections, server)
         session = conn.session if conn is not None else None
         if conn is not None and session is not None:
             conn.in_flight += 1
+            leases.append(conn)
             conn.last_used = time.monotonic()
         return conn, session
 
@@ -1132,34 +1169,37 @@ class MCPManager:
         display = _key_display_name(server)
         if self._shut_down:
             return f"Error: MCP server {display!r} is not connected (manager shut down)"
-        conn, session = self._lease(server)
-        if session is None:
-            # Evicted from the pool, or the server died mid-task: rebuild
-            # it rather than failing every remaining call of the run.
-            fresh = self._reconnect(server)
-            if fresh is not None:
-                leased, session = self._lease(server)
-                conn = leased or fresh
-        if conn is None or session is None:
-            why = (conn.error if conn is not None else "") or "never connected"
-            return f"Error: MCP server {display!r} is not connected ({why})"
-        future = asyncio.run_coroutine_threadsafe(
-            session.call_tool(
-                tool, arguments,
-                read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
-            ),
-            self._loop,
-        )
+        leases: list[_Connection] = []
+        # Made before the call is submitted, so the ``finally`` can cancel
+        # the call wherever a Stop lands (``run_coroutine_threadsafe``
+        # returned its future only after queueing the call).
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         try:
-            result = _result_interruptible(future, CALL_TIMEOUT + 5)
-        except Exception as exc:
-            return f"Error: MCP tool call failed: {exc}"
+            conn, session = self._lease(server, leases)
+            if session is None:
+                # Evicted from the pool, or the server died mid-task: rebuild
+                # it rather than failing every remaining call of the run.
+                fresh = self._reconnect(server)
+                if fresh is not None:
+                    leased, session = self._lease(server, leases)
+                    conn = leased or fresh
+            if conn is None or session is None:
+                why = (conn.error if conn is not None else "") or "never connected"
+                return f"Error: MCP server {display!r} is not connected ({why})"
+            self._loop.call_soon_threadsafe(_start_call, future, session, tool, arguments)
+            try:
+                result = tool_interrupt.result_interruptible(future, CALL_TIMEOUT + 5)
+            except Exception as exc:
+                return f"Error: MCP tool call failed: {exc}"
         finally:
-            # A no-op once the call completed; a timeout, an interrupt
-            # or an injected Stop must not leave the call running on
-            # the loop with its lease released.
+            # Leased inside this try, so a Stop landing anywhere after a
+            # lease still returns it.  Cancelling is a no-op once the
+            # call completed; a timeout, an interrupt or an injected Stop
+            # must not leave the call running on the loop with its lease
+            # released.
             future.cancel()
-            locked_call(self._lock, _release_lease, conn)
+            for leased_conn in leases:
+                locked_call(self._lock, _release_lease, leased_conn)
         return _result_text(result)
 
     def _reconnect(self, server: str) -> _Connection | None:
@@ -1455,7 +1495,7 @@ def make_mcp_tool_wrapper(
 # that has its toolset in hand passes the real names instead.
 _RESERVED_TOOL_NAMES = frozenset({
     "Bash", "bash_job", "run_commands_parallel", "Read", "Edit", "Write", "finish",
-    "create_worktree", "commit_and_merge",
+    "create_worktree", "commit_and_merge", "checkpoint", "rollback",
     "go_to_url", "click", "type_text", "press_key", "scroll",
     "screenshot", "get_page_content", "evaluate_script", "list_console_messages",
     "list_network_requests", "wait_for", "attach_to_chrome", "use_my_chrome",

@@ -4,10 +4,10 @@
 # add your name here
 """Shared fixtures for channel-agent tests.
 
-Isolates the Slack token directory per test so parallel pytest processes
-never race on the real ``~/.kiss/third_party_agents/slack`` path, and
-provides the per-test ``KISS_HOME`` and refusing-port fixtures that several
-test modules used to define locally.
+Gives every test its own ``KISS_HOME`` (so Slack tokens and channel
+configs never leak from one test into the next), and provides the
+refusing-port and service-emulator fixtures that several test modules
+used to define locally.
 """
 
 from __future__ import annotations
@@ -205,15 +205,15 @@ def refusing_port() -> Iterator[int]:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_slack_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect Slack token storage to a per-test temporary directory.
+def _isolated_slack_dir(isolated_kiss_home: Path) -> Path:
+    """Give every test its own ``KISS_HOME`` and return its Slack token directory.
 
-    ``slack_sea._slack_dir()`` resolves ``$KISS_HOME`` lazily, which already
-    keeps parallel pytest processes apart; patching it here additionally
-    gives every *test* a fresh, not-yet-created directory, so a token saved
-    by one test is never visible to the next.  The returned path is the
-    directory the product code will use for the duration of the test.
+    The root conftest's session ``KISS_HOME`` already keeps parallel
+    pytest processes apart; the per-test home of ``isolated_kiss_home``
+    additionally makes ``slack_sea._slack_dir()`` a fresh, not-yet-created
+    directory for every *test*, so a token saved by one test is never
+    visible to the next.  It is the directory the product code, a
+    ``ChannelConfig`` and any subprocess the test starts (a Muse daemon)
+    all resolve for the duration of the test.
     """
-    isolated = tmp_path / "slack"
-    monkeypatch.setattr(slack_agent_mod, "_slack_dir", lambda: isolated)
-    return isolated
+    return slack_agent_mod._slack_dir()

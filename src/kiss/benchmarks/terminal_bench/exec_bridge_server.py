@@ -18,6 +18,14 @@ no longer waits for (a task Stop) with ``POST /kill``.
 
 The server listens on the loopback interface only; nothing but the local
 daemon can reach the sandbox through it.
+
+When a command fails because the environment itself is gone (the provider
+shut the sandbox down) and a probe fails too, the server records the error
+in :attr:`ExecBridgeServer.lost`; the Harbor agent polls it, confirms it
+with a later probe (:meth:`ExecBridgeServer.confirm_lost`, so a passing
+provider error does not end a healthy trial) and ends the trial with an
+error (re-runnable with ``harbor jobs resume -f``) instead of leaving the
+agent to work around a dead sandbox.
 """
 
 from __future__ import annotations
@@ -39,6 +47,10 @@ SERVER_THREAD_NAME = "exec-bridge-server"
 REAP_INTERVAL_S = 0.5
 #: Reply to an ``/exec`` whose token was killed before the command started.
 STOPPED_REPLY: dict[str, Any] = {"exit_code": -1, "output": ""}
+#: Seconds the ``true`` probe of :meth:`ExecBridgeServer.alive` may take.
+PROBE_TIMEOUT_S = 15
+#: Seconds :meth:`ExecBridgeServer.confirm_lost` waits before it probes a sandbox again.
+LOST_CONFIRM_S = 10.0
 
 
 async def kill_tagged(environment: Any, token: str) -> None:
@@ -115,6 +127,10 @@ class ExecBridgeServer:
         self.lock = threading.Lock()
         self.pending: dict[str, Future[dict[str, Any]]] = {}
         self.cancelled: set[str] = set()
+        #: The error of the exec that found the environment gone (a sandbox the
+        #: provider shut down; :meth:`alive` failed right after), ``""`` while
+        #: it answers; cleared by a later command or probe that succeeds.
+        self.lost = ""
         bridge = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -176,7 +192,7 @@ class ExecBridgeServer:
                 exec_once(self.environment, command, timeout, token), self.loop)
             self.pending[token] = future
         try:
-            return future.result(timeout=timeout + 120)
+            reply = future.result(timeout=timeout + 120)
         except TimeoutError:
             future.cancel()
             self.sweep(token)
@@ -185,6 +201,45 @@ class ExecBridgeServer:
             with self.lock:
                 self.pending.pop(token, None)
                 self.cancelled.discard(token)
+        if reply["exit_code"] == 255:
+            # The environment itself is gone (the provider shut the sandbox
+            # down): every later command would fail the same way, so the trial
+            # runner ends the trial instead of letting the agent retry for hours.
+            if not self.lost and not self.alive():
+                self.lost = str(reply["output"])
+        elif isinstance(reply["exit_code"], int) and reply["exit_code"] >= 0:
+            self.lost = ""  # the command ran: an earlier failure was a passing one
+        return reply
+
+    async def confirm_lost(self) -> bool:
+        """Whether the environment recorded as lost is still gone after :data:`LOST_CONFIRM_S`.
+
+        Runs on the environment's loop (the trial runner's side, not the
+        server thread).  A probe that succeeds clears :attr:`lost`: the earlier
+        failures were a passing provider error, and the trial goes on.
+        """
+        await asyncio.sleep(LOST_CONFIRM_S)
+        if not self.lost:
+            return False
+        if (await exec_once(self.environment, "true", PROBE_TIMEOUT_S))["exit_code"] == 0:
+            self.lost = ""
+            return False
+        return True
+
+    def alive(self) -> bool:
+        """Whether the environment still runs commands (a ``true`` exec succeeds).
+
+        The probe runs at most :data:`PROBE_TIMEOUT_S` seconds (plus the
+        provider's grace in :func:`exec_once`), well within the slack the
+        daemon-side client allows a reply.
+        """
+        future = asyncio.run_coroutine_threadsafe(
+            exec_once(self.environment, "true", PROBE_TIMEOUT_S), self.loop)
+        try:
+            return bool(future.result(timeout=PROBE_TIMEOUT_S + 60)["exit_code"] == 0)
+        except TimeoutError:
+            future.cancel()
+            return False
 
     def sweep(self, token: str) -> None:
         """Kill the process tree tagged with *token* on the environment, once."""

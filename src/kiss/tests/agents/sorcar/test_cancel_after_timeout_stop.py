@@ -49,9 +49,11 @@ def test_cancel_during_the_timeout_grace_sends_no_second_stop(
                 stop_on_timeout=True, cancel=cancel,
             )
         elapsed = time.monotonic() - begin
-        assert daemon.wait_for_command("closeTab")
+        assert daemon.disconnected.wait(10)
         stops = [c for c in daemon.commands if c.get("type") == "stop"]
         assert len(stops) == 1, stops
+        # Unconfirmed: the task may still be running, so its tab stays open.
+        assert not any(c.get("type") == "closeTab" for c in daemon.commands)
         assert cancel.is_set()
         assert caught.value.confirmed is False
         # A second grace would end at TIMEOUT + CANCEL_AFTER_STOP + GRACE.

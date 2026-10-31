@@ -236,9 +236,8 @@ class _AuthHandler(RecordingHandler):
 
     def _register_matrix_client(self) -> None:
         """Dynamic client registration (Matrix spec): JSON in, 201 + client_id out."""
-        raw = self.server.requests[-1]["raw_body"]
         try:
-            metadata = json.loads(raw)
+            metadata = json.loads(self._raw_body)
         except ValueError:
             metadata = None
         if not isinstance(metadata, dict) or not str(metadata.get("client_uri", "")).startswith(
@@ -1713,29 +1712,32 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
 
     # The backend renews the short-lived token by itself before it expires.
     backend = MatrixChannelBackend()
-    backend._client = _matrix_client(auth_server.base_url, cfg["access_token"])
-    backend.refresh_if_needed()
-    assert backend._client.access_token == "access-1" and auth_server.refreshes == 0
-    cfg["expires_at"] = str(time.time() + 30)  # inside the skew
-    mx_config.save(cfg)
+    try:
+        backend._client = _matrix_client(auth_server.base_url, cfg["access_token"])
+        backend.refresh_if_needed()
+        assert backend._client.access_token == "access-1" and auth_server.refreshes == 0
+        cfg["expires_at"] = str(time.time() + 30)  # inside the skew
+        mx_config.save(cfg)
 
-    async def _noop() -> str:
-        return "ran"
+        async def _noop() -> str:
+            return "ran"
 
-    assert backend._run(_noop()) == "ran"
-    assert auth_server.refreshes == 1
-    refresh = next(
-        r for r in auth_server.requests if r["form"].get("grant_type") == "refresh_token"
-    )
-    assert refresh["form"] == {
-        "grant_type": "refresh_token",
-        "refresh_token": "refresh-1",
-        "client_id": "mas-client-1",
-    }
-    assert backend._client.access_token == "access-2"
-    renewed = json.loads(mx_config.path.read_text())
-    assert renewed["access_token"] == "access-2" and renewed["refresh_token"] == "refresh-2"
-    assert float(renewed["expires_at"]) > time.time() + 200
+        assert backend._run(_noop()) == "ran"
+        assert auth_server.refreshes == 1
+        refresh = next(
+            r for r in auth_server.requests if r["form"].get("grant_type") == "refresh_token"
+        )
+        assert refresh["form"] == {
+            "grant_type": "refresh_token",
+            "refresh_token": "refresh-1",
+            "client_id": "mas-client-1",
+        }
+        assert backend._client.access_token == "access-2"
+        renewed = json.loads(mx_config.path.read_text())
+        assert renewed["access_token"] == "access-2" and renewed["refresh_token"] == "refresh-2"
+        assert float(renewed["expires_at"]) > time.time() + 200
+    finally:
+        backend.disconnect()  # stops the loop thread _run started
 
     # Matrix spec: every authorisation flow registers the client anew.
     assert json.loads(tools["authenticate_matrix"](auth_server.base_url))["status"] == (
@@ -1765,36 +1767,40 @@ def test_matrix_refresh_failures_follow_the_spec(
         }
     )
     backend = MatrixChannelBackend()
-    backend._client = _matrix_client(auth_server.base_url, "old")
-    # The emulator refuses unknown refresh tokens with 400 invalid_grant.
-    auth_server.refresh_error = "server_error"
-    auth_server.refresh_status = 503
-
-    async def _noop() -> str:
-        return "ran"
-
-    assert backend._run(_noop()) == "ran"  # 5xx: session kept
-    assert backend._client.access_token == "old"
     backend2 = MatrixChannelBackend()
-    backend2._client = _matrix_client(f"http://127.0.0.1:{refusing_port}", "old")
-    cfg = mx_config.load() or {}
-    cfg["token_url"] = f"http://127.0.0.1:{refusing_port}/token"
-    mx_config.save(cfg)
-    assert backend2._run(_noop()) == "ran"  # unreachable: session kept
-    cfg["token_url"] = f"{auth_server.base_url}/mas/oauth2/token"
-    mx_config.save(cfg)
-    # A 4xx without a JSON body is still a logout, not a transient failure.
-    auth_server.refresh_error = "plain"
-    auth_server.refresh_status = 400
-    with pytest.raises(RuntimeError, match=r"logged out \(HTTP 400\)"):
-        backend._run(_noop())
-    auth_server.refresh_error = ""
-    with pytest.raises(RuntimeError, match=r"logged out \(invalid_grant\)"):
-        backend._run(_noop())
-    # A legacy (hand-supplied) token never refreshes.
-    mx_config.save({"homeserver_url": auth_server.base_url, "access_token": "legacy"})
-    assert backend._run(_noop()) == "ran"
-    assert auth_server.refreshes == 3
+    try:
+        backend._client = _matrix_client(auth_server.base_url, "old")
+        # The emulator refuses unknown refresh tokens with 400 invalid_grant.
+        auth_server.refresh_error = "server_error"
+        auth_server.refresh_status = 503
+
+        async def _noop() -> str:
+            return "ran"
+
+        assert backend._run(_noop()) == "ran"  # 5xx: session kept
+        assert backend._client.access_token == "old"
+        backend2._client = _matrix_client(f"http://127.0.0.1:{refusing_port}", "old")
+        cfg = mx_config.load() or {}
+        cfg["token_url"] = f"http://127.0.0.1:{refusing_port}/token"
+        mx_config.save(cfg)
+        assert backend2._run(_noop()) == "ran"  # unreachable: session kept
+        cfg["token_url"] = f"{auth_server.base_url}/mas/oauth2/token"
+        mx_config.save(cfg)
+        # A 4xx without a JSON body is still a logout, not a transient failure.
+        auth_server.refresh_error = "plain"
+        auth_server.refresh_status = 400
+        with pytest.raises(RuntimeError, match=r"logged out \(HTTP 400\)"):
+            backend._run(_noop())
+        auth_server.refresh_error = ""
+        with pytest.raises(RuntimeError, match=r"logged out \(invalid_grant\)"):
+            backend._run(_noop())
+        # A legacy (hand-supplied) token never refreshes.
+        mx_config.save({"homeserver_url": auth_server.base_url, "access_token": "legacy"})
+        assert backend._run(_noop()) == "ran"
+        assert auth_server.refreshes == 3
+    finally:
+        backend.disconnect()  # stops the loop threads _run started
+        backend2.disconnect()
 
 
 def test_matrix_refresh_never_resurrects_a_cleared_or_replaced_session(

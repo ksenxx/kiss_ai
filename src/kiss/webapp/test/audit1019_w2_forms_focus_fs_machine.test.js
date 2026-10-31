@@ -34,6 +34,8 @@ const {
   stubMonaco,
   pickMachine,
   click: harnessClick,
+  ofType,
+  fakeIntervals,
 } = require('./simplify2_harness');
 const {
   all,
@@ -41,6 +43,7 @@ const {
   menuItem,
   rightClick,
   explorerRow,
+  makeRunner,
 } = require('./ui_antipattern_harness');
 
 const openWindows = [];
@@ -49,15 +52,12 @@ function makePage() {
   let editors;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
-    extraScripts: ['treeContextMenu.js'],
+    extraScripts: ['contentContextMenu.js', 'treeContextMenu.js'],
     beforeScripts(win) {
       openWindows.push(win);
       stubRaf(win);
       // The polls are recorded, not run: a test delivers replies by hand.
-      win.setInterval = function () {
-        return 1;
-      };
-      win.clearInterval = function () {};
+      fakeIntervals(win);
       fakeMatchMedia(win, true);
       editors = stubMonaco(win);
     },
@@ -70,13 +70,9 @@ function click(win, el) {
   harnessClick(win, el);
 }
 
-function msgs(posted, type) {
-  return posted.filter(m => m && m.type === type);
-}
-
 /** Answer the last listDir for *p* (stamped *machine*, '' for none). */
 function answerListing(win, posted, p, machine, entries) {
-  const reqs = msgs(posted, 'listDir').filter(
+  const reqs = ofType(posted, 'listDir').filter(
     m => m.path === p && (m.machine || '') === machine,
   );
   const req = reqs[reqs.length - 1];
@@ -124,7 +120,7 @@ function renameInExplorer(win, posted, p, newName) {
       cancelable: true,
     }),
   );
-  const sent = msgs(posted, 'fsAction');
+  const sent = ofType(posted, 'fsAction');
   assert.strictEqual(sent.length, 1, 'one rename sent');
   assert.strictEqual(sent[0].action, 'rename');
   return sent[0];
@@ -145,7 +141,7 @@ function deleteInExplorer(win, posted, p) {
       b => b.textContent.trim() === 'Delete',
     ),
   );
-  const sent = msgs(posted, 'fsAction');
+  const sent = ofType(posted, 'fsAction');
   assert.strictEqual(sent.length, 1, 'one delete sent');
   assert.strictEqual(sent[0].action, 'delete');
   return sent[0];
@@ -517,7 +513,7 @@ function testCompareWithSelectedFollowsRenameAndDelete() {
   rightClick(win, rowFor(win, '/work/ws/b.py'));
   posted.length = 0;
   click(win, menuItem(win, 'Compare with Selected'));
-  const compare = msgs(posted, 'fsAction');
+  const compare = ofType(posted, 'fsAction');
   assert.strictEqual(compare.length, 1);
   assert.strictEqual(compare[0].action, 'compare');
   assert.strictEqual(compare[0].path, '/work/ws/c.py', 'the renamed path');
@@ -557,12 +553,53 @@ function testCompareWithSelectedStaysOnItsMachine() {
   rightClick(win, rowFor(win, '/work/ws/b.py'));
   assert.ok(menuItem(win, 'Compare with Selected'), 'offered again at home');
   closeMenu(win);
-  // A folder deleted on the machine does not touch this machine's pick
-  // at the same path.
+  // gpu-box has a workspace at the same path: its a.py is another file,
+  // so renaming it, and deleting the a.py written there later, leave
+  // this machine's pick alone.
+  pickMachine(win, 'gpu-box');
+  send(win, Object.assign({}, BOX_DIRS, {workDir: '/work/ws'}));
+  answerListing(win, posted, '/work/ws', 'gpu-box', HOME_FILES);
+  let req = renameInExplorer(win, posted, '/work/ws/a.py', 'c.py');
+  assert.strictEqual(req.machine, 'gpu-box');
+  send(win, {
+    type: 'fsResult',
+    token: req.token,
+    action: 'rename',
+    path: '/work/ws/c.py',
+    machine: 'gpu-box',
+  });
+  answerListing(win, posted, '/work/ws', 'gpu-box', [
+    ...HOME_FILES,
+    {name: 'c.py', path: '/work/ws/c.py', isDir: false},
+  ]);
+  req = deleteInExplorer(win, posted, '/work/ws/a.py');
+  assert.strictEqual(req.machine, 'gpu-box');
+  send(win, {
+    type: 'fsResult',
+    token: req.token,
+    action: 'delete',
+    path: '/work/ws/a.py',
+    machine: 'gpu-box',
+  });
+  pickMachine(win, '');
+  answerListing(win, posted, '/work/ws', '', HOME_FILES);
+  rightClick(win, rowFor(win, '/work/ws/b.py'));
+  const item = menuItem(win, 'Compare with Selected');
+  assert.ok(item, 'still offered at home');
+  posted.length = 0;
+  click(win, item);
+  const compare = ofType(posted, 'fsAction');
+  assert.strictEqual(compare.length, 1, 'one compare sent');
+  assert.strictEqual(
+    compare[0].path,
+    '/work/ws/a.py',
+    "this machine's pick keeps its path",
+  );
+  // A pick made on gpu-box is withdrawn when it is deleted there.
   goToBox(win, posted);
   rightClick(win, rowFor(win, '/srv/proj/a.py'));
   click(win, menuItem(win, 'Select for Compare'));
-  const req = deleteInExplorer(win, posted, '/srv/proj/a.py');
+  req = deleteInExplorer(win, posted, '/srv/proj/a.py');
   send(win, {
     type: 'fsResult',
     token: req.token,
@@ -606,7 +643,7 @@ function testCompareWithSelectedReadsTheSelectionWhenClicked() {
   click(win, compare);
   assert.deepStrictEqual(errors, [], 'the click must not throw');
   assert.deepStrictEqual(
-    msgs(posted, 'fsAction'),
+    ofType(posted, 'fsAction'),
     [],
     'nothing is compared against a deleted file',
   );
@@ -625,7 +662,7 @@ function testCompareWithSelectedReadsTheSelectionWhenClicked() {
   });
   posted.length = 0;
   click(win, compareRenamed);
-  const sent = msgs(posted, 'fsAction');
+  const sent = ofType(posted, 'fsAction');
   assert.strictEqual(sent.length, 1, 'one compare sent');
   assert.strictEqual(sent[0].path, '/work/ws/c.py', 'against the new path');
   assert.strictEqual(sent[0].dest, '/work/ws/b.py');
@@ -753,7 +790,7 @@ function testMachinesDeleteConfirmationSurvivesAPoll() {
   // Confirming in the rebuilt row sends the removal.
   posted.length = 0;
   click(win, machineRow(win, 'gpu-box').querySelector('.sidebar-confirm-yes'));
-  const sent = msgs(posted, 'machineAction');
+  const sent = ofType(posted, 'machineAction');
   assert.strictEqual(sent.length, 1, 'one removal sent');
   assert.strictEqual(sent[0].action, 'remove');
   assert.strictEqual(sent[0].name, 'gpu-box');
@@ -802,20 +839,15 @@ const tests = [
   ],
 ];
 
+const {test, report} = makeRunner();
+
 (async () => {
-  let failed = 0;
   for (const [name, fn] of tests) {
     try {
-      await fn();
-      console.log('ok - ' + name);
-    } catch (e) {
-      failed += 1;
-      console.log('not ok - ' + name);
-      console.log(e && e.stack ? e.stack : String(e));
+      await test(name, fn);
     } finally {
       while (openWindows.length) openWindows.pop().close();
     }
   }
-  console.log(`\n${tests.length - failed} passed, ${failed} failed`);
-  process.exit(failed ? 1 : 0);
+  report('audit1019_w2_forms_focus_fs_machine');
 })();

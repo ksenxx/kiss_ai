@@ -193,7 +193,8 @@ def resolve_merge_conflict(
         user_prompt: The task prompt, for the agent and the commit message.
         task_result: The task result summary, for the commit message.
         run_agent: Runs the merge agent (``(parent_agent, prompt, repo)``);
-            :func:`run_merge_sea` by default.
+            :func:`run_merge_sea` by default.  Tests pass scripted
+            resolvers here.
 
     Returns:
         :attr:`MergeResult.SUCCESS` when the branch is merged and
@@ -204,12 +205,15 @@ def resolve_merge_conflict(
     repo = wt.repo_root
     before = GitWorktreeOps.status_porcelain(repo)
     head_before = GitWorktreeOps.head_sha(repo) or ""
-    conflicted = GitWorktreeOps.begin_conflicted_merge(
-        repo, wt.branch, wt.baseline_commit, before,
-    )
-    if conflicted is None:
-        return MergeResult.CONFLICT
     try:
+        # Inside the ``try``: a Stop can land after git applied the
+        # conflicting change but before this call returns, and only
+        # the handler below restores the tree.
+        conflicted = GitWorktreeOps.begin_conflicted_merge(
+            repo, wt.branch, wt.baseline_commit, before,
+        )
+        if conflicted is None:
+            return MergeResult.CONFLICT
         if conflicted:
             prompt = conflict_task(
                 repo, wt.branch, wt.original_branch or "", conflicted, user_prompt,

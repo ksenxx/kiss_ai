@@ -26,15 +26,20 @@
 // concaudit_f4_attachment_prepare_deadline.test.js.
 //
 // The production deadline is 60s; waiting a real minute per run is not
-// acceptable, so main.js is loaded with that ONE constant held (the
-// substitution is asserted, so a rename fails loudly) and the deadline
-// timer is fired by hand.  Everything else — DOM, events, the attachment
+// acceptable, so the page records main.js's 60 s timer instead of
+// arming it and the test fires it by hand (a changed delay fails
+// fireDeadline).  Everything else — DOM, events, the attachment
 // pipeline — is the real code.
 
 'use strict';
 
 const assert = require('assert');
-const {makeHeldDeadlinePage, paste, settle} = require('./attachment_helpers');
+const {
+  makeHeldDeadlinePage,
+  paste,
+  settle,
+  removeChip,
+} = require('./attachment_helpers');
 
 function chipText(win) {
   return win.document.getElementById('file-chips').textContent;
@@ -46,22 +51,8 @@ function errorChips(win) {
   );
 }
 
-// Click the x on the chip whose label contains `name`.
-function removeChip(win, name) {
-  const chips = win.document.querySelectorAll('#file-chips .file-chip');
-  for (const chip of chips) {
-    if (chip.textContent.indexOf(name) >= 0) {
-      chip.querySelector('.fc-rm').click();
-      return;
-    }
-  }
-  throw new Error('no chip found for ' + name);
-}
-
 async function main() {
-  const {win, decodeCount, fireDeadline} = makeHeldDeadlinePage(
-    'conc2026-attachment-removed-slot-main.js',
-  );
+  const {win, decodeCount, fireDeadline} = makeHeldDeadlinePage();
   win._testApi.endLaunch();
 
   // A pending HEIC whose decode is wedged is removed by the user BEFORE

@@ -10,15 +10,15 @@
 // clipboard API that rejects (document not focused, permission denied)
 // falls back to the execCommand('copy') textarea instead of leaving an
 // unhandled rejection and no copy.  jsdom has no xterm.js, no
-// ResizeObserver and no animation frames, so the page is given the
-// same minimal stand-ins as terminalTabView.test.js; the real
+// ResizeObserver and no animation frames, so the page is given
+// simplify2_harness's stand-ins (installXtermStub, queueRaf); the real
 // terminalTab.js and panelCopy.js drive them.
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {queueRaf} = require('./simplify2_harness');
+const {queueRaf, installXtermStub} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -33,38 +33,7 @@ async function openView(selection) {
   });
   const win = dom.window;
   const log = {rejectedWrites: 0, execCopies: []};
-  const terminals = [];
-  class Terminal {
-    constructor() {
-      this.cols = 80;
-      this.rows = 24;
-      this.options = {};
-      terminals.push(this);
-    }
-    open() {}
-    loadAddon() {}
-    attachCustomKeyEventHandler(handler) {
-      this.keyHandler = handler;
-    }
-    write() {}
-    onData() {}
-    onResize() {}
-    focus() {}
-    getSelection() {
-      return selection;
-    }
-    dispose() {}
-  }
-  win.Terminal = Terminal;
-  win.FitAddon = {
-    FitAddon: class {
-      fit() {}
-    },
-  };
-  win.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
-  };
+  const {terminals} = installXtermStub(win);
   queueRaf(win); // no frame ever runs
   // The async clipboard refuses every write, as it does when the
   // document is not focused; execCommand('copy') records the value of
@@ -94,6 +63,7 @@ async function openView(selection) {
   await Promise.resolve();
   await Promise.resolve();
   assert.strictEqual(terminals.length, 1, 'xterm created on first show');
+  terminals[0].getSelection = () => selection;
   return {keyHandler: terminals[0].keyHandler, log};
 }
 

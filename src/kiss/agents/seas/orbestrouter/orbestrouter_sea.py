@@ -7,7 +7,7 @@
 Same protocol as :mod:`kiss.agents.seas.bestrouter.bestrouter_sea` (one
 frontier model does the work, a second one reviews it read-only through
 a non-blocking ``run_agent`` on at most 75% of the budget), with both models taken from
-the OpenRouter vendor: :data:`PRIMARY_MODEL` is Claude Fable 5.1 and
+the OpenRouter vendor: :data:`PRIMARY_MODEL` is Claude Fable 5.1 (max effort) and
 :data:`REVIEW_MODEL` is GPT-6 Astra, both as ``openrouter/...`` catalog
 entries, so one OpenRouter key runs the whole session.
 
@@ -28,8 +28,8 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.bestrouter.bestrouter_sea import routing_prompt
 
-PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.1"
-"""The model that does every task: Claude Fable 5.1 via OpenRouter."""
+PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.1-max"
+"""The model that does every task: Claude Fable 5.1 at max effort via OpenRouter."""
 
 REVIEW_MODEL = "openrouter/openai/gpt-6-astra"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""

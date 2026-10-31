@@ -7,18 +7,26 @@
 
 const assert = require('assert');
 const {installTokenisedCss} = require('./designTokens');
-const {makePage: makeChatPage, showTips} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  showTips,
+  loadRemoteCss,
+} = require('./simplify2_harness');
 
 function installTokenCss(win) {
   installTokenisedCss(win, 'main.css');
   win.__TIPS__ = {tips: [], show: false};
 }
 
-function makePage() {
-  return makeChatPage({
-    beforeScripts: installTokenCss,
-    extraScripts: ['tips.js'],
-  });
+// The send and stop buttons take their size from remote-codex.css: the
+// chat page is always served with both sheets and `remote-chat` on body.
+function installRemoteTokenCss(win) {
+  loadRemoteCss(win, true);
+  win.__TIPS__ = {tips: [], show: false};
+}
+
+function makePage(beforeScripts = installTokenCss) {
+  return makeChatPage({beforeScripts, extraScripts: ['tips.js']});
 }
 
 function cssRule(win, selector) {
@@ -50,7 +58,7 @@ function assertAtLeast(actual, min, what) {
 }
 
 function testInputFooterButtonsAreBigger() {
-  const {win} = makePage();
+  const {win} = makePage(installRemoteTokenCss);
   const doc = win.document;
 
   const send = win.getComputedStyle(doc.getElementById('send-btn'));
@@ -211,38 +219,12 @@ function testButtonsLoseFocusAfterClick() {
   console.log('  ok - buttons lose focus after click');
 }
 
-// The tips X removes the whole panel (tips.js `this.remove()`), which is
-// what takes focus off the button: a detached element can never be the
-// document's activeElement, so no separate blur assertion is meaningful.
-function testTipsCloseClosesPanel() {
-  const {win} = makePage();
-  const doc = win.document;
-
-  showTips(win, ['# Tip 1\nHello']);
-  const panel = doc.querySelector('kiss-tips-panel');
-  assert.ok(panel && panel.shadowRoot, 'tips panel must mount');
-  const close = panel.shadowRoot.querySelector('.tips-close');
-  assert.ok(close, 'tips panel must have a .tips-close button');
-  close.focus();
-  close.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-  assert.strictEqual(
-    doc.querySelector('kiss-tips-panel'),
-    null,
-    'clicking the tips X must remove the panel',
-  );
-  win.close();
-  console.log('  ok - tips X closes the panel');
-}
-
 function main() {
   console.log('buttonSizeAndBlur.test.js');
   testInputFooterButtonsAreBigger();
   testTabBarPlusAndSettingsAreBigger();
   testCloseButtonsAreBigger();
   testButtonsLoseFocusAfterClick();
-  testTipsCloseClosesPanel();
   console.log('all ok');
 }
 

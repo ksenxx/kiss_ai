@@ -228,8 +228,10 @@ function testResultArmsPanelDuringReplay() {
 function testResultStepCountReplacesTheCountedOne() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
+  const steps = win.document.getElementById('status-steps');
   send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
   think(win, tab, 'one thought only');
+  assert.strictEqual(steps.textContent, 'Steps: 1', 'the page counted one');
   send(win, {
     type: 'result',
     tabId: tab,
@@ -238,7 +240,17 @@ function testResultStepCountReplacesTheCountedOne() {
     step_count: 12,
     ts: TS,
   });
+  assert.strictEqual(
+    steps.textContent,
+    'Steps: 12',
+    "the daemon's step count replaces the counted one",
+  );
   think(win, tab, 'and one more');
+  assert.strictEqual(
+    steps.textContent,
+    'Steps: 13',
+    "counting goes on from the daemon's step count",
+  );
   assert.ok(
     panelOfThought(win, 'and one more'),
     'the thought after the result still gets a panel even though the ' +

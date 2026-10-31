@@ -18,11 +18,13 @@ general memory, ``<memory>/<page>`` a page of that domain memory.
 """
 
 import re
-from concurrent.futures import Future, ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from kiss.core import tool_interrupt
 from kiss.core.memoryfield.index import Embedder, SearchHit, VectorIndex, embedding_text
 from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, is_valid_page_name
 
@@ -80,13 +82,6 @@ RECALL_PAGES = 5
 RECALL_QUERY_CHARS = 4_000
 RECALL_HEADING = "# Memory pages relevant to this task"
 
-# How long the task thread blocks in one ``Future.result`` wait on a search
-# worker.  The runner's Stop injects ``KeyboardInterrupt`` with
-# ``PyThreadState_SetAsyncExc``, which lands only when the thread runs
-# bytecode: an unbounded wait would make a search deaf to Stop for the
-# whole of a first-time index build (minutes of embedding requests).
-_WAIT_POLL_SECONDS = 0.1
-
 
 def recall_query(task: str) -> str:
     """Return the part of *task* embedded as the recall query: all of it, or its head and tail."""
@@ -109,23 +104,6 @@ def _format_hits(hits: list[SearchHit]) -> str:
 def _qualified(memory: str, name: str) -> str:
     """The page name an agent sees: ``name`` in the general memory, else ``memory/name``."""
     return name if memory == GENERAL else f"{memory}/{name}"
-
-
-def _result[T](future: Future[T]) -> T:
-    """``future.result()`` in :data:`_WAIT_POLL_SECONDS` slices, so a Stop can land between them.
-
-    A ``TimeoutError`` from a slice means "keep waiting" only while the
-    future is still running: a worker whose own failure is a
-    ``TimeoutError`` (an embedder's socket read timing out) makes
-    ``future.result()`` raise that same class instantly, so it must be
-    re-raised, not polled for again.
-    """
-    while not future.done():
-        try:
-            return future.result(timeout=_WAIT_POLL_SECONDS)
-        except TimeoutError:
-            continue
-    return future.result()
 
 
 class MemoryTools:
@@ -228,20 +206,23 @@ class MemoryTools:
         return memory, self.indexes[memory].memory, page
 
     @staticmethod
-    def _search_one(memory: str, index: VectorIndex, query: str, k: int) -> list[SearchHit]:
+    def _search_one(
+        memory: str, index: VectorIndex, query: str, k: int, cancel: threading.Event
+    ) -> list[SearchHit]:
         """Sync one index and search it, embedding the query during the sync.
 
         The query's embedding request runs on a worker thread while the
         sync scans the directory (and embeds any changed pages), so the
         call costs about one embedding round trip instead of two.  Hit
         names come back qualified with the memory they were found in.
+        Once *cancel* is set the sync starts no further embedding batch.
         """
         if k <= 0:
-            index.sync()
+            index.sync(cancel=cancel)
             return []
         with ThreadPoolExecutor(max_workers=1) as pool:
             query_vector = pool.submit(index.embed_query, query)
-            index.sync()
+            index.sync(cancel=cancel)
             query_vector.result()  # re-raises an embedding failure
         return [replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)]
 
@@ -249,20 +230,27 @@ class MemoryTools:
         """Search the selected memories concurrently and merge the best *k* hits.
 
         Each memory's sync-and-search runs on its own worker thread; the
-        task thread waits in short slices (:func:`_result`) and does not
-        join the pool, so a Stop injected into it propagates at once while
-        a worker finishes its current embedding batch in the background
-        (safe: the index writes each batch in its own transaction).
+        task thread waits in short slices
+        (:func:`~kiss.core.tool_interrupt.result_interruptible`) and does not
+        join the pool, so a Stop injected into it propagates at once.  An
+        abandoned worker finishes only its current embedding batch in the
+        background (safe: the index writes each batch in its own
+        transaction) and then stops, so process exit, which joins pool
+        threads, waits for at most that batch.
         """
         selected = self._selected(memory)
+        cancel = threading.Event()
         pool = ThreadPoolExecutor(max_workers=len(selected))
         try:
             futures = [
-                pool.submit(self._search_one, name, index, query, k)
+                pool.submit(self._search_one, name, index, query, k, cancel)
                 for name, index in selected.items()
             ]
-            hits = [hit for future in futures for hit in _result(future)]
+            hits = [
+                hit for future in futures for hit in tool_interrupt.result_interruptible(future)
+            ]
         finally:
+            cancel.set()
             pool.shutdown(wait=False)
         hits.sort(key=lambda hit: (-hit.score, hit.name))
         return hits[:k]

@@ -16,7 +16,9 @@
 // The menu behaves like VS Code's: it opens at the pointer (kept inside
 // the viewport), Up / Down move between enabled items, Enter / Space run
 // the focused one, Escape or a click anywhere else closes it, and a
-// disabled item is shown greyed out and cannot be run.
+// disabled item is shown greyed out and cannot be run.  The keyboard model
+// and the viewport clamp are contentContextMenu.js's (`menuKeyNav`,
+// `clampMenu`), so that file must be loaded first.
 
 /* global module */
 'use strict';
@@ -56,32 +58,8 @@
   }
 
   function onKeyDown(e) {
-    if (!menu) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      close();
-      return;
-    }
-    const items = focusableItems(menu);
-    if (!items.length) return;
-    const idx = items.indexOf(menu.ownerDocument.activeElement);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      let next;
-      if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
-      else next = idx <= 0 ? items.length - 1 : idx - 1;
-      items[next].focus();
-      return;
-    }
-    if (e.key === 'Home' || e.key === 'End') {
-      e.preventDefault();
-      items[e.key === 'Home' ? 0 : items.length - 1].focus();
-      return;
-    }
-    if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
-      e.preventDefault();
-      items[idx].click();
-    }
+    if (menu)
+      root.ContentContextMenu.menuKeyNav(e, focusableItems(menu), close);
   }
 
   function onDocPointerDown(e) {
@@ -163,15 +141,14 @@
     const last = el.lastElementChild;
     if (last && last.classList.contains('tree-ctx-sep')) last.remove();
     el.hidden = false;
-    const win = doc.defaultView;
-    const vw = (win && win.innerWidth) || 0;
-    const vh = (win && win.innerHeight) || 0;
-    const mw = el.offsetWidth || 200;
-    const mh = el.offsetHeight || 24 * items.length;
-    const px = vw ? Math.min(x, vw - mw - 4) : x;
-    const py = vh ? Math.min(y, vh - mh - 4) : y;
-    el.style.left = Math.max(0, px) + 'px';
-    el.style.top = Math.max(0, py) + 'px';
+    root.ContentContextMenu.clampMenu(
+      doc.defaultView,
+      el,
+      x,
+      y,
+      200,
+      24 * items.length,
+    );
     const first = focusableItems(el)[0];
     if (first) first.focus({preventScroll: true});
     return el;

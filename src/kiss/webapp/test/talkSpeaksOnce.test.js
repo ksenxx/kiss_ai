@@ -128,31 +128,33 @@ test('legacy talk event without talkId or tabId still plays', () => {
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
 });
 
-test('dedupe memory is bounded (many talk calls keep working)', () => {
-  const {win, played, tabId} = makePage();
-  for (let i = 0; i < 600; i++) {
-    send(win, {
-      type: 'talk',
-      language: 'en-US',
-      text: `utterance ${i}`,
-      talkId: `t-many-${i}`,
-      taskId: 7,
-      tabId,
-      audioB64: B64,
-    });
-    played[played.length - 1].onended();
-  }
-  assert.strictEqual(played.length, 600);
+/** Send talk call number *i* (talkId `t-many-<i>`) to own tab *tabId*. */
+function sendNumberedTalk(win, tabId, i) {
   send(win, {
     type: 'talk',
     language: 'en-US',
-    text: 'utterance 599',
-    talkId: 't-many-599',
+    text: `utterance ${i}`,
+    talkId: `t-many-${i}`,
     taskId: 7,
     tabId,
     audioB64: B64,
   });
-  assert.strictEqual(played.length, 600, 'latest talkId must stay deduped');
+}
+
+test('dedupe memory is bounded (oldest talkIds forgotten, recent kept)', () => {
+  const {win, played, tabId} = makePage();
+  for (let i = 0; i < 600; i++) {
+    sendNumberedTalk(win, tabId, i);
+    played[played.length - 1].onended();
+  }
+  assert.strictEqual(played.length, 600);
+  // The 250 most recent ids are still remembered...
+  sendNumberedTalk(win, tabId, 599);
+  sendNumberedTalk(win, tabId, 350);
+  assert.strictEqual(played.length, 600, 'recent talkIds must stay deduped');
+  // ...and the oldest were dropped: the memory does not grow for ever.
+  sendNumberedTalk(win, tabId, 0);
+  assert.strictEqual(played.length, 601, 'the oldest talkId must be forgotten');
 });
 
 report('talkSpeaksOnce');

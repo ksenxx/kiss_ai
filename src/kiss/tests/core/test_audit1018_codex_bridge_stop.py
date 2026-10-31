@@ -354,7 +354,8 @@ def test_a_call_still_being_read_when_the_block_ends_is_refused() -> None:
     with ToolBridge(NOOP_SCHEMA, execute) as bridge:
         port = bridge.port
         client = socket.create_connection(("127.0.0.1", port))
-        client.sendall(b'{"op": "call", "name": "noop", "arguments": {}')  # no newline yet
+        request = {"op": "call", "name": "noop", "arguments": {}, "token": bridge._server.token}
+        client.sendall(json.dumps(request)[:-1].encode())  # no "}" and newline yet
         time.sleep(0.3)  # the handler is accepted and blocked in readline
     client.sendall(b"}\n")
     reply = json.loads(client.makefile("rb").readline())
@@ -375,8 +376,7 @@ def test_bridge_records_the_first_executor_error() -> None:
 
     with ToolBridge(NOOP_SCHEMA, explode) as bridge:
         for _ in range(2):
-            with socket.create_connection(("127.0.0.1", bridge.port)) as client:
-                client.sendall(b'{"op": "call", "name": "noop", "arguments": {}}\n')
+            with _call(bridge, "noop") as client:
                 assert b"RuntimeError: boom" in client.makefile("rb").readline()
         assert str(bridge.error) == "boom 1"
         assert bridge.take_served() == [
@@ -492,10 +492,11 @@ def later() -> str:
     return "late side effect"
 
 
-def _call(port: int, name: str) -> socket.socket:
-    """Send one tool call to the bridge on *port* and return the open connection."""
-    client = socket.create_connection(("127.0.0.1", port), timeout=15)
-    client.sendall(json.dumps({"op": "call", "name": name, "arguments": {}}).encode() + b"\n")
+def _call(bridge: ToolBridge, name: str) -> socket.socket:
+    """Send one tool call to *bridge* and return the open connection."""
+    client = socket.create_connection(("127.0.0.1", bridge.port), timeout=15)
+    request = {"op": "call", "name": name, "arguments": {}, "token": bridge._server.token}
+    client.sendall(json.dumps(request).encode() + b"\n")
     return client
 
 
@@ -527,9 +528,9 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
     stop_signal.set_thread_stop_event(stop)
     try:
         with ToolBridge(_schema(hold.__name__, "later"), execute) as bridge:
-            first = _call(bridge.port, hold.__name__)
+            first = _call(bridge, hold.__name__)
             assert HOLD_STARTED.wait(5)
-            second = _call(bridge.port, "later")
+            second = _call(bridge, "later")
             deadline = time.monotonic() + 5
             while bridge.calls_in_flight != 2 and time.monotonic() < deadline:
                 time.sleep(0.01)
@@ -570,12 +571,14 @@ def _spend_slowly(call: dict[str, Any]) -> tuple[str, str]:
     raise BudgetExceededError("spent on the bridge")
 
 
-def _child_calling_the_bridge(port: int, then: str) -> list[str]:
-    """A child that asks the bridge on *port* for one tool call, then runs *then*."""
+def _child_calling_the_bridge(bridge: ToolBridge, then: str) -> list[str]:
+    """A child that asks *bridge* for one tool call, then runs *then*."""
+    request = {"op": "call", "name": "noop", "arguments": {}, "token": bridge._server.token}
+    line = json.dumps(request).encode() + b"\n"
     script = (
         "import os, socket, time\n"
-        f"s = socket.create_connection(('127.0.0.1', {port}))\n"
-        's.sendall(b\'{"op": "call", "name": "noop", "arguments": {}}\\n\')\n' + then
+        f"s = socket.create_connection(('127.0.0.1', {bridge.port}))\n"
+        f"s.sendall({line!r})\n" + then
     )
     return [sys.executable, "-c", script]
 
@@ -584,7 +587,7 @@ def test_fatal_tool_error_ends_the_wind_down_wait() -> None:
     """The child closed stdout with a tool call in flight and lingers: the error the
     call raises ends ``raise_for_exit`` at once instead of a normal return."""
     with ToolBridge(NOOP_SCHEMA, _spend_slowly) as bridge:
-        child = _child_calling_the_bridge(bridge.port, "os.close(1)\ns.recv(4096)\ntime.sleep(2)\n")
+        child = _child_calling_the_bridge(bridge, "os.close(1)\ns.recv(4096)\ntime.sleep(2)\n")
         began = time.monotonic()
         with _CLIProcess(child, "fake", timeout=20.0, caller_error=_BridgeError(bridge)) as proc:
             assert list(proc.lines()) == []
@@ -597,7 +600,7 @@ def test_fatal_tool_error_ends_a_blocked_prompt_write() -> None:
     """The child never reads its prompt while its tool call hits the budget: the
     error ends ``send_prompt`` at once, and its writer with it, not a stall timeout."""
     with ToolBridge(NOOP_SCHEMA, _spend_slowly) as bridge:
-        child = _child_calling_the_bridge(bridge.port, "s.recv(4096)\ntime.sleep(8)\n")
+        child = _child_calling_the_bridge(bridge, "s.recv(4096)\ntime.sleep(8)\n")
         began = time.monotonic()
         with (
             _CLIProcess(child, "fake", timeout=1.5, caller_error=_BridgeError(bridge)) as proc,

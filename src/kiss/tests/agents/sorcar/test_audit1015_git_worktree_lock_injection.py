@@ -32,6 +32,7 @@ passes on the fixed ones.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -104,17 +105,20 @@ _DRIVERS: dict[str, type[_Prune | _EnsureExcluded | _Sweep | _Lookup]] = {
 def run_hammer(name: str) -> None:
     """Child-process body: hammer the path *name* and check the repo locks stay free."""
     repo = _make_repo()
-    driver = _DRIVERS[name](repo)
-    lock = repo_lock(repo)
-    locks: dict[str, object] = {
-        "repo_lock": lock, "_repo_locks_guard": git_worktree._repo_locks_guard,
-    }
-    contended = git_worktree._repo_locks_guard if name == "lookup" else lock
-    # The locks are checked once the contender is gone: it holds them most of the time.
-    hammer(driver, locks, contend=contended)
-    # The repository still works afterwards: the next task's worktree setup gets the lock.
-    GitWorktreeOps.prune(repo)
-    assert repo_lock(repo) is lock
+    try:
+        driver = _DRIVERS[name](repo)
+        lock = repo_lock(repo)
+        locks: dict[str, object] = {
+            "repo_lock": lock, "_repo_locks_guard": git_worktree._repo_locks_guard,
+        }
+        contended = git_worktree._repo_locks_guard if name == "lookup" else lock
+        # The locks are checked once the contender is gone: it holds them most of the time.
+        hammer(driver, locks, contend=contended)
+        # The repository still works afterwards: the next task's worktree setup gets the lock.
+        GitWorktreeOps.prune(repo)
+        assert repo_lock(repo) is lock
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
 
 
 @pytest.mark.parametrize("name", sorted(_DRIVERS))

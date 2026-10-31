@@ -104,7 +104,7 @@ def _assert_closed(ws: ClientConnection) -> None:
 
 def _back_off(link: mach.MachineLink) -> float:
     """Seconds *link* waits before dialling again, as of now."""
-    return link._retry_at - time.monotonic()
+    return link._health.retry_at - time.monotonic()
 
 
 def _fail_once(link: mach.MachineLink) -> str:
@@ -142,8 +142,10 @@ def test_the_back_off_grows_with_the_failures_in_a_row(remote: RemoteDaemon) -> 
 
     # A machine that answers starts its ladder over.
     box = mach.link_for(machine)
+    # The request's timeout also bounds the connect: 0.3 s let a TLS
+    # handshake on a loaded full-suite host time out ("unreachable").
     with pytest.raises(mach.MachineError, match="did not answer"):
-        box.request({"type": "ping"}, "never-sent", timeout=0.3)
+        box.request({"type": "ping"}, "never-sent", timeout=2.0)
     assert round(_back_off(box)) == 5 and box._health.failures == 1
     box._health.retry_at = 0.0
     assert box.request({"type": "ping"}, "pong")["type"] == "pong"
@@ -152,7 +154,7 @@ def test_the_back_off_grows_with_the_failures_in_a_row(remote: RemoteDaemon) -> 
     # A rejected password is not tried again sooner: the remote daemon
     # locks a client out after a few wrong passwords in a row.
     wrong = mach.Machine("box", remote.url, password="not-it")
-    mach.close_links()
+    mach.save_machines([wrong])
     assert "rejected the password" in _fail_once(mach.link_for(wrong))
     assert round(_back_off(mach.link_for(wrong))) == 30
 

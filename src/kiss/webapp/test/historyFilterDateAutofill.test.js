@@ -7,16 +7,11 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {makeRow, localIsoDate: localIso} = require('./history_helpers');
-
-function visibleCount(win) {
-  const list = win.document.getElementById('history-list');
-  let n = 0;
-  list.querySelectorAll('.sidebar-item').forEach(r => {
-    if (r.style.display !== 'none') n++;
-  });
-  return n;
-}
+const {
+  makeRow,
+  localIsoDate: localIso,
+  visibleTitles,
+} = require('./history_helpers');
 
 /** A finished row whose task ran at the unix time `ts`. */
 function session(id, ts) {
@@ -60,9 +55,9 @@ function testAutofillFromDateRange() {
     'To must be auto-filled with the LAST task date',
   );
 
-  assert.strictEqual(
-    visibleCount(win),
-    3,
+  assert.deepStrictEqual(
+    visibleTitles(win),
+    ['task 1', 'task 2', 'task 3'],
     'auto-filled [first, last] range must keep every row visible',
   );
 
@@ -113,9 +108,9 @@ function testUserValueWins() {
   hfFrom.value = localIso(TS_MID);
   hfFrom.dispatchEvent(new win.Event('change', {bubbles: true}));
 
-  assert.strictEqual(
-    visibleCount(win),
-    2,
+  assert.deepStrictEqual(
+    visibleTitles(win),
+    ['task 2', 'task 3'],
     'narrowed From date must hide the older task',
   );
 
@@ -130,7 +125,11 @@ function testUserValueWins() {
     localIso(TS_MID),
     'a user-set date must NOT be overwritten by a later history event',
   );
-  assert.strictEqual(visibleCount(win), 2, 'filter stays applied');
+  assert.deepStrictEqual(
+    visibleTitles(win),
+    ['task 2', 'task 3'],
+    'filter stays applied',
+  );
 
   win.close();
   console.log('  ok - user-set dates survive history refreshes');
@@ -163,7 +162,11 @@ function testClearButton() {
   clearBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.strictEqual(doc.getElementById('hf-from').value, '');
   assert.strictEqual(doc.getElementById('hf-to').value, '');
-  assert.strictEqual(visibleCount(win), 3, 'all rows visible after clear');
+  assert.deepStrictEqual(
+    visibleTitles(win),
+    ['task 1', 'task 2', 'task 3'],
+    'all rows visible after clear',
+  );
   assert.strictEqual(
     clearBtn.style.display,
     'none',

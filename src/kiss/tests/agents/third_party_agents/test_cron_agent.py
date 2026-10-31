@@ -17,8 +17,9 @@ non-deterministic) in unit tests; the failure path is covered via
 The daemon/SEA scenarios (pure kiss.agents.sorcar +
 kiss.server closure) moved to ``kiss.tests.server.test_cron_agent``;
 this file keeps the delivery test that imports real
-``kiss.agents.third_party_agents`` channel modules and the SEA
-contract checks.
+``kiss.agents.third_party_agents`` channel modules and the Sorcar
+wiring checks (the SEA contract itself is pinned by
+``kiss.tests.agents.sorcar.test_cron_agent.test_agent_script_getters``).
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
     cron_job,
@@ -68,13 +68,8 @@ def test_delivery_error_notes() -> None:
     assert "not authenticated" in notes[2]
 
 
-def test_get_tools_and_sorcar_wiring() -> None:
-    sea = cron_agent.CronAgentSea()
-    assert sea.tools([]) == [cron_job, cron_agent.gateway_command]
-    # The dispatch preamble reaches the session through the SEA
-    # contract (the SEA's ``system_prompt`` method), not through a prompt prefix.
-    assert sea.system_prompt("S") == "S\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
-    assert isinstance(sea, ChannelSea)
+def test_sorcar_wiring() -> None:
+    """Sorcar sends scheduling requests to cron, and ``kiss-cron`` runs ``cron_agent.main``."""
     # Sorcar's system prompt, as the product loads it, sends scheduling
     # requests to this agent.
     assert 'run_agent tool with "cron"' in SYSTEM_PROMPT

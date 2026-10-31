@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import tempfile
 import textwrap
 import threading
@@ -110,6 +111,7 @@ class TestStopBeforeThreadStart(TestCase):
         if self.thread is not None:
             self.thread.join(timeout=90)
         agent_state.agent_states.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _event(
         self, event_type: str, tab_id: str, **fields: Any,

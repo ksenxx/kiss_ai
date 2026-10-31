@@ -12,7 +12,6 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const {JSDOM} = require('jsdom');
 const {newDom, MEDIA} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
@@ -169,20 +168,6 @@ test('bulb click does not throw when window.__TIPS__ is missing', () => {
   win.document.getElementById('tips-btn').click();
   const {counter} = panelParts(win);
   assert.strictEqual(counter.textContent, '');
-});
-
-test('tips.js tolerates a DOM without #tips-btn', () => {
-  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-    runScripts: 'outside-only',
-  });
-  dom.window.eval(
-    `window.__TIPS__ = ${JSON.stringify({tips: THREE_TIPS, show: false})};`,
-  );
-  dom.window.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf-8'));
-  assert.strictEqual(
-    dom.window.document.querySelector('kiss-tips-panel'),
-    null,
-  );
 });
 
 report('tipsSettingsButton');

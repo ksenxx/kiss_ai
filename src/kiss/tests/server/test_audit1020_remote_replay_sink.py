@@ -170,11 +170,18 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
         self.assertEqual(events["task"], "Seeded task")
         # A asked for nothing more: the seeded transcript must not reach
         # it.  Everything scheduled for A so far (a misrouted transcript
-        # among it) precedes the reply to a request sent now.
+        # among it) precedes the reply to a request sent now.  The wait
+        # is bounded as a whole: frames trickling in (status, machine
+        # views) must not keep the loop alive without the reply.
         await self._send(self.conn_a, {"type": "getInputHistory"})
+        deadline = time.monotonic() + 60.0
+        seen: list[str] = []
         while True:
-            msg = await self._next(self.conn_a)
-            assert msg is not None, "no inputHistory reply within 60 s"
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"no inputHistory reply within 60 s; A received {seen}"
+            msg = await self._next(self.conn_a, timeout=remaining)
+            assert msg is not None, f"no inputHistory reply within 60 s; A received {seen}"
+            seen.append(str(msg.get("type")))
             self.assertNotEqual(
                 msg.get("type"),
                 "task_events",

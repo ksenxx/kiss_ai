@@ -100,6 +100,12 @@ class TestRegistryTripwire:
         """Custom gateways resolve to None (adaptive handling)."""
         assert openai_compatible_provider_for_base_url("http://127.0.0.1:9/v1") is None
 
+    def test_host_match_ignores_case(self) -> None:
+        """Host names are case-insensitive: an upper-case base_url still gets
+        its vendor's capabilities (e.g. OpenAI's Responses item-id rules)."""
+        for p in OPENAI_COMPATIBLE_PROVIDERS:
+            assert openai_compatible_provider_for_base_url(p.base_url.upper()) is p
+
 
 class TestFactoryRoutesMatchRegistry:
     """The model() factory and the registry are a single source of truth."""

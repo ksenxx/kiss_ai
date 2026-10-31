@@ -53,6 +53,7 @@ import difflib
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -133,6 +134,15 @@ the bound expires the call returns the job's still-running notice (see
 collects or stops it with ``agent_job(id, "wait" | "kill")``; a job it
 never resolves is killed when the calling run ends
 (:func:`kill_jobs_of`), so no sub-task outlives its caller.
+"""
+
+_AGENT_JOBS_LOCK = threading.RLock()
+"""Guards the job registry (:data:`_AGENT_JOBS`) and every job's budget reservation.
+
+A job's inherited share is resolved and recorded under it
+(:func:`_inherited_budget`), and a finishing job's spend lands on its
+caller's ledger in the same critical section that clears the job's
+reservation (:func:`_attribute_dispatch_usage`).
 """
 
 
@@ -273,12 +283,13 @@ def _parse_number(name: str, value: Any) -> float | None:
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
+    not_a_number = ValueError(f"{name} must be a number, got {value!r}.")
+    if isinstance(value, bool):
+        raise not_a_number
     try:
-        number = float(value) if not isinstance(value, bool) else "no"
+        number = float(value)
     except (TypeError, ValueError, OverflowError):
-        number = "no"
-    if isinstance(number, str):
-        raise ValueError(f"{name} must be a number, got {value!r}.")
+        raise not_a_number from None
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
     return number
@@ -513,10 +524,21 @@ def _daemon_endpoint_file() -> str | None:
     return cron_agent._daemon_endpoint_file
 
 
+@locked(_AGENT_JOBS_LOCK)
 def _attribute_dispatch_usage(
-    parent_agent: Any, result: Any, epoch: Any = None, parent_task_id: str = "",
+    parent_agent: Any,
+    result: Any,
+    epoch: Any = None,
+    parent_task_id: str = "",
+    job: AgentJob | None = None,
 ) -> None:
     """Fold a dispatched sub-task's spend into the calling task.
+
+    One :data:`_AGENT_JOBS_LOCK` critical section with the lapse of
+    *job*'s budget reservation: a job of another call resolves its
+    share under that lock (:func:`_inherited_budget`), so it counts this
+    sub-task once, by its reservation before the fold and by its spend
+    after it.
 
     The daemon's terminal ``result`` event carries the sub-task's
     cost, tokens, and steps (parsed into the
@@ -554,9 +576,13 @@ def _attribute_dispatch_usage(
         parent_task_id: The calling task's persisted row id captured
             when the dispatch started (the agent may since have moved
             on to another task), or ``""`` when it has none.
+        job: The job the sub-task ran as, whose :attr:`AgentJob.budget`
+            reservation the fold replaces; ``None`` without one.
     """
     if parent_agent is None or result is None:
         return
+    if job is not None:
+        job.budget = None
     cost = float(getattr(result, "cost", 0.0) or 0.0)
     tokens = int(getattr(result, "tokens", 0) or 0)
     steps = int(getattr(result, "steps", 0) or 0)
@@ -837,6 +863,7 @@ def _unreserved_share(
     return left
 
 
+@locked(_AGENT_JOBS_LOCK)
 def _inherited_budget(
     parent_agent: Any, siblings: int, job: AgentJob | None, budget_cap: float | None,
 ) -> float | None:
@@ -847,14 +874,10 @@ def _inherited_budget(
     at *budget_cap*.  Everything is read and the result recorded
     under :data:`_AGENT_JOBS_LOCK`, so two sub-tasks of one caller
     resolving at the same time cannot both find the other unrecorded:
-    the second one sees the first one's share.  A finishing sub-task
-    puts its spend on the ledger BEFORE its reservation lapses, so
-    the live jobs are read first and the ledger second: a sub-task
-    that finished before the first read is on the ledger, one still
-    live at it holds its budget, and one that settles in between
-    (live at the first read, finished afterwards) is detected and
-    both are read again, so it is counted exactly once, never dropped
-    from both.
+    the second one sees the first one's share.  A finishing sub-task's
+    spend lands on the ledger in the critical section that clears its
+    reservation (:func:`_attribute_dispatch_usage`), so each sub-task
+    is counted exactly once: by its reservation or by its spend.
 
     Returns:
         The budget, or ``None`` when the caller has no budget context.
@@ -864,18 +887,12 @@ def _inherited_budget(
     )
     if not callable(share):
         return None
-    with _AGENT_JOBS_LOCK:
-        while True:
-            others = _live_jobs_of_other_calls(job)
-            reserved = reserved_budget(others)
-            unreserved = share(siblings)
-            if not any(other.finished for other in others):
-                break
-        budget = _unreserved_share(parent_agent, unreserved, siblings, reserved)
-        if budget is not None and budget_cap is not None:
-            budget = min(budget, budget_cap)
-        if job is not None:
-            job.budget = budget
+    reserved = reserved_budget(_live_jobs_of_other_calls(job))
+    budget = _unreserved_share(parent_agent, share(siblings), siblings, reserved)
+    if budget is not None and budget_cap is not None:
+        budget = min(budget, budget_cap)
+    if job is not None:
+        job.budget = budget
     return budget
 
 
@@ -968,6 +985,32 @@ def unconfirmed_stop_error(name: str) -> str:
     )
 
 
+#: How the error of a sub-task starts whose daemon connection failed after
+#: its ``run`` was sent (:func:`dispatch_result`); the failure follows.
+_CONNECTION_LOST_HEAD = (
+    "Error: the connection to the daemon failed while the {name} agent task ran ("
+)
+
+
+def may_still_run(outcome: object, name: str) -> bool:
+    """Return whether a dispatch *outcome* says the *name* sub-task may still be running.
+
+    True for :func:`unconfirmed_stop_error` and for a daemon connection
+    that failed after the ``run`` was sent, matched on their fixed text
+    (never a substring, which a path in another error could contain).
+    A programmatic caller (``cron_agent._run_prompt_job``) then keeps
+    what the sub-task may still use.
+
+    Args:
+        outcome: The job's outcome or the ``run_agent`` reply.
+        name: The dispatched agent's display name.
+    """
+    return isinstance(outcome, str) and (
+        outcome == unconfirmed_stop_error(name)
+        or outcome.startswith(_CONNECTION_LOST_HEAD.format(name=name))
+    )
+
+
 def notice_job_id(text: str) -> str:
     """Return the job id a :func:`job_notice` names, or ``""`` for any other tool text."""
     match = re.match(r"(?:Started|The) .* as job (agent-[0-9a-f]{8})\b", text)
@@ -1023,14 +1066,13 @@ def dispatch_result(
     settings: dict[str, Any] | None = None,
     workspace: str = "",
     job: AgentJob | None = None,
-    timeout_explicit: bool = False,
     siblings: int = 1,
     machine: str = "",
     sea_command: str = "",
 ) -> TaskResult | str:
     """Submit a SEA task to the kiss-web daemon and wait.
 
-    The tail of :func:`start_run_agent`'s job: calls
+    The tail of a ``run_agent`` job (:func:`start_agent_job`): calls
     :func:`kiss.server.sorcar.run` with *sea_path* as its
     *sea_path* and returns the daemon's
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
@@ -1108,9 +1150,6 @@ def dispatch_result(
             budget the sub-task was given so other calls of the same
             caller take it off their share (:func:`reserved_budget`).
             ``None`` (standalone use) never stops the sub-task.
-        timeout_explicit: Whether *timeout* was passed by the call
-            (marked explicit in the run's ``provenance``) rather than
-            taken from the script or the default.
         siblings: How many sub-tasks the calling tool call starts at
             once; an inherited budget is the caller's remaining budget
             shared among them plus the caller.
@@ -1137,7 +1176,7 @@ def dispatch_result(
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     kwargs = dispatch_command(
         prompt, sea_path, work_dir, model_name, budget, timeout, parent_agent,
-        scope_work_dir, options, inherit, settings, workspace, timeout_explicit, siblings,
+        scope_work_dir, options, inherit, settings, workspace, siblings,
         machine, sea_command, job,
     )
     parent_task_id = kwargs["parent_task_id"]
@@ -1160,11 +1199,11 @@ def dispatch_result(
     except daemon_client.CancelledError as e:
         # A confirmed stop carries the stopped task's spend, which still
         # counts towards the caller.
-        _attribute_dispatch_usage(parent_agent, e.result, epoch, parent_task_id)
+        _attribute_dispatch_usage(parent_agent, e.result, epoch, parent_task_id, job)
         if not e.confirmed:
             return unconfirmed_stop_error(name)
         spend = ""
-        if e.result is not None and e.result.cost:
+        if e.result.cost:
             spend = f"; its ${e.result.cost:.4f} spend is counted in this task's cost"
         return (
             f"Error: the {name} agent task was stopped before it finished; work it "
@@ -1172,11 +1211,17 @@ def dispatch_result(
         )
     except Exception as e:
         _attribute_dispatch_usage(
-            parent_agent, getattr(e, "task_result", None), epoch, parent_task_id,
+            parent_agent, getattr(e, "task_result", None), epoch, parent_task_id, job,
         )
         logger.warning("agent dispatch failed", exc_info=True)
+        if isinstance(e, daemon_client.ConnectionLostError):
+            # The run was sent before the connection failed.
+            return (
+                _CONNECTION_LOST_HEAD.format(name=name)
+                + f"{e}); it MAY STILL BE RUNNING (and spending) on the daemon."
+            )
         return f"Error: the {name} agent task could not run: {e}"
-    _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id)
+    _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id, job)
     return result
 
 
@@ -1193,7 +1238,6 @@ def dispatch_command(
     inherit: bool = False,
     settings: dict[str, Any] | None = None,
     workspace: str = "",
-    timeout_explicit: bool = False,
     siblings: int = 1,
     machine: str = "",
     sea_command: str = "",
@@ -1250,9 +1294,8 @@ def dispatch_command(
     # The arguments the caller left empty come from the calling agent
     # (its model, budget share, chat, web/memory settings, container).
     # Channel dispatches and explicit programmatic callers skip this.
+    # ``options.timeout`` set marks the call's timeout explicit.
     explicit = list(explicit_values(model_name, budget, options))
-    if timeout_explicit:
-        explicit.append("timeout")
     # A read-only review the caller gave no budget holds one sized by
     # the diff it reads (:func:`review_budget`) rather than half of the
     # caller's remainder, which the 2026-10-24 audit found 10 to 40x
@@ -1359,11 +1402,12 @@ def start_run_agent(
 ) -> AgentJob | str:
     """Resolve, check and start a SEA sub-task as an :class:`AgentJob`.
 
-    The body behind ``run_agent`` (:func:`_run_agent`):
     :func:`plan_run_agent` resolves and checks the call, then the
-    dispatch runs on a job thread (``run_parallel`` plans once and
-    starts one such job per task, see :func:`run_agents_parallel`).
-    The arguments are those of :func:`plan_run_agent`.
+    dispatch runs on a job thread (:func:`start_agent_job`).
+    ``run_agent`` (:func:`_run_agent`) and ``run_parallel`` (one plan,
+    one job per task, :func:`run_agents_parallel`) take the same steps
+    holding each job before it is launched.  The arguments are those
+    of :func:`plan_run_agent`.
 
     Returns:
         The started job, or :func:`plan_run_agent`'s error message.
@@ -1375,6 +1419,158 @@ def start_run_agent(
     if isinstance(plan, str):
         return plan
     return start_agent_job(plan["name"], plan, parent_agent)
+
+
+PIN_TASK_MODEL_ENV = "KISS_PIN_TASK_MODEL"
+"""Environment switch of a daemon that measures one model per task tree (a
+benchmark daemon, :mod:`kiss.benchmarks.terminal_bench.daemon`): set to a
+value other than ``""``/``"0"``, every sub-task keeps its caller's model and
+model configuration and ``set_model`` is refused (:func:`task_model_pinned`)."""
+
+
+def task_model_pinned() -> bool:
+    """Whether this daemon pins every task tree to the model it was launched with.
+
+    Benchmark daemons set :data:`PIN_TASK_MODEL_ENV` so the score of a run
+    reflects the one model it names: an agent can neither hand a sub-task to
+    another model nor switch its own.
+    """
+    return os.environ.get(PIN_TASK_MODEL_ENV, "") not in ("", "0")
+
+
+def sandbox_of(parent_agent: Any) -> str:
+    """Name the sandbox *parent_agent*'s tools run in, ``""`` when they run on the host.
+
+    A Sorcar agent attached to a Docker container (``docker_manager.container``)
+    or to a remote environment behind an exec bridge (``docker_manager.url``,
+    see :mod:`kiss.agents.sorcar.exec_bridge`) is sandboxed: its commands and
+    file edits never touch the host.
+
+    Args:
+        parent_agent: The agent calling ``run_agent``, or ``None``.
+
+    Returns:
+        ``"container <id>"``, ``"exec bridge <url>"`` or ``""``.
+    """
+    manager = getattr(parent_agent, "docker_manager", None)
+    container = getattr(manager, "container", None)
+    if container is not None and getattr(container, "id", None):
+        return f"container {container.id}"
+    url = getattr(manager, "url", None)
+    return f"exec bridge {url}" if url else ""
+
+
+def slash_task(task: str) -> str:
+    """The registered slash command a task text starts with (``"/sync"``), or ``""``.
+
+    The daemon rewrites such a task into a run of that command's SEA
+    (``task_runner``'s slash rewrite), after the dispatcher's checks of the
+    ``agent`` argument; :func:`slash_task_conflict` therefore checks the task
+    text too.
+    """
+    from kiss.agents.sorcar.sea_commands import slash_command
+
+    return task.split(None, 1)[0] if slash_command(task) is not None else ""
+
+
+def slash_task_conflict(parent_agent: Any, task: str) -> str:
+    """Why a sub-task's text is refused; ``""`` when it may be sent as it is.
+
+    A task that starts with a registered slash command runs that command's
+    SEA, which a sandboxed caller (:func:`sandbox_of`) may not do (the SEA
+    is host code) and which a daemon that pins the model
+    (:func:`task_model_pinned`) may not allow either (the SEA may pick its
+    own model).  Checked for every task of a call: ``run_parallel`` plans
+    once and sends each task's text with that plan.
+
+    Args:
+        parent_agent: The calling agent; ``None`` for a standalone call.
+        task: The sub-task's text.
+    """
+    slash = slash_task(task)
+    if not slash:
+        return ""
+    sandbox = sandbox_of(parent_agent)
+    if sandbox:
+        return (f"this task runs in {sandbox} and its sub-tasks must run there too; a task "
+                f"starting with the slash command {slash} would run that command's SEA as "
+                "host code. Write the task as plain text.")
+    if parent_agent is not None and task_model_pinned():
+        pinned = str(getattr(parent_agent, "model_name", "") or "")
+        return (f"this daemon pins every task to its model, {pinned}; a task starting with "
+                f"the slash command {slash} would run that command's SEA, which may pick "
+                "another model. Write the task as plain text.")
+    return ""
+
+
+def confinement_conflict(
+    sandbox: str, run_options: RunOptions, machine: str, sea_path: str,
+) -> str:
+    """Why a sandboxed caller's sub-task call is refused; ``""`` when the sub-task stays inside.
+
+    A sub-task of a sandboxed caller (:func:`sandbox_of`) inherits the sandbox
+    (:func:`_inherit_from_parent` attaches it to the same container or exec
+    bridge), so it may not ask for anything that would run it elsewhere: on the
+    host (``inherit: false``; a SEA file, command or channel, which the daemon
+    loads and runs as host code; a host work directory; a browser; the host's
+    memory), in another container (``docker_image``) or on another machine
+    (``machine``).  Without this rule an agent that is confined for isolation
+    (a benchmark trial, untrusted work) could read the host through a
+    sub-task.  The check runs before the SEA is loaded, so a confined caller
+    never gets a host file imported on its behalf.  The task text's own rule
+    (a slash command) is :func:`slash_task_conflict`.
+
+    Args:
+        sandbox: The caller's sandbox from :func:`sandbox_of`; ``""`` (no sandbox)
+            refuses nothing.
+        run_options: The parsed options of the call.
+        machine: The resolved remote machine name, ``""`` for this machine.
+        sea_path: The resolved SEA file of the sub-task (:func:`resolve_agent`).
+
+    Returns:
+        The reasons, one message, or ``""``.
+    """
+    if not sandbox:
+        return ""
+    reasons = []
+    if run_options.inherit is False:
+        reasons.append("options['inherit'] = false would run it on the host")
+    if machine:
+        reasons.append(f"machine={machine!r} would run it on another machine")
+    if run_options.docker_image:
+        reasons.append("options['docker_image'] would start it in another container")
+    if Path(sea_path).resolve() != Path(DEFAULT_AGENT_PATH).resolve():
+        reasons.append("a SEA file, command or channel runs as host code; only the plain "
+                       "sub-agent (agent='') may run here")
+    if run_options.work_dir:
+        reasons.append("options['work_dir'] would give it a directory of the host")
+    if run_options.use_web_tools:
+        reasons.append("options['use_web_tools'] = true would browse from the host")
+    if run_options.use_memory:
+        reasons.append("options['use_memory'] = true would read and write the host's memory")
+    if not reasons:
+        return ""
+    return (f"this task runs in {sandbox} and its sub-tasks must run there too; "
+            + "; ".join(reasons) + ". Call again without that.")
+
+
+def pinned_model_conflict(parent_agent: Any, run_options: RunOptions) -> str:
+    """Why a call breaks the daemon's model pin (:func:`task_model_pinned`); ``""`` if it does not.
+
+    Args:
+        parent_agent: The calling agent; ``None`` (a standalone call) is never pinned.
+        run_options: The parsed options of the call.
+    """
+    if parent_agent is None or not task_model_pinned():
+        return ""
+    pinned = str(getattr(parent_agent, "model_name", "") or "")
+    if run_options.model and run_options.model != pinned:
+        return (f"this daemon pins every task to its model, {pinned}; "
+                f"model={run_options.model!r} is refused. Call again without a model.")
+    if run_options.model_config is not None:
+        return (f"this daemon pins every task to its model, {pinned}, and its model "
+                "configuration; options['model_config'] is refused.")
+    return ""
 
 
 def plan_run_agent(
@@ -1471,6 +1667,10 @@ def plan_run_agent(
     if isinstance(resolved, str):
         return resolved
     sea_path, name = resolved
+    conflict = (confinement_conflict(sandbox_of(parent_agent), run_options, machine_name, sea_path)
+                or slash_task_conflict(parent_agent, task))
+    if conflict:
+        return f"Error: {name}: {conflict}"
     from kiss.agents.sorcar.sea_commands import base_settings, is_channel, load_sea
 
     try:
@@ -1494,6 +1694,9 @@ def plan_run_agent(
     # checkout are rewritten to the caller's worktree.
     asked = explicit_values(run_options.model, run_options.max_budget, run_options)
     conflict = locked_conflicts(settings, asked, parent_work_dir)
+    if conflict:
+        return f"Error: {name}: {conflict}"
+    conflict = pinned_model_conflict(parent_agent, run_options)
     if conflict:
         return f"Error: {name}: {conflict}"
     channel = is_channel([sea])
@@ -1530,7 +1733,7 @@ def plan_run_agent(
         "model_name": run_options.model, "budget": run_options.max_budget, "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
-        "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
+        "workspace": run_options.workspace,
         "siblings": siblings, "machine": machine_name, "sea_command": sea_command,
         "alias": alias,
     }
@@ -1608,9 +1811,9 @@ def _run_agent(
 
     The implementation behind the per-task ``run_agent`` tool built by
     :func:`make_run_agent_tool`, which captures *parent_work_dir*; the
-    remaining arguments are the tool's (see its docstring).  Starts
-    the job (:func:`start_run_agent`) and blocks for its ``timeout``
-    unless *wait* is ``"false"``.
+    remaining arguments are the tool's (see its docstring).  Plans the
+    job (:func:`plan_run_agent`), launches it and blocks for its
+    ``timeout`` unless *wait* is ``"false"``.
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), the
@@ -1621,17 +1824,20 @@ def _run_agent(
         blocking = _parse_bool("wait", wait) is not False
     except ValueError as e:
         return f"Error: {e}"
-    # The job is started inside the ``try``: a Stop landing between
-    # the start and the wait would otherwise leave a job nobody owns
-    # (a cron ``run_now`` dispatch) running on.
-    job: AgentJob | str | None = None
+    # The job is held before it is launched, and launched inside the
+    # ``try``: a Stop landing anywhere from the launch to the wait
+    # cancels it, where it would otherwise leave a job nobody owns (a
+    # cron ``run_now`` dispatch) running on.
+    job: AgentJob | None = None
     try:
-        job = start_run_agent(
+        plan = plan_run_agent(
             parent_work_dir, task, agent, model, tool_profile, max_budget, timeout, options,
             parent_agent, machine=machine,
         )
-        if isinstance(job, str):
-            return job
+        if isinstance(plan, str):
+            return plan
+        job = new_agent_job(plan["name"], plan, parent_agent)
+        launch_agent_job(job)
         if blocking:
             join_agent_job(job, job.timeout)
         else:
@@ -1642,7 +1848,7 @@ def _run_agent(
             # there is no tab and nothing to wait for, so the error is
             # the answer, as for a blocking call.
     except BaseException:
-        if isinstance(job, AgentJob):
+        if job is not None:
             _abandon_job(job)
         raise
     return _collect_job(job)
@@ -1721,6 +1927,10 @@ def run_agents_parallel(
     started: list[AgentJob] = []
     plan: dict[str, Any] | None = None
     call_id = uuid.uuid4().hex
+    for task in tasks:  # the one check that depends on the task text, for every task
+        conflict = slash_task_conflict(parent_agent, task)
+        if conflict:
+            return f"Error: {conflict}"
     try:
         for task in tasks:
             if plan is None:
@@ -1734,7 +1944,10 @@ def run_agents_parallel(
             else:
                 prompt = sub_task_prompt(task, parent_work_dir, plan["inherit"], plan["machine"])
                 kwargs = {**plan, "prompt": prompt}
-            started.append(start_agent_job(plan["name"], kwargs, parent_agent, call_id))
+            # Held before it is launched, so a Stop inside the launch cancels it.
+            job = new_agent_job(plan["name"], kwargs, parent_agent, call_id)
+            started.append(job)
+            launch_agent_job(job)
         deadline = time.monotonic() + started[0].timeout
         for job in started:
             join_agent_job(job, max(0.0, deadline - time.monotonic()))
@@ -1781,8 +1994,9 @@ class AgentJob:
             :data:`_AGENT_JOBS_LOCK`) and before the sub-task runs;
             ``None`` until then or when the daemon default applies.
             While the job is unfinished it is reserved against the
-            owner's remainder (:func:`reserved_budget`); once finished
-            the sub-task's real spend is on the owner's ledger instead.
+            owner's remainder (:func:`reserved_budget`); it is cleared
+            in the critical section that puts the sub-task's real spend
+            on the owner's ledger (:func:`_attribute_dispatch_usage`).
         outcome: What :func:`dispatch_result` returned (the sub-task's
             :class:`TaskResult`, or an error string); ``None`` while
             running.
@@ -1825,17 +2039,17 @@ when its owner's run ends (:func:`kill_jobs_of`).  Guarded by
 :data:`_AGENT_JOBS_LOCK`.
 """
 
-_AGENT_JOBS_LOCK = threading.RLock()
-
 
 def start_agent_job(
     name: str, kwargs: dict[str, Any], owner: Any, call_id: str = "",
 ) -> AgentJob:
     """Start :func:`dispatch_result` with *kwargs* in a thread and register the job.
 
-    The job is registered before its thread starts, so a Stop that
-    interrupts this call never leaves a running sub-task that
-    :func:`kill_jobs_of` cannot find.  The function does
+    :func:`new_agent_job`, then :func:`launch_agent_job`.  A caller
+    that cancels its job when a Stop interrupts it (``run_agent``,
+    ``run_parallel``) holds the built job before launching it instead:
+    a Stop landing after the launch but before this function returns
+    would leave that caller nothing to cancel.  The function does
     not wait for the sub-task to start: a blocking ``run_agent`` call
     joins the thread under its one ``timeout`` (startup included) and
     a ``wait="false"`` call waits for the tab with
@@ -1855,6 +2069,22 @@ def start_agent_job(
     Returns:
         The registered job.
     """
+    job = new_agent_job(name, kwargs, owner, call_id)
+    launch_agent_job(job)
+    return job
+
+
+def new_agent_job(
+    name: str, kwargs: dict[str, Any], owner: Any, call_id: str = "",
+) -> AgentJob:
+    """Build the job that runs :func:`dispatch_result` with *kwargs* on its own thread.
+
+    Neither registered nor started: :func:`launch_agent_job` does both.
+    The arguments are those of :func:`start_agent_job`.
+
+    Returns:
+        The unlaunched job.
+    """
     job_id = f"agent-{uuid.uuid4().hex[:8]}"
     job = AgentJob(
         job_id, name, owner, threading.Event(), threading.Event(),
@@ -1865,6 +2095,16 @@ def start_agent_job(
         target=_finish_agent_job, args=(job, {**kwargs, "job": job}),
         name=f"agent-job-{job_id}", daemon=True,
     )
+    return job
+
+
+def launch_agent_job(job: AgentJob) -> None:
+    """Register *job* (built by :func:`new_agent_job`) and start its thread.
+
+    The job is registered before its thread starts, so a Stop that
+    interrupts this call never leaves a running sub-task that
+    :func:`kill_jobs_of` cannot find.
+    """
     job.started = time.monotonic()
     # Registered first, started under the same lock: a task's Stop is a
     # KeyboardInterrupt injected between any two bytecodes, and a job
@@ -1876,7 +2116,6 @@ def start_agent_job(
     # every registered job, and _finish_agent_job dispatches nothing
     # once its cancel is set.
     locked_call(_AGENT_JOBS_LOCK, _register_and_start, job)
-    return job
 
 
 def _register_and_start(job: AgentJob) -> None:
@@ -1890,7 +2129,7 @@ def _register_and_start(job: AgentJob) -> None:
     the owner's run ends.  Only that error unregisters: a Stop's
     ``KeyboardInterrupt`` landing inside ``start()`` may leave a thread
     that runs later, which must stay registered for ``kill_jobs_of``
-    (see :func:`start_agent_job`).
+    (see :func:`launch_agent_job`).
     """
     _AGENT_JOBS[job.job_id] = job
     try:
@@ -2045,8 +2284,8 @@ def reserved_budget(jobs: Sequence[AgentJob]) -> float:
     is on its job from registration, and the siblings of one
     ``run_parallel`` call (same :attr:`AgentJob.call_id`) are left
     out, as the split already divides the remainder among them.  A
-    sub-task that finished — its spend is on the caller's ledger by
-    then — no longer holds anything.
+    sub-task whose spend is on the caller's ledger (its budget was
+    cleared as the spend landed) or that finished holds nothing.
     """
     return sum(job.budget or 0.0 for job in jobs if not job.finished)
 
@@ -2074,11 +2313,15 @@ def kill_jobs_of(owner: Any) -> list[str]:
         The ids of the jobs that had not finished.
     """
     jobs = agent_jobs_of(owner)
-    # Registry and cancels first: they must survive an interrupt that
-    # lands in the bounded join below.
+    # Cancels and registry first, so they survive an interrupt landing
+    # in the bounded join below; every cancel before any job leaves the
+    # registry, so an interrupt in between leaves each job cancelled or
+    # still reachable (a later kill_jobs_of, agent_job, the finish
+    # gate), never forgotten and running.
+    for job in jobs.values():
+        job.cancel.set()
     for job in jobs.values():
         forget_agent_job(job)
-        job.cancel.set()
     live = [job for job in jobs.values() if not job.finished]
     deadline = time.monotonic() + _JOB_END_GRACE_SECONDS
     for job in live:

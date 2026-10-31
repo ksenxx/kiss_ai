@@ -284,7 +284,11 @@ class TestPersistMergeAgentUsage:
         from kiss.agents.sorcar.sorcar_agent import _agent_usage, _attribute_sub_usage
 
         task_id, _ = _add_task("task that conflicted", "")
-        _save_task_extra({"tokens": 100, "cost": 0.5, "steps": 3}, task_id=task_id)
+        # The task finished (its final save wrote ``endTs``) before the
+        # user pressed Merge.
+        _save_task_extra(
+            {"tokens": 100, "cost": 0.5, "steps": 3, "endTs": 1}, task_id=task_id,
+        )
         agent = ChatSorcarAgent("test")
         agent._last_task_id = task_id
         flow = _Flow()
@@ -355,7 +359,10 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
         from kiss.agents.sorcar.persistence import _save_task_extra
 
         task_id, _ = _add_task("stopped task", "")
-        _save_task_extra({"tokens": 100, "cost": 0.5, "steps": 3}, task_id=task_id)
+        # The task's final save (``endTs``) precedes any Merge.
+        _save_task_extra(
+            {"tokens": 100, "cost": 0.5, "steps": 3, "endTs": 1}, task_id=task_id,
+        )
         agent = _StoppedDuringMergeAgent("test")
         agent.repo_root = self.home.repo
         agent._last_task_id = task_id

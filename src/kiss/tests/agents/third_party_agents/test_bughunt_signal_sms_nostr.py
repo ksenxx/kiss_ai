@@ -39,6 +39,15 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 )
 from kiss.tests.agents.third_party_agents.signal_cli import FAKE_SIGNAL_CLI
 
+# The shared stand-in, writing its arguments to ``argv.json`` beside itself first.
+ARGV_RECORDING_SIGNAL_CLI = f"""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+Path(__file__).with_name("argv.json").write_text(json.dumps(sys.argv[1:]))
+exec({FAKE_SIGNAL_CLI!r})
+"""
+
 
 @pytest.mark.usefixtures("isolated_kiss_home")
 class TestSignalBackend(unittest.TestCase):
@@ -124,11 +133,16 @@ class TestSignalBackend(unittest.TestCase):
         """A successful send returns without raising."""
         self._backend.send_message("+1AAA", "hi")
 
-    def test_receive_messages_with_large_timeout(self) -> None:
-        """receive_messages(timeout=60) must not be killed by a 30s subprocess cap."""
+    def test_receive_messages_forwards_its_timeout(self) -> None:
+        """receive_messages(timeout=60) asks signal-cli to wait 60 s and parses its envelopes."""
+        cli_dir = install_cli_on_path(self, "signal-cli", ARGV_RECORDING_SIGNAL_CLI)
         result = json.loads(self._backend.receive_messages(timeout=60))
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["messages"]), 3)
+        self.assertEqual(
+            json.loads((cli_dir / "argv.json").read_text()),
+            ["-u", "+1BOT", "receive", "--output=json", "--timeout", "60"],
+        )
 
 
 @pytest.mark.usefixtures("isolated_kiss_home")

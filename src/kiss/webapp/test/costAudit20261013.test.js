@@ -70,10 +70,9 @@ function testHiddenTabDropsAnotherTasksLateUsage() {
   send(win, {...usage('new-1', '$0.0100', 10), tabId: tabB});
 
   // old-9's late side-channel charge (task_update.charge_side_channel_usage)
-  // reaches every tab; B must not take it for new-1's total.
+  // reaches the tabs that watched old-9, B among them; B must not take it
+  // for new-1's total.
   send(win, {...usage('old-9', '$0.7500', 150), tabId: tabB});
-  // The same event on the visible tab (which shows no task) is harmless.
-  send(win, {...usage('old-9', '$0.7500', 150), tabId: tabA});
 
   win._testApi.switchToTab(tabB);
   assert.strictEqual(

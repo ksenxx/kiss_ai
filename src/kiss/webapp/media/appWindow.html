@@ -29,7 +29,12 @@
   start page appStart.html, which waited for the daemon, opened it so)
   the page shows the webapp in place, at the saved bounds: opening a
   popup by that name from here would navigate this very window, and
-  closing it would close the app.
+  closing it would close the app.  Unless this window has no geometry:
+  Chrome 156 gives a popup that came here from the file:// start page
+  none (screenX .. outerHeight read 0) and ignores moveTo / resizeTo,
+  so neither the saved bounds nor appWindow.js could place it.  The
+  page then hands the name to a popup opened from here, which can be
+  placed, and closes this one.
 -->
 <html>
 <head>
@@ -54,12 +59,16 @@
         return bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null;
       }
 
+      function popupFeatures(bounds) {
+        if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) return 'popup';
+        return 'popup,left=' + bounds.left + ',top=' + bounds.top +
+          ',width=' + bounds.width + ',height=' + bounds.height;
+      }
+
       function openPopup() {
         var bounds = savedBounds() ||
           {left: screenX, top: screenY, width: outerWidth, height: outerHeight};
-        var features = 'popup,left=' + bounds.left + ',top=' + bounds.top +
-          ',width=' + bounds.width + ',height=' + bounds.height;
-        if (window.open(url, 'kiss-app-window', features)) {
+        if (window.open(url, 'kiss-app-window', popupFeatures(bounds))) {
           window.close();
         } else {
           location.replace(url);
@@ -68,7 +77,14 @@
 
       function showHere() {
         var bounds = savedBounds();
-        if (bounds) {
+        if (!(outerWidth > 0)) {
+          window.name = '';
+          if (window.open(url, 'kiss-app-window', popupFeatures(bounds))) {
+            window.close();
+            return;
+          }
+          window.name = 'kiss-app-window';
+        } else if (bounds) {
           window.moveTo(bounds.left, bounds.top);
           window.resizeTo(bounds.width, bounds.height);
         }

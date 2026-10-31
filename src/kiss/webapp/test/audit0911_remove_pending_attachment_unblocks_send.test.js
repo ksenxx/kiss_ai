@@ -29,55 +29,19 @@
 const assert = require('assert');
 const {
   makePage,
-  paste,
-  typeAndEnter,
+  parkSendOnLateHeic,
+  removeChip,
   submits,
   settle,
-  failDecode,
 } = require('./attachment_helpers');
 
-// Click the x on the chip whose label contains `name`.
-function removeChip(win, name) {
-  const chips = win.document.querySelectorAll('#file-chips .file-chip');
-  for (const chip of chips) {
-    if (chip.textContent.indexOf(name) >= 0) {
-      chip.querySelector('.fc-rm').click();
-      return;
-    }
-  }
-  throw new Error('no chip found for ' + name);
-}
-
-async function checkRemovingPendingAttachmentUnblocksSend({win, posted, decodes}) {
-  win._testApi.endLaunch();
-  const tabA = win._testApi.getActiveTabId();
+async function checkRemovingPendingAttachmentUnblocksSend(page) {
+  const {win, posted} = page;
+  // 1-3. A (shot.png) is still reading at Enter, B (IMG_0002.HEIC) is
+  //      added while the send waits and its decode never settles: once A
+  //      is done the fixpoint pass awaits B.
+  const tabA = await parkSendOnLateHeic(page, 'prompt minus the removed photo');
   const chips = win.document.getElementById('file-chips');
-
-  // 1. Attachment A: a PNG whose FileReader is still running when Enter
-  //    arrives, so the send parks while A is pending.
-  const png = new win.File([new Uint8Array([137, 80, 78, 71])], 'shot.png', {
-    type: 'image/png',
-  });
-  paste(win, png);
-  typeAndEnter(win, 'prompt minus the removed photo');
-  assert.strictEqual(submits(posted).length, 0, 'the send is waiting on A');
-
-  // 2. While the send waits, attachment B (a camera HEIC) is added; its
-  //    decode parks in the test's decoder and will never settle.
-  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0002.HEIC', {
-    type: 'image/heic',
-  });
-  paste(win, heic);
-
-  // 3. A finishes during settle; the next fixpoint pass now awaits B.
-  await settle(() => decodes.length >= 1);
-  assert.strictEqual(decodes.length, 1, 'B reached the decoder');
-  assert.strictEqual(
-    submits(posted).length,
-    0,
-    'the send must keep waiting while B is present and converting',
-  );
-  assert.match(chips.textContent, /IMG_0002\.HEIC/, "B's chip is visible");
 
   // 4. The user removes B's pending chip.  The send must proceed with A
   //    only, even though B's conversion promise never settles: before the

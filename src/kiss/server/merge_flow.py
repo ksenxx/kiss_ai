@@ -30,11 +30,9 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
     _porcelain_entries,
-    _unquote_git_path,
     repo_lock,
 )
 from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
-from kiss.agents.sorcar.persistence import _add_task_usage, _append_chat_event
 from kiss.agents.sorcar.sorcar_agent import (
     _agent_usage,
     _commit_subject,
@@ -43,7 +41,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.server import agent_state, sidebar_panels
 from kiss.server.agent_state import AgentState
-from kiss.server.json_printer import stamp_event_ts
+from kiss.server.task_update import charge_side_channel_usage
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -65,46 +63,28 @@ def _git_error_line(result: Any, default: str) -> str:
     return err.splitlines()[0] if err else default
 
 
-def _unquoted_name_lines(output: str) -> list[str]:
-    """Parse ``git diff --name-only`` output into unquoted paths.
+def _git_paths(cwd: str, command: str, *args: str) -> list[str] | None:
+    """List the paths git *command* prints with ``-z`` in *cwd* (None when git fails).
 
-    Even with ``core.quotepath=false``, git C-quotes any path that
-    contains a double-quote, backslash, or control character.  Without
-    unquoting, changed-file lists show bogus names and the conflict
-    file-overlap sets can never intersect the real on-disk paths.
-
-    Args:
-        output: Raw stdout from a ``--name-only`` git command.
-
-    Returns:
-        List of unquoted relative file paths.
-    """
-    return [_unquote_git_path(line) for line in output.split("\n") if line]
-
-
-def _porcelain_paths(output: str) -> list[str]:
-    """Parse ``git status --porcelain`` output into unquoted file paths.
-
-    A thin wrapper over the shared
-    :func:`kiss.agents.sorcar.git_worktree._porcelain_entries` parser
-    (also backing ``GitWorktreeOps.copy_dirty_state``) so the porcelain
-    parsers cannot drift apart.  Rename/copy entries (``R  old -> new``)
-    are split on the `` -> `` boundary and BOTH sides are listed
-    (mirroring a ``diff --no-renames`` listing) instead of one bogus
-    ``"old -> new"`` path.
+    NUL-separated, as :meth:`GitWorktreeOps._diff_name_only` lists:
+    git quotes no ``-z`` path, so a name with a double quote, a
+    backslash, a control character or an edge space comes back
+    byte-exact, equal to the real on-disk path and to the names
+    ``_diff_name_only`` puts next to it in the changed-file lists and
+    the conflict file-overlap sets.
 
     Args:
-        output: Raw stdout from a ``git status --porcelain`` command.
+        cwd: The directory to run git in.
+        command: The listing subcommand (``diff``, ``ls-files``, ``log``).
+        *args: Its other arguments.
 
     Returns:
-        De-duplicated list of relative file paths in output order.
+        The relative paths in output order, or None on a git failure.
     """
-    files: list[str] = []
-    for _code, old_name, new_name in _porcelain_entries(output):
-        for path in (old_name, new_name):
-            if path and path not in files:
-                files.append(path)
-    return files
+    result = _git(command, "-z", *args, cwd=cwd)
+    if result.returncode != 0:
+        return None
+    return [path for path in result.stdout.split("\0") if path]
 
 
 def _capture_untracked(work_dir: str) -> set[str]:
@@ -116,8 +96,7 @@ def _capture_untracked(work_dir: str) -> set[str]:
     Returns:
         Set of untracked file paths relative to work_dir.
     """
-    result = _git("ls-files", "--others", "--exclude-standard", cwd=work_dir)
-    return set(_unquoted_name_lines(result.stdout))
+    return set(_git_paths(work_dir, "ls-files", "--others", "--exclude-standard") or ())
 
 
 def _stage_all(work_path: Path) -> tuple[str, str]:
@@ -202,8 +181,8 @@ class _MergeFlowMixin:
         commit_message: str | None = None,
         work_dir: str = "",
         reply_to: str = "",
-    ) -> dict[str, Any]:
-        """Report the outcome of a manual Git Commit and return the event.
+    ) -> None:
+        """Report the outcome of a manual Git Commit.
 
         The outcome is a toast ``notification`` — info on success,
         error on failure — plus the ``autocommit_done`` event (flagged
@@ -223,13 +202,7 @@ class _MergeFlowMixin:
                 forwarded Git Commit this is: the event goes to that
                 connection alone, as the reply to its request, and
                 nothing is broadcast here.
-
-        Returns:
-            The event dict.
         """
-        # Same stable id as the "Auto-generating commit message…"
-        # toast, so the outcome replaces it in place (the page
-        # dedups toasts by id) instead of stacking a second one.
         event: dict[str, Any] = {
             "type": "autocommit_done",
             "success": success,
@@ -249,16 +222,30 @@ class _MergeFlowMixin:
             # tab-stamped events, so a broadcast here would reach them
             # a second time).
             self.printer.broadcast({**event, "connId": reply_to})
-            return event
+            return
+        self._commit_toast(tab_id, "info" if success else "error", message)
+        self.printer.broadcast(event)
+
+    def _commit_toast(self, tab_id: str, severity: str, message: str) -> None:
+        """Show *message* as *tab_id*'s Git Commit toast on every surface.
+
+        Every toast of one commit ("Auto-generating commit message…",
+        "Committing on <machine>…", the outcome) has the same stable
+        id, so each replaces the one before in place (the page dedups
+        toasts by id) instead of stacking.
+
+        Args:
+            tab_id: The tab that pressed Git Commit.
+            severity: ``"info"`` or ``"error"``.
+            message: The toast's text.
+        """
         self.printer.broadcast({
             "type": "notification",
             "id": f"manual-commit:{tab_id}",
-            "severity": "info" if success else "error",
+            "severity": severity,
             "message": message,
             "tabId": tab_id,
         })
-        self.printer.broadcast(event)
-        return event
 
     def _commit_main_tree(self, tab_id: str, work_dir: str = "", reply_to: str = "") -> None:
         """Stage-all + generate-message + commit the tab's working tree.
@@ -315,13 +302,7 @@ class _MergeFlowMixin:
                 )
                 return
             if not reply_to:
-                self.printer.broadcast({
-                    "type": "notification",
-                    "id": f"manual-commit:{tab_id}",
-                    "severity": "info",
-                    "message": "Auto-generating commit message…",
-                    "tabId": tab_id,
-                })
+                self._commit_toast(tab_id, "info", "Auto-generating commit message…")
             msg = generate_commit_message_from_diff(diff_text)
             with repo_lock(repo):
                 staged, error = _stage_all(work_path)
@@ -382,13 +363,7 @@ class _MergeFlowMixin:
             work_dir: The folder to commit on the machine; empty for
                 the machine's own configured folder.
         """
-        self.printer.broadcast({
-            "type": "notification",
-            "id": f"manual-commit:{tab_id}",
-            "severity": "info",
-            "message": f"Committing on {machine}…",
-            "tabId": tab_id,
-        })
+        self._commit_toast(tab_id, "info", f"Committing on {machine}…")
         reply = sidebar_panels.machine_autocommit(
             machine, {"type": "autocommitAction", "tabId": tab_id, "workDir": work_dir},
         )
@@ -680,12 +655,8 @@ class _MergeFlowMixin:
             base_ref = self._resolve_base_ref(
                 str(wt.wt_dir), wt.baseline_commit, wt.original_branch,
             ) or wt.original_branch
-            tracked = _git(
-                "diff", "--name-only", "--no-renames", base_ref, cwd=str(wt.wt_dir),
-            )
-            if tracked.returncode == 0:
-                files = _unquoted_name_lines(tracked.stdout)
-            else:
+            files = _git_paths(str(wt.wt_dir), "diff", "--name-only", "--no-renames", base_ref)
+            if files is None:
                 # The diff query failed (e.g. the original branch was
                 # renamed/deleted so base_ref no longer resolves).  A
                 # clean ``status --porcelain`` alone must NOT be taken
@@ -694,15 +665,19 @@ class _MergeFlowMixin:
                 # returns [].  Also list files from commits unique to
                 # this worktree so committed work is never mistaken for
                 # a clean worktree.
-                status = _git("status", "--porcelain", cwd=str(wt.wt_dir))
-                files = _porcelain_paths(status.stdout)
-                unique = _git(
-                    "log", "--pretty=format:", "--name-only", "--no-renames",
+                # Both sides of a rename are listed, as by a
+                # ``diff --no-renames``.
+                status = _git("status", "--porcelain", "-z", cwd=str(wt.wt_dir))
+                files = [
+                    path
+                    for _code, old_name, new_name in _porcelain_entries(status.stdout)
+                    for path in (old_name, new_name)
+                    if path is not None
+                ]
+                files.extend(_git_paths(
+                    str(wt.wt_dir), "log", "--pretty=format:", "--name-only", "--no-renames",
                     "HEAD", "--not", f"--exclude={wt.branch}", "--branches",
-                    cwd=str(wt.wt_dir),
-                )
-                if unique.returncode == 0:
-                    files.extend(_unquoted_name_lines(unique.stdout))
+                ) or ())
             files.extend(_capture_untracked(str(wt.wt_dir)))
             return sorted(set(files))
         base_ref = self._resolve_base_ref(
@@ -887,10 +862,13 @@ class _MergeFlowMixin:
         steps) was persisted, as a sub-agent whose spend
         :func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`
         has already added to *agent*'s live counters.  The difference
-        between those counters before and after the merge is added to
-        the task's row, and the new totals are pushed to the tab as a
-        ``usage_info`` event — persisted on the task so a replay shows
-        them, and tab-stamped so the live status row updates now.
+        between those counters before and after the merge is late
+        spend on the finished row, charged like any side channel's
+        (:func:`~kiss.server.task_update.charge_side_channel_usage`:
+        the row and its finished ancestors get it, and their new totals
+        reach the tabs as a persisted ``usage_info``, *tab_id*
+        included so its live status row updates now).  No live agent
+        is passed: the spend is already on *agent*'s counters.
 
         Args:
             agent: The worktree agent that ran the merge.
@@ -899,33 +877,12 @@ class _MergeFlowMixin:
             tab_id: The tab whose status row to refresh.
         """
         budget, tokens, steps = _agent_usage(agent)
-        d_budget = budget - usage_before[0]
-        d_tokens = tokens - usage_before[1]
-        d_steps = steps - usage_before[2]
-        if d_budget <= 0 and d_tokens <= 0 and d_steps <= 0:
-            return
-        task_id = _persisted_task_id(agent)
-        if not task_id:
-            return
-        try:
-            totals = _add_task_usage(task_id, d_tokens, d_budget, d_steps)
-        except Exception:
-            logger.warning(
-                "Could not add merge agent usage to task %s", task_id, exc_info=True,
-            )
-            return
-        if totals is None:
-            return
-        new_tokens, new_cost, new_steps = totals
-        event: dict[str, Any] = {
-            "type": "usage_info",
-            "text": "",
-            "total_tokens": new_tokens,
-            "cost": f"${new_cost:.4f}",
-            "cost_usd": new_cost,
-            "total_steps": new_steps,
-        }
-        stamp_event_ts(event)
-        self.printer.broadcast_transient(event, task_id=task_id, tab_id=tab_id)
-        _append_chat_event(dict(event), task_id=task_id)
-        self.printer.broadcast({"type": "tasks_updated"})
+        charge_side_channel_usage(
+            self.printer,
+            None,
+            _persisted_task_id(agent),
+            budget - usage_before[0],
+            tokens - usage_before[1],
+            steps - usage_before[2],
+            tab_id=tab_id,
+        )

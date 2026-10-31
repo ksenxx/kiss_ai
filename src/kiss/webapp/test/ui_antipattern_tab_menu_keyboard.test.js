@@ -14,14 +14,9 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
+const {tabEl} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
-
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-}
 
 function menu(win) {
   return h.byId(win, 'tab-context-menu');

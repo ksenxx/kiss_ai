@@ -22,6 +22,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -145,10 +146,9 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
     items with ``input_text`` / ``output_text`` parts, standalone
     ``function_call`` / ``function_call_output`` / ``reasoning`` items).
     When such a conversation is handed off to another provider's model
-    (e.g. via the Sorcar ``set_model`` tool, which does
-    ``new_model.conversation = old_model.conversation``), those items must
-    first be translated to the OpenAI Chat Completions format that every
-    other model's normalizer understands:
+    (:func:`hand_off_conversation`, or a model's own normalizer), those
+    items must first be translated to the OpenAI Chat Completions format
+    that every other model's normalizer understands:
 
     * ``function_call`` items become ``tool_calls`` entries merged into the
       immediately preceding assistant message (or a fresh assistant message
@@ -271,11 +271,20 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-BINARY_ATTACHMENT_OPEN = "<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>"
+# Both sentinels carry a random per-process token.  Tool results routinely
+# quote arbitrary text (a Read of this file, grep output, a web page, a
+# command's stdout); with a fixed sentinel any such text was rewritten into
+# placeholders, and text shaped like a block injected bytes of its choosing
+# into the model's context.  Only encode_binary_attachment() in this process
+# knows the token, so only the blocks it produced are decoded.
+_BINARY_ATTACHMENT_TOKEN = secrets.token_hex(16)
+BINARY_ATTACHMENT_OPEN = (
+    f"<<KISS_BINARY_ATTACHMENT {_BINARY_ATTACHMENT_TOKEN} mime_type={{mime_type}}>>"
+)
 BINARY_ATTACHMENT_OPEN_RE = re.compile(
     re.escape(BINARY_ATTACHMENT_OPEN).replace(re.escape("{mime_type}"), r"([^>\s]+)")
 )
-BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
+BINARY_ATTACHMENT_CLOSE = f"<</KISS_BINARY_ATTACHMENT {_BINARY_ATTACHMENT_TOKEN}>>"
 
 # The Read tool may also embed a HEIF photo: parse_binary_attachments() runs
 # it through Attachment.from_bytes(), which transcodes it to JPEG.
@@ -302,10 +311,12 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
     """Split a tool result string into plain text + binary attachments.
 
     Scans ``text`` for ``<<KISS_BINARY_ATTACHMENT ...>>...<<...>>`` blocks
-    produced by :func:`encode_binary_attachment` and returns the residual
-    plain text (with each block replaced by a short
+    produced by :func:`encode_binary_attachment` in this process and
+    returns the residual plain text (with each block replaced by a short
     ``[attached image/png, N bytes]`` placeholder) along with the decoded
-    :class:`Attachment` list.
+    :class:`Attachment` list.  A block written by any other process, or
+    text quoting the sentinel's shape, lacks this process's token and is
+    left as it is.
 
     Args:
         text: Raw tool result content possibly containing sentinel blocks.
@@ -321,7 +332,7 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
         open_start, open_end = match.span()
         if open_start < cursor:
             # An opener inside the block just consumed (only possible in
-            # text that quotes the sentinel, e.g. a Read of this file).
+            # text this process assembled from its own sentinels).
             # Skipping it keeps the scan linear: without this, every
             # such opener re-searched for the same closer and re-decoded
             # the overlapping payload, which is quadratic.
@@ -821,6 +832,70 @@ def flatten_content_to_text(content: Any) -> str:
         elif block_type in ("image", "image_url", "document", "file", "input_audio"):
             parts.append(f"[{block_type} attachment omitted]")
     return "\n".join(p for p in parts if p)
+
+
+def _unrecorded_tool_calls_text(message: dict[str, Any], content: str) -> str:
+    """Render the chat ``tool_calls`` of an assistant *message* its text does not record.
+
+    The Chat-Completions and Gemini adapters (and converted Responses
+    items) keep a call only in ``tool_calls``; it is rendered like an
+    Anthropic ``tool_use`` block, ``[Tool Call] name(arguments)``.  The CLI
+    adapters' own turns already carry their calls in the text (the raw
+    ``{"tool_calls": ...}`` block, or Codex's ``name(...)`` invocation),
+    so those are not rendered twice.
+
+    Args:
+        message: An assistant message in chat format.
+        content: The message's flattened text.
+
+    Returns:
+        One ``[Tool Call]`` line per unrecorded call, newline-joined.
+    """
+    calls = message.get("tool_calls") or []
+    if not calls:
+        return ""
+    recorded = {call["name"] for call in _parse_text_based_tool_calls(content)}
+    lines: list[str] = []
+    for call in calls:
+        function = call.get("function") or {}
+        name = function.get("name", "")
+        if name in recorded or f"{name}(" in content:
+            continue
+        arguments = function.get("arguments", "")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+        lines.append(f"[Tool Call] {name}({arguments})")
+    return "\n".join(lines)
+
+
+def _dialogue_transcript(messages: list[Any]) -> str:
+    """Render chat messages as the ``[User]/[Assistant]/[Tool Result]`` transcript.
+
+    The CLI transports are stateless across invocations, so a multi-turn
+    conversation is flattened into a single text block.  Tool-result
+    messages (``role == "tool"``) are rendered as ``[Tool Result]: …`` and
+    an assistant turn's calls as ``[Tool Call]`` lines (see
+    :func:`_unrecorded_tool_calls_text`).
+
+    Args:
+        messages: The conversation in chat format
+            (:func:`responses_items_to_chat_messages` output).
+
+    Returns:
+        The assembled transcript string.
+    """
+    parts: list[str] = []
+    for msg in messages:
+        role = msg["role"]
+        content = flatten_content_to_text(msg.get("content", ""))
+        if role == "user":
+            parts.append(f"[User]: {content}")
+        elif role == "assistant":
+            calls = _unrecorded_tool_calls_text(msg, content)
+            parts.append("[Assistant]: " + "\n".join(p for p in (content, calls) if p))
+        elif role == "tool":
+            parts.append(f"[Tool Result]: {content}")
+    return "\n\n".join(parts)
 
 
 def merge_system_texts(configured: str | None, messages: list[dict[str, Any]]) -> str | None:
@@ -1557,6 +1632,24 @@ class Model(ABC):
         """
         return None
 
+    def context_tokens_from_response(self, response: Any) -> int | None:
+        """Return the size of one API request's context for *response*, when it differs.
+
+        A CLI-backed model's turn may make several API requests over the
+        same growing transcript and report only their summed usage; its
+        adapter overrides this so the agent tracks the context the model
+        works in rather than that sum.  Any other model's call is one
+        request, whose token counts already are its context size.
+
+        Args:
+            response: The raw API response object.
+
+        Returns:
+            The tokens of one request's context, or ``None`` to use the
+            call's own token counts.
+        """
+        return None
+
     def cost_multiplier_for_response(self, response: Any) -> float:
         """Return the factor the served processing tier applies to catalog rates.
 
@@ -1720,6 +1813,30 @@ class Model(ABC):
         }
 
 
+def hand_off_conversation(old: Model, new: Model) -> None:
+    """Continue *old*'s live conversation on *new* (a model switch mid-task).
+
+    Used by the agent's fallback and by Sorcar's ``set_model`` tool.
+    Responses API items belong to the endpoint that produced them:
+    OpenAI rejects Together's reasoning items (they lack ``summary``) and
+    its item ids.  So when the two models talk to different endpoints
+    (``base_url``, which native adapters lack) the conversation is
+    converted with :func:`responses_items_to_chat_messages`, which every
+    adapter reads; on the same endpoint it is kept verbatim, so an
+    OpenAI model keeps another OpenAI model's reasoning items.  The
+    usage line appended to messages carries over as well.
+
+    Args:
+        old: The model the conversation ran on so far.
+        new: The freshly initialized model that continues it.
+    """
+    if getattr(old, "base_url", None) == getattr(new, "base_url", None):
+        new.conversation = list(old.conversation)
+    else:
+        new.conversation = responses_items_to_chat_messages(old.conversation)
+    new.usage_info_for_messages = old.usage_info_for_messages
+
+
 def _parse_docstring_params(docstring: str) -> dict[str, str]:
     """Parses parameter descriptions from a Google-style ``Args:`` section.
 
@@ -1816,7 +1933,7 @@ class CLITextModel(Model):
     as plain language models: every turn runs the CLI with its native
     tools, MCP servers, hooks and project instructions switched off and
     KISS's own system prompt installed in place of the CLI's (``claude
-    --tools "" --system-prompt`` and ``codex exec`` with its tool
+    --tools "" --system-prompt-file`` and ``codex exec`` with its tool
     features disabled and ``model_instructions_file``), so the KISS tool
     loop — and only it — acts on the user's behalf.
 
@@ -1840,16 +1957,20 @@ class CLITextModel(Model):
 
         A one-message conversation is the task text itself; a multi-turn
         conversation is flattened into a ``[User]/[Assistant]/[Tool
-        Result]`` transcript.  The system instruction never rides in the
-        prompt: each adapter hands it to its CLI as the real system
-        prompt (see :meth:`_build_cli_args` of the subclasses).
+        Result]`` transcript.  A conversation handed over from another
+        provider's model is read as chat messages first: the Responses
+        items of :class:`OpenAICompatibleModel2` are converted by
+        :func:`responses_items_to_chat_messages`.  The system instruction
+        never rides in the prompt: each adapter hands it to its CLI as the
+        real system prompt (see :meth:`_build_cli_args` of the subclasses).
 
         Returns:
             The prompt text, without any system instruction.
         """
-        if len(self.conversation) == 1:
-            return flatten_content_to_text(self.conversation[0]["content"])
-        return self._conversation_as_dialogue()
+        messages = responses_items_to_chat_messages(self.conversation)
+        if len(messages) == 1:
+            return flatten_content_to_text(messages[0].get("content"))
+        return _dialogue_transcript(messages)
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -1891,28 +2012,6 @@ class CLITextModel(Model):
                 ),
             }
         )
-
-    def _conversation_as_dialogue(self) -> str:
-        """Render the conversation as a ``[User]/[Assistant]/[Tool Result]`` transcript.
-
-        The CLI transports are stateless across invocations, so multi-turn
-        conversations are flattened into a single text block.  Tool-result
-        messages (``role == "tool"``) are rendered as ``[Tool Result]: …``.
-
-        Returns:
-            The assembled transcript string.
-        """
-        parts: list[str] = []
-        for msg in self.conversation:
-            role = msg["role"]
-            content = flatten_content_to_text(msg.get("content", ""))
-            if role == "user":
-                parts.append(f"[User]: {content}")
-            elif role == "assistant":
-                parts.append(f"[Assistant]: {content}")
-            elif role == "tool":
-                parts.append(f"[Tool Result]: {content}")
-        return "\n\n".join(parts)
 
     @contextlib.contextmanager
     def _tools_prompt_installed(
@@ -2100,8 +2199,9 @@ def _cli_stall_error(label: str, timeout: float) -> TimeoutError:
     ``KISSAgent._run_agentic_loop`` re-raises every :class:`KISSError`
     immediately and retries everything else, so a transient stall must
     NOT be a ``KISSError``: that would abort the whole task where the
-    equivalent Anthropic condition (``AnthropicModel._stall_error``) is
-    simply retried.
+    equivalent API-model condition
+    (:func:`kiss.core.models.stream_abort.stall_error`) is simply
+    retried.
 
     Args:
         label: Human-readable CLI name for the message.
@@ -2248,6 +2348,25 @@ class _CLIProcess:
         self._deadline = time.monotonic() + timeout
         self._waiting_on_caller = waiting_on_caller
         self._caller_error = caller_error
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stderr_chunks: list[str] = []
+        # The stdin writer, once send_prompt() has created it, and the
+        # flag that tells it to give up: close() (and a Stop or deadline
+        # in send_prompt) set the flag, join the thread, then close stdin.
+        # The lock is held by the writer for the whole write and by
+        # close() while it closes stdin, so the descriptor can never be
+        # closed (and its number reused) under an os.write: a Stop
+        # delivered inside Thread.start() leaves a writer that is not yet
+        # alive, so nothing to join, but it still runs.
+        self._writer: threading.Thread | None = None
+        self._writer_cancel = threading.Event()
+        self._stdin_lock = threading.RLock()
+        # Everything else exists before the child does.  From the spawn
+        # to the end of __init__ every statement is inside the try that
+        # kills it: a Stop injected (PyThreadState_SetAsyncExc) at any
+        # check point there must not escape a constructor whose ``with``
+        # block, and so close(), never starts.
+        readers: list[threading.Thread] = []
         try:
             # errors="replace": a hook, plugin or shell command the CLI
             # runs can print bytes in any encoding.  With the strict
@@ -2272,27 +2391,13 @@ class _CLIProcess:
             )
         except OSError as e:
             raise KISSError(f"Failed to start {label}: {e}") from e
-        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
-        self._stderr_chunks: list[str] = []
-        readers: list[threading.Thread] = []
         try:
             readers.append(self._start_reader(self._drain_stdout, "stdout"))
             readers.append(self._start_reader(self._drain_stderr, "stderr"))
+            self._readers = (readers[0], readers[1])
         except BaseException:
             self._abort_start(readers)
             raise
-        self._readers = (readers[0], readers[1])
-        # The stdin writer, once send_prompt() has created it, and the
-        # flag that tells it to give up: close() (and a Stop or deadline
-        # in send_prompt) set the flag, join the thread, then close stdin.
-        # The lock is held by the writer for the whole write and by
-        # close() while it closes stdin, so the descriptor can never be
-        # closed (and its number reused) under an os.write: a Stop
-        # delivered inside Thread.start() leaves a writer that is not yet
-        # alive, so nothing to join, but it still runs.
-        self._writer: threading.Thread | None = None
-        self._writer_cancel = threading.Event()
-        self._stdin_lock = threading.RLock()
 
     def __enter__(self) -> "_CLIProcess":
         """Return the running process supervisor."""
@@ -2303,11 +2408,12 @@ class _CLIProcess:
         self.close()
 
     def _abort_start(self, readers: list[threading.Thread]) -> None:
-        """Kill, reap and release a child whose reader threads failed to start.
+        """Kill, reap and release a child whose start-up did not complete.
 
-        ``Thread.start()`` failing (thread exhaustion) inside ``__init__``
-        means the ``with`` block is never entered and ``close()`` never
-        runs, so the child would stay alive behind three open pipes.  Once
+        ``Thread.start()`` failing (thread exhaustion) or a Stop landing
+        anywhere in ``__init__`` after the spawn means the ``with`` block
+        is never entered and ``close()`` never runs, so the child would
+        stay alive behind three open pipes.  Once
         the child is dead a reader that did start drains its pipe to EOF
         and exits; as in :meth:`close`, an output pipe is closed only
         after its reader is gone, stdin unconditionally.
@@ -2742,10 +2848,19 @@ class _JsonPrefix:
     below the envelope are argument data, which the decoder accepts with
     raw control characters, so they pass here too: a prefix released as
     prose cannot be taken back once the object turns out to be a call.
+
+    ``string_brace`` is the offset (in characters fed) of the first ``{``
+    inside the latest string, or ``None``: once the text is ruled out,
+    that brace may open a real object the string swallowed.  Closing a
+    container clears it: the string then lies inside a finished value
+    (a call nested in a wrapper the prose never closes, say), which the
+    held text already holds whole.
     """
 
     def __init__(self) -> None:
         self.open: list[str] = []
+        self.string_brace: int | None = None
+        self._fed = 0
         self._expect = _VALUE
         self._in_string = False
         self._in_key = False
@@ -2762,6 +2877,7 @@ class _JsonPrefix:
             value; the state is meaningless after that.  ``open`` is
             empty again when the value has closed.
         """
+        self._fed += 1
         if self._in_string:
             return self._feed_string_char(char)
         if char in " \t\r\n":
@@ -2780,6 +2896,7 @@ class _JsonPrefix:
         if self._expect in (_KEY, _KEY_OR_CLOSE):
             if char == '"':
                 self._in_string = self._in_key = True
+                self.string_brace = None
                 return True
             return self._expect == _KEY_OR_CLOSE and self._close(char)
         if self._expect == _COLON:
@@ -2788,6 +2905,7 @@ class _JsonPrefix:
         if char == '"':
             self._in_string = True
             self._in_key = False
+            self.string_brace = None
         elif char in _CLOSER:
             self.open.append(char)
             self._expect = _KEY_OR_CLOSE if char == "{" else _VALUE_OR_CLOSE
@@ -2799,6 +2917,8 @@ class _JsonPrefix:
 
     def _feed_string_char(self, char: str) -> bool:
         """Consume one character inside a string; see :meth:`feed`."""
+        if char == "{" and self.string_brace is None:
+            self.string_brace = self._fed - 1
         if self._escaped:
             self._escaped = False
         elif char == "\\":
@@ -2816,6 +2936,7 @@ class _JsonPrefix:
             return False
         self.open.pop()
         self._expect = _NEXT
+        self.string_brace = None
         return True
 
 
@@ -2918,39 +3039,54 @@ class _ToolCallFilteredStream:
         A ``{`` opens a candidate that is held while :class:`_JsonPrefix`
         still accepts it and released by :meth:`_release` when it closes
         or when a character proves it prose; that character is then
-        rescanned as plain text.  Rescans and the closing-fence eater
-        continue in this same loop, so a chunk with thousands of false
-        candidates costs no recursion.
+        rescanned as plain text, after any held text :meth:`_reject`
+        hands back.  Rescans and the closing-fence eater, armed whenever a
+        fenced call is dropped (closed or inside a rejected wrapper),
+        continue in this same loop (the rest of a chunk waits on
+        ``resume`` while held text is rescanned), so a chunk with
+        thousands of false candidates costs no recursion.
         """
         if self._eat_close:
             text = self._eat_closing_fence(text)
+        resume: list[tuple[str, int]] = []
         start = index = 0
-        while index < len(text):
-            char = text[index]
-            if self._json is None:
-                if char == "{":
-                    self._begin_object(text[start:index])
+        while True:
+            while index < len(text):
+                char = text[index]
+                if self._json is None:
+                    if char == "{":
+                        self._begin_object(text[start:index])
+                        start = index
+                        self._json = _JsonPrefix()
+                        self._json.feed(char)
+                elif not self._json.feed(char):
+                    self._pending += text[start:index]
+                    rescan = self._reject()
                     start = index
-                    self._json = _JsonPrefix()
-                    self._json.feed(char)
-            elif not self._json.feed(char):
-                self._pending += text[start:index]
-                self._release()
-                start = index
-                continue
-            elif not self._json.open:
-                self._pending += text[start : index + 1]
-                self._release()
-                start = index + 1
-                if self._eat_close:
-                    text = self._eat_closing_fence(text[start:])
-                    start = index = 0
+                    if rescan:
+                        resume.append((text, index))
+                        text, start, index = rescan, 0, 0
+                    elif self._eat_close:
+                        text = self._eat_closing_fence(text[index:])
+                        start = index = 0
                     continue
-            index += 1
-        if self._json is None:
-            self._hold_tail(text[start:])
-        else:
-            self._pending += text[start:]
+                elif not self._json.open:
+                    self._pending += text[start : index + 1]
+                    self._release()
+                    start = index + 1
+                    if self._eat_close:
+                        text = self._eat_closing_fence(text[start:])
+                        start = index = 0
+                        continue
+                index += 1
+            if self._json is None:
+                self._hold_tail(text[start:])
+            else:
+                self._pending += text[start:]
+            if not resume:
+                return
+            text, index = resume.pop()
+            start = index
 
     def _begin_object(self, before: str) -> None:
         """Emit the text preceding a ``{``, holding back its fence opener.
@@ -3019,6 +3155,32 @@ class _ToolCallFilteredStream:
                 self._close_buf = ""
                 return leftover
         return ""
+
+    def _reject(self) -> str:
+        """Release a candidate a character proved prose; return held text to rescan.
+
+        The candidate may have read the brace of a real object as string
+        text: ``Use {"x {"tool_calls": ...}`` holds ``{"x {"`` and fails at
+        ``t``, and the post-turn parser, which tries every brace, still
+        runs that call.  Such a brace can only sit in the candidate's
+        latest string (any later key or value would have ruled it out
+        first), so the held text from that string's first ``{`` on is
+        scanned again and only the text before it is released.  The
+        closing-fence eater is disarmed: what follows the released text
+        is that brace, not a fence.
+
+        Returns:
+            The held text to scan again, ``""`` when there is none.
+        """
+        cut = self._json.string_brace if self._json is not None else None
+        if cut is None:
+            self._release()
+            return ""
+        rescan = self._pending[cut:]
+        self._pending = self._pending[:cut]
+        self._release()
+        self._eat_close = False
+        return rescan
 
     def _release(self) -> None:
         """Let go of the held candidate: drop a validated tool call, emit the rest.
@@ -3235,29 +3397,33 @@ def _iter_balanced_json_objects(
 
 
 def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
-    """Recursively collect every ``tool_calls`` list inside *obj*.
+    """Collect every ``tool_calls`` list inside *obj*.
 
     Walks dicts and lists looking for any ``"tool_calls"`` key whose value
     is a list.  This supports both top-level ``{"tool_calls": [...]}``
     objects and tool_calls nested inside an outer wrapper such as
-    ``{"outer": {"tool_calls": [...]}}``.
+    ``{"outer": {"tool_calls": [...]}}``.  The walk keeps its own stack:
+    ``json.loads`` accepts nesting far deeper than the interpreter's
+    recursion limit.
 
     Args:
         obj: A parsed JSON value (dict, list, scalar).
 
     Returns:
-        Lists of tool-call entries in encounter order.
+        Lists of tool-call entries in encounter order (depth first, a
+        dict's own list before the ones nested in its values).
     """
     out: list[list[Any]] = []
-    if isinstance(obj, dict):
-        tcs = obj.get("tool_calls")
-        if isinstance(tcs, list):
-            out.append(tcs)
-        for v in obj.values():
-            out.extend(_iter_tool_calls_lists(v))
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_iter_tool_calls_lists(item))
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            tcs = node.get("tool_calls")
+            if isinstance(tcs, list):
+                out.append(tcs)
+            stack.extend(reversed(node.values()))
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
     return out
 
 
@@ -3268,7 +3434,8 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     :func:`_iter_balanced_json_objects`) to find every valid JSON object in
     *content*, then collects every nested ``tool_calls`` list.  Duplicates
     (same ``name`` + same ``arguments``) are removed so a single logical
-    call emitted multiple times collapses to one entry.
+    call emitted multiple times collapses to one entry.  An entry whose
+    ``name`` is not a string is not a call.
 
     This robustly handles reasoning models (e.g. ``cc/opus``) that:
 
@@ -3291,10 +3458,15 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     for _start, _end, parsed in _iter_balanced_json_objects(content):
         for tcs in _iter_tool_calls_lists(parsed):
             for tc in tcs:
-                if not (isinstance(tc, dict) and "name" in tc):
+                if not (isinstance(tc, dict) and isinstance(tc.get("name"), str)):
                     continue
                 arguments = tc.get("arguments", {})
-                key = (tc["name"], json.dumps(arguments, sort_keys=True))
+                try:
+                    key = (tc["name"], json.dumps(arguments, sort_keys=True))
+                except RecursionError:
+                    # Arguments nested deeper than json.dumps can follow
+                    # could not be recorded in the conversation either.
+                    continue
                 if key in seen:
                     continue
                 seen.add(key)
@@ -3307,3 +3479,18 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 )
 
     return function_calls
+
+
+def render_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    """Render a tool call as the Python-style invocation an agent's trajectory records.
+
+    Args:
+        name: The tool's name.
+        arguments: The call's keyword arguments.
+
+    Returns:
+        The call as ``name(key=value, ...)`` in a ``python`` code fence,
+        each value in its ``repr`` form.
+    """
+    args_str = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+    return f"```python\n{name}({args_str})\n```"

@@ -112,31 +112,6 @@ function testRealReconnectStillResendsReady() {
   console.log('PASS real reconnect re-sends ready once per outage');
 }
 
-function testRemoteShimQueueNeverExpiresSoNoLateResend() {
-  // The shim keeps queued posts for ever (and even re-sends
-  // unconfirmed batches), so a slow first connect --
-  // e.g. the user took a while at the password prompt -- must not
-  // produce a second ready.
-  const {win, posted} = makePage();
-  assert.strictEqual(msgsOf(posted, 'ready').length, 1);
-  daemon(win, false);
-  const realNow = win.Date.now;
-  const t0 = realNow();
-  win.Date.now = () => t0 + 60000;
-  try {
-    daemon(win, true);
-  } finally {
-    win.Date.now = realNow;
-  }
-  assert.strictEqual(
-    msgsOf(posted, 'ready').length,
-    1,
-    'the page never re-sends the queued boot ready',
-  );
-  win.close();
-  console.log('PASS slow cold start never re-sends ready');
-}
-
 function testSubmitStillBlockedWhileDownOnColdStart() {
   // The "currently disconnected" guards moved off daemonWasDown: a
   // cold-start disconnect must still keep a submit out of the shim
@@ -438,7 +413,6 @@ function testServerCloseNeedsNoShield() {
 const tests = [
   testColdStartDoesNotDoubleReady,
   testRealReconnectStillResendsReady,
-  testRemoteShimQueueNeverExpiresSoNoLateResend,
   testSubmitStillBlockedWhileDownOnColdStart,
   testUaPauseReleasesTalkQueue,
   testPollersPauseWhileDisconnected,

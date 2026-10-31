@@ -14,6 +14,8 @@ const {
   installFakeWebSocket,
   readShimJs,
   bootShim,
+  ok,
+  fail,
 } = require('./transport_page_helpers');
 
 const MEDIA = path.resolve(__dirname, '..', 'media');
@@ -23,16 +25,6 @@ const MEDIA = path.resolve(__dirname, '..', 'media');
 // any stylesheet or script.
 function readAssetGuardJs() {
   return fs.readFileSync(path.join(MEDIA, 'assetLoadGuard.js'), 'utf-8');
-}
-
-function ok(msg) {
-  console.log('  ok -', msg);
-}
-
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
 }
 
 function buildDom(opts) {
@@ -356,13 +348,7 @@ async function run() {
   }
 
   {
-    const {window, sockets} = page();
-
-    const forwarded = [];
-    window.addEventListener('message', ev => {
-      const d = ev.data;
-      if (d && d.type && d.type !== 'daemonStatus') forwarded.push(d);
-    });
+    const {window, sockets, appFrames} = page();
 
     bootShim(window);
     const sock = sockets[0];
@@ -371,7 +357,7 @@ async function run() {
     await tick();
     try {
       assert.deepStrictEqual(
-        forwarded,
+        appFrames,
         [],
         'data frames must not reach the app before authentication',
       );
@@ -386,7 +372,7 @@ async function run() {
     await tick();
     try {
       assert.ok(
-        forwarded.some(d => d.type === 'history'),
+        appFrames.some(d => d.type === 'history'),
         'post-auth data frames must be forwarded to the app',
       );
       ok('post-auth server data frames are forwarded to the app');
@@ -1283,7 +1269,7 @@ async function run() {
     // Half-open socket: no onclose ever fires, so the shim's stale check
     // (every 15 s; the server sends a heartbeat frame every 15 s) must
     // drop a socket that has been silent for 45 s and reconnect.
-    const {window, sockets, statuses} = page({noOverlay: true});
+    const {window, sockets, statuses, appFrames} = page({noOverlay: true});
     const timers = [];
     window.setTimeout = function (fn, ms) {
       timers.push({fn, ms});
@@ -1296,17 +1282,17 @@ async function run() {
     const s0 = sockets[0];
     s0.fireOpen();
     s0.fireMessage({type: 'auth_ok'});
-    const appFrames = [];
-    window.addEventListener('message', ev => {
-      if (ev.data && ev.data.type === 'heartbeat') appFrames.push(ev.data);
-    });
     try {
       const armed = timers.filter(t => t.ms === 15000);
       assert.strictEqual(armed.length, 1, 'auth_ok arms the stale check');
       // Heartbeats keep the socket alive and never reach the app.
       now += 14000;
       s0.fireMessage({type: 'heartbeat'});
-      assert.strictEqual(appFrames.length, 0, 'heartbeat frames are swallowed');
+      assert.strictEqual(
+        appFrames.filter(f => f.type === 'heartbeat').length,
+        0,
+        'heartbeat frames are swallowed',
+      );
       now += 15000;
       armed[0].fn();
       assert.strictEqual(
@@ -1529,10 +1515,11 @@ async function run() {
   {
     const pg = page();
     const {window, sockets} = pg;
-    // Real timers drive the 1 s overlay tick; the wrappers only record
-    // which setTimeout ids the shim arms and clears, so the backoff
-    // cancellation below is checked by id instead of by sleeping
-    // shorter than the (1 s or longer) backoff it would have to catch.
+    // The setTimeout wrappers record which ids the shim arms and clears
+    // around real timers, so the backoff cancellation below is checked
+    // by id instead of by sleeping shorter than the (1 s or longer)
+    // backoff it would have to catch; the 1 s overlay tick runs on the
+    // fake interval clock (`clock.tick`).
     const armed = [];
     const cleared = [];
     const realSetTimeout = window.setTimeout;
@@ -2318,12 +2305,13 @@ async function run() {
     window.close();
   }
 
-  // The server checks the password on EVERY frame of a password-
-  // authenticated client: each frame carries the session password, and
-  // when install.sh rotates the password under an authenticated socket
-  // the server answers a frame with ``auth_failed`` and closes.  The
-  // stale password is forgotten so the reconnect probes with the
-  // uncounted empty one and gets the dialog, not a counted wrong guess.
+  // When install.sh rotates the password under an authenticated socket,
+  // the server answers a frame with ``auth_failed`` and closes (the
+  // per-frame password, the forgotten password and the reconnect's
+  // empty probe are transportFramePassword.test.js's).  Here: a browser
+  // that forbids storage (private mode) must not turn the refusal into a
+  // script error, and the refusal opens no dialog until the reconnect's
+  // ``auth_required`` asks for the new password.
   {
     const pg = page();
     const {window, sockets} = pg;
@@ -2335,20 +2323,6 @@ async function run() {
       sock.fireOpen();
       sock.fireMessage({type: 'auth_ok'});
       await tick();
-      window.acquireTransport().postMessage({type: 'runTask', prompt: 'x'});
-      assert.deepStrictEqual(
-        JSON.parse(sock.sent[sock.sent.length - 1]),
-        {password: 'rotated-away', type: 'runTask', prompt: 'x'},
-        'every frame after auth repeats the session password',
-      );
-      window.acquireTransport().postMessage({});
-      assert.deepStrictEqual(
-        JSON.parse(sock.sent[sock.sent.length - 1]),
-        {password: 'rotated-away'},
-        'a message with no fields still goes out as valid JSON',
-      );
-      // A browser that forbids storage (private mode) must not turn the
-      // refusal into a script error.
       const realRemoveItem = window.Storage.prototype.removeItem;
       window.Storage.prototype.removeItem = function () {
         throw new Error('SecurityError');
@@ -2369,25 +2343,17 @@ async function run() {
         !isVisible(doc.getElementById('auth-modal')),
         'a post-auth refusal opens no dialog by itself: the server closes the socket',
       );
+      // With working storage the stale password is forgotten, so the
+      // reconnect probes with the uncounted empty one.
       sock.fireMessage({
         type: 'error',
         code: 'auth_failed',
         text: 'That password is not correct. Try again.',
       });
       await tick();
-      assert.strictEqual(
-        window.localStorage.getItem('sorcar-remote-pwd'),
-        null,
-        'the rotated-away password is forgotten',
-      );
       sock.fireClose();
       const s1 = fireReconnect(pg);
       s1.fireOpen();
-      assert.deepStrictEqual(
-        JSON.parse(s1.sent[s1.sent.length - 1]),
-        {type: 'auth', password: ''},
-        'the reconnect probes with the uncounted empty password',
-      );
       s1.fireMessage({type: 'auth_required'});
       await tick();
       assert.ok(
@@ -2395,7 +2361,7 @@ async function run() {
         'the user is asked for the new password',
       );
       ok(
-        'a password rotated under an authenticated socket is forgotten and re-asked',
+        'a post-auth refusal tolerates throwing storage; the reconnect asks',
       );
     } catch (err) {
       fail('post-auth auth_failed handling broken', err);
@@ -2404,10 +2370,11 @@ async function run() {
   }
 
   // Settings > Remote password saved: the daemon tells the saving page
-  // the new password with ``remotePasswordChanged``.  A password-authenticated page adopts
-  // it for its next frame (the server checks every frame) and stores it
-  // for the reconnect; a page admitted without a password (loopback)
-  // keeps sending bare frames; a storage that throws is tolerated.
+  // the new password with ``remotePasswordChanged`` (the frames that
+  // carry it, its stored copy, malformed notices, an empty password and
+  // a loopback page are transportFramePassword.test.js's).  A storage
+  // that throws must not stop a password-authenticated page adopting a
+  // new password, nor dropping a cleared one (remote access turned off).
   {
     const {window, sockets} = page();
     window.localStorage.setItem('sorcar-remote-pwd', 'old-pw');
@@ -2435,72 +2402,22 @@ async function run() {
         'old-pw',
         'storage that throws is tolerated',
       );
-      sock.fireMessage({type: 'remotePasswordChanged', password: 'newer-pw'});
-      await tick();
-      window.acquireTransport().postMessage({type: 'runTask', prompt: 'y'});
-      assert.deepStrictEqual(
-        JSON.parse(sock.sent[sock.sent.length - 1]),
-        {password: 'newer-pw', type: 'runTask', prompt: 'y'},
-        'every later frame carries the latest rotated password',
-      );
-      assert.strictEqual(
-        window.localStorage.getItem('sorcar-remote-pwd'),
-        'newer-pw',
-        'the rotated password is stored for the reconnect',
-      );
-      sock.fireMessage({type: 'remotePasswordChanged'});
-      await tick();
-      window.acquireTransport().postMessage({type: 'runTask', prompt: 'z'});
-      assert.deepStrictEqual(
-        JSON.parse(sock.sent[sock.sent.length - 1]),
-        {password: 'newer-pw', type: 'runTask', prompt: 'z'},
-        'a rotation notice without a password changes nothing',
-      );
-      // Remote access turned off: the stored credential is forgotten at
-      // once and the next frame goes bare.
+      const realRemoveItem = window.Storage.prototype.removeItem;
+      window.Storage.prototype.removeItem = function () {
+        throw new Error('SecurityError');
+      };
       sock.fireMessage({type: 'remotePasswordChanged', password: ''});
+      window.Storage.prototype.removeItem = realRemoveItem;
       await tick();
       window.acquireTransport().postMessage({type: 'runTask', prompt: 'w'});
       assert.deepStrictEqual(
         JSON.parse(sock.sent[sock.sent.length - 1]),
         {type: 'runTask', prompt: 'w'},
-        'an empty password makes the next frame bare',
+        'an empty password makes the next frame bare even when storage throws',
       );
-      assert.strictEqual(
-        window.localStorage.getItem('sorcar-remote-pwd'),
-        null,
-        'an empty password removes the stored credential',
-      );
-      ok('a password-authenticated page adopts the changed password');
+      ok('a changed or cleared password is adopted even when storage throws');
     } catch (err) {
       fail('remotePasswordChanged adoption broken', err);
-    }
-    window.close();
-  }
-  {
-    const {window, sockets} = page();
-    bootShim(window);
-    const sock = sockets[0];
-    try {
-      sock.fireOpen();
-      sock.fireMessage({type: 'auth_ok'});
-      await tick();
-      sock.fireMessage({type: 'remotePasswordChanged', password: 'new-pw'});
-      await tick();
-      window.acquireTransport().postMessage({type: 'runTask', prompt: 'x'});
-      assert.deepStrictEqual(
-        JSON.parse(sock.sent[sock.sent.length - 1]),
-        {type: 'runTask', prompt: 'x'},
-        'a page admitted without a password keeps sending bare frames',
-      );
-      assert.strictEqual(
-        window.localStorage.getItem('sorcar-remote-pwd'),
-        null,
-        'no password is stored for a loopback page',
-      );
-      ok('a loopback page ignores the changed password');
-    } catch (err) {
-      fail('loopback remotePasswordChanged handling broken', err);
     }
     window.close();
   }
@@ -2566,7 +2483,7 @@ async function run() {
     }
     try {
       const popup = reconnectDelays('kiss-app-window');
-      const page = reconnectDelays('');
+      const plainDelays = reconnectDelays('');
       assert.ok(
         popup.every(ms => ms <= 10000),
         `the popup never waits longer than 10 s: ${popup}`,
@@ -2576,8 +2493,8 @@ async function run() {
         `the popup's backoff settles at 5-10 s: ${popup}`,
       );
       assert.ok(
-        page.some(ms => ms > 10000),
-        `other pages back off beyond 10 s: ${page}`,
+        plainDelays.some(ms => ms > 10000),
+        `other pages back off beyond 10 s: ${plainDelays}`,
       );
       ok(
         'the standalone app window reconnects within 10 s, other pages back off further',

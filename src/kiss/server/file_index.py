@@ -551,6 +551,7 @@ class FileIndex:
         self.relisted = relisted
         self.built_at = time.monotonic()
         self._views: dict[tuple[str, bool], FileView] = {}
+        self._served: set[tuple[str, bool]] = set()
         self._views_lock = threading.Lock()
 
     @classmethod
@@ -677,9 +678,15 @@ class FileIndex:
         return cls(root, [], frozenset({""}), {}, {}, False, 0)
 
     def view_keys(self) -> list[tuple[str, bool]]:
-        """Return the ``(sub_dir, complement)`` keys of the views built so far."""
+        """Return the ``(sub_dir, complement)`` keys of the views :meth:`view` served.
+
+        A view only :meth:`prebuild` built is not among them: the next
+        index prebuilds these keys alone, so a view no tab asked for
+        during one index's lifetime is dropped instead of being rebuilt
+        on every rescan for the daemon's lifetime.
+        """
         with self._views_lock:
-            return list(self._views)
+            return list(self._served)
 
     def view(self, sub_dir: str, complement: bool = False) -> FileView:
         """Return the (cached) view of the entries below *sub_dir*.
@@ -693,25 +700,41 @@ class FileIndex:
         """
         key = (sub_dir, complement and bool(sub_dir))
         with self._views_lock:
-            view = self._views.get(key)
-            if view is None:
-                view = self._make_view(*key)
-                self._views[key] = view
-            return view
+            self._served.add(key)
+            return self._cached_view(key)
 
-    def _make_view(self, sub_dir: str, complement: bool) -> FileView:
-        """Build the view of :meth:`view` (*key* already normalised)."""
+    def prebuild(self, keys: list[tuple[str, bool]]) -> None:
+        """Build the views of *keys* (from :meth:`view_keys`) before anyone asks.
+
+        Prebuilt views are not served views (see :meth:`view_keys`)
+        until :meth:`view` hands them out.
+        """
+        with self._views_lock:
+            for key in keys:
+                self._cached_view(key)
+
+    def _cached_view(self, key: tuple[str, bool]) -> FileView:
+        """Return the view of the normalised *key*, building it once (``_views_lock`` held)."""
+        view = self._views.get(key)
+        if view is not None:
+            return view
+        sub_dir, complement = key
         if not sub_dir:
-            return FileView(self.paths, self.wide_from)
-        head, tail = self.paths[:self.wide_from], self.paths[self.wide_from:]
-        if complement:
-            head = [p for p in head if not p.startswith(sub_dir)]
-            tail = [p for p in tail if not p.startswith(sub_dir)]
+            view = FileView(self.paths, self.wide_from)
         else:
-            n = len(sub_dir)
-            head = [p[n:] for p in head if p.startswith(sub_dir) and len(p) > n]
-            tail = [p[n:] for p in tail if p.startswith(sub_dir)]
-        return FileView(head + tail, len(head))
+            head, tail = self.paths[:self.wide_from], self.paths[self.wide_from:]
+            if complement:
+                head = [p for p in head if not p.startswith(sub_dir)]
+                tail = [p for p in tail if not p.startswith(sub_dir)]
+            else:
+                # ``len(p) > n`` drops *sub_dir*'s own entry, which is in
+                # the tail when its parent is a wide container.
+                n = len(sub_dir)
+                head = [p[n:] for p in head if p.startswith(sub_dir) and len(p) > n]
+                tail = [p[n:] for p in tail if p.startswith(sub_dir) and len(p) > n]
+            view = FileView(head + tail, len(head))
+        self._views[key] = view
+        return view
 
 
 def _search_prefixed(
@@ -1045,11 +1068,10 @@ class FileIndexRegistry:
         except Exception:
             logger.exception("file index scan of %s failed", root)
             index = FileIndex.empty(root)
-        # Rebuild the views tabs were using, here on the worker thread,
-        # so the next keystroke does not pay for them.
+        # Rebuild the views tabs used since the previous build, here on
+        # the worker thread, so the next keystroke does not pay for them.
         if previous is not None:
-            for sub_dir, complement in previous.view_keys():
-                index.view(sub_dir, complement)
+            index.prebuild(previous.view_keys())
         with self._lock:
             self._indexes[root] = index
         if index.relisted:

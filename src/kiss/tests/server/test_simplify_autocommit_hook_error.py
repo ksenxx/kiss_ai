@@ -30,7 +30,7 @@ from typing import Any
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.conftest import run_git
+from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 _HOOK_REASON = "HOOK-REJECT: commits are refused by this hook"
 
@@ -53,13 +53,14 @@ class TestManualCommitReportsHookOutput(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-hook-error-test-")
         self.repo = str(Path(self.tmpdir) / "otherrepo")
         Path(self.repo).mkdir()
-        run_git(self.repo, "init", "-q")
-        run_git(self.repo, "config", "user.email", "test@example.com")
-        run_git(self.repo, "config", "user.name", "Test User")
-        run_git(self.repo, "config", "commit.gpgsign", "false")
+        run_git_checked(self.repo, "init", "-q")
+        assert_repo_root(self.repo)
+        run_git_checked(self.repo, "config", "user.email", "test@example.com")
+        run_git_checked(self.repo, "config", "user.name", "Test User")
+        run_git_checked(self.repo, "config", "commit.gpgsign", "false")
         Path(self.repo, "seed.txt").write_text("seed\n")
-        run_git(self.repo, "add", "seed.txt")
-        run_git(self.repo, "commit", "-q", "-m", "seed")
+        run_git_checked(self.repo, "add", "seed.txt")
+        run_git_checked(self.repo, "commit", "-q", "-m", "seed")
         hook = Path(self.repo, ".git", "hooks", "pre-commit")
         hook.write_text(f"#!/bin/sh\necho '{_HOOK_REASON}' >&2\nexit 1\n")
         hook.chmod(hook.stat().st_mode | 0o111)

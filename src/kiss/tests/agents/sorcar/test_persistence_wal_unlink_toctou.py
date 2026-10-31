@@ -27,6 +27,7 @@ patches, fakes, or test doubles.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -49,8 +50,10 @@ class TestWalUnlinkToctou:
         th._db_conn = None
 
     def teardown_method(self) -> None:
+        th._release_owner_marker()
         th._close_db()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_shared_db_survives_concurrent_scratch_redirects(self) -> None:
         """The shared DB's ``-shm`` must never be unlinked (and new
@@ -72,7 +75,10 @@ class TestWalUnlinkToctou:
         def redirect_delete_restore() -> None:
             """Emulate a test that redirects, deletes, and restores."""
             while not stop.is_set():
-                scratch = Path(tempfile.mkdtemp(prefix="kiss_toctou_s_"))
+                # Inside the test's own folder, so teardown removes every
+                # scratch dir (thousands per run), including one a
+                # background ``_get_db()`` re-creates after the swap.
+                scratch = Path(tempfile.mkdtemp(prefix="scratch_", dir=self.tmpdir))
                 kd = scratch / ".kiss"
                 kd.mkdir()
                 th._DB_PATH = kd / "history.db"

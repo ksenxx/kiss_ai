@@ -14,6 +14,7 @@ Request ops:
 * ``status`` — enrolled services.
 * ``store_credentials`` — enroll a service's OAuth token into the vault.
 * ``clear_credentials`` — remove a service's token and surrogates.
+* ``generation`` — the nonce of a service's stored credential (no secret).
 * ``mint_surrogate`` — get an opaque per-service surrogate token.
 * ``http_request`` — the boundary: Sentinel authorizes the concrete
   request, the surrogate Authorization header is swapped for the real
@@ -503,6 +504,8 @@ class MuseAuthDaemon:
         if op == "clear_credentials":
             self.vault.clear(request["service"])
             return {"ok": True}
+        if op == "generation":
+            return {"ok": True, "generation": self.vault.generation(request["service"])}
         if op == "mint_surrogate":
             service = request["service"]
             if not self.vault.has_credentials(service):

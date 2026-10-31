@@ -42,6 +42,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from kiss.agents.seas.base.base_sea import ChannelSea
+from kiss.agents.sorcar.channel_workspace import WORKSPACE_ENV_VAR
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -92,7 +93,7 @@ class SlackSea(ChannelSea):
         ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
         launcher while the task runs), defaulting to ``"default"``.
         """
-        workspace = os.environ.get("KISS_CHANNEL_WORKSPACE", "default") or "default"
+        workspace = os.environ.get(WORKSPACE_ENV_VAR, "default") or "default"
         return tools + SlackAgent(workspace=workspace)._get_tools()
 
     def system_prompt(self, system_prompt: str) -> str:
@@ -758,7 +759,7 @@ class SlackChannelBackend(ToolMethodBackend):
             return text.replace(f"<@{self._bot_user_id}>", "").strip()
         return text
 
-    def list_third_party_agents(
+    def list_channels(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""
     ) -> str:
         """List channels in the Slack workspace.

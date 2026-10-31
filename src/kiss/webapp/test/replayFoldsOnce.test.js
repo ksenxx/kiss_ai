@@ -16,8 +16,9 @@
 //   * a 150-step running-task replay (302 panels) writes each panel's
 //     preview at most once (the quadratic pass wrote it once per event)
 //     and ends with every older panel folded, exactly as before;
-//   * live streaming after the replay still keeps the newest two panels
-//     open, so the replay-only shortcut does not leak into the stream.
+//   * live streaming after the replay folds older panels again (a
+//     finished fan-out folds once two newer panels follow it), so the
+//     replay-only shortcut does not leak into the stream.
 
 /* global require, console */
 'use strict';
@@ -150,22 +151,34 @@ function testLongReplayFoldsOnceAndFast() {
   );
 }
 
-function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
+function testLiveStreamAfterReplayFoldsAgain() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
   replayRunning(win, tab, longRun(3));
   const before = panels(win).length;
 
-  // The task keeps streaming after the replay: the live collapse pass
-  // must run again (the replay flag is cleared) and fold the rest.  The
-  // newest two are the last step's tool panel (a tool call starts
-  // folded) and the Thoughts panel its result armed (never folded).
+  // The task keeps streaming after the replay.  A finished fan-out with
+  // no sub-agents starts open, and only the live collapse pass folds it,
+  // once two newer panels follow it: that pass must run again (the
+  // replay flag is cleared).  Read and Bash panels start folded and
+  // Thoughts panels never fold, so they cannot show this.
+  send(win, {type: 'tool_call', name: 'run_parallel', ts: TS, tabId: tab});
+  send(win, {type: 'tool_result', content: 'no tasks', ts: TS, tabId: tab});
+  const fanout = win.document.querySelector('#output > .tc-run-parallel');
+  assert.ok(fanout && !isCollapsed(fanout), 'a fan-out panel starts open');
   for (const ev of [...step(3), ...step(4)]) send(win, {...ev, tabId: tab});
+  assert.ok(
+    isCollapsed(fanout),
+    'the live collapse pass folds the fan-out once newer panels follow',
+  );
   const ps = panels(win);
-  assert.strictEqual(ps.length, before + 4, 'two more steps, four panels');
-  const folded = ps.map(isCollapsed);
+  assert.strictEqual(
+    ps.length,
+    before + 5,
+    'the fan-out plus two more steps add five panels',
+  );
   assert.deepStrictEqual(
-    folded.slice(-2),
+    ps.slice(-2).map(isCollapsed),
     [true, false],
     'the newest tool panel starts folded, the armed Thoughts panel is open',
   );
@@ -174,12 +187,12 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
     'every older tool panel is folded once the stream resumes',
   );
   win.close();
-  console.log('  ok - live streaming after a replay keeps folding tool panels');
+  console.log('  ok - live streaming after a replay folds older panels again');
 }
 
 function main() {
   testLongReplayFoldsOnceAndFast();
-  testLiveStreamAfterReplayKeepsNewestTwoOpen();
+  testLiveStreamAfterReplayFoldsAgain();
 }
 
 main();

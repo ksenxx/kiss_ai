@@ -57,12 +57,12 @@ def _make_repo(path: Path) -> Path:
         capture_output=True,
         check=True,
     )
-    _git(path, "config", "user.email", "test@test.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "commit.gpgsign", "false")
+    _git(path, "config", "user.email", "test@test.com").check_returncode()
+    _git(path, "config", "user.name", "Test").check_returncode()
+    _git(path, "config", "commit.gpgsign", "false").check_returncode()
     (path / "README.md").write_text("# Test\n")
-    _git(path, "add", ".")
-    _git(path, "commit", "-m", "initial")
+    _git(path, "add", ".").check_returncode()
+    _git(path, "commit", "-m", "initial").check_returncode()
     return path
 
 

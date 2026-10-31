@@ -118,6 +118,14 @@
     _overlayTick = null;
   }
 
+  // The server answered: any outage or lockout is over, so the overlay
+  // escalation / lockout countdown stops.
+  function _endOutage() {
+    _outageSince = 0;
+    _lockedUntil = 0;
+    _stopOverlayTick();
+  }
+
   /**
    * Re-render the overlay text for the current disconnected state.
    *
@@ -240,6 +248,10 @@
   // The commands flushed on a reconnected socket, kept until the
   // server's ``pong`` confirms it has taken them (see ``auth_ok``).
   let _inflight = [];
+  // The frames posted while such a batch was unconfirmed (and every
+  // frame posted after them): sent once, after a ``pong`` confirmed
+  // the batch, and never part of a batch a reconnect re-sends.
+  let _held = [];
   try {
     if (_offlineShell) {
       _reloadOnFirstAuth =
@@ -557,6 +569,22 @@
   let _authPrompt = null;
   // Pending interactive submission, never populated from cached credentials.
   let _authPassword = '';
+  // The localStorage key of the password the server last accepted, kept
+  // for the next page load and for the other tabs of this origin.
+  const _PASSWORD_KEY = 'sorcar-remote-pwd';
+
+  function _storePassword(pwd) {
+    try {
+      localStorage.setItem(_PASSWORD_KEY, pwd);
+    } catch (_e) {}
+  }
+
+  function _forgetStoredPassword() {
+    try {
+      localStorage.removeItem(_PASSWORD_KEY);
+    } catch (_e) {}
+  }
+
   // The password the current socket's ``auth`` frame carried.  The
   // server checks the password on EVERY frame of a password-
   // authenticated client, so ``_sendFrame`` repeats it in each one.
@@ -727,7 +755,7 @@
   /** "Enter password" on the overlay after a Cancel: show the dialog again. */
   function _reopenPasswordPrompt() {
     _promptDeclined = false;
-    _updateLoadingMsg(_hadAuthThenClosed);
+    _setOverlayAction(null, null);
     _dispatchToApp({type: 'daemonStatus', connected: true});
     _promptForPassword();
     _reconnectNowIfNeeded();
@@ -737,7 +765,13 @@
     return {
       postMessage: function (msg) {
         const data = JSON.stringify(msg);
-        if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
+        // While a reconnect batch awaits its ``pong`` (on this
+        // connection or, once re-sent, on a later one) the frame waits
+        // behind it: it goes out once, when the batch is confirmed
+        // (see ``pong``).
+        if (_inflight.length > 0 || _held.length > 0) {
+          _held.push(data);
+        } else if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
           _sendFrame(data);
         } else {
           _pending.push(data);
@@ -757,7 +791,10 @@
 
   // A connection that went away while its ``pong`` was still awaited
   // proves nothing about the batch flushed on it: the next connection
-  // sends the batch again, ahead of whatever has been queued since.
+  // sends the batch again.  The frames held back behind it (never sent
+  // yet) stay in ``_held`` until that re-sent batch is confirmed: a
+  // ``submit`` among them is not replayable, and a second lost
+  // ``pong`` must not send it twice.
   function _requeueUnconfirmed() {
     if (_inflight.length === 0) return;
     _pending = _inflight.concat(_pending);
@@ -799,7 +836,14 @@
       // the typed text) exactly as it is, say nothing on the overlay,
       // and reconnect underneath; the reconnect's ``auth_required``
       // is a no-op on the open dialog and the Unlock sends on the
-      // new socket.
+      // new socket.  With no prompt pending the user already pressed
+      // Unlock and the reconnect it started failed: re-arm the dialog
+      // and say why, so Cancel, Escape and a second Unlock (which
+      // reconnects at once) work while the server is unreachable.
+      if (!_authPrompt) {
+        _promptForPassword();
+        _setAuthError('Cannot reach the server; retrying ...');
+      }
       _scheduleReconnect();
       return;
     }
@@ -895,7 +939,7 @@
       let pwd = _authPassword;
       if (!pwd) {
         try {
-          pwd = localStorage.getItem('sorcar-remote-pwd') || '';
+          pwd = localStorage.getItem(_PASSWORD_KEY) || '';
         } catch (_e) {}
       }
       _sessionPassword = pwd;
@@ -912,11 +956,7 @@
         // An interactive login the server accepted: store it for the
         // next page load (the offline-shell reload below included) and
         // for the other tabs of this origin.
-        if (_authPassword) {
-          try {
-            localStorage.setItem('sorcar-remote-pwd', _authPassword);
-          } catch (_e) {}
-        }
+        if (_authPassword) _storePassword(_authPassword);
         if (_reloadOnFirstAuth) {
           // A page the service worker served from its offline cache
           // may run code older than the server's: reload it once, now
@@ -943,10 +983,8 @@
           _stableTimer = null;
           _reconnectAttempt = 0;
         }, _STABLE_AFTER_MS);
-        _outageSince = 0;
-        _lockedUntil = 0;
+        _endOutage();
         _promptDeclined = false;
-        _stopOverlayTick();
         _setOverlayAction(null, null);
         // WebSocket auth is invisible to the browser's login heuristics.
         // Complete an interactive login explicitly; otherwise Terminal's
@@ -979,8 +1017,13 @@
         // the ``ping``; until then the batch stays in ``_inflight`` and
         // a connection that dies first re-sends it on the next one
         // (at-least-once: a settings save may be applied twice, never
-        // silently lost).  main.js holds prompts back while the daemon
-        // is down, so a ``runTask`` is never in such a batch.
+        // silently lost).  A frame the page posts before the ``pong``
+        // is held back behind the batch (see ``postMessage``) through
+        // every reconnect until a ``pong`` confirms it: sent once,
+        // after it, so a re-sent batch never overwrites a newer change
+        // and a ``submit`` posted meanwhile never runs twice.  main.js
+        // holds prompts back while the daemon is down, so a prompt
+        // rarely sits in the batch itself.
         const batch = _pending;
         _pending = [];
         for (let i = 0; i < batch.length; i++) _sendFrame(batch[i]);
@@ -1004,9 +1047,14 @@
       }
       if (msg.type === 'pong') {
         // The server has taken the whole batch flushed on this
-        // connection; nothing is owed any more.  A reload that waited
-        // for this confirmation (a new daemon process) goes ahead.
+        // connection; nothing is owed any more, and the frames held
+        // back behind it go out now, in the order they were posted.
+        // A reload that waited for this confirmation (a new daemon
+        // process) goes ahead.
         _inflight = [];
+        const held = _held;
+        _held = [];
+        for (let i = 0; i < held.length; i++) _sendFrame(held[i]);
         if (_pendingDaemonInstance) _reloadForDaemon(_pendingDaemonInstance);
         return;
       }
@@ -1014,9 +1062,7 @@
         _authPassword = '';
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
-        try {
-          localStorage.removeItem('sorcar-remote-pwd');
-        } catch (_e) {}
+        _forgetStoredPassword();
         // Reveal ``#app`` so the auth modal (which lives INSIDE #app
         // in the chat.html template — see the ``AUTH_MODAL`` template
         // placeholder substituted by ``_build_html``) is no longer
@@ -1031,9 +1077,7 @@
         // reveal never exposes the unauthenticated webapp.
         // The server answered, so any outage is over: stop the
         // overlay escalation / lockout countdown.
-        _outageSince = 0;
-        _lockedUntil = 0;
-        _stopOverlayTick();
+        _endOutage();
         if (_promptDeclined) {
           // The user closed the dialog earlier; the overlay still says
           // a password is needed and how to enter it.  Do not pop the
@@ -1057,9 +1101,7 @@
         // closing the socket.  Forget the stale password so the
         // reconnect probes with the uncounted empty one and gets the
         // password dialog, not a counted wrong guess.
-        try {
-          localStorage.removeItem('sorcar-remote-pwd');
-        } catch (_e) {}
+        _forgetStoredPassword();
         _authPassword = '';
         _sessionPassword = '';
         return;
@@ -1080,14 +1122,12 @@
         // credential now (its grace ended with the save) and let the
         // reconnect's handshake report that remote access is off.
         _sessionPassword = msg.password;
-        if (!msg.password) _authPassword = '';
-        try {
-          if (msg.password) {
-            localStorage.setItem('sorcar-remote-pwd', msg.password);
-          } else {
-            localStorage.removeItem('sorcar-remote-pwd');
-          }
-        } catch (_e) {}
+        if (msg.password) {
+          _storePassword(msg.password);
+        } else {
+          _authPassword = '';
+          _forgetStoredPassword();
+        }
       }
       if (msg.type === 'error' && !_authenticated) {
         // Pre-auth errors are the server's last word before it closes
@@ -1102,16 +1142,12 @@
         // / lockout countdown, else the next tick overwrites the
         // explanation with "Still trying to reach ..." and a stale
         // "Retry now" button.
-        _outageSince = 0;
-        _lockedUntil = 0;
-        _stopOverlayTick();
+        _endOutage();
         _setOverlayAction(null, null);
         const text = (msg.text && String(msg.text)) || 'Something went wrong.';
         if (msg.code === 'auth_failed') {
           _authPassword = '';
-          try {
-            localStorage.removeItem('sorcar-remote-pwd');
-          } catch (_e) {}
+          _forgetStoredPassword();
           if (_authModalOpen()) {
             _setAuthError(text);
             _promptForPassword();

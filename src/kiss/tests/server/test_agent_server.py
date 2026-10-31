@@ -161,13 +161,6 @@ class TestNewChatBroadcastsShowWelcome(unittest.TestCase):
         assert welcome_events[0]["tabId"] == "tab-1"
 
 
-class TestExtractResultSummary(unittest.TestCase):
-    """Test _extract_result_summary extracts summary from recorded events."""
-
-    def setUp(self) -> None:
-        self.server = AgentServer()
-
-
 class TestLastActiveFile(unittest.TestCase):
     """Test that _last_active_file is stored from run commands."""
 
@@ -205,7 +198,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
 
     def _git(self, *args: str) -> None:
         subprocess.run(
-            ["git", *args], cwd=self.repo, capture_output=True,
+            ["git", *args], cwd=self.repo, capture_output=True, check=True,
         )
 
     def setUp(self) -> None:
@@ -393,23 +386,23 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
         subprocess.run(
-            ["git", "init", "-b", "main"], cwd=self.repo, capture_output=True,
+            ["git", "init", "-b", "main"], cwd=self.repo, capture_output=True, check=True,
         )
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=self.repo, capture_output=True,
+            cwd=self.repo, capture_output=True, check=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
-            cwd=self.repo, capture_output=True,
+            cwd=self.repo, capture_output=True, check=True,
         )
         (self.repo / "file.txt").write_text("hello")
         subprocess.run(
-            ["git", "add", "."], cwd=self.repo, capture_output=True,
+            ["git", "add", "."], cwd=self.repo, capture_output=True, check=True,
         )
         subprocess.run(
             ["git", "commit", "-m", "init"],
-            cwd=self.repo, capture_output=True,
+            cwd=self.repo, capture_output=True, check=True,
         )
 
         self.server = AgentServer()

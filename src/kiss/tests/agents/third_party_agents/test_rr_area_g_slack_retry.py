@@ -5,7 +5,7 @@
 """End-to-end tests for slack_sea's shared retry and cursor helpers (G-R2).
 
 ``poll_messages`` and ``poll_thread_messages`` used to carry verbatim
-copies of the 3-attempt OSError backoff loop and the trailing
+copies of the 3-attempt transport-error backoff loop and the trailing
 cursor-advance loop; both now live in module-local helpers
 ``_call_with_retry`` and ``_advance_cursor``.  These tests drive the
 helpers with real callables — no mocks, patches, or test doubles.
@@ -15,28 +15,30 @@ from __future__ import annotations
 
 import pytest
 
+from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 from kiss.agents.third_party_agents.slack.slack_sea import _advance_cursor, _call_with_retry
 from kiss.tests.agents.third_party_agents.muse_test_utils import recorded_sleeps
 
 
 class FlakyCall:
-    """Real callable that raises OSError for its first *failures* calls."""
+    """Real callable that raises *error* for its first *failures* calls."""
 
-    def __init__(self, failures: int, result: str = "ok") -> None:
+    def __init__(self, failures: int, result: str = "ok", error: type[Exception] = OSError) -> None:
         self.failures = failures
         self.result = result
+        self.error = error
         self.calls = 0
 
     def __call__(self) -> str:
-        """Raise OSError while failures remain, then return the result."""
+        """Raise *error* while failures remain, then return the result."""
         self.calls += 1
         if self.calls <= self.failures:
-            raise OSError(f"transient error #{self.calls}")
+            raise self.error(f"failure #{self.calls}")
         return self.result
 
 
 class TestCallWithRetry:
-    """3-attempt OSError retry loop shared by both slack poll methods."""
+    """3-attempt OSError / MuseAuthError retry loop shared by both slack poll methods."""
 
     def test_success_first_attempt(self) -> None:
         """A call that succeeds immediately is invoked exactly once."""
@@ -56,20 +58,27 @@ class TestCallWithRetry:
     def test_raises_after_three_failures(self) -> None:
         """The last OSError propagates when every attempt fails."""
         fn = FlakyCall(failures=5)
-        with recorded_sleeps() as sleeps, pytest.raises(OSError, match="transient error #3"):
+        with recorded_sleeps() as sleeps, pytest.raises(OSError, match="failure #3"):
             _call_with_retry(fn, "messages", backoff=0.01)
         assert fn.calls == 3
         # No sleep follows the last attempt.
         assert sleeps == [0.01, 0.02]
 
-    def test_non_oserror_propagates_immediately(self) -> None:
-        """Only OSError is retried; other exceptions escape on attempt one."""
+    def test_muse_boundary_failures_are_retried(self) -> None:
+        """A MuseAuthError (Muse-mode transport failure) is retried like an OSError."""
+        fn = FlakyCall(failures=2, result="resp", error=MuseAuthError)
+        with recorded_sleeps() as sleeps:
+            assert _call_with_retry(fn, "messages", backoff=0.01) == "resp"
+        assert fn.calls == 3
+        assert sleeps == [0.01, 0.02]
 
-        def boom() -> None:
-            raise ValueError("not transient")
-
-        with pytest.raises(ValueError, match="not transient"):
-            _call_with_retry(boom, "messages")
+    def test_other_errors_propagate_immediately(self) -> None:
+        """Any other exception escapes on attempt one, with no retry and no sleep."""
+        fn = FlakyCall(failures=5, error=ValueError)
+        with recorded_sleeps() as sleeps, pytest.raises(ValueError, match="failure #1"):
+            _call_with_retry(fn, "messages", backoff=0.01)
+        assert fn.calls == 1
+        assert sleeps == []
 
 
 class TestAdvanceCursor:

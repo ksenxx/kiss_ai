@@ -414,27 +414,49 @@ _EXECUTING_WAIT: dict[threading.Thread, str] = {}
 """Thread -> module name it waits to execute."""
 
 _EXECUTING_RECHECK_SECONDS = 1.0
-"""How often a thread waiting for a file re-checks that the thread executing it is alive."""
+"""How often a thread waiting for a file re-checks that its record is still live
+(:func:`_executing_owner`)."""
 
 
 def _executing_owner(module_name: str) -> tuple[threading.Thread, int] | None:
     """Return the record of the thread executing *module_name*, or ``None``.
 
-    Called under :data:`_EXECUTING`.  A record whose thread has exited
-    is dropped: the daemon stops a task by injecting
-    ``KeyboardInterrupt`` at an arbitrary bytecode boundary
-    (``PyThreadState_SetAsyncExc``), and one landing in
+    Called under :data:`_EXECUTING`.  A record whose thread is not inside
+    an :func:`execute_python_file` call of *module_name* (dead, or alive
+    and doing something else) is dropped: the daemon's Stop
+    (``KeyboardInterrupt``) and the per-tool Stop
+    (``ToolCallInterrupted``) are injected at an arbitrary bytecode
+    boundary (``PyThreadState_SetAsyncExc``), and one landing in
     :func:`_executing` after the record is written but before its
     ``try`` is entered (or inside its ``finally``) leaves the record
-    behind, with no code of the stopped thread left to remove it.
-    The maps hold the thread, not its ident, which the next thread
-    started may reuse.
+    behind, with no code left to remove it.  A thread survives a
+    per-tool Stop and carries on with its task, so only its stack tells
+    whether it still executes the file (:func:`_in_execution`).  The
+    maps hold the thread, not its ident, which the next thread started
+    may reuse; the ident is read only while the thread is alive.
     """
     owner = _EXECUTING_OWNER.get(module_name)
-    if owner is not None and not owner[0].is_alive():
+    if owner is not None and not (owner[0].is_alive() and _in_execution(owner[0], module_name)):
         del _EXECUTING_OWNER[module_name]
         return None
     return owner
+
+
+def _in_execution(thread: threading.Thread, module_name: str) -> bool:
+    """Whether *thread*'s stack holds an :func:`execute_python_file` call of *module_name*.
+
+    :func:`_executing` makes and drops its claim inside that call, so
+    the owner of a live record always has one on its stack.
+    """
+    frame = sys._current_frames().get(thread.ident or 0)
+    while frame is not None:
+        if (
+            frame.f_code is execute_python_file.__code__
+            and frame.f_locals.get("module_name") == module_name
+        ):
+            return True
+        frame = frame.f_back
+    return False
 
 
 def _waits_on_thread(module_name: str, me: threading.Thread) -> bool:
@@ -442,15 +464,17 @@ def _waits_on_thread(module_name: str, me: threading.Thread) -> bool:
 
     Called under :data:`_EXECUTING`: follows the owner-waits-for-module
     chain so a circular load across threads is reported, not deadlocked.
+    A stale record on the chain is dropped (:func:`_executing_owner`),
+    so it cannot fake a cycle.
     """
     seen: set[threading.Thread] = set()
-    owner = _EXECUTING_OWNER.get(module_name)
+    owner = _executing_owner(module_name)
     while owner is not None and owner[0] not in seen:
         if owner[0] is me:
             return True
         seen.add(owner[0])
         waited = _EXECUTING_WAIT.get(owner[0])
-        owner = _EXECUTING_OWNER.get(waited) if waited is not None else None
+        owner = _executing_owner(waited) if waited is not None else None
     return False
 
 
@@ -706,6 +730,11 @@ class ParsedSea:
 
 _UNREADABLE = ParsedSea(None, set(), {}, False)
 
+PARSE_ERRORS = (SyntaxError, ValueError, RecursionError, MemoryError)
+"""What reading a script as Python source raises when the source is not parsable: a syntax
+error, undecodable bytes or a NUL byte (``ValueError``), or nesting too deep for the parser
+(``RecursionError``, or ``MemoryError`` "too complex to parse")."""
+
 _PARSE_CACHE: dict[Path, ParsedSea] = {}
 """The memo of :func:`parsed_sea`: one parse per file revision, so a registry refresh costs
 one ``stat`` per SEA."""
@@ -734,7 +763,7 @@ def parsed_sea(path: Path) -> ParsedSea:
         mentions = "register_as_model" in source
         try:
             tree = ast.parse(source)
-        except (SyntaxError, ValueError):
+        except PARSE_ERRORS:
             cached = ParsedSea(stamp, set(), {}, mentions)
         else:
             cached = ParsedSea(stamp, _class_bases(tree), _settings_literals(tree), mentions)
@@ -950,6 +979,8 @@ def _check_value(source: str, key: str, value: Any) -> Any:
         except OverflowError:
             value = math.inf
         except BaseException as exc:  # noqa: BLE001 — an untrusted number subclass may raise
+            if is_stop(exc):
+                raise
             raise SeaError(
                 f"{source} returned a broken value: {safe_message(exc)}"
             ) from exc

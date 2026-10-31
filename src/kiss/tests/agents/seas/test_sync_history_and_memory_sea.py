@@ -50,7 +50,7 @@ from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -228,25 +228,19 @@ def stamp_page(memory: MemoryDir, name: str, when: str) -> None:
 def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA pins the run: no built-in tools, its own prompt and system prompt, one tool."""
     sea = SyncHistoryAndMemorySea()
-    assert_no_removed_getters(sea_module)
+    assert_worker_contract(
+        sea_module,
+        sea,
+        {
+            "tool_profile": "none",
+            "max_budget": sea_module.MAX_BUDGET_USD,
+            "locked": ["tool_profile"],
+        },
+    )
     assert "history" in sea.description() and "/sync_history_and_memory" in sea.description()
     assert sea.prompt("") == sea_module.ADD_TO_PROMPT
     assert sea.prompt("  dry run ") == f"dry run\n\n{sea_module.ADD_TO_PROMPT}"
     assert sea.system_prompt("ignored") == sea_module.SYSTEM_PROMPT
-    assert sea.settings({"model": "m"}) == {
-        "model": "m",
-        "tool_profile": "none",
-        "max_budget": sea_module.MAX_BUDGET_USD,
-        "locked": ["tool_profile"],
-    }
-    assert sea_commands.base_settings([sea]) == {
-        "tool_profile": "none",
-        "max_budget": sea_module.MAX_BUDGET_USD,
-        "locked": ["tool_profile"],
-        "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
-    }
 
     def other() -> None: ...
 
@@ -516,7 +510,9 @@ def test_pages_relayed_through_a_fast_clock_become_conflicts_not_overwrites(
     assert page_text(beta, "note") == "beta's newer words\n"
     assert page_text(box.memory(), "note") in {"alpha's older words\n", "beta's newer words\n"}
     assert "note" in alpha_report.conflicts + beta_report.conflicts
-    assert "clock skew: +12" in format_reports([alpha_report, beta_report], dry_run=False)
+    assert f"clock skew: {alpha_report.skew:+.1f}s" in format_reports(
+        [alpha_report, beta_report], dry_run=False
+    )
 
 
 def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
@@ -678,17 +674,17 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
         make_db(box.db(host), {f"{host or 'local'}-{i}": {"events": 20} for i in range(5)})
         box.memory(host).write(f"{host or 'local'}-page", "first\n")
     before = {host: tasks_in(box.db(host)) for host in ("", "alpha", "beta")}
+    # Every live task is committed before the sync starts, so every report must hold it
+    # back; during the sync its writer only appends events to it.
+    live = {"events": 0, "result": PLACEHOLDER, "end_ts": 0, "timestamp": now}
+    for host in ("", "alpha", "beta"):
+        make_db(box.db(host), {f"{host or 'local'}-live": live})
     stop = threading.Event()
     errors: list[BaseException] = []
 
     def hammer(host: str) -> None:
         try:
             conn = sqlite3.connect(box.db(host), timeout=30)
-            conn.execute(
-                "INSERT INTO task_history(id, timestamp, task, result, end_ts) "
-                "VALUES (?, ?, ?, ?, 0)",
-                (f"{host or 'local'}-live", now, "live", PLACEHOLDER),
-            )
             seq = 0
             while not stop.is_set():
                 conn.execute(
@@ -871,7 +867,7 @@ def test_memory_delta_runs_as_shipped_text_with_its_helper_inline(
     assert run(["bogus", str(memory)])[0] == 2 and "unknown mode" in capsys.readouterr().err
 
 
-def test_ssh_peer_commands_ride_the_master_connection(tmp_path: Path) -> None:
+def test_ssh_peer_commands_ride_the_master_connection() -> None:
     """The peer's ssh command lines carry the control socket, the port, and ship scripts inline."""
     control = control_directory()
     try:

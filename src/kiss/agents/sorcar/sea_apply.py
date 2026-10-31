@@ -48,6 +48,7 @@ parameters.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -134,7 +135,9 @@ def calling_work_dir(cmd: dict[str, Any]) -> str:
     return ""
 
 
-def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
+def load_layers(
+    cmd: dict[str, Any], base: Path | None = None, loaded: Iterable[BaseSea] = (),
+) -> list[BaseSea]:
     """Load the SEA a ``run`` command names, under the tab's model-picker SEA.
 
     Args:
@@ -146,6 +149,9 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
         base: A SEA to lay under the file's (the tab's model-picker
             SEA), or ``None``.  With no ``seaPath`` the base alone is
             the run's SEA.
+        loaded: SEAs already loaded, reused instead of executing their
+            files again (a run's layers rebuilt after its slash SEA was
+            dropped keep the picker's SEA).
 
     Returns:
         The SEAs (see :func:`~kiss.agents.sorcar.sea_commands.sea_layers`).
@@ -162,7 +168,7 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
         raw_path = str(base)
     if not isinstance(raw_path, str):
         raise SeaError(f"SEA field must be a path string, got {type(raw_path).__name__}")
-    return sea_layers(Path(raw_path), base)
+    return sea_layers(Path(raw_path), base, loaded)
 
 
 def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str]:

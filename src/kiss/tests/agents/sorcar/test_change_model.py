@@ -291,3 +291,24 @@ class TestNextCallTargetsNewModel:
 
         assert agent.model.model_name == "model-c"
         assert agent.model_name == "model-c"
+
+
+class TestPinnedModelDaemon:
+    """A daemon that pins its tasks' model (a benchmark daemon) refuses ``set_model``."""
+
+    def test_refused_and_model_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from kiss.agents.sorcar.agent_dispatch import PIN_TASK_MODEL_ENV
+
+        monkeypatch.setenv(PIN_TASK_MODEL_ENV, "1")
+        agent, tools = _make_agent()
+        _bootstrap_live_model(agent, "model-a")
+        set_model = _find_tool(tools, "set_model")
+
+        result = set_model("model-b")
+
+        assert result.startswith("Refused") and "model-a" in result
+        assert agent.model_name == "model-a" and agent.model.model_name == "model-a"
+        # ``0`` and an empty value mean "not pinned": the switch goes through again
+        monkeypatch.setenv(PIN_TASK_MODEL_ENV, "0")
+        assert "model-b" in set_model("model-b")
+        assert agent.model_name == "model-b"

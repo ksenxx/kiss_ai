@@ -26,6 +26,9 @@ const assert = require('assert');
 const {send, click, ofType} = require('./simplify2_harness');
 const {
   WD,
+  SHA_A,
+  SHA_B,
+  commit,
   makePage: makeHarnessPage,
   makeRunner,
   byId,
@@ -35,6 +38,8 @@ const {
   menuItem,
   openExplorer,
   explorerRow,
+  openScm,
+  pinWorkspace,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
@@ -48,27 +53,6 @@ function makePage() {
 }
 
 const WD2 = '/ws/other';
-
-function pinWorkspace(win, wd) {
-  send(win, {type: 'configData', config: {work_dir: wd || WD}});
-}
-
-const SHA_A = 'a'.repeat(40);
-const SHA_B = 'b'.repeat(40);
-
-function commit(sha, parents, subject) {
-  return {
-    sha,
-    shortSha: sha.slice(0, 7),
-    parents,
-    author: 'A',
-    date: new Date().toISOString(),
-    refs: [],
-    subject,
-    message: subject,
-    files: [],
-  };
-}
 
 function worktree(wd, head) {
   return {
@@ -115,17 +99,6 @@ function commitRow(win, sha) {
   return all(win, '#scm-graph .scm-commit').find(
     el => el.dataset.scmSha === sha,
   );
-}
-
-/** Open Source Control on *wd* showing history A -> B. */
-function openScm(win, posted, wd) {
-  pinWorkspace(win, wd);
-  showSection(win, 'meta-scm');
-  answerScm(win, posted, wd || WD, [
-    commit(SHA_A, [SHA_B], 'Title line'),
-    commit(SHA_B, [], 'root'),
-  ]);
-  return commitRow(win, SHA_A);
 }
 
 async function main() {
@@ -192,7 +165,7 @@ async function main() {
       workDir: WD,
       repo: WD,
       head: SHA_B,
-      commits: [commit(SHA_B, [], 'root')],
+      commits: [commit(SHA_B, [], 'root', 'root')],
       worktrees: [worktree(WD, SHA_B)],
     });
     assert.ok(commitRow(win, SHA_A), 'the old row for A is still shown');
@@ -225,8 +198,8 @@ async function main() {
     });
     click(win, byId(win, 'scm-refresh'));
     answerScm(win, posted, WD, [
-      commit(SHA_A, [SHA_B], 'Title line'),
-      commit(SHA_B, [], 'root'),
+      commit(SHA_A, [SHA_B], 'Title line', 'Title line'),
+      commit(SHA_B, [], 'root', 'root'),
     ]);
     const backRow = commitRow(win, SHA_A);
     assert.ok(backRow, 'A is back in the graph');
@@ -399,8 +372,8 @@ async function main() {
     );
     // Repo B happens to contain the same sha.
     answerScm(win, posted, WD2, [
-      commit(SHA_A, [SHA_B], 'Same sha, other repo'),
-      commit(SHA_B, [], 'root'),
+      commit(SHA_A, [SHA_B], 'Same sha, other repo', 'Same sha, other repo'),
+      commit(SHA_B, [], 'root', 'root'),
     ]);
     const rowB = commitRow(win, SHA_A);
     assert.ok(rowB, 'the commit row for A renders in repo B');

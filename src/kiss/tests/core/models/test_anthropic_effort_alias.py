@@ -212,10 +212,22 @@ def test_alias_costs_the_same_as_base(level: str) -> None:
 
 @pytest.mark.parametrize("level", ANTHROPIC_EFFORT_LEVELS)
 def test_alias_keeps_openrouter_twin(level: str) -> None:
-    from kiss.core.models.model_info import openrouter_twin
+    """The OpenRouter slug carries the same generated effort aliases, so the level survives."""
+    from kiss.core.models.model_info import MODEL_INFO, openrouter_twin
 
     assert openrouter_twin("claude-opus-5-5") == "openrouter/anthropic/claude-opus-5.5"
-    assert openrouter_twin(f"claude-opus-5-5-{level}") == "openrouter/anthropic/claude-opus-5.5"
+    twin = f"openrouter/anthropic/claude-opus-5.5-{level}"
+    assert openrouter_twin(f"claude-opus-5-5-{level}") == twin
+    assert MODEL_INFO[twin].alias_of == "openrouter/anthropic/claude-opus-5.5"
+    assert MODEL_INFO[twin].thinking == level
+
+
+def test_alias_falls_back_to_the_bare_twin_without_a_leveled_one() -> None:
+    """Haiku 4.5 has no effort ladder on either side: a bare twin, no invented alias."""
+    from kiss.core.models.model_info import MODEL_INFO, openrouter_twin
+
+    assert "openrouter/anthropic/claude-haiku-4.5-low" not in MODEL_INFO
+    assert openrouter_twin("claude-haiku-4-5") == "openrouter/anthropic/claude-haiku-4.5"
 
 
 def test_openai_alias_twin_keeps_level_when_openrouter_has_it() -> None:
@@ -229,7 +241,7 @@ def test_harbor_prefixed_alias_keeps_openrouter_twin() -> None:
     from kiss.core.models.model_info import openrouter_twin
 
     assert openrouter_twin("anthropic/claude-opus-5-5-medium") == (
-        "openrouter/anthropic/claude-opus-5.5"
+        "openrouter/anthropic/claude-opus-5.5-medium"
     )
     assert openrouter_twin("openai/gpt-6.1-sol-xhigh") == "openrouter/openai/gpt-6.1-sol-xhigh"
     assert openrouter_twin("openrouter/anthropic/claude-opus-5.5") is None

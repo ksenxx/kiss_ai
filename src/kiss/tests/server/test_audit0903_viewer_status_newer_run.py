@@ -31,6 +31,7 @@ the tab — and must emit NOTHING for the viewer tab.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import textwrap
 import time
@@ -73,6 +74,7 @@ class TestViewerStatusNewerRun(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-newer-run-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.printer = MemoryPrinter()

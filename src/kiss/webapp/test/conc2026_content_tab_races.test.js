@@ -39,7 +39,12 @@ const {
   click,
   stubMonaco,
 } = require('./simplify2_harness');
-const {toastButton, contentTabStrips} = require('./ui_antipattern_harness');
+const {
+  toastButton,
+  contentTabStrips,
+  openDirtyContentTab,
+  makeRunner,
+} = require('./ui_antipattern_harness');
 
 // The page harness of workspaceScopedTabs.test.js plus a fake Monaco
 // rich enough for the EDITABLE content-tab path: renderCodeContent needs
@@ -56,14 +61,6 @@ function makePage() {
     },
   });
   return {win, posted, created};
-}
-
-function setWorkspace(win, dir) {
-  send(win, {type: 'configData', config: {work_dir: dir}, apiKeys: {}});
-}
-
-function entry(tabId, workDir, chatId) {
-  return {tabId, chatId: chatId || '', title: tabId, workDir: workDir || ''};
 }
 
 function conflictToast(win) {
@@ -89,34 +86,16 @@ const FILE_PATH = '/shared/notes.txt';
 // Drives a page into the state every test here starts from: two chat
 // tabs in different workspaces (a1 active in /ws/a, b1 hidden in /ws/b),
 // a content tab for FILE_PATH owned by a1 whose editor holds unsaved
-// edits, and — the only user path that arms contentReloadRequested — a
-// save that hit a disk conflict, so the sticky conflict toast with the
-// 'Overwrite' / 'Reload from disk' actions is on screen.
+// edits (ui_antipattern_harness.openDirtyContentTab), and — the only
+// user path that arms contentReloadRequested — a save that hit a disk
+// conflict, so the sticky conflict toast with the 'Overwrite' /
+// 'Reload from disk' actions is on screen.
 async function openDirtyConflictedTab(ctx) {
   const {win, posted, created} = ctx;
-  setWorkspace(win, '/ws/a');
-  send(win, {
-    type: 'tabs_state',
-    tabs: [entry('a1', '/ws/a', 'chat-1'), entry('b1', '/ws/b', 'chat-2')],
-  });
-  send(win, {
-    type: 'fileContent',
-    tabId: 'a1',
-    path: FILE_PATH,
-    name: 'notes.txt',
-    content: 'v1 on disk',
-    // The daemon's version stamp is what makes a file EDITABLE
-    // (renderContentView keys the Save bar on it).
-    version: 'ver-1',
-  });
-  await waitFor(
-    () => created.length >= 1,
-    'the content tab must create its editor',
-  );
+  await openDirtyContentTab(ctx);
   assert.strictEqual(created[0].value, 'v1 on disk');
 
-  // A keystroke makes the tab dirty (enables the Save button).
-  created[0].editor._type('v1 edited');
+  // The keystroke made the tab dirty (enables the Save button).
   const saveBtn = win.document.querySelector('.content-save-btn');
   assert.ok(saveBtn, 'the editable content tab must have a Save button');
   assert.strictEqual(saveBtn.disabled, false, 'dirty tab: Save enabled');
@@ -191,7 +170,6 @@ async function testForeignScopeErrorMustNotSwallowReload() {
     'the reloaded editor must hold the disk content',
   );
   win.close();
-  console.log('  ok - foreign-scope error does not swallow the reload');
 }
 
 // CAND-1 guard: an error reply for the SAME scope still clears the
@@ -254,7 +232,6 @@ async function testSameScopeErrorStillClearsReloadFlag() {
     'the unsaved edits must survive the failed reload + re-open',
   );
   win.close();
-  console.log('  ok - same-scope error still clears the reload flag');
 }
 
 // CAND-2: closing the content tab must remove its sticky conflict
@@ -291,31 +268,21 @@ async function testClosingTabRemovesConflictToast() {
       'a sticky toast about a dead tab can never be resolved',
   );
   win.close();
-  console.log('  ok - closing the tab removes its conflict toast');
 }
 
 (async () => {
-  const tests = [
+  const {test, report} = makeRunner();
+  await test(
+    'a foreign-scope error does not swallow the reload',
     testForeignScopeErrorMustNotSwallowReload,
-    testSameScopeErrorStillClearsReloadFlag,
-    testClosingTabRemovesConflictToast,
-  ];
-  let failures = 0;
-  for (const t of tests) {
-    try {
-      await t();
-      console.log('PASS', t.name);
-    } catch (err) {
-      failures += 1;
-      console.error('FAIL', t.name);
-      console.error(err && err.stack ? err.stack : err);
-    }
-  }
-  if (failures > 0) {
-    console.error(failures + ' test(s) failed');
-    process.exit(1);
-  }
-  console.log(
-    'All ' + tests.length + ' conc2026_content_tab_races tests passed',
   );
+  await test(
+    'a same-scope error still clears the reload flag',
+    testSameScopeErrorStillClearsReloadFlag,
+  );
+  await test(
+    'closing the tab removes its conflict toast',
+    testClosingTabRemovesConflictToast,
+  );
+  report('conc2026_content_tab_races');
 })();

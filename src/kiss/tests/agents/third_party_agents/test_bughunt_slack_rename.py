@@ -138,7 +138,7 @@ class TestSlackRenameBugs:
 
     def test_list_channels_tool_returns_channels(self) -> None:
         """The list-channels tool surfaces the API's channels under its own ``channels`` key."""
-        result = json.loads(self.backend.list_third_party_agents())
+        result = json.loads(self.backend.list_channels())
         assert result["ok"] is True
         assert "third_party_agents" not in result
         entries = result["channels"]

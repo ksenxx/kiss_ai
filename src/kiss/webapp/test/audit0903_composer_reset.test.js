@@ -17,6 +17,7 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {paste, settle} = require('./attachment_helpers');
 
 function clickSend(win) {
   win.document
@@ -41,14 +42,41 @@ function assertComposerCleared(win, label) {
   );
 }
 
+/**
+ * Fill the composer the way a user does -- attach a PDF and type the
+ * prompt (an `input` event, which shows the clear button) -- and check
+ * that every part assertComposerCleared reads left its default state.
+ */
+async function fillComposer(win, text) {
+  const chips = win.document.getElementById('file-chips');
+  paste(
+    win,
+    new win.File(['%PDF-1.4'], 'notes.pdf', {type: 'application/pdf'}),
+  );
+  await settle(() => chips.querySelector('.file-chip:not(.pending)'));
+  const inp = win.document.getElementById('task-input');
+  inp.value = text;
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  assert.strictEqual(
+    chips.children.length,
+    1,
+    'precondition: one attachment chip',
+  );
+  assert.strictEqual(
+    win.document.getElementById('input-clear-btn').style.display,
+    '',
+    'precondition: typing shows the clear button',
+  );
+}
+
 async function testFreshSubmitClearsComposer() {
   const {win, posted} = makePage();
-  const inp = win.document.getElementById('task-input');
-  inp.value = 'do the thing';
+  await fillComposer(win, 'do the thing');
   clickSend(win);
   const submit = posted.find(m => m && m.type === 'submit');
   assert.ok(submit, 'a fresh send posts a submit message');
   assert.strictEqual(submit.prompt, 'do the thing');
+  assert.strictEqual(submit.attachments.length, 1, 'the PDF rides along');
   assertComposerCleared(win, 'fresh submit');
   win.close();
   console.log('  ok - a fresh submit clears the composer');
@@ -58,12 +86,12 @@ async function testAppendToRunningTaskClearsComposer() {
   const {win, posted} = makePage();
   const tabId = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId});
-  const inp = win.document.getElementById('task-input');
-  inp.value = 'also do this';
+  await fillComposer(win, 'also do this');
   clickSend(win);
   const append = posted.find(m => m && m.type === 'appendUserMessage');
   assert.ok(append, 'a send during a running task posts appendUserMessage');
   assert.strictEqual(append.prompt, 'also do this');
+  assert.strictEqual(append.attachments.length, 1, 'the PDF rides along');
   assert.ok(
     !posted.some(m => m && m.type === 'submit'),
     'no second task is submitted while one is running',

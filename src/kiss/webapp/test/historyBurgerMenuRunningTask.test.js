@@ -85,26 +85,13 @@ function testRunningTaskAppearsWhenBurgerOpened() {
     }),
   ]);
 
-  const row = rowByTitle(win, 'my running task');
   assert.ok(
-    row,
+    rowByTitle(win, 'my running task'),
     'the running task row MUST appear in the History list after ' +
       'the burger menu opens — this is the user-reported invariant',
   );
-  const dot = findDot(row);
-  assert.ok(dot, 'running task row MUST carry a .sidebar-item-running spinner');
-  assert.strictEqual(
-    row.firstElementChild,
-    dot,
-    'spinner MUST be the first child of the row so it sits to ' +
-      'the LEFT of the task title (middle-left layout)',
-  );
-  assert.strictEqual(row.dataset.category, 'running');
-  // The spinner's colour and animation are historyRunningSpinner's.
-  assert.ok(
-    dot.classList.contains('status-spinner'),
-    'the running indicator must be the shared .status-spinner icon',
-  );
+  // What the running row's indicator is and where it sits are pinned by
+  // historyTaskRowIndicators.test.js and historyRunningSpinner.test.js.
 
   posted.length = 0;
   send(win, {type: 'status', running: false, tabId: undefined});
@@ -135,15 +122,8 @@ function testRunningTaskAppearsWhenBurgerOpened() {
     'finished task row MUST show a .sidebar-item-completed green tick ' +
       '(no animation)',
   );
-  assert.strictEqual(
-    row2.firstElementChild,
-    completed,
-    'green tick MUST be the first child of the row',
-  );
-  assert.ok(
-    completed.classList.contains('status-tick'),
-    'the completed indicator must be the shared .status-tick icon',
-  );
+  // The tick's place (first child) and icon (.status-tick) are pinned by
+  // historyTaskRowIndicators.test.js; its colour and stillness here.
 
   const cs2 = win.getComputedStyle(completed);
   assert.strictEqual(

@@ -382,3 +382,36 @@ class Sea(BaseSea):
         assert picker_counter.read_text().count("executed") == executed_before + 1, (
             picker_counter.read_text()
         )
+
+    def test_a_named_command_gets_its_help_but_a_bare_fallback_does_not(self) -> None:
+        """A typed task naming ``/xxx`` mid-text gets its ``description()``
+        after the task; a later bare ``/xxx`` in that chat, which falls back
+        to a plain prompt, gets no help block, so the follow-up executes the
+        SEA file once although the chat's earlier task names the command."""
+        counter = self._seed_counting_sea(
+            "plain",
+            "    def description(self):\n"
+            "        return 'Plain; /plain <text>.'\n",
+        )
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        first = sorcar.run(
+            "Later, use /plain on the notes.", work_dir=self.repo,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert first.success is True, first
+        assert runs[0]["prompt"].endswith(
+            "\n\n" + sea_commands.NAMED_COMMANDS_HEADING + "\n"
+            + 'Each is an agent; run one with run_agent(agent="<name>", task="...") when the '
+            "task calls for it.  What each does:\n- `/plain`: Plain; /plain <text>."
+        ), runs[0]["prompt"]
+        executed_before = counter.read_text().count("executed")
+        follow_up = sorcar.run(
+            "/plain", work_dir=self.repo, chat_id=first.chat_id,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert follow_up.success is True, follow_up
+        assert len(runs) == 2, runs
+        assert "Later, use /plain on the notes." in runs[1]["prompt"]
+        assert runs[1]["prompt"].endswith("# Task (work on it now)\n\n/plain"), runs[1]["prompt"]
+        assert counter.read_text().count("executed") == executed_before + 1, counter.read_text()

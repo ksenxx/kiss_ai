@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import textwrap
 import threading
@@ -215,6 +216,9 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-prestart-"))
+        # A cleanup, not tearDown: it also runs when the server start below
+        # or the drain in tearDown times out.
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.script = self.tmp / "agent.py"

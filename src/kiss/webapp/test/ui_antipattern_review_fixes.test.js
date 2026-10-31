@@ -4,7 +4,7 @@
 // add your name here
 //
 // End-to-end (jsdom) regression tests for the review findings on the
-// in-page dialog work in media/main.js (tmp/review-R1.md, R2.md):
+// in-page dialog work in media/main.js:
 //
 //   R1-1  Git prompts (Create Branch / Create Tag / Compare with) act on
 //         the repository and tab they were opened from, not on whatever

@@ -94,8 +94,11 @@ async function main() {
     win.close();
   });
 
+  // A running sub-agent keeps its idle chat open under Close Inactive
+  // (tabCloseActions_sweep1030), so sub-a stops first in these two.
   await test('Close Inactive closes the tab on screen last', () => {
     const {win, posted, tabA} = pageWithDeferredTabs();
+    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
     pickMenuItem(win, tabA, 'Close Inactive');
     assert.strictEqual(win._testApi.openTabs().length, 1, 'one fresh chat');
     assert.deepStrictEqual(scopedFetches(posted), []);
@@ -104,6 +107,7 @@ async function main() {
 
   await test('Close Inactive keeps a running tab, fetched only once', () => {
     const {win, posted, tabA} = pageWithDeferredTabs();
+    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
     h.send(win, {type: 'status', running: true, tabId: 'tab-c'});
     pickMenuItem(win, tabA, 'Close Inactive');
     const ids = win._testApi.openTabs().map(t => t.id);

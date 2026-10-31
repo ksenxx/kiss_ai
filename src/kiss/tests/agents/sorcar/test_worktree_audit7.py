@@ -15,8 +15,8 @@ BUG-32 (obsolete): covered the per-tab merge review data directories
         (``_merge_data_dir``/``_finish_merge``), removed together with
         the interactive diff/merge review workflow.
 
-BUG-33 FIX: copy_dirty_state now unquotes C-style quoted filenames
-        from git status --porcelain, correctly handling files with
+BUG-33 FIX: copy_dirty_state reads ``git status --porcelain -z``, whose
+        names git never quotes, correctly handling files with
         non-ASCII characters, control chars, or special characters.
 """
 
@@ -33,7 +33,6 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
-    _unquote_git_path,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
@@ -243,8 +242,8 @@ class TestBug31Fix:
 
 
 class TestBug33Fix:
-    """BUG-33 FIX: copy_dirty_state now uses _unquote_git_path to
-    properly handle C-style quoted filenames from git status.
+    """BUG-33 FIX: copy_dirty_state mirrors a file whose name git would
+    C-quote in plain ``git status --porcelain`` output.
     """
 
     def setup_method(self) -> None:
@@ -254,29 +253,6 @@ class TestBug33Fix:
     def teardown_method(self) -> None:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_unquote_plain_path(self) -> None:
-        """Plain paths are returned unchanged."""
-        assert _unquote_git_path("simple.txt") == "simple.txt"
-        assert _unquote_git_path("dir/file.py") == "dir/file.py"
-
-    def test_unquote_quoted_non_ascii(self) -> None:
-        """Quoted non-ASCII path is correctly decoded."""
-        quoted = '"caf\\303\\251.txt"'
-        assert _unquote_git_path(quoted) == "café.txt"
-
-    def test_unquote_escaped_chars(self) -> None:
-        """Standard C escape sequences are handled."""
-        assert _unquote_git_path('"hello\\nworld"') == "hello\nworld"
-        assert _unquote_git_path('"tab\\there"') == "tab\there"
-        assert _unquote_git_path('"back\\\\slash"') == "back\\slash"
-        assert _unquote_git_path('"with\\"quote"') == 'with"quote'
-
-    def test_unquote_multiple_octals(self) -> None:
-        """Multiple octal sequences are decoded."""
-        quoted = '"\\346\\227\\245.txt"'
-        assert _unquote_git_path(quoted) == "日.txt"
-
 
     def test_non_ascii_filename_copied(self) -> None:
         """BUG-33 FIX: File with non-ASCII name IS copied to worktree."""
@@ -307,13 +283,3 @@ class TestBug33Fix:
         _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
         _git("worktree", "prune", cwd=repo)
         _git("branch", "-D", "test-wt", cwd=repo)
-
-    def test_quoted_filename_parse_correct(self) -> None:
-        """BUG-33 FIX: The parsing logic now correctly handles quoted names."""
-        quoted_line = '?? "caf\\303\\251.txt"'
-        raw_fname = quoted_line[3:]
-
-        fname = _unquote_git_path(raw_fname)
-        assert fname == "café.txt", (
-            f"BUG-33 NOT fixed: unquoted name is {fname!r}, expected 'café.txt'"
-        )

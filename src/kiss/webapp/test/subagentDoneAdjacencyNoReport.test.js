@@ -101,8 +101,8 @@ function testSoleSubagentReportDoesNotBecomeActiveOnClose() {
 
 function testSubagentReportNotActiveWithSiblingStillRunning() {
   // Two sub-agents, the user is on the first.  It finishes with a
-  // report; the user must land on a chat tab (parent or the running
-  // sibling), never on the report.
+  // report; the user must land on the parent chat tab (not on the
+  // running sibling next to it), never on the report.
   const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, tabEl(win, subTabIds[0]));
@@ -118,9 +118,10 @@ function testSubagentReportNotActiveWithSiblingStillRunning() {
     reportTab.id,
     'BUG - the parked report must not become active',
   );
-  assert.ok(
-    [parentId, subTabIds[1]].includes(activeTabId(win)),
-    'a surviving chat tab must become active',
+  assert.strictEqual(
+    activeTabId(win),
+    parentId,
+    'the parent chat tab must become active, not the running sibling',
   );
   assert.ok(chatSurfaceVisible(win), 'the chat surface must be visible');
 

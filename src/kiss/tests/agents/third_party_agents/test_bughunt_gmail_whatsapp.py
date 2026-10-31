@@ -2,98 +2,27 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests reproducing verified bugs in gmail_sea and whatsapp_sea.
+"""Integration tests reproducing a verified bug in gmail_sea.
 
-No mocks, patches, or fakes of kiss classes: WhatsApp tests run the real
-``WhatsAppChannelBackend`` against a real local HTTP server speaking the
-whatsapp-mcp bridge REST protocol and a real bridge-schema SQLite database;
-Gmail tests use a real googleapiclient service built from the bundled
-static discovery document.
+No mocks, patches, or fakes of kiss classes: the tests use a real
+googleapiclient service built from the bundled static discovery document.
 
-Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
+Bug covered:
   (C) gmail: ``send_message`` addressed mail to a label ID (e.g. "INBOX").
-  (E) whatsapp: ``send_message`` must surface bridge send failures.
-  (G) whatsapp: ``poll_messages`` must honour ``channel_id``/limit/cursor.
+
+The WhatsApp bugs this file once covered, (E) ``send_message`` must surface
+bridge send failures and (G) ``poll_messages`` must honour
+``channel_id``/limit/cursor, are pinned by ``test_whatsapp_agent.py``
+(``TestChannelProtocol``) against the QR-paired bridge backend.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import httplib2  # type: ignore[import-untyped]
 import pytest
 from googleapiclient.discovery import build
 
 from kiss.agents.third_party_agents.gmail.gmail_sea import GmailChannelBackend
-from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import WhatsAppChannelBackend
-from kiss.tests.agents.third_party_agents.whatsapp_bridge import bridge_server, make_messages_db
-
-
-def _make_db(repo_dir: Path) -> None:
-    """Create a bridge-schema messages.db with two senders' messages."""
-    one, two = "111@s.whatsapp.net", "222@s.whatsapp.net"
-    chats = [(one, "One", "2026-01-01 00:00:02+00:00"), (two, "Two", "2026-01-01 00:00:03+00:00")]
-    messages = [
-        ("m1", one, one, "from-111-a", "2026-01-01 00:00:01+00:00", 0, ""),
-        ("m2", two, two, "from-222", "2026-01-01 00:00:02+00:00", 0, ""),
-        ("m3", one, one, "from-111-b", "2026-01-01 00:00:03+00:00", 0, ""),
-    ]
-    make_messages_db(repo_dir, chats, messages)
-
-
-class TestWhatsAppSendMessage:
-    """Bug (E): send_message must raise when the bridge reports failure."""
-
-    def test_send_message_raises_on_bridge_error(self, tmp_path: Path) -> None:
-        with bridge_server({"success": False, "message": "bad recipient"}) as server:
-            port = server.server_address[1]
-            backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
-            with pytest.raises(RuntimeError, match="bad recipient"):
-                backend.send_message("+14155238886", "hello")
-
-    def test_send_message_succeeds_without_error(self, tmp_path: Path) -> None:
-        with bridge_server({"success": True, "message": "sent"}) as server:
-            port = server.server_address[1]
-            backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
-            backend.send_message("+14155238886", "hello")
-            assert [(r["method"], r["path"], r["json"]) for r in server.requests] == [
-                ("POST", "/api/send", {"recipient": "14155238886", "message": "hello"})
-            ]
-
-
-class TestWhatsAppPollMessages:
-    """Bug (G): poll_messages must honour channel_id, limit, and the cursor.
-
-    (Bug (F) — racy hand-rolled webhook-queue draining — no longer has an
-    equivalent: the QR-paired backend reads the bridge's SQLite database,
-    which has no shared in-process queue to race on.)
-    """
-
-    def test_poll_messages_filters_to_channel_id(self, tmp_path: Path) -> None:
-        _make_db(tmp_path)
-        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
-        messages, cursor = backend.poll_messages("111", "0", limit=10)
-        assert [m["user"] for m in messages] == ["111@s.whatsapp.net"] * 2
-        assert [m["text"] for m in messages] == ["from-111-a", "from-111-b"]
-        assert cursor == "2026-01-01 00:00:03+00:00"
-
-    def test_poll_messages_empty_channel_id_returns_all_senders(self, tmp_path: Path) -> None:
-        _make_db(tmp_path)
-        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
-        messages, _ = backend.poll_messages("", "0", limit=10)
-        assert [m["text"] for m in messages] == ["from-111-a", "from-222", "from-111-b"]
-
-    def test_poll_messages_respects_limit(self, tmp_path: Path) -> None:
-        _make_db(tmp_path)
-        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
-        messages, _ = backend.poll_messages("111", "0", limit=1)
-        assert len(messages) == 1
-
-    def test_poll_messages_cursor_excludes_seen(self, tmp_path: Path) -> None:
-        _make_db(tmp_path)
-        backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
-        messages, _ = backend.poll_messages("111", "2026-01-01 00:00:01+00:00", limit=10)
-        assert [m["text"] for m in messages] == ["from-111-b"]
 
 
 class TestGmailSendMessage:

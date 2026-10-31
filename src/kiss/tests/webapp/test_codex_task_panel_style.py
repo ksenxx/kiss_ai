@@ -214,7 +214,6 @@ def _alpha_of(rgba: str) -> float:
 # The remote palette's VS Code tokens (remote-codex.css maps every
 # semantic name onto a --theme-* variable with its Dark Modern value
 # as the fallback).
-FG = "var(--theme-editor-foreground, #ccc)"
 DIM = "var(--theme-tab-inactiveForeground, #9d9d9d)"
 FAINT = "var(--theme-input-placeholderForeground, #989898)"
 SELECTED = "var(--theme-list-inactiveSelectionBackground, #37373d)"
@@ -240,18 +239,15 @@ REMOTE_METADATA_COLOR_RULES = [
     (".running-item-metrics", f"color: {DIM}"),
     (".running-item-workspace", f"color: {FAINT}"),
     (".running-item-ids", f"color: {FAINT}"),
-    (".running-item .ids-copy-btn", f"color: {FG}"),
-    (".running-item .sidebar-item-collapse", f"color: {FG}"),
-    (".running-item .sidebar-item-copy", f"color: {FG}"),
-    (".running-item .sidebar-item-favorite", f"color: {FG}"),
 ]
 
 
 @pytest.mark.parametrize(("selector", "decl"), REMOTE_METADATA_COLOR_RULES)
 def test_remote_history_metadata_readable_on_dark(selector: str, decl: str) -> None:
-    """main.css metadata/buttons colors are near-black (designed for
-    the pastel background); the remote's neutral rows take VS Code's
-    foregrounds instead."""
+    """The remote's neutral rows take VS Code's dim and placeholder
+    foregrounds for the metadata lines.  (The row buttons keep main.css's
+    theme foreground; test_remote_stylesheet_cascade_sweep1030.py
+    measures them.)"""
     rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
     assert decl in rule, f"{selector} must set {decl}; got: {rule!r}"
 

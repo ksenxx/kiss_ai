@@ -75,11 +75,16 @@ def start_remote_daemon(
     home: Path, *, password: str = "", seed: list[dict[str, Any]] | None = None,
     certfile: Path | None = None, keyfile: Path | None = None, timeout: float = 60.0,
     config: dict[str, Any] | None = None, port: int = 0, host: str = "127.0.0.1",
+    env: dict[str, str] | None = None,
 ) -> RemoteDaemon:
     """Start a daemon under *home* on an OS-picked port and wait until it is bound.
 
     Args:
         home: The child's ``KISS_HOME`` (created when missing).
+        env: Environment variables set for the child on top of this
+            process's (a ``HOME`` of its own, so its start-up scan of the
+            home directory for the ``@`` picker does not walk the
+            developer's).
         password: Its remote password (stored hashed); empty means loopback-only.
         seed: Rows for its ``task_history``: dicts with ``chat_id``,
             ``task`` and optionally ``task_id`` (forced), ``timestamp``
@@ -102,7 +107,7 @@ def start_remote_daemon(
     """
     home.mkdir(parents=True, exist_ok=True)
     endpoint_file = home / local_endpoint.LOCAL_ENDPOINT_FILE
-    env = dict(os.environ, KISS_HOME=str(home))
+    child_env = dict(os.environ, **(env or {}), KISS_HOME=str(home))
     # The seed goes through a file: a row with a multi-megabyte task
     # text does not fit on the command line.
     seed_file = home / "seed.json"
@@ -115,7 +120,7 @@ def start_remote_daemon(
     if certfile is not None and keyfile is not None:
         cmd += ["--certfile", str(certfile), "--keyfile", str(keyfile)]
     process = subprocess.Popen(
-        cmd, env=env, cwd=str(home), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        cmd, env=child_env, cwd=str(home), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True,
     )
     assert process.stdout is not None

@@ -218,7 +218,7 @@ class TestF6CommitToastIdIsPerInvocation(_Base):
         printer = _RecordingPrinter()
         agent.printer = printer
 
-        committed = agent._commit_worktree()
+        committed = agent._commit_worktree(agent.worktrees[0])
 
         self.assertTrue(committed)
         subject = run_git(str(wt_dir), "log", "-1", "--format=%s").stdout

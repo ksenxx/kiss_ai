@@ -157,11 +157,11 @@ def test_response_has_message_text_and_failed() -> None:
     failed = {"status": "failed", "error": {"message": "boom"}}
     with pytest.raises(KISSError, match="boom"):
         m._raise_for_failed_response(failed)
-    assert m.take_partial_usage_response() is failed
     incomplete = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
     with pytest.raises(KISSError, match="max_output_tokens"):
         m._raise_for_failed_response(incomplete)
-    assert m.take_partial_usage_response() is incomplete
+    # The check only raises: the request path records the billed response
+    # before calling it (test_failed_responses_billing_sweep1030.py).
     assert m.take_partial_usage_response() is None
 
 

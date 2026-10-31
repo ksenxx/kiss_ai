@@ -21,7 +21,7 @@ cannot be hit deterministically without test doubles; the stale
 interleaving is therefore reproduced by calling the per-tab tracking
 step exactly as the fan-out does, after the rebind has run.  The
 healthy paths (subscribed fan-out copy, directly addressed event,
-replay envelope, cleanup) run end-to-end through ``broadcast``.
+cleanup) run end-to-end through ``broadcast``.
 """
 
 from __future__ import annotations
@@ -77,7 +77,8 @@ class TestTabWorktreeDirRebind(unittest.TestCase):
 
     def test_directly_addressed_events_always_record(self) -> None:
         # worktree_done is stamped with the tab id by the server and
-        # takes the direct path; a replay envelope nests the events.
+        # takes the direct path, as does the worktree_created a replay
+        # re-sends for a running task.
         self.printer.broadcast({
             "type": "worktree_done", "tabId": "tab-9",
             "worktreeDir": "/repo/.kiss-worktrees/done",
@@ -87,14 +88,8 @@ class TestTabWorktreeDirRebind(unittest.TestCase):
             "/repo/.kiss-worktrees/done",
         )
         self.printer.broadcast({
-            "type": "task_events", "tabId": "tab-8",
-            "events": [
-                {"type": "prompt", "text": "x"},
-                {
-                    "type": "worktree_created",
-                    "worktreeDir": "/repo/.kiss-worktrees/replayed",
-                },
-            ],
+            "type": "worktree_created", "tabId": "tab-8",
+            "worktreeDir": "/repo/.kiss-worktrees/replayed",
         })
         self.assertEqual(
             self.printer.worktree_dir_for_tab("tab-8"),

@@ -14,6 +14,7 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
   stubClipboard,
+  captureTimers,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -24,22 +25,7 @@ function makePage() {
   const {win, posted} = makeHarnessPage({
     beforeScripts(win) {
       clipboardWrites = stubClipboard(win).writes;
-      const realSetTimeout = win.setTimeout.bind(win);
-      const realClearTimeout = win.clearTimeout.bind(win);
-      win.setTimeout = function (fn, ms, ...args) {
-        const timer = {
-          fn,
-          ms,
-          id: realSetTimeout(fn, ms, ...args),
-          cleared: false,
-        };
-        timeouts.push(timer);
-        return timer.id;
-      };
-      win.clearTimeout = function (id) {
-        for (const t of timeouts) if (t.id === id) t.cleared = true;
-        realClearTimeout(id);
-      };
+      captureTimers(win, timeouts);
     },
   });
   return {win, posted, clipboardWrites, timeouts};
@@ -49,7 +35,7 @@ function makePage() {
 function fireTimeout(win, timer) {
   if (timer.cleared) return;
   win.clearTimeout(timer.id);
-  timer.fn();
+  timer.cb();
 }
 
 const WS = '/Users/koushik/work/repo';

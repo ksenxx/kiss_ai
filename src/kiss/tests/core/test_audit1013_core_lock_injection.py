@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from pathlib import Path
 
 from kiss.core import browser_handoff, config
 from kiss.core.base import Base
@@ -144,11 +145,19 @@ def run_hammer(name: str) -> None:
         _hammer(query, {"_query_lock": query.index._query_lock})
 
 
-def test_core_lock_paths() -> None:
-    """No ``kiss.core`` lock site a task thread runs leaks the lock under injection."""
+def test_core_lock_paths(tmp_path: Path) -> None:
+    """No ``kiss.core`` lock site a task thread runs leaks the lock under injection.
+
+    The children get a ``KISS_HOME`` of their own: an injection that
+    lands after ``save_config`` staged ``.config.json-<hex>`` and before
+    its cleanup removed it leaves that file behind, and in the session's
+    home it made every later ``load_config`` of the session on Windows
+    wait 10 s for a write it took to be in flight.
+    """
+    env = {**os.environ, "KISS_HOME": str(tmp_path)}
     for name in ("base", "artifact_dir", "verdict", "handoff", "config", "stream", "query"):
         proc = subprocess.run(
             [sys.executable, "-c", f"import {__name__} as m; m.run_hammer({name!r})"],
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, timeout=120, check=False, env=env,
         )
         assert proc.returncode == 0, f"{name}: {proc.stderr[-3000:]}"

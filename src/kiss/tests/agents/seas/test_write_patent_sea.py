@@ -11,7 +11,6 @@ server (``conftest.run_sea``) so the rules, the tools and the real gate report a
 the agent sees.
 """
 
-import shutil
 import zipfile
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from PIL import Image
 
 from kiss.agents.seas.write_patent import write_patent_sea
 from kiss.tests.agents.seas.conftest import gate
-from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run
+from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 _CLEAN_DRAFT = """\
@@ -349,7 +348,7 @@ def test_antecedent_problems_resolve_quantifiers_modifiers_and_skips() -> None:
     assert problems == []
 
 
-@pytest.mark.skipif(not shutil.which("pdflatex"), reason="pdflatex is not installed")
+@pytest.mark.usefixtures("tex_bin")
 def test_build_patent_writes_docx_and_pdfs(tmp_path: Path) -> None:
     """The clean draft builds a numbered DOCX, a specification PDF and a drawings PDF."""
     path = _write(tmp_path, _CLEAN_DRAFT, figures=2)
@@ -450,9 +449,13 @@ def test_build_patent_renders_markdown_tables(tmp_path: Path) -> None:
     assert "\\begin{tabularx}{\\textwidth}{|X|l|}" in tex  # at least one column wraps
     assert "\\textbf{Modality type} & \\textbf{Event type of the hypothesis}" in tex
     assert "Thermal camera & fire & 0.90 &  \\\\" in tex
-    if shutil.which("pdflatex"):
-        report = write_patent_sea.build_patent(str(path))
-        assert "draft.tex errors: 0 (limit 0) PASS" in report
+
+
+@pytest.mark.usefixtures("tex_bin")
+def test_build_patent_compiles_markdown_tables(tmp_path: Path) -> None:
+    """The tabularx tables of a Markdown draft compile with no LaTeX error."""
+    path = _write(tmp_path, _TABLE_DRAFT)
+    assert "draft.tex errors: 0 (limit 0) PASS" in write_patent_sea.build_patent(str(path))
 
 
 def test_build_patent_without_pdflatex_and_missing_draft(tmp_path: Path) -> None:
@@ -501,6 +504,7 @@ def test_sea_description_prompt_tools_and_settings() -> None:
         settings["timeout"] == write_patent_sea.DISPATCH_TIMEOUT_SECONDS
         and settings["model"] == "x"
     )
+    assert_no_removed_getters(write_patent_sea)
 
 
 def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
   makePage,
+  send,
   stubRaf,
   fakeIntervals,
   fakeMatchMedia,
@@ -49,24 +50,20 @@ const TIPS_DATA = {
   version: '2026.10.1',
 };
 
-function sendTips(win) {
-  win.dispatchEvent(new win.MessageEvent('message', {data: TIPS_DATA}));
-}
-
 function tipsPanels(win) {
   return win.document.body.querySelectorAll('kiss-tips-panel').length;
 }
 
 test('the tipsData message opens the tips window once', () => {
   const win = loadChatDom();
-  sendTips(win);
+  send(win, TIPS_DATA);
   assert.strictEqual(tipsPanels(win), 1);
   assert.strictEqual(
     win.localStorage.getItem('kissTipsSeenVersion'),
     '2026.10.1',
   );
   // A reconnect re-sends tipsData: still one window.
-  sendTips(win);
+  send(win, TIPS_DATA);
   assert.strictEqual(tipsPanels(win), 1);
 });
 

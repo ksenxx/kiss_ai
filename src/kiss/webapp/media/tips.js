@@ -285,7 +285,14 @@
   // tips come back once per device after every update.
   const SEEN_VERSION_KEY = 'kissTipsSeenVersion';
 
+  /**
+   * Whether the user opted out of the automatic tips: in this browser,
+   * or on the daemon (`cfg.optOut`), whose persisted choice also holds
+   * on another device or after this site's data was cleared.
+   */
   function readOptOut() {
+    const cfg = window.__TIPS__;
+    if (cfg && cfg.optOut === true) return true;
     try {
       return window.localStorage.getItem(OPT_OUT_KEY) === '1';
     } catch {
@@ -317,9 +324,12 @@
    * `detail = {type: 'tipsOptOut', optOut: <boolean>}`.  main.js relays
    * that detail to the daemon as a `tipsOptOut` message so the choice
    * survives updates (the daemon then stops claiming the popup for new
-   * versions).
+   * versions).  The page's copy of the daemon's flag follows the choice
+   * until the next `tipsData` brings the persisted one.
    */
   function writeOptOut(optOut) {
+    const cfg = window.__TIPS__;
+    if (cfg) cfg.optOut = !!optOut;
     try {
       if (optOut) window.localStorage.setItem(OPT_OUT_KEY, '1');
       else window.localStorage.removeItem(OPT_OUT_KEY);
@@ -480,10 +490,6 @@
       }
     }
 
-    get tips() {
-      return this._tips;
-    }
-
     set tips(list) {
       this._tips = Array.isArray(list) ? list : [];
       this._tipsAssigned = true;
@@ -600,7 +606,7 @@
   }
 
   /**
-   * Install the tips bootstrap `{tips, show, version}` and auto-open
+   * Install the tips bootstrap `{tips, show, version, optOut}` and auto-open
    * the window when due.  Called at load with the config the remote
    * page embeds, and again from main.js for every `tipsData` event the
    * daemon sends on `ready`.

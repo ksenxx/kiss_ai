@@ -21,10 +21,11 @@
 //   * a touch that starts inside an `ignore` element is left to that
 //     element (the composer's own swipe gestures, the streamed browser
 //     screen that forwards drags to the remote page);
-//   * an ancestor that scrolls sideways (overflow-x) and did scroll
-//     during the touch, or any `scrollPositions()` entry that changed
-//     (a Monaco editor scrolls sideways through transforms, not
-//     scrollLeft), means the finger was scrolling, not swiping;
+//   * an ancestor that scrolls sideways (overflow-x, or the page
+//     itself) and did scroll during the touch, or any
+//     `scrollPositions()` entry that changed (a Monaco editor scrolls
+//     sideways through transforms, not scrollLeft), means the finger
+//     was scrolling, not swiping;
 //   * a text selection made during the touch (long-press then drag)
 //     is a selection, not a swipe.
 //
@@ -48,12 +49,17 @@
   // Sideways travel must exceed vertical travel by this factor.
   const SWIPE_AXIS_RATIO = 1.5;
 
-  /** Whether *el* can scroll sideways (overflow-x auto or scroll with
-   *  content wider than its box). */
+  /** Whether *el* can scroll sideways: content wider than its box and
+   *  overflow-x auto or scroll.  The document's scrolling element
+   *  scrolls the viewport, where `visible` means auto, so it scrolls
+   *  unless its overflow-x is hidden or clip. */
   function scrollsSideways(el) {
     if (!el || el.nodeType !== 1) return false;
     if (el.scrollWidth <= el.clientWidth + 1) return false;
     const overflowX = global.getComputedStyle(el).overflowX;
+    if (el === el.ownerDocument.scrollingElement) {
+      return overflowX !== 'hidden' && overflowX !== 'clip';
+    }
     return overflowX === 'auto' || overflowX === 'scroll';
   }
 

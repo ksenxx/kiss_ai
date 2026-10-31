@@ -132,6 +132,7 @@ class TestTipsInRemoteHtml(unittest.TestCase):
             {
                 "tips": ["Hello."],
                 "show": True,
+                "optOut": False,
                 "version": web_server._read_version(),  # type: ignore[attr-defined]
             },
         )

@@ -11,14 +11,22 @@ accumulated in the macOS temp folder.  These tests drive real child
 interpreters with a private ``TMPDIR`` and inspect what they leave
 behind.
 
+On POSIX the home lives in the session temp root (``kiss-pt-*``),
+where ``tempfile`` and every child that inherits ``TMPDIR`` write
+too; leaked test temp dirs had used up the inodes of the ``/tmp``
+tmpfs by 2026-10-30.  The root goes at exit as well, and a root whose
+owner died without running atexit goes with the next session.
+
 Two tests here are *probes*: they only run inside the nested pytest
 process another test starts (selected by ``KISS_HOME_CLEANUP_PROBE``)
 because one of them ends its session with ``pytest.exit``.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -114,13 +122,28 @@ def _run_nested_pytest(
     )
 
 
+def _check_home_location(home: Path, tmpdir: Path) -> None:
+    """Check that *home* sits in a session root in *tmpdir* (POSIX) or in *tmpdir*."""
+    if os.name == "posix":
+        assert home.parent.name.startswith("kiss-pt-"), home
+        assert home.parent.parent.resolve() == tmpdir.resolve()
+    else:
+        assert home.parent.resolve() == tmpdir.resolve()
+
+
+def _assert_nothing_left(tmpdir: Path) -> None:
+    """Check that no session home or session temp root is left in *tmpdir*."""
+    assert list(tmpdir.glob("kiss_test_*")) == []
+    assert list(tmpdir.glob("kiss-pt-*")) == []
+
+
 def _reported_home(stdout: str, tmpdir: Path) -> Path:
     """Return the single ``KISS_HOME=`` path a probe printed, checking it lives in *tmpdir*."""
     lines = stdout.splitlines()
     homes = [line.removeprefix("KISS_HOME=") for line in lines if line.startswith("KISS_HOME=")]
     assert len(homes) == 1, stdout
     home = Path(homes[0])
-    assert home.parent.resolve() == tmpdir.resolve()
+    _check_home_location(home, tmpdir)
     return home
 
 
@@ -164,9 +187,9 @@ def test_probe_interrupted_run_with_live_child() -> None:
 def test_import_then_exit_removes_home(tmp_path: Path) -> None:
     """Importing the conftest and exiting leaves no ``kiss_test_*`` behind."""
     (home,) = _run_python(_REPORT_HOME, tmp_path)
-    assert Path(home).parent.resolve() == tmp_path.resolve()
+    _check_home_location(Path(home), tmp_path)
     assert not Path(home).exists()
-    assert list(tmp_path.glob("kiss_test_*")) == []
+    _assert_nothing_left(tmp_path)
 
 
 def test_queued_event_at_exit_does_not_recreate_home(tmp_path: Path) -> None:
@@ -180,7 +203,7 @@ def test_queued_event_at_exit_does_not_recreate_home(tmp_path: Path) -> None:
         assert all(name.startswith("history.db") for name in leftovers), leftovers
         return
     assert not Path(home).exists()
-    assert list(tmp_path.glob("kiss_test_*")) == []
+    _assert_nothing_left(tmp_path)
 
 
 def test_pytest_run_removes_home(tmp_path: Path) -> None:
@@ -189,7 +212,7 @@ def test_pytest_run_removes_home(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     home = _reported_home(proc.stdout, tmp_path)
     assert not home.exists()
-    assert list(tmp_path.glob("kiss_test_*")) == []
+    _assert_nothing_left(tmp_path)
 
 
 @posix_only("SIGTERM handler in the leftover child")
@@ -205,7 +228,7 @@ def test_interrupted_run_reaps_children_before_removing_home(tmp_path: Path) -> 
     home = _reported_home(proc.stdout, tmp_path)
     assert probe_out.read_text() == "True", "child was terminated only after its home was gone"
     assert not home.exists()
-    assert list(tmp_path.glob("kiss_test_*")) == []
+    _assert_nothing_left(tmp_path)
 
 
 @posix_only("os.fork")
@@ -214,3 +237,130 @@ def test_forked_child_exit_keeps_parent_home(tmp_path: Path) -> None:
     status, home = _run_python(_FORK_THEN_EXIT, tmp_path)
     assert status == "after child exit: True"
     assert not Path(home).exists()
+    _assert_nothing_left(tmp_path)
+
+
+# The session leaves temp dirs behind: its own and one of a child that
+# inherited TMPDIR.
+_LEAK_TEMP_DIRS = """
+import subprocess, sys, tempfile
+import kiss.tests.conftest as conftest
+print(conftest._session_tmp_root)
+print(tempfile.mkdtemp())
+child = "import tempfile; print(tempfile.mkdtemp())"
+out = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, check=True)
+print(out.stdout.strip())
+"""
+
+# A session that dies without running atexit, as pytest-timeout's
+# os._exit does.
+_DIE_WITHOUT_ATEXIT = """
+import os
+import kiss.tests.conftest as conftest
+print(conftest._session_tmp_root, flush=True)
+os._exit(0)
+"""
+
+# A session that runs until its stdin is closed.
+_RUN_UNTIL_STDIN_CLOSES = """
+import sys
+import kiss.tests.conftest as conftest
+print(conftest._session_tmp_root, flush=True)
+sys.stdin.read()
+"""
+
+# multiprocessing registers its exit finalizer before the conftest's
+# handler, so the finalizer runs after the handler.
+_MULTIPROCESSING_TEMP_DIR = """
+import multiprocessing.util
+import kiss.tests.conftest as conftest
+print(multiprocessing.util.get_temp_dir())
+print(conftest._session_tmp_root)
+"""
+
+_START_SESSION = "import kiss.tests.conftest"
+
+
+@posix_only("session temp root")
+def test_session_temp_dirs_go_with_the_root(tmp_path: Path) -> None:
+    """Temp dirs of the session and of its children land in the root and go at exit."""
+    root, own, child = _run_python(_LEAK_TEMP_DIRS, tmp_path)
+    assert Path(root).name.startswith("kiss-pt-")
+    assert Path(root).parent.resolve() == tmp_path.resolve()
+    assert Path(own).parent == Path(root)
+    assert Path(child).parent == Path(root)
+    assert list(tmp_path.iterdir()) == []
+
+
+@posix_only("flock on the root's lock")
+def test_next_session_sweeps_the_root_of_a_dead_session(tmp_path: Path) -> None:
+    """A root whose owner died without atexit goes when the next session starts."""
+    (root,) = _run_python(_DIE_WITHOUT_ATEXIT, tmp_path)
+    assert (Path(root) / ".lock").is_file()
+    _run_python(_START_SESSION, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@posix_only("flock on the root's lock")
+def test_sweep_keeps_the_root_of_a_live_session(tmp_path: Path) -> None:
+    """A starting session leaves the root of a running session alone."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _RUN_UNTIL_STDIN_CLOSES],
+        env=_private_env(tmp_path),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        root = Path(proc.stdout.readline().strip())
+        assert root.name.startswith("kiss-pt-"), root
+        _run_python(_START_SESSION, tmp_path)
+        assert (root / ".lock").is_file()
+    finally:
+        proc.communicate(input="", timeout=120)
+    assert proc.returncode == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+@posix_only("session temp root")
+def test_multiprocessing_temp_dir_is_left_to_its_finalizer() -> None:
+    """multiprocessing deletes its own ``pymp-*`` dir at exit without a
+    traceback, and the next session deletes the root left around it."""
+    # multiprocessing puts its socket dir in /tmp instead when the temp
+    # dir is too long for a socket path, as ``tmp_path`` is.
+    short = Path(tempfile.mkdtemp(prefix="mp", dir="/tmp"))
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _MULTIPROCESSING_TEMP_DIR],
+            env=_private_env(short),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "Traceback" not in proc.stderr, proc.stderr
+        mp_dir, root = proc.stdout.splitlines()
+        assert Path(mp_dir).parent == Path(root)
+        assert [p.name for p in Path(root).iterdir()] == [".lock"]
+        _run_python(_START_SESSION, short)
+        assert list(short.iterdir()) == []
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_running_session_writes_temp_files_into_its_root() -> None:
+    """This session's ``tempfile`` writes into its root (POSIX)."""
+    from kiss.tests import conftest
+
+    if os.name != "posix":
+        assert conftest._session_tmp_root is None
+        return
+    root = conftest._session_tmp_root
+    assert root is not None
+    assert Path(root).name.startswith("kiss-pt-")
+    made = Path(tempfile.mkdtemp())
+    try:
+        assert made.parent == Path(root)
+    finally:
+        made.rmdir()

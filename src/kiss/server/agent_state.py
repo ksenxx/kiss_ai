@@ -108,6 +108,7 @@ class AgentState:
         "task_thread",
         "user_answer_queue",
         "pending_ask_question",
+        "pending_ask_id",
         "pending_user_messages",
         "pending_user_attachments",
         "unattributed_prompt_echoes",
@@ -154,6 +155,13 @@ class AgentState:
         # client that connects mid-question also shows the modal.
         # Read/written under the server's ``_state_lock``.
         self.pending_ask_question: str = ""
+        # The ``questionId`` minted for the pending ``ask_user_question``
+        # call (every ``askUser`` frame of that call carries it), ``""``
+        # when none is pending: set with ``pending_ask_question`` and
+        # cleared with it (``clear_pending_ask``).  Two asks of the same
+        # text get different ids, so an answer naming one never answers
+        # the other.  Read/written under the server's ``_state_lock``.
+        self.pending_ask_id: str = ""
         self.pending_user_messages: list[str] = []
         # The files attached to the queued steering messages, one list
         # per message (index-aligned with ``pending_user_messages``),
@@ -222,6 +230,20 @@ class AgentState:
     def thread_alive(self) -> bool:
         """True while the run's worker thread is installed and not dead (:func:`thread_alive`)."""
         return thread_alive(self.task_thread)
+
+    def clear_pending_ask(self) -> None:
+        """Under the server's ``_state_lock``: forget the pending question, its text and its id."""
+        self.pending_ask_question = ""
+        self.pending_ask_id = ""
+
+    def ask_pending(self) -> bool:
+        """Under the server's ``_state_lock``: True while an ``ask_user_question`` call waits.
+
+        Keyed on the call's ``pending_ask_id``, which every ask gets:
+        its text may be empty, and the ask still blocks the task until
+        an answer arrives.
+        """
+        return bool(self.pending_ask_id)
 
     def running(self) -> bool:
         """True while this state's task is live.

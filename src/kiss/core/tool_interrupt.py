@@ -47,6 +47,7 @@ import itertools
 import logging
 import threading
 import time
+from concurrent.futures import Future
 
 from kiss.core.locked import locked
 
@@ -57,6 +58,17 @@ USER_INTERRUPTED_MESSAGE = "User interrupted the tool call."
 
 _INJECT_AFTER_SECONDS = 1.0
 """Grace given to a tool to honor the cooperative signal before injection."""
+
+_WAIT_SLICE_SECONDS = 0.1
+"""One blocking slice of :func:`result_interruptible` and :func:`wait_interruptible`.
+
+One ``future.result(timeout)`` or ``Event.wait(timeout)`` over the whole
+deadline blocks in C for all of it, where an injected Stop
+(:class:`ToolCallInterrupted` from the tool panel, ``KeyboardInterrupt``
+from the task's stop watchdog) cannot land; short slices return to
+Python between them, and the tool panel's Stop is honoured cooperatively
+there too.
+"""
 
 _DRAIN_SECONDS = 1.0
 """How long :func:`drain_pending_interrupt` waits for an injected exception.
@@ -313,6 +325,64 @@ def raise_if_interrupted() -> None:
     # handler, and the watchdog must not inject into that.
     end_tool_call(token)
     raise ToolCallInterrupted(USER_INTERRUPTED_MESSAGE)
+
+
+def result_interruptible[T](future: Future[T], timeout: float | None = None) -> T:
+    """Return *future*'s result, waiting in :data:`_WAIT_SLICE_SECONDS` slices.
+
+    ``concurrent.futures.TimeoutError`` is ``builtins.TimeoutError``, so
+    a slice that raises it means "keep waiting" only while the future is
+    still running.  A future that is done by then has its outcome
+    returned or raised: it finished right after the slice expired, or
+    its worker's own failure is a ``TimeoutError``.
+
+    Args:
+        future: A ``concurrent.futures.Future``.
+        timeout: Seconds to wait at most; ``None`` waits until it is done.
+
+    Returns:
+        The future's result.
+
+    Raises:
+        TimeoutError: When *timeout* passes first, or the worker raised it.
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted meanwhile.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        wait = _WAIT_SLICE_SECONDS
+        if deadline is not None:
+            wait = min(max(deadline - time.monotonic(), 0.0), wait)
+        try:
+            return future.result(timeout=wait)
+        except TimeoutError:
+            if future.done():
+                return future.result()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise
+            raise_if_interrupted()
+
+
+def wait_interruptible(event: threading.Event, timeout: float) -> bool:
+    """Wait for *event* in :data:`_WAIT_SLICE_SECONDS` slices.
+
+    Args:
+        event: The event to wait for.
+        timeout: Seconds to wait at most.
+
+    Returns:
+        Whether *event* was set before *timeout* passed.
+
+    Raises:
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted meanwhile.
+    """
+    deadline = time.monotonic() + timeout
+    while not event.wait(min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_SECONDS)):
+        if time.monotonic() >= deadline:
+            return False
+        raise_if_interrupted()
+    return True
 
 
 def _inject_unless_closing(token: ToolCallToken) -> bool:

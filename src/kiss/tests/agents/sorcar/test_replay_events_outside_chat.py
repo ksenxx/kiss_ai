@@ -198,14 +198,14 @@ class TestReplayEventsOutsideChat:
         agent.budget_used = 0.25
         task_id, _ = _add_task("a worktree task")
 
-        assert agent._persist_replay_events_if_missing(
+        agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
             parsed=yaml.safe_load(_CANNED_RESULT),
             result_summary="all done",
             usage=agent.usage_snapshot(),
         )
-        assert not agent._persist_replay_events_if_missing(
+        agent._persist_replay_events_if_missing(
             task_id=task_id,
             prompt="a worktree task",
             parsed=yaml.safe_load(_CANNED_RESULT),

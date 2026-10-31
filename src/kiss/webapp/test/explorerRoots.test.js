@@ -30,6 +30,7 @@ const {
   fakeMatchMedia,
   ofType,
   captureTimers,
+  fireCapturedTimers,
   stubClipboard,
 } = require('./simplify2_harness');
 
@@ -201,6 +202,26 @@ function addOtherFolder(win, posted, entries) {
   click(win, picker.querySelector('.folder-picker-select'));
   assert.ok(picker.hidden, 'picker closed after Add Folder');
   answer(win, posted, OTHER, entries || [], OTHER);
+}
+
+/**
+ * Assert that *sent* (what the page posted after a refresh named *how*)
+ * re-lists both top-level folders, each confined to itself, while the
+ * tree keeps its rows.
+ */
+function assertRootsRelistedInPlace(win, sent, how) {
+  assert.deepStrictEqual(
+    ofType(sent, 'listDir')
+      .map(m => m.path + '|' + m.workDir)
+      .sort(),
+    [OTHER + '|' + OTHER, WD + '|' + WD],
+    how + ': both top-level folders re-listed in place',
+  );
+  assert.strictEqual(rootRows(win).length, 2, how + ': tree not rebuilt');
+  assert.ok(
+    rowFor(win, OTHER + '/n.md'),
+    how + ': rows kept while the listing is in flight',
+  );
 }
 
 async function main() {
@@ -609,22 +630,16 @@ async function main() {
   await test('Refresh keeps the added folders; a task-news refresh re-lists them in place', async () => {
     const {win, posted} = makePage();
     openExplorer(win, posted, []);
-    addOtherFolder(win, posted, [
-      {name: 'n.md', path: OTHER + '/n.md', isDir: false},
-    ]);
-    const before = posted.length;
+    const notes = [{name: 'n.md', path: OTHER + '/n.md', isDir: false}];
+    addOtherFolder(win, posted, notes);
+    let before = posted.length;
     click(win, byId(win, 'explorer-refresh'));
-    const relisted = posted.slice(before).filter(m => m.type === 'listDir');
-    assert.deepStrictEqual(
-      relisted.map(m => m.path + '|' + m.workDir).sort(),
-      [OTHER + '|' + OTHER, WD + '|' + WD],
-      'both top-level folders re-listed in place',
-    );
-    assert.strictEqual(rootRows(win).length, 2, 'tree not rebuilt');
-    assert.ok(
-      rowFor(win, OTHER + '/n.md'),
-      'rows kept while the listing is in flight',
-    );
+    assertRootsRelistedInPlace(win, posted.slice(before), 'Refresh');
+    answer(win, posted, WD, [], WD);
+    answer(win, posted, OTHER, notes, OTHER);
+    before = posted.length;
+    send(win, {type: 'tasks_updated'});
+    assertRootsRelistedInPlace(win, posted.slice(before), 'task news');
     win.close();
   });
 
@@ -886,27 +901,31 @@ async function main() {
       timers = captureTimers(w);
     });
     openExplorer(win, posted, []);
-    // The active chat is a task of the old workspace: switching the
-    // workspace hides its tab and activates another one, which
-    // schedules the composer's deferred focus (100 / 300 ms).
-    send(win, {
-      type: 'task_events',
-      task: 'earlier task',
-      task_id: 3,
-      events: [],
-      extra: JSON.stringify({work_dir: WD}),
-    });
-    answer(win, posted, WD, [], WD);
     addOtherFolder(win, posted, []);
+    // The daemon's focusInput nudge (sent on every reconnect) focuses
+    // the composer and arms its deferred retries (100 / 300 ms); the
+    // user goes on to the tree before they fire.
+    const armedBefore = timers.length;
+    send(win, {type: 'focusInput'});
+    const retries = timers
+      .slice(armedBefore)
+      .filter(t => t.ms === 100 || t.ms === 300);
+    assert.deepStrictEqual(
+      retries.map(t => t.ms),
+      [100, 300],
+      'the nudge armed the composer retries',
+    );
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
-    const armedBefore = timers.length;
     click(win, menuItem(win, 'Set as Working Directory'));
+    assert.ok(
+      retries.every(t => !t.cleared),
+      'the retries are still pending when the daemon answers the check',
+    );
     answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
-    // Fire the deferred focus timers (100 / 300 ms) the switch armed,
-    // including any a fired one arms in turn.
-    for (let i = armedBefore; i < timers.length; i++) timers[i].cb();
+    // Run the pending timers now, as the clock would.
+    fireCapturedTimers(win, timers, armedBefore);
     const active = win.document.activeElement;
     assert.ok(
       active && active.classList.contains('explorer-row'),

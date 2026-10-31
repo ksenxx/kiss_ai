@@ -450,13 +450,20 @@ async function panelStopBody() {
   assert.strictEqual(btn.disabled, false);
   click(win, btn);
   assert.strictEqual(stops, 3, 'the button can be used again');
-  // Default reset delay (no resetMs given).
+  // Default reset delay (no resetMs given): 5 s.
+  const defaultResets = recordTimers(win, 5000);
   const panel2 = doc.createElement('div');
   doc.body.appendChild(panel2);
   const btn2 = PanelCopy.addStopButton(panel2, () => {});
   click(win, btn2);
   assert.ok(btn2.classList.contains('stopping'));
-  btn2._kissClearStopping();
+  assert.strictEqual(defaultResets.length, 1, 'one 5 s reset is armed');
+  fireTimers(defaultResets);
+  assert.ok(
+    !btn2.classList.contains('stopping'),
+    'the default reset clears the stopping state',
+  );
+  assert.strictEqual(btn2.disabled, false);
   win.close();
 }
 

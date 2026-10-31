@@ -126,7 +126,7 @@ class TestBug3AutoCommitNoLLMFallback:
         (wt.wt_dir / "extra.txt").write_text("extra work\n")
 
         try:
-            result = agent._commit_worktree()
+            result = agent._commit_worktree(wt)
             assert result is True, (
                 "BUG 3: _commit_worktree should commit with a fallback "
                 "message when no LLM is available, but returned False"

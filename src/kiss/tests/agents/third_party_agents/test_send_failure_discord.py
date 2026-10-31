@@ -14,7 +14,8 @@ at via the ``api_base`` constructor argument, following
    keeps the entry for retry.
 2. ``send_message`` raises when the server is unreachable.
 3. ``send_message`` succeeds without raising on a 200 response with a
-   normal JSON body.
+   normal JSON body, posting to the channel with ``thread_ts`` as the
+   reply reference (not as the channel id).
 4. Tool-path callers of ``_post`` (e.g. ``post_message``) keep their
    return-an-error-string contract on API errors instead of raising.
 """
@@ -81,7 +82,7 @@ class TestDiscordSendMessageFailures:
         assert self.server.requests == []
 
     def test_send_message_succeeds_on_200(self) -> None:
-        """A 200 response with a normal JSON body must not raise."""
+        """A 200 response must not raise; ``thread_ts`` is the reply reference, not the channel."""
         self.backend.send_message("111", "hello", thread_ts="9999")
         req = self.server.requests[0]
         assert req["method"] == "POST"

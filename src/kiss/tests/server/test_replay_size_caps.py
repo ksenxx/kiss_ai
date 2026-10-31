@@ -25,6 +25,7 @@ pinned here:
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import threading
 import unittest
@@ -161,6 +162,7 @@ class OversizedRowTest(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         self._dir = Path(tempfile.mkdtemp(prefix="kiss_replay_caps_"))
+        self.addCleanup(shutil.rmtree, self._dir, True)
         th._KISS_DIR = self._dir
         th._DB_PATH = self._dir / "history.db"
         th._db_conn = None

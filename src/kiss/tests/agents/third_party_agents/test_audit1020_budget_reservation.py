@@ -35,16 +35,16 @@ from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent
 from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
     live_agent_jobs,
     make_run_agent_tool,
     make_run_parallel_tool,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
-from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
-
-DUMMY_SEA = str(
-    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
+from kiss.tests.agents.third_party_agents.recording_daemon import (
+    RecordingDaemon,
+    serve_recording_daemon,
 )
 
 
@@ -75,6 +75,16 @@ class HoldingDaemon(RecordingDaemon):
         """Let every held sub-task finish."""
         self.gate.set()
 
+    def close(self) -> None:
+        """Release the held sub-tasks, then stop serving.
+
+        A handler parked on the gate keeps the server from shutting down,
+        so without the release the base ``close`` waits out its 30 s join
+        and leaves the loop thread running.
+        """
+        self.release()
+        super().close()
+
 
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,15 +95,9 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def daemon() -> Iterator[HoldingDaemon]:
-    stand_in = HoldingDaemon()
-    saved = cron_agent._daemon_endpoint_file
-    cron_agent._daemon_endpoint_file = str(stand_in.endpoint_file)
-    try:
+    with serve_recording_daemon(cron_agent, "_daemon_endpoint_file", HoldingDaemon) as stand_in:
+        assert isinstance(stand_in, HoldingDaemon)
         yield stand_in
-    finally:
-        cron_agent._daemon_endpoint_file = saved
-        stand_in.release()
-        stand_in.close()
 
 
 def _parent(budget: float) -> SorcarAgent:
@@ -126,7 +130,7 @@ def test_overlapping_non_blocking_children_split_what_is_left(
     run_agent = make_run_agent_tool(str(tmp_path), parent)
     try:
         notices = [
-            run_agent(task, DUMMY_SEA, wait="false", timeout="60")
+            run_agent(task, DEFAULT_AGENT_PATH, wait="false", timeout="60")
             for task in ("first", "second", "third")
         ]
         assert all(notice.startswith("Started the ") for notice in notices), notices
@@ -143,7 +147,7 @@ def test_overlapping_non_blocking_children_split_what_is_left(
     assert live_agent_jobs(parent) == []
     daemon.gate.clear()
     try:
-        run_agent("fourth", DUMMY_SEA, wait="false", timeout="60")
+        run_agent("fourth", DEFAULT_AGENT_PATH, wait="false", timeout="60")
         assert _budgets(daemon)[-1] == pytest.approx(5.0)
     finally:
         _settle(parent, daemon)
@@ -152,7 +156,7 @@ def test_overlapping_non_blocking_children_split_what_is_left(
 def _plan(parent: SorcarAgent, work_dir: Path, task: str, max_budget: str = "") -> dict[str, Any]:
     """Plan a ``run_agent`` call of *parent* without starting it."""
     plan = agent_dispatch.plan_run_agent(
-        str(work_dir), task, DUMMY_SEA, max_budget=max_budget, parent_agent=parent
+        str(work_dir), task, DEFAULT_AGENT_PATH, max_budget=max_budget, parent_agent=parent
     )
     assert isinstance(plan, dict), plan
     return plan
@@ -229,7 +233,7 @@ def test_a_child_that_finished_between_planning_and_dispatch_is_not_charged_twic
     run_agent = make_run_agent_tool(str(tmp_path), parent)
     daemon.result["cost"] = "5.000000"
     try:
-        run_agent("first", DUMMY_SEA, wait="false", timeout="60")
+        run_agent("first", DEFAULT_AGENT_PATH, wait="false", timeout="60")
         first = live_agent_jobs(parent)
         assert [job.budget for job in first] == pytest.approx([5.0])
         plan = _plan(parent, tmp_path, "second")
@@ -276,14 +280,15 @@ def test_a_child_settling_between_the_ledger_and_reservation_reads_is_counted(
     """Review round 1, item 2: a child that finishes mid-resolution is never dropped from both.
 
     A $10 parent runs a $5 child.  A second child resolves its share
-    while the first still runs; the first then settles (its $8 spend
-    lands on the ledger and its reservation lapses) before the second
-    child's resolution is done.  Reading the ledger first and the
-    reservations second saw the old ledger ($0 spent) and no
-    reservation, and handed the second child $5 of the $2 actually
-    left.  The reservations are now read first and the share is
-    re-resolved when a job settled in between, so the second child
-    gets half of the real remainder: $1.
+    while the first still runs; the first then finishes (its $8 spend
+    arrives) before the second child's resolution is done.  Reading the
+    ledger first and the reservations second saw the old ledger ($0
+    spent) and no reservation, and handed the second child $5 of the
+    $2 actually left.  A child's spend now lands, and its reservation
+    lapses, in the critical section the resolution holds (audit
+    2026-10-30 S6), so the first child settles only after the second
+    child's share was resolved against its live $5 reservation:
+    (10 - 5) / 2 = $2.50.
     """
     parent = PausingParent("reserve-parent")
     parent.max_budget = 10.0
@@ -292,7 +297,7 @@ def test_a_child_settling_between_the_ledger_and_reservation_reads_is_counted(
     run_agent = make_run_agent_tool(str(tmp_path), parent)
     daemon.result["cost"] = "8.000000"
     try:
-        run_agent("first", DUMMY_SEA, wait="false", timeout="60")
+        run_agent("first", DEFAULT_AGENT_PATH, wait="false", timeout="60")
         first = live_agent_jobs(parent)
         assert [job.budget for job in first] == pytest.approx([5.0])
         plan = _plan(parent, tmp_path, "second")
@@ -300,12 +305,13 @@ def test_a_child_settling_between_the_ledger_and_reservation_reads_is_counted(
         second = agent_dispatch.start_agent_job(plan["name"], plan, parent)
         assert parent.ledger_read.wait(30.0)
         daemon.release()
-        assert agent_dispatch.join_agent_job(first[0], 30.0)
-        assert parent._live_budget_used() == pytest.approx(8.0)
+        # The first child's spend waits for the resolution in progress.
+        assert not agent_dispatch.join_agent_job(first[0], 0.5)
+        assert parent._live_budget_used() == pytest.approx(0.0)
         parent.resume.set()
+        assert agent_dispatch.join_agent_job(first[0], 30.0)
         assert agent_dispatch.join_agent_job(second, 30.0)
-        assert _budgets(daemon) == pytest.approx([5.0, 1.0])
-        assert second.budget == pytest.approx(1.0)
+        assert _budgets(daemon) == pytest.approx([5.0, 2.5])
     finally:
         parent.resume.set()
         _settle(parent, daemon)
@@ -320,10 +326,10 @@ def test_fan_out_siblings_split_the_unreserved_remainder_equally(
     run_agent = make_run_agent_tool(str(tmp_path), parent)
     run_parallel = make_run_parallel_tool(str(tmp_path), parent)
     try:
-        run_agent("first", DUMMY_SEA, wait="false", timeout="60")
+        run_agent("first", DEFAULT_AGENT_PATH, wait="false", timeout="60")
         # The call blocks for its timeout: short, so the two children are
         # still held when it returns their notices.
-        out = run_parallel(json.dumps(["second", "third"]), DUMMY_SEA, timeout="0.5")
+        out = run_parallel(json.dumps(["second", "third"]), DEFAULT_AGENT_PATH, timeout="0.5")
         entries = yaml.safe_load(out)
         assert len(entries) == 2 and all("still running" in e for e in entries), out
         assert wait_until(lambda: len(daemon.run_commands) == 3, 10.0), daemon.run_commands
@@ -342,8 +348,8 @@ def test_child_whose_reservations_exhaust_the_caller_gets_the_error(
     parent = _parent(1.0)
     run_agent = make_run_agent_tool(str(tmp_path), parent)
     try:
-        run_agent("greedy", DUMMY_SEA, max_budget="1", wait="false", timeout="60")
-        out = run_agent("starved", DUMMY_SEA, wait="false", timeout="60")
+        run_agent("greedy", DEFAULT_AGENT_PATH, max_budget="1", wait="false", timeout="60")
+        out = run_agent("starved", DEFAULT_AGENT_PATH, wait="false", timeout="60")
         assert out.startswith("Error: the sorcar agent task could not run: "), out
         assert "reserve-parent has no remaining budget" in out, out
         assert "$1.0000 of its remainder is reserved" in out, out

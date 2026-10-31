@@ -10,7 +10,7 @@
 'use strict';
 
 const assert = require('assert');
-const {send, rowsByTitle} = require('./simplify2_harness');
+const {makePage, send, rowsByTitle} = require('./simplify2_harness');
 const {installTokenisedCss} = require('./designTokens');
 
 /** Every row of the history list, in list order. */
@@ -182,6 +182,28 @@ function openChatsPanel(win) {
 }
 
 /**
+ * A remote-chat page with the Chats panel open and an empty `configData`
+ * delivered, the starting point of the chat-panel header suites.
+ *
+ * @returns {{win: object, posted: Array<object>}}
+ */
+function openChatsPage() {
+  const {win, posted} = makePage({bodyClass: 'remote-chat'});
+  win.document.getElementById('sidebar').classList.add('open');
+  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
+  return {win, posted};
+}
+
+/** The header of chat `chatId`'s panel in the Chats list; fails when there is no panel. */
+function chatHeader(win, chatId) {
+  const g = win.document.querySelector(
+    '#history-list .history-chat-group[data-chat-id="' + chatId + '"]',
+  );
+  assert.ok(g, 'chat panel for ' + chatId);
+  return g.querySelector(':scope > .history-chat-header');
+}
+
+/**
  * Answer the page's last getHistory (its generation) with `sessions`,
  * failing when nothing was requested: main.js drops a reply whose
  * generation is not the one it asked for, so answering an absent request
@@ -282,6 +304,25 @@ function finishedSession(id, title, extra) {
   );
 }
 
+/**
+ * A remote-chat page whose daemon link is up (`daemonStatus` connected),
+ * the starting point of the delete-button suites.
+ *
+ * @returns {{win: object, posted: Array<object>}}
+ */
+function makeConnectedRemotePage() {
+  const {win, posted} = makePage({bodyClass: 'remote-chat'});
+  send(win, {type: 'daemonStatus', connected: true});
+  return {win, posted};
+}
+
+/** One history row per status chip: running, errored, succeeded. */
+const STATUS_CHIP_SESSIONS = [
+  makeRow({id: 'chatR', task_id: 1, title: 'running task', is_running: true, endTs: 0}),
+  makeRow({id: 'chatE', task_id: 2, title: 'errored task', failed: true}),
+  makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
+];
+
 module.exports = {
   historyRows,
   visibleTitles,
@@ -296,6 +337,8 @@ module.exports = {
   gatewaySession,
   selectFilter,
   openChatsPanel,
+  openChatsPage,
+  chatHeader,
   answerHistory,
   localIsoDate,
   todayNoonSec,
@@ -303,4 +346,6 @@ module.exports = {
   sendHistoryPage,
   listShape,
   finishedSession,
+  makeConnectedRemotePage,
+  STATUS_CHIP_SESSIONS,
 };

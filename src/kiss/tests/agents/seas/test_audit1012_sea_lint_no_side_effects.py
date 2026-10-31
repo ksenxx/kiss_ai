@@ -23,7 +23,12 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.sea_docs import TABLES
 from kiss.tests.agents.third_party_agents.muse_test_utils import muse_daemons_of
+
+skip_on_windows = pytest.mark.skipif(
+    sys.platform == "win32", reason="the Muse daemon only runs on Unix"
+)
 
 
 @pytest.fixture
@@ -61,33 +66,49 @@ def run_sea_cli(home: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the Muse daemon only runs on Unix")
-@pytest.mark.parametrize(
-    ("argv", "stdout"),
-    [(("lint",), r"sea lint: \d+ finding\(s\)"), (("docs", "--check"), "")],
-    ids=["lint", "docs"],
-)
-def test_sea_cli_starts_no_muse_daemon(
-    fresh_home: Path, argv: tuple[str, ...], stdout: str
-) -> None:
-    """``sea lint`` / ``sea docs`` with Muse-auth at its default leave no daemon and no vault state.
+def assert_ran_without_muse(home: Path, argv: tuple[str, ...], stdout: str) -> None:
+    """Run ``sea <argv>`` against *home*; assert it left no daemon and no vault state.
 
     The command must really have run to completion: a Python that fails
     before importing Sorcar (a broken environment) exits non-zero with a
     traceback and an empty stdout, which would make the daemon/state
     check pass vacuously.  So it exited 0, raised nothing and printed
-    exactly its own summary line (*stdout*, a pattern; empty for ``docs
-    --check``, which is silent on success): a Muse-auth banner or
-    warning on top of it would show the hooks did more than lint.
+    exactly its own summary line (*stdout*, a pattern): a Muse-auth
+    banner or warning on top of it would show the hooks did more than
+    their job.
     """
-    assert muse_daemons_of(fresh_home) == set()
-    result = run_sea_cli(fresh_home, *argv)
+    assert muse_daemons_of(home) == set()
+    result = run_sea_cli(home, *argv)
 
-    daemons = muse_daemons_of(fresh_home)
-    state = sorted(str(p.relative_to(fresh_home)) for p in fresh_home.rglob("muse_auth*"))
+    daemons = muse_daemons_of(home)
+    state = sorted(str(p.relative_to(home)) for p in home.rglob("muse_auth*"))
     assert daemons == set(), f"sea {argv[0]} spawned muse_auth.daemon {daemons}; state: {state}"
-    assert not (fresh_home / "muse_auth").exists(), f"sea {argv[0]} wrote {state}"
+    assert not (home / "muse_auth").exists(), f"sea {argv[0]} wrote {state}"
     output = result.stdout + result.stderr
     assert "Traceback" not in output, output
     assert result.returncode == 0, output
     assert re.fullmatch(stdout, result.stdout.strip()), output
+
+
+@skip_on_windows
+def test_sea_lint_starts_no_muse_daemon(fresh_home: Path) -> None:
+    """``sea lint`` with Muse-auth at its default leaves no daemon and no vault state."""
+    assert_ran_without_muse(fresh_home, ("lint",), r"sea lint: \d+ finding\(s\)")
+
+
+@skip_on_windows
+def test_sea_docs_starts_no_muse_daemon(fresh_home: Path, tmp_path: Path) -> None:
+    """``sea docs`` with Muse-auth at its default leaves no daemon and no vault state.
+
+    It renders a page of the test's own with one empty block per table
+    (``commands`` loads every bundled SEA, and none may fail to load), so
+    the run does not depend on whether the repository's generated pages
+    are current.
+    """
+    page = tmp_path / "page.md"
+    blocks = "".join(f"<!-- sea-docs: {name} -->\n<!-- /sea-docs -->\n" for name in TABLES)
+    page.write_text(blocks, encoding="utf-8")
+    assert_ran_without_muse(fresh_home, ("docs", str(page)), re.escape(f"updated: {page}"))
+    rendered = page.read_text(encoding="utf-8")
+    assert "| `/autorouter` | `agents/seas/autorouter/autorouter_sea.py` |" in rendered
+    assert "(broken:" not in rendered, rendered

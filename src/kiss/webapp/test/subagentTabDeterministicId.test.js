@@ -21,7 +21,9 @@
 // `${parentTabId}__sub_${taskId}` (the daemon's own replay-id
 // convention from AgentServer._open_persisted_subagent_tabs), so all
 // clients converge on ONE shared tab id — no retag, no closeTab, one
-// live subscription.
+// live subscription.  This file pins the id minting; a converged
+// announcement landing on that tab without a closeTab is pinned by
+// runParallelSubagentTabDedupe.test.js.
 //
 // The page runs on the REAL webapp transport (media/transport.js
 // driving a fake WebSocket), so the frames the daemon would see are
@@ -33,7 +35,7 @@
 
 const assert = require('assert');
 const {send, readyTabId} = require('./simplify2_harness');
-const {subagentTabEls, spawnSubagent} = require('./subagent_tab_helpers');
+const {subagentTabEls} = require('./subagent_tab_helpers');
 const {makeWebappClient} = require('./transport_page_helpers');
 
 /** Boot a client, start the parent task, and return the parent tab id. */
@@ -91,60 +93,7 @@ function testDeterministicId() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Another client's announcement of the SAME deterministic id must not
-//    trigger the retag/closeTab dance that used to kill the event
-//    stream for every client.
-// ---------------------------------------------------------------------------
-
-function testNoCloseTabOnConvergedAnnouncement() {
-  const client = makeWebappClient();
-  const parentId = bootParent(client);
-  const taskId = 'sub-task-det-2';
-  const sharedId = parentId + '__sub_' + taskId;
-
-  // The daemon's ready round-trip for the OTHER client announces the
-  // same sub-agent.  Both clients minted the same deterministic id, so
-  // the announcement names a tab this client already has.
-  const tabId = spawnSubagent(client, parentId, taskId, 'sub 1', 0);
-  assert.strictEqual(tabId, sharedId, 'both clients mint the same id');
-  send(client.win, {
-    type: 'task_events',
-    tabId: sharedId,
-    task: 'sub 1',
-    task_id: taskId,
-    events: [],
-  });
-
-  const closes = client.drain().filter(m => m.type === 'closeTab');
-  assert.strictEqual(
-    closes.length,
-    0,
-    'a converged openSubagentTab must not close any tab id ' +
-      '(a closeTab here unsubscribes the shared id for EVERY client): ' +
-      JSON.stringify(closes),
-  );
-  const tabs = subagentTabEls(client.win);
-  assert.strictEqual(tabs.length, 1, 'still exactly one sub-agent tab');
-  assert.strictEqual(tabs[0].dataset.tabId, sharedId);
-
-  // Live fan-out events for the shared id must land in the (single,
-  // still-subscribed) tab: the tab keeps a task panel and stays open.
-  send(client.win, {
-    type: 'tool_call',
-    name: 'Bash',
-    tabId: sharedId,
-    extras: {command: 'echo sub-live'},
-  });
-  assert.strictEqual(
-    subagentTabEls(client.win).length,
-    1,
-    'the sub-agent tab must survive live events',
-  );
-  console.log('PASS converged announcement keeps stream');
-}
-
-// ---------------------------------------------------------------------------
-// 3. A parent-less spawn still mints a deterministic (task-keyed) id.
+// 2. A parent-less spawn still mints a deterministic (task-keyed) id.
 // ---------------------------------------------------------------------------
 
 function testParentlessDeterministicId() {
@@ -169,7 +118,6 @@ function testParentlessDeterministicId() {
 }
 
 testDeterministicId();
-testNoCloseTabOnConvergedAnnouncement();
 testParentlessDeterministicId();
 console.log('subagentTabDeterministicId.test.js: all tests passed');
 // JSDOM windows keep timers alive (running-task UI timer, shim

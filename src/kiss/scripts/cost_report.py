@@ -49,6 +49,7 @@ from typing import Any, TypeGuard
 
 from kiss.agents.sorcar.fanout_guard import is_review_task
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.printer import event_cost, parse_cost
 from kiss.core.tool_verdict import REFUSED_PREFIX
 
 CONTEXT_BUCKETS: tuple[tuple[str, int], ...] = (
@@ -148,22 +149,6 @@ class TaskRow:
     """Routine calls that ran at the lowered ``routine_turn_effort``."""
 
 
-def _money(text: Any) -> float:
-    """Parse the ``$1.2345`` cost string of a ``usage_info`` event."""
-    try:
-        return float(str(text).replace("$", "").replace(",", ""))
-    except ValueError:
-        return 0.0
-
-
-def _event_cost(event: dict[str, Any]) -> float:
-    """The USD cost of a ``usage_info`` event: exact ``cost_usd``, else the string."""
-    exact = event.get("cost_usd")
-    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
-        return float(exact)
-    return _money(event.get("cost"))
-
-
 def _bucket(context_tokens: int) -> str:
     for name, upper in CONTEXT_BUCKETS:
         if context_tokens < upper:
@@ -231,7 +216,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
         elif kind == "llm_call":
             output_tokens = int(event.get("output_tokens") or 0)
             row.llm_calls += 1
-            row.llm_cost += _money(event.get("cost"))
+            row.llm_cost += parse_cost(event.get("cost")) or 0.0
             row.llm_output_tokens += output_tokens
             if event.get("routine"):
                 row.routine_calls += 1
@@ -263,7 +248,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
                 peak_context[task_id] = (context, window)
             if row.first_context is None:
                 row.first_context = context
-            cost = _event_cost(event)
+            cost = event_cost(event) or 0.0
             steps = int(event.get("total_steps") or 0)
             delta = max(0.0, cost - last_cost.get(task_id, 0.0))
             last_cost[task_id] = cost

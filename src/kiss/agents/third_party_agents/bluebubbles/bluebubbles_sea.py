@@ -509,16 +509,18 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
 
 
 def _muse_authenticate(backend: BlueBubblesChannelBackend, server_url: str, password: str) -> str:
-    """Enroll a BlueBubbles password into the Muse vault and validate it.
+    """Enroll a BlueBubbles password into the Muse vault once the server accepts it.
 
-    The plaintext password goes straight into the vault as a query-kind
-    credential (the daemon splices ``password=`` into the URL at the
-    boundary) bound to the configured server origin, and is never
-    written to ``config.json`` (only the non-secret ``server_url``
-    metadata is — written first, so a failed enrollment leaves no
-    password on disk).  Validation runs the ``/server/info`` read
-    through the daemon boundary, so it is audited; an invalid password
-    leaves the vault empty.
+    A direct ``/api/v1/server/info`` read (:func:`probe_credential`)
+    checks the password first, so a rejected one leaves the previous
+    enrollment, ``config.json`` and the live wiring untouched.  The
+    accepted password goes into the vault as a query-kind credential
+    (the daemon splices ``password=`` into the URL at the boundary)
+    bound to the server origin, and is never written to ``config.json``.
+    :func:`enroll_credential` stores it together with the non-secret
+    ``server_url`` metadata under the config lock: a failed metadata
+    write leaves the vault untouched, and a refused store puts the old
+    metadata back, so the old password stays paired with the old server.
 
     Args:
         backend: The agent's BlueBubbles backend to (re)wire.
@@ -528,51 +530,42 @@ def _muse_authenticate(backend: BlueBubblesChannelBackend, server_url: str, pass
     Returns:
         JSON string with the validation result.
     """
-    import contextlib
-
-    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
+    from kiss.agents.third_party_agents._channel_agent_utils import (
+        enroll_credential,
+        probe_credential,
+    )
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
         valid_http_url,
-    )
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
     )
 
     if not valid_http_url(server_url):
         return json.dumps(
             {"ok": False, "error": f"{server_url!r} is not a valid http(s):// server URL."}
         )
+    info, _ = probe_credential(
+        f"{server_url}/api/v1/server/info", {}, params={"password": password}
+    )
+    # BlueBubbles wraps every response in a numeric ``status`` envelope.
+    if not isinstance(info, dict) or info.get("status") != 200:
+        return json.dumps({"ok": False, "error": "Could not connect to BlueBubbles server."})
     try:
-        save_json_config(_config.path, {"server_url": server_url})
-        store_credentials(
+        enroll_credential(
+            _config.path,
+            {"server_url": server_url},
             "bluebubbles",
             {"kind": "query", "param": "password", "token": password},
-            [],
             hosts=origin_hosts(server_url),
             insecure_hosts=insecure_origin_hosts(server_url),
         )
         if backend._wire_muse():  # pragma: no branch - credential was just stored
-            result = json.loads(backend.get_server_info())
-            if result.get("ok"):
-                return json.dumps({"ok": True, "message": "BlueBubbles configured (Muse-auth)."})
-            error = json.dumps(
-                {"ok": False, "error": "Could not connect to BlueBubbles server."}
-            )
-        else:  # pragma: no cover - defense in depth
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+            return json.dumps({"ok": True, "message": "BlueBubbles configured (Muse-auth)."})
+        return json.dumps(  # pragma: no cover - defense in depth
+            {"ok": False, "error": backend._connection_info}
+        )
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so a bad password is not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("bluebubbles")
-    backend._server_url = ""
-    backend._surrogate = ""
-    backend._http = requests
-    backend._muse = False
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
 
 
 class BlueBubblesAgent(BaseChannelAgent):

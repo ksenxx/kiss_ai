@@ -36,6 +36,7 @@ Branch-coverage notes for ``_repair_and_create_index``:
 from __future__ import annotations
 
 import multiprocessing
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -140,6 +141,7 @@ class _MigrationRaceBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss_rr_review_mig_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.saved = _redirect(self.tmp)
         th._close_db()
         self.task_id, _chat = th._add_task("legacy race task")

@@ -131,7 +131,8 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         branch = self._setup_pending_worktree(server)
 
-        _agent(server)._commit_worktree()
+        tab_agent = _agent(server)
+        tab_agent._commit_worktree(tab_agent.worktrees[0])
         changed = server._get_worktree_changed_files("0")
         assert len(changed) > 0
 
@@ -236,7 +237,8 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server, with_changes=False)
 
-        _agent(server)._commit_worktree()
+        tab_agent = _agent(server)
+        tab_agent._commit_worktree(tab_agent.worktrees[0])
         changed = server._get_worktree_changed_files("0")
         assert len(changed) == 0
 

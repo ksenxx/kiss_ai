@@ -6,13 +6,14 @@
 // End-to-end (JSDOM cascade) parity tests for the sibling side panels
 // of media/main.css: the three dimming overlays (history sidebar,
 // settings, tricks) and their `.open` state, and the three panel close
-// buttons and their hover state.  main.css used to spell each of them out as its own copy
-// of the same declarations; they are grouped now, and this test pins
-// that every sibling still computes to the same style -- so a future
-// edit to one panel's look must be a deliberate un-grouping, not an
-// accidental drift.  The rules are applied through jsdom's real
-// stylesheet cascade on the real chat.html markup, not by reading the
-// source text.
+// buttons (their grouped `:hover` rule is not checked: jsdom's cascade
+// cannot evaluate `:hover`).  main.css used to spell each of them out
+// as its own copy of the same declarations; they are grouped now, and
+// this test pins that every sibling still computes to the same style
+// -- so a future edit to one panel's look must be a deliberate
+// un-grouping, not an accidental drift.  The rules are applied through
+// jsdom's real stylesheet cascade on the real chat.html markup, not by
+// reading the source text.
 
 'use strict';
 

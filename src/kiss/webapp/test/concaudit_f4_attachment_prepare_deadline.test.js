@@ -22,11 +22,11 @@
 //
 // The production deadline is 60s.  Waiting a real minute per run is not
 // acceptable in the suite, and racing a shortened real timer against the
-// host's scheduling is not deterministic, so the test loads main.js with
-// that ONE constant held (asserting the substitution matched, so a
-// rename fails loudly) and fires the deadline timer by hand.  Everything
-// else -- DOM, events, FileReader, the attachment fixpoint, the latch --
-// is the real code.
+// host's scheduling is not deterministic, so makeHeldDeadlinePage
+// records the 60 s timer instead of arming it (harness `recordTimers`)
+// and the test fires it by hand with `fireDeadline()`, which fails when
+// main.js armed no 60 s deadline.  Everything else -- DOM, events,
+// FileReader, the attachment fixpoint, the latch -- is the real code.
 
 'use strict';
 
@@ -44,9 +44,7 @@ function chipText(win) {
 }
 
 async function main() {
-  const {win, posted, decodeCount, fireDeadline} = makeHeldDeadlinePage(
-    'concaudit-f4-attach-deadline-main.js',
-  );
+  const {win, posted, decodeCount, fireDeadline} = makeHeldDeadlinePage();
   win._testApi.endLaunch();
 
   // 1. A camera HEIC whose decode never settles; Enter parks the send.

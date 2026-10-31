@@ -290,7 +290,10 @@ class DockerTools:
                     # A task Stop: every later edit would be killed the
                     # same way (an exec and a reaper wait each).
                     return result
-                if result.startswith("Error"):
+                # Only the success line proves the edit landed: a traceback
+                # (a non-UTF-8 or unwritable file) or a failed payload store
+                # does not start with "Error".
+                if not result.startswith("Successfully"):
                     applied = f"edits 1-{index - 1} applied; " if index > 1 else ""
                     return f"Error: edit {index}: {applied}{result.removeprefix('Error: ')}"
                 results.append(f"edit {index}: {result}")

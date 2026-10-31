@@ -53,18 +53,24 @@ const SUITE_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_JOBS = 32;
 
 // Every *.test.js and *.coverage.js suite.  A *.coverage.js gate runs its
-// *.test.js as a child (under NODE_V8_COVERAGE) and fails when that child
-// fails, so a suite with a gate is run through the gate only.
+// *.test.js suites as children (under NODE_V8_COVERAGE) and fails when one
+// of them fails, so a suite a gate runs is run through the gate only.  A
+// gate names each suite it runs in a quoted '*.test.js' string (its
+// `testFile`, or an entry of its SUITES list), which is how they are
+// found here.
 function testFiles() {
   const files = fs.readdirSync(TEST_DIR);
+  const gated = new Set();
+  for (const gate of files.filter(f => f.endsWith('.coverage.js'))) {
+    const src = fs.readFileSync(path.join(TEST_DIR, gate), 'utf-8');
+    for (const m of src.matchAll(/['"]([\w.-]+\.test\.js)['"]/g)) {
+      gated.add(m[1]);
+    }
+  }
   return files
-    .filter(f => f.endsWith('.test.js') || f.endsWith('.coverage.js'))
     .filter(
       f =>
-        !(
-          f.endsWith('.test.js') &&
-          files.includes(f.replace(/\.test\.js$/, '.coverage.js'))
-        ),
+        f.endsWith('.coverage.js') || (f.endsWith('.test.js') && !gated.has(f)),
     )
     .sort();
 }
@@ -103,7 +109,10 @@ function exited(child) {
  * this process's streams in one piece, under a header, so the output
  * of suites running at once does not interleave.  Normally the suite is
  * reported when its pipes close (`close`), so that no trailing output is
- * lost.  After SUITE_TIMEOUT_MS the suite's process group is SIGKILLed
+ * lost.  Reporting it SIGKILLs its process group, which ends whatever
+ * it left running there without holding its pipes (stdio 'ignore'),
+ * such as a worker of a suite a *.coverage.js gate killed at the gate's
+ * own timeout.  After SUITE_TIMEOUT_MS the group is SIGKILLed at once
  * and the suite is reported as failed, with the output so far, as soon
  * as its process has exited, which may be long before the timeout: a
  * process the suite started can inherit its pipes and outlive it (even
@@ -143,6 +152,7 @@ function runSuite(file, index, total, done) {
     reported = true;
     clearTimeout(timer);
     children.delete(child);
+    killGroup(child);
     child.stdout.destroy();
     child.stderr.destroy();
     console.log(`\n[${index + 1}/${total}] ${file}`);

@@ -307,10 +307,8 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
 
         self._old_max = ws_mod._AUTH_FAIL_MAX
         self._old_window = ws_mod._AUTH_FAIL_WINDOW
-        self._old_lockout = ws_mod._AUTH_LOCKOUT
         ws_mod._AUTH_FAIL_MAX = 3
         ws_mod._AUTH_FAIL_WINDOW = 60.0
-        ws_mod._AUTH_LOCKOUT = 60.0
 
         self.port = find_free_port()
         self.server = RemoteAccessServer(
@@ -324,7 +322,6 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         ws_mod._AUTH_FAIL_MAX = self._old_max
         ws_mod._AUTH_FAIL_WINDOW = self._old_window
-        ws_mod._AUTH_LOCKOUT = self._old_lockout
         self._snap.__exit__()
 
     async def _try_auth(self, password: str) -> str:

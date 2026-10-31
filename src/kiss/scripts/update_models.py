@@ -206,6 +206,8 @@ _OPENROUTER_CACHE_PRICE_FIELDS = (
     ("image_output", "image_output_price_per_1M"),
 )
 _CACHE_PRICE_CATALOG_FIELDS = tuple(field for _api, field in _OPENROUTER_CACHE_PRICE_FIELDS)
+# Catalog fields an update removes when OpenRouter stops publishing them.
+_REMOVABLE_PRICE_FIELDS = (*_CACHE_PRICE_CATALOG_FIELDS, "prompt_tiers")
 
 
 def _price_changed(current: float, fetched: float) -> bool:
@@ -259,6 +261,92 @@ def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
     return prices
 
 
+# OpenRouter override price keys (USD per token) -> catalog prompt-tier
+# fields (USD per 1M tokens); see model_info._parse_prompt_tiers.
+_OPENROUTER_TIER_PRICE_FIELDS = (
+    ("prompt", "input_price_per_1M"),
+    ("completion", "output_price_per_1M"),
+    ("input_cache_read", "cache_read_price_per_1M"),
+    ("input_cache_write", "cache_write_price_per_1M"),
+    ("input_cache_write_1h", "cache_write_1h_price_per_1M"),
+)
+# Other ``pricing`` keys an override may set that the catalog does not
+# tier.  Any key outside these two sets is a condition this importer does
+# not understand (e.g. the ``utc_*`` time-of-day windows).
+_OPENROUTER_UNTIERED_PRICE_KEYS = frozenset(
+    {
+        "audio",
+        "audio_output",
+        "discount",
+        "image",
+        "image_output",
+        "image_token",
+        "input_audio_cache",
+        "internal_reasoning",
+        "request",
+        "web_search",
+    }
+)
+
+
+def openrouter_prompt_tiers(pricing: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Convert OpenRouter long-prompt price overrides to catalog ``prompt_tiers``.
+
+    OpenRouter lists conditional prices in ``pricing.overrides``.  An
+    entry whose only condition is ``min_prompt_tokens`` applies to
+    requests whose prompt is strictly longer than that; later entries
+    win per key and absent keys keep the base price (the semantics
+    ``model_info.calculate_cost`` implements).  Entries with any other
+    condition (time-of-day ``utc_*`` windows, or keys this importer does
+    not know) are skipped, as OpenRouter's docs ask, so the base price
+    applies to them.  An entry with a missing, non-numeric or negative
+    price is skipped too.
+
+    Args:
+        pricing: The ``pricing`` object of one ``/api/v1/models`` entry.
+
+    Returns:
+        ``{"prompt_tiers": [...]}`` in OpenRouter's order, each tier a
+        ``min_prompt_tokens`` plus the catalog fields it sets (rounded to
+        6 decimals per 1M tokens); ``{}`` when no entry qualifies.
+    """
+    overrides = pricing.get("overrides")
+    if not isinstance(overrides, list):
+        return {}
+    tiered_keys = {api_field for api_field, _catalog in _OPENROUTER_TIER_PRICE_FIELDS}
+    tiers: list[dict[str, Any]] = []
+    for override in overrides:
+        if not isinstance(override, dict):
+            continue
+        conditions = set(override) - tiered_keys - _OPENROUTER_UNTIERED_PRICE_KEYS
+        threshold = override.get("min_prompt_tokens")
+        if isinstance(threshold, float) and threshold.is_integer():
+            threshold = int(threshold)
+        if (
+            conditions != {"min_prompt_tokens"}
+            or not isinstance(threshold, int)
+            or isinstance(threshold, bool)
+            or threshold <= 0
+        ):
+            continue
+        tier: dict[str, Any] = {"min_prompt_tokens": threshold}
+        for api_field, catalog_field in _OPENROUTER_TIER_PRICE_FIELDS:
+            raw = override.get(api_field)
+            if raw is None or raw == "":
+                continue
+            try:
+                per_million = float(raw) * 1_000_000
+            except (TypeError, ValueError, OverflowError):
+                break
+            if not 0 <= per_million < float("inf"):
+                break
+            tier[catalog_field] = round(per_million, 6)
+        else:
+            if len(tier) > 1:
+                tiers.append(tier)
+    return {"prompt_tiers": tiers} if tiers else {}
+
+
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
     """Fetch all models from OpenRouter (public API, no auth).
 
@@ -308,6 +396,7 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
                 "source": "openrouter",
                 "decisions": decisions,
                 **openrouter_cache_prices(pricing),
+                **openrouter_prompt_tiers(pricing),
             }
     if verbose:  # pragma: no branch
         print(f"    Found {len(models)} models ({skipped_deprecated} deprecated filtered out)")
@@ -592,7 +681,7 @@ def fetch_bedrock(verbose: bool = False) -> dict[str, dict]:
 def get_current_model_info() -> dict[str, dict]:
     """Return the loaded catalog as plain dicts keyed like MODEL_INFO.json.
 
-    Cache prices are taken from the on-disk JSON rather than from
+    Cache prices and ``prompt_tiers`` are taken from the on-disk JSON rather than from
     ``ModelInfo``, because ``model_info._apply_cache_pricing`` fills
     unpublished entries with provider defaults at load time; comparing
     those derived values with OpenRouter's listing would make
@@ -620,6 +709,8 @@ def get_current_model_info() -> dict[str, dict]:
         for _api_field, catalog_field in _OPENROUTER_CACHE_PRICE_FIELDS:
             if catalog_field in raw:
                 entry[catalog_field] = raw[catalog_field]
+        if "prompt_tiers" in raw:
+            entry["prompt_tiers"] = raw["prompt_tiers"]
         current[name] = entry
     return current
 
@@ -988,7 +1079,9 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
     * Direct ``claude-*`` models use the Anthropic ``output_config.effort``
       ladder from :func:`_anthropic_effort_scale` (up to
       ``low``/``medium``/``high``/``xhigh``/``max``); a ``bedrock/`` id
-      uses the ladder of the Claude model behind it.
+      and an ``openrouter/anthropic/claude-*`` slug use the ladder of the
+      Claude model behind them (OpenRouter forwards ``reasoning.effort``
+      to Anthropic unchanged).
     * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
       (``low``/``medium``/``high``/``xhigh``) — including Together's
       OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
@@ -1018,6 +1111,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         from kiss.core.models.model_info import bedrock_claude_name
 
         return _anthropic_effort_scale(bedrock_claude_name(model_name) or model_name)
+    if model_name.startswith(_OPENROUTER_CLAUDE_PREFIX):
+        return _anthropic_effort_scale(_openrouter_claude_slug(model_name))
     return _THINKING_LEVELS
 
 
@@ -1063,6 +1158,9 @@ def detect_thinking_level(model_name: str) -> str | None:
       etc.) either don't accept ``reasoning_effort`` or repurpose the
       levels for agent count rather than depth.
     * GLMs other than exactly ``GLM-5.2`` (see :func:`_is_glm_5_2_family`).
+    * ``openrouter/anthropic/*`` — OpenRouter accepts every level for
+      every Claude model, so a probe proves nothing; the level is mirrored
+      from the direct twin by :func:`_sync_openrouter_claude_thinking`.
     * Every other vendor not yet verified to support the parameter (only
       the OpenAI family — direct and via OpenRouter, plus Together's
       ``openai/gpt-oss-*`` — Kimi K3, the xAI Grok effort family, and
@@ -1647,6 +1745,40 @@ def _bedrock_twin_key(claude: str, names: Iterable[str]) -> str | None:
     return None
 
 
+_OPENROUTER_CLAUDE_PREFIX = "openrouter/anthropic/"
+"""Catalog-key prefix of the Claude models routed through OpenRouter.
+
+The ``openrouter/~anthropic/*-latest`` rolling aliases are deliberately
+not covered: they name no fixed Claude model, so no direct twin exists.
+"""
+
+
+def _openrouter_claude_slug(name: str) -> str:
+    """Return the direct Claude id behind an ``openrouter/anthropic/`` key.
+
+    OpenRouter slugs dot the minor version (``claude-opus-5.5``) where the
+    Anthropic ids hyphenate it (``claude-opus-5-5``); the result is the
+    catalog key of the direct twin when the catalog has one.
+    """
+    from kiss.core.models.model_info import _twin_key
+
+    return _twin_key(name.rsplit("/", 1)[-1])
+
+
+def _openrouter_claude_twin_key(name: str, names: Iterable[str]) -> str | None:
+    """Return the direct ``claude-*`` key in ``names`` serving an OpenRouter Claude id.
+
+    Only the undated base key matches (``claude-opus-5-5``, never its
+    ``-max`` alias or a dated snapshot), as :func:`model_info.openrouter_twin`
+    matches in the other direction.  None when ``name`` is not an
+    ``openrouter/anthropic/`` key or ``names`` lacks the twin.
+    """
+    if not name.startswith(_OPENROUTER_CLAUDE_PREFIX):
+        return None
+    twin = _openrouter_claude_slug(name)
+    return twin if twin in names else None
+
+
 def _bedrock_twin_entry(
     claude: str, current: dict[str, dict], openrouter: dict[str, dict]
 ) -> dict | None:
@@ -1771,22 +1903,99 @@ def _sync_bedrock_thinking(
         if (key := _bedrock_twin_key(claude, new_by_name)) is not None:
             level = new_by_name[key].get("thinking")
         elif (key := _bedrock_twin_key(claude, current)) is not None:
-            upd = update_by_name.get(key)
-            if upd is not None and "thinking" in upd["changes"]:
-                level = upd["changes"]["thinking"]
-            else:
-                level = _stored_max_thinking_level(current, key, current[key])
+            level = _run_thinking_level(key, current, update_by_name)
         else:
             level = None
-        if name in new_by_name:
-            new_by_name[name]["thinking"] = level
-        elif name in current and level != _stored_max_thinking_level(current, name, current[name]):
-            upd = update_by_name.get(name)
-            if upd is None:
-                upd = {"name": name, "changes": {}, "source": "bedrock"}
-                updates.append(upd)
-                update_by_name[name] = upd
-            upd["changes"]["thinking"] = level
+        _set_mirror_thinking(name, level, "bedrock", current, updates, new_by_name, update_by_name)
+
+
+def _sync_openrouter_claude_thinking(
+    current: dict[str, dict],
+    updates: list[dict],
+    new_models: list[dict],
+) -> None:
+    """Give every ``openrouter/anthropic/`` entry the effort level of its ``claude-*`` twin.
+
+    OpenRouter forwards ``reasoning.effort`` to Anthropic, so a Claude slug
+    runs the same ``low`` … ``max`` ladder as the direct model, yet it can
+    never be probed: OpenRouter answers 200 at every level for every
+    Claude (``max`` on Opus 4.5, ``low`` on Sonnet 4.5), so
+    :func:`detect_thinking_level` would record the ladder top for models
+    that have no effort parameter at all.  The level is therefore a
+    mirror of the direct twin's, resolved exactly as
+    :func:`_sync_bedrock_thinking` resolves a Bedrock id's: a twin new
+    this run hands over its probed level, a retested twin its new level,
+    any other twin the maximum recorded on disk.  A slug without a direct
+    twin (``claude-opus-4.1``, the ``:thinking`` variants) keeps no level.
+    Called from :func:`compute_changes` and again from ``main`` after the
+    probes and retests, like the Bedrock sync.
+
+    Args:
+        current: The current catalog.
+        updates: This run's update records; extended in place.
+        new_models: This run's candidates (probed); mutated in place.
+    """
+    new_by_name = {nm["name"]: nm for nm in new_models}
+    update_by_name = {upd["name"]: upd for upd in updates}
+    bases = [
+        name
+        for name in sorted(set(current) | set(new_by_name))
+        if name.startswith(_OPENROUTER_CLAUDE_PREFIX)
+        and not (current.get(name) or {}).get("alias_of")
+    ]
+    for name in bases:
+        if (key := _openrouter_claude_twin_key(name, new_by_name)) is not None:
+            level = new_by_name[key].get("thinking")
+        elif (key := _openrouter_claude_twin_key(name, current)) is not None:
+            level = _run_thinking_level(key, current, update_by_name)
+        else:
+            level = None
+        _set_mirror_thinking(
+            name, level, "openrouter-claude", current, updates, new_by_name, update_by_name
+        )
+
+
+def _run_thinking_level(
+    key: str, current: dict[str, dict], update_by_name: dict[str, dict]
+) -> str | None:
+    """Return the effort level this run knows for the catalog entry ``key``.
+
+    A pending ``thinking`` update (a retest this run) wins over the maximum
+    recorded on disk (:func:`_stored_max_thinking_level`).
+    """
+    upd = update_by_name.get(key)
+    if upd is not None and "thinking" in upd["changes"]:
+        level = upd["changes"]["thinking"]
+        return str(level) if level is not None else None
+    return _stored_max_thinking_level(current, key, current[key])
+
+
+def _set_mirror_thinking(
+    name: str,
+    level: str | None,
+    source: str,
+    current: dict[str, dict],
+    updates: list[dict],
+    new_by_name: dict[str, dict],
+    update_by_name: dict[str, dict],
+) -> None:
+    """Record ``level`` as the effort level of the mirror entry ``name``.
+
+    A candidate new this run takes the level directly; an existing entry
+    whose level this run knows (:func:`_run_thinking_level`) differs gets
+    a ``thinking`` update under ``source`` (joining its pending update
+    record when there is one), which :func:`apply_updates_to_file` turns
+    into the ``-low`` … ``-max`` siblings of the entry's ladder.
+    """
+    if name in new_by_name:
+        new_by_name[name]["thinking"] = level
+    elif name in current and level != _run_thinking_level(name, current, update_by_name):
+        upd = update_by_name.get(name)
+        if upd is None:
+            upd = {"name": name, "changes": {}, "source": source}
+            updates.append(upd)
+            update_by_name[name] = upd
+        upd["changes"]["thinking"] = level
 
 
 def _lookup_openrouter_pricing(
@@ -1847,6 +2056,65 @@ def _cache_price_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[s
     return changed
 
 
+def _same_prompt_tiers(current: Any, fetched: list[dict[str, Any]]) -> bool:
+    """Whether stored ``prompt_tiers`` match freshly fetched ones.
+
+    Tiers match when they come in the same order with the same
+    thresholds and fields, and no price moved past
+    :func:`_price_changed`'s tolerance.  A stored tier that
+    ``model_info`` would reject (a non-integer threshold, a price that is
+    not a finite non-negative number) never matches, so the fetched tier
+    replaces it.
+    """
+    if not isinstance(current, list) or len(current) != len(fetched):
+        return False
+    for cur_tier, new_tier in zip(current, fetched, strict=True):
+        if not isinstance(cur_tier, dict) or set(cur_tier) != set(new_tier):
+            return False
+        threshold = cur_tier.get("min_prompt_tokens")
+        if type(threshold) is not int or threshold != new_tier["min_prompt_tokens"]:
+            return False
+        for field, value in new_tier.items():
+            if field == "min_prompt_tokens":
+                continue
+            stored = cur_tier[field]
+            if not isinstance(stored, int | float) or isinstance(stored, bool):
+                return False
+            try:
+                stored_price = float(stored)
+            except OverflowError:  # a hand-edited integer such as 10**400
+                return False
+            if not 0 <= stored_price < float("inf") or _price_changed(stored_price, value):
+                return False
+    return True
+
+
+def _prompt_tier_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[str, Any]:
+    """Return ``{"prompt_tiers": ...}`` when ``fetched``'s tiers differ from ``cur``'s.
+
+    ``fetched`` is one :func:`fetch_openrouter` entry (tiers from
+    :func:`openrouter_prompt_tiers`), ``cur`` the catalog entry (``{}``
+    for a brand-new model).  Tiers the catalog stores but OpenRouter no
+    longer publishes come back as ``None`` so
+    :func:`apply_updates_to_file` drops the field.
+
+    Args:
+        cur: The current catalog entry, or ``{}`` when the model is new.
+        fetched: One entry of :func:`fetch_openrouter`'s result.
+
+    Returns:
+        ``{}`` when nothing changed, else the field to merge into an
+        ``updates`` ``changes`` dict or a ``new_models`` entry.
+    """
+    value = fetched.get("prompt_tiers")
+    current_value = cur.get("prompt_tiers")
+    if value is None:
+        return {"prompt_tiers": None} if current_value is not None else {}
+    if current_value is None or not _same_prompt_tiers(current_value, value):
+        return {"prompt_tiers": value}
+    return {}
+
+
 def compute_changes(
     current: dict[str, dict],
     openrouter: dict[str, dict],
@@ -1883,6 +2151,7 @@ def compute_changes(
             if _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"]):
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
             changed.update(_cache_price_changes(cur, fetched))
+            changed.update(_prompt_tier_changes(cur, fetched))
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
@@ -1901,6 +2170,7 @@ def compute_changes(
                         "needs_pricing": not has_pricing,
                         "is_decisions": fetched.get("decisions", False),
                         **_cache_price_changes({}, fetched),
+                        **_prompt_tier_changes({}, fetched),
                     }
                 )
 
@@ -2031,6 +2301,7 @@ def compute_changes(
         # Levels known from the catalog now (so a thinking-only drift counts
         # as a change); main() re-syncs after the probes and retests.
         _sync_bedrock_thinking(bedrock, current, updates, new_models)
+    _sync_openrouter_claude_thinking(current, updates, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -2443,16 +2714,16 @@ def apply_updates_to_file(
             ``changes`` may target ``context_length``, ``input_price_per_1M``,
             ``output_price_per_1M``, ``cache_read_price_per_1M``,
             ``cache_write_price_per_1M``, ``image_output_price_per_1M``,
-            ``fc``, ``emb``, ``gen``, ``thinking``, ``use_responses_api``,
-            ``dec``.  A ``thinking`` or cache/image-price value of
-            ``None`` and a falsy
-            ``use_responses_api`` / ``dec`` value remove their field.
+            ``prompt_tiers``, ``fc``, ``emb``, ``gen``, ``thinking``,
+            ``use_responses_api``, ``dec``.  A ``thinking``,
+            cache/image-price or ``prompt_tiers`` value of ``None`` and a
+            falsy ``use_responses_api`` / ``dec`` value remove their field.
         new_models: Each entry must carry at minimum ``name``,
             ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
             Optional flags: ``fc`` (default True), ``emb`` (False),
             ``gen`` (True), ``dec`` (False), ``thinking``, ``needs_pricing``,
             ``cache_read_price_per_1M``, ``cache_write_price_per_1M``,
-            ``image_output_price_per_1M``.
+            ``image_output_price_per_1M``, ``prompt_tiers``.
         deprecated: ``[{"name": str, "reason": str}]``; removed by name.
             An update that targets a deprecated name is skipped so the
             removal is not undone in the same run.
@@ -2500,7 +2771,7 @@ def apply_updates_to_file(
                 entry.pop("thinking", None)
             elif field in ("use_responses_api", "dec") and not value:
                 entry.pop(field, None)
-            elif field in _CACHE_PRICE_CATALOG_FIELDS and value is None:
+            elif field in _REMOVABLE_PRICE_FIELDS and value is None:
                 entry.pop(field, None)
             else:
                 entry[field] = value
@@ -2530,6 +2801,7 @@ def apply_updates_to_file(
             dec=nm.get("dec", False),
         )
         entry.update(_cache_price_changes({}, nm))
+        entry.update(_prompt_tier_changes({}, nm))
         _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
 
@@ -2995,7 +3267,12 @@ def main() -> None:
             )
             fc_changed = caps["fc"] != cur["fc"]
             stored_thinking = _stored_max_thinking_level(current, name, cur)
-            thinking_changed = caps["thinking"] != stored_thinking
+            # An OpenRouter Claude slug's level mirrors its claude-* twin
+            # (_sync_openrouter_claude_thinking below); its own probe is
+            # gated off and says nothing about the ladder.
+            thinking_changed = caps["thinking"] != stored_thinking and not name.startswith(
+                _OPENROUTER_CLAUDE_PREFIX
+            )
             responses_verdict = caps.get("use_responses_api")
             # None means the probe never ran or died on transient endpoint
             # errors — a stored flag must survive an unexecuted probe.
@@ -3031,6 +3308,7 @@ def main() -> None:
 
     if bedrock_models:
         _sync_bedrock_thinking(bedrock_models, current, updates, new_models)
+    _sync_openrouter_claude_thinking(current, updates, new_models)
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)

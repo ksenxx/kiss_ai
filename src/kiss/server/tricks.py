@@ -285,7 +285,9 @@ def _reject_new_body(body: str) -> str | None:
     """Return why *body* cannot be stored as a ``## Trick`` section, or ``None``."""
     if not body:
         return "Promptlet must not be empty"
-    if re.search(r"^##\s", body, flags=re.MULTILINE):
+    # The lines the reader splits sections at (``^##\s+``, which takes the
+    # newline after a bare ``##`` too), the trimmed body's last one included.
+    if re.search(r"^##(\s|$)", body, flags=re.MULTILINE):
         return "Promptlet must not contain a line starting with '## '"
     return None
 

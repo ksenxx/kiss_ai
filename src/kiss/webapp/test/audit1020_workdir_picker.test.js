@@ -25,11 +25,10 @@ const {
   showSection,
   ofType,
   makeRunner,
+  WD,
 } = require('./ui_antipattern_harness');
 
 const {test, report} = makeRunner();
-
-const WD = '/ws/repo';
 
 function makePage() {
   return makeChatPage({
@@ -38,8 +37,7 @@ function makePage() {
       stubRaf(win);
       fakeMatchMedia(win, true);
     },
-    extraScripts: ['treeContextMenu.js'],
-    sourceUrl: 'workdir-picker-main.js',
+    extraScripts: ['contentContextMenu.js', 'treeContextMenu.js'],
   });
 }
 

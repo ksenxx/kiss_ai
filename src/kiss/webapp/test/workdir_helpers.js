@@ -94,6 +94,35 @@ function errorNotifications(win) {
   );
 }
 
+/** Record a window built without makePage, so closeWindows closes it too. */
+function trackWindow(win) {
+  openWindows.push(win);
+}
+
+/**
+ * Run `tests`, `[name, fn]` pairs of synchronous tests, in order: print
+ * `ok - name`, or `not ok - name` and the error, close every recorded
+ * window after each test, print the tally and exit with 1 when any test
+ * failed.
+ */
+function runTests(tests) {
+  let failed = 0;
+  for (const [name, fn] of tests) {
+    try {
+      fn();
+      console.log('ok - ' + name);
+    } catch (e) {
+      failed += 1;
+      console.log('not ok - ' + name);
+      console.log(e && e.stack ? e.stack : String(e));
+    } finally {
+      closeWindows();
+    }
+  }
+  console.log(`\n${tests.length - failed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+}
+
 module.exports = {
   makePage,
   closeWindows,
@@ -106,4 +135,6 @@ module.exports = {
   currentDir,
   pick,
   errorNotifications,
+  trackWindow,
+  runTests,
 };

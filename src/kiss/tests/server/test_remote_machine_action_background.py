@@ -134,26 +134,28 @@ class TestMachineActionInBackground(IsolatedAsyncioTestCase):
         self.assertNotEqual(reply["error"], "")
 
     async def test_machine_replies_keep_command_order(self) -> None:
-        """A quick machine command sent behind a slow one is answered after it.
+        """A quick command for a machine sent behind a slow one for it is answered after it.
 
         ``setWorkDir`` on the silent machine stalls for the handshake
-        timeout; ``getMachineWorkDirs`` of an unregistered machine
-        answers without any network.  Run as independent background
-        tasks the quick reply would overtake the slow one (and a later
-        ``setWorkDir`` could apply before an earlier one): the replies
-        must come back in the order the commands were sent.
+        timeout; ``machineAction remove`` of that machine answers
+        without any network.  Run as independent background tasks the
+        quick reply would overtake the slow one (and a later
+        ``setWorkDir`` could apply before an earlier one): one
+        machine's replies must come back in the order the commands were
+        sent.  Another machine's are not held up
+        (``test_machine_queues_sweep1030.py``).
         """
         self._register_silent_machine("mute")
         await self._send({"type": "setWorkDir", "machine": "mute", "workDir": self.tmpdir})
-        await self._send({"type": "getMachineWorkDirs", "machine": "nope"})
+        await self._send({"type": "machineAction", "action": "remove", "name": "mute"})
         replies: list[str] = []
         deadline = time.monotonic() + 60.0
         while len(replies) < 2:
             remaining = deadline - time.monotonic()
-            self.assertGreater(remaining, 0, "no machineWorkDirs replies within 60s")
+            self.assertGreater(remaining, 0, "no machineWorkDirs or remove reply within 60s")
             line = await asyncio.wait_for(self.reader.readline(), timeout=remaining)
             assert line, "local connection closed"
             msg: dict[str, Any] = json.loads(line.decode("utf-8"))
-            if msg.get("type") == "machineWorkDirs":
-                replies.append(msg["machine"])
-        self.assertEqual(replies, ["mute", "nope"])
+            if msg.get("type") == "machineWorkDirs" or msg.get("action") == "remove":
+                replies.append(msg["type"])
+        self.assertEqual(replies, ["machineWorkDirs", "machines"])

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
@@ -35,17 +36,21 @@ class TestJobNameSingleDecode(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_pct_")) / "jobs"
-        self._jobs_root.mkdir(parents=True)
+        tmp = Path(tempfile.mkdtemp(prefix="kiss_traj_pct_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self._jobs_root = tmp / "jobs"
+        self._jobs_root.mkdir()
         write_trajectory(self._jobs_root, "job_%20a", "Agent Pct")
         write_trajectory(self._jobs_root, "job_plain", "Agent Plain")
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
 
+        work_dir = tmp / "work"
+        work_dir.mkdir()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=str(work_dir),
         )
         await self.server.start_async()
 

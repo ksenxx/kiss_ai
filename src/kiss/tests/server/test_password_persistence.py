@@ -59,8 +59,9 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
 
     def test_password_read_uses_local_storage(self) -> None:
         """The auth on-open path reads the password from localStorage."""
+        self.assertIn("const _PASSWORD_KEY = 'sorcar-remote-pwd';", _TRANSPORT_JS)
         self.assertIn(
-            "localStorage.getItem('sorcar-remote-pwd')",
+            "localStorage.getItem(_PASSWORD_KEY)",
             _TRANSPORT_JS,
             "Shim must read the cached remote password from localStorage so "
             "the password survives tab close / browser restart.",
@@ -68,8 +69,9 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
 
     def test_password_write_uses_local_storage(self) -> None:
         """The auth_ok handler persists the accepted password to localStorage."""
+        self.assertIn("localStorage.setItem(_PASSWORD_KEY, pwd)", _TRANSPORT_JS)
         self.assertIn(
-            "localStorage.setItem('sorcar-remote-pwd', _authPassword)",
+            "if (_authPassword) _storePassword(_authPassword);",
             _TRANSPORT_JS,
             "Shim must write the accepted password to localStorage so "
             "subsequent visits skip the prompt.",
@@ -77,8 +79,9 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
 
     def test_password_clear_on_auth_required(self) -> None:
         """Stale cached password is removed when the server rejects it."""
+        self.assertIn("localStorage.removeItem(_PASSWORD_KEY)", _TRANSPORT_JS)
         self.assertIn(
-            "localStorage.removeItem('sorcar-remote-pwd')",
+            "_forgetStoredPassword();",
             _TRANSPORT_JS,
             "Shim must clear the cached password on auth_required so a stale "
             "wrong password does not silently retry forever.",
@@ -87,7 +90,7 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
     def test_password_never_uses_session_storage(self) -> None:
         """The password key must not appear in any sessionStorage call."""
         for line in _TRANSPORT_JS.splitlines():
-            if "sorcar-remote-pwd" in line:
+            if "sorcar-remote-pwd" in line or "_PASSWORD_KEY" in line:
                 self.assertNotIn(
                     "sessionStorage",
                     line,

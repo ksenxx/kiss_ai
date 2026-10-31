@@ -17,7 +17,6 @@ call into the SEA file.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import shutil
@@ -907,7 +906,8 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     shutil.rmtree(tmp_path / "src")
     rmtree_force(tmp_path / ".git")  # git's objects are read-only on Windows
     signatures = sea._signatures()
-    assert signatures["sh"] == ast.literal_eval(repr(signatures["sh"]))  # plain text
+    # A window of the sh SEA's own prompt text, cut from the bundled copy.
+    assert signatures["sh"] in sea._sea_prompt_text(_SEAS_DIR / "sh" / "sh_sea.py")
     assert len(signatures["sh"]) == sea.SIGNATURE_CHARS and "review_paper" in signatures
     assert "dummy" not in signatures  # no prompt getter
 

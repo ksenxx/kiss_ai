@@ -31,15 +31,36 @@ const {
   readyTabId,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {click, shareWithTasks, makeSharePage} = require('./share_helpers');
+const {
+  click,
+  shareWithTasks,
+  makeSharePage: makeShareWindow,
+} = require('./share_helpers');
 
-const {test, report} = makeRunner();
+const runner = makeRunner();
+const {report} = runner;
 
+// Every chat / share window the running test opened; closed after it.
+const openWindows = [];
+
+/** Run one test through the shared runner, then close its windows. */
+async function test(name, fn) {
+  await runner.test(name, fn);
+  while (openWindows.length) openWindows.pop().close();
+}
+
+/** A chat page (main.js) with synchronous animation frames. */
 function makePage() {
-  return makeChatPage({
-    beforeScripts: stubRaf,
-    sourceUrl: 'sharesub-main.js',
-  });
+  const wv = makeChatPage({beforeScripts: stubRaf});
+  openWindows.push(wv.win);
+  return wv;
+}
+
+/** The exported page *bodyHtml* with share.js running in it. */
+function makeSharePage(bodyHtml) {
+  const win = makeShareWindow(bodyHtml);
+  openWindows.push(win);
+  return win;
 }
 
 /**
@@ -598,9 +619,6 @@ async function run() {
   });
 
   report('shareSubagents');
-  // The JSDOM windows above loaded main.js, whose live timers would
-  // otherwise keep the process alive until the runner's timeout.
-  process.exit(0);
 }
 
 run().catch(err => {

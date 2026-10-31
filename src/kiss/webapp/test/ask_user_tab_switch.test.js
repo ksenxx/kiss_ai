@@ -21,6 +21,7 @@ const {
   clickTab,
   answering,
 } = require('./simplify2_harness');
+const {tabEl} = require('./subagent_tab_helpers');
 
 function makePage(opts) {
   return makeChatPage({
@@ -31,14 +32,6 @@ function makePage(opts) {
       fakeMatchMedia(win, false);
     },
   });
-}
-
-// The tab's entry on the group strip (#tab-list): rendered for the chat
-// on screen and its group only, so a background chat has none.
-function tabElement(win, tabId) {
-  return win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
 }
 
 // The record of an open tab, or null once it is closed.
@@ -141,26 +134,8 @@ function testNewQuestionSwitchesTabWithoutToast() {
   console.log('  ok - a new question switches tabs and raises no toast');
 }
 
-function testTaskEndAndAskUserDoneRaiseNoToast() {
-  for (const retire of [
-    {type: 'askUserDone'},
-    {type: 'task_done', success: true},
-    {type: 'task_error', error: 'boom'},
-  ]) {
-    const {win} = makePage();
-    const api = win._testApi;
-    const tab = api.getActiveTabId();
-    send(win, {type: 'askUser', question: 'Which branch?', tabId: tab});
-    assert.ok(answering(win), retire.type + ': answer mode entered');
-    assertNoToast(win, retire.type + ': while the question is pending');
-
-    send(win, Object.assign({tabId: tab}, retire));
-    assert.ok(!answering(win), retire.type + ' retires the question');
-    assertNoToast(win, retire.type + ': after the question is retired');
-    win.close();
-  }
-  console.log('  ok - answering or ending the task raises no toast either');
-}
+// An answer accepted (askUserDone) or the task ending retires the
+// question without a toast too: askClearedOnTaskEnd.test.js.
 
 function testClosingTheAskingTabPostsNothingExtra() {
   const {win} = makePage();
@@ -170,7 +145,7 @@ function testClosingTheAskingTabPostsNothingExtra() {
   send(win, {type: 'askUser', question: 'Close me?', tabId: askTab});
   assert.strictEqual(api.getActiveTabId(), askTab);
 
-  const closeBtn = tabElement(win, askTab).querySelector('.chat-tab-close');
+  const closeBtn = tabEl(win, askTab).querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the tab has a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.strictEqual(tabRecord(win, askTab), null, 'the tab is gone');
@@ -184,6 +159,7 @@ function testAskUserForUnknownTabIsIgnored() {
   const {win, posted} = makePage();
   const api = win._testApi;
   const activeBefore = api.getActiveTabId();
+  const before = posted.length;
 
   send(win, {
     type: 'askUser',
@@ -194,7 +170,11 @@ function testAskUserForUnknownTabIsIgnored() {
   assert.strictEqual(api.getActiveTabId(), activeBefore);
   assert.ok(!answering(win));
   assertNoToast(win, 'for a foreign tab');
-  assert.strictEqual(posted.filter(m => m.type === 'askUser').length, 0);
+  assert.deepStrictEqual(
+    posted.slice(before),
+    [],
+    'a question for a foreign tab posts nothing to the daemon',
+  );
   win.close();
   console.log('  ok - askUser for an unknown tab is ignored');
 }
@@ -295,7 +275,6 @@ function testQuestionPostsNothingToTheDaemon() {
 
 function runTests() {
   testNewQuestionSwitchesTabWithoutToast();
-  testTaskEndAndAskUserDoneRaiseNoToast();
   testClosingTheAskingTabPostsNothingExtra();
   testAskUserForUnknownTabIsIgnored();
   testReloadWithAnswerDraftRestoresInPlace();
@@ -306,7 +285,7 @@ function runTests() {
 
 try {
   runTests();
-  console.log('\n8 passed, 0 failed');
+  console.log('\n7 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

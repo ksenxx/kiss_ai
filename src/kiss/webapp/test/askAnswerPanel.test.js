@@ -143,13 +143,10 @@ function testAnswerStaysOpenWhileTaskStreams() {
   send(win, {type: 'prompt', text: '/ask ' + QUESTION, tabId: tab});
   send(win, askAnswerEvent({tabId: tab, taskId: '42'}));
   // The running task keeps going: its next events fold older panels
-  // away (collapseOlderPanels) -- the prompt echo folds, the answer
-  // the user asked for must not.
+  // away (collapseOlderPanels), but never the answer the user asked for.
   send(win, {type: 'text_delta', text: 'Continuing with the fix.', tabId: tab});
   send(win, {type: 'text_end', tabId: tab});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab});
-  const prompt = win.document.querySelector('#output .ev.prompt');
-  assert.ok(prompt.classList.contains('collapsed'), 'prompt echo folds');
   const panel = win.document.querySelector('#output .ev.ask-answer');
   assert.ok(
     !panel.classList.contains('collapsed'),

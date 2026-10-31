@@ -11,8 +11,8 @@ thread')``, leaks the freshly opened socket, and kills the reader with
 unprocessed buffer.  ``_read_loop`` also re-read ``self._sock``, so an
 outliving reader could adopt the next connection's socket.
 
-Fixes under test, driven against a REAL TCP IRC server in this file
-(no mocks or test doubles):
+Fixes under test, driven against a real loopback TCP listener
+(``irc_test_utils.IRCServer``; no mocks or test doubles):
 
 - the reader owns the socket it was started with and exits once
   ``self._sock`` no longer refers to it;
@@ -22,66 +22,29 @@ Fixes under test, driven against a REAL TCP IRC server in this file
 
 from __future__ import annotations
 
-import socket
 import threading
 from collections.abc import Iterator
 
 import pytest
 
 from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend, _config
+from kiss.tests.agents.third_party_agents.irc_test_utils import IRCServer, read_lines
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-def _read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[str]:
-    """Read CRLF lines from *conn* until one starts with *until*."""
-    conn.settimeout(timeout)
-    buf = ""
-    lines: list[str] = []
-    while True:
-        chunk = conn.recv(4096).decode("utf-8", errors="replace")
-        if not chunk:
-            raise AssertionError(f"connection closed before {until!r}; got {lines}")
-        buf += chunk
-        while "\r\n" in buf:
-            line, buf = buf.split("\r\n", 1)
-            lines.append(line)
-            if line.startswith(until):
-                return lines
-
-
-class _IRCServer:
-    """Minimal real TCP server accepting IRC client connections."""
-
-    def __init__(self) -> None:
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(5)
-        self.sock.settimeout(5.0)
-        self.port = self.sock.getsockname()[1]
-
-    def accept(self) -> socket.socket:
-        """Accept one client connection."""
-        conn, _ = self.sock.accept()
-        return conn
-
-    def close(self) -> None:
-        """Close the listening socket."""
-        self.sock.close()
-
-
 @pytest.fixture()
-def server() -> Iterator[_IRCServer]:
+def server() -> Iterator[IRCServer]:
     """A listening IRC server for one test."""
-    srv = _IRCServer()
+    srv = IRCServer()
     try:
         yield srv
     finally:
         srv.close()
 
 
-def _connected_backend(server: _IRCServer) -> IRCChannelBackend:
+def _connected_backend(server: IRCServer) -> IRCChannelBackend:
     """Save config for *server* and return a connected backend."""
     _config.save({"server": "127.0.0.1", "port": str(server.port), "nick": "bot"})
     backend = IRCChannelBackend()
@@ -92,14 +55,14 @@ def _connected_backend(server: _IRCServer) -> IRCChannelBackend:
 class TestPingPong:
     """PING is answered directly on the reader's own socket."""
 
-    def test_pong_sent_on_same_connection(self, server: _IRCServer) -> None:
+    def test_pong_sent_on_same_connection(self, server: IRCServer) -> None:
         """The PONG arrives on the original connection; no reconnect happens."""
         backend = _connected_backend(server)
         try:
             with server.accept() as conn:
-                _read_lines(conn, "USER ")
+                read_lines(conn, "USER ")
                 conn.sendall(b"PING :tok-123\r\n")
-                lines = _read_lines(conn, "PONG")
+                lines = read_lines(conn, "PONG")
                 assert lines[-1] == "PONG :tok-123"
                 # No second connection was opened to answer the PING.
                 server.sock.settimeout(0.3)
@@ -110,14 +73,14 @@ class TestPingPong:
         finally:
             backend.disconnect()
 
-    def test_messages_still_processed_after_ping(self, server: _IRCServer) -> None:
+    def test_messages_still_processed_after_ping(self, server: IRCServer) -> None:
         """The reader keeps parsing PRIVMSG lines after answering a PING."""
         backend = _connected_backend(server)
         try:
             with server.accept() as conn:
-                _read_lines(conn, "USER ")
+                read_lines(conn, "USER ")
                 conn.sendall(b"PING :alive\r\n")
-                _read_lines(conn, "PONG")
+                read_lines(conn, "PONG")
                 conn.sendall(b":alice!u@h PRIVMSG #chan :hello bot\r\n")
                 assert wait_until(lambda: not backend._message_queue.empty(), timeout=6.0)
                 messages, _ = backend.poll_messages("#chan", "")
@@ -130,18 +93,18 @@ class TestPingPong:
 class TestReconnect:
     """A reconnect retires the old reader instead of splitting the stream."""
 
-    def test_old_reader_exits_and_new_socket_is_not_adopted(self, server: _IRCServer) -> None:
+    def test_old_reader_exits_and_new_socket_is_not_adopted(self, server: IRCServer) -> None:
         """After connect() twice, only the new reader consumes the new socket."""
         backend = _connected_backend(server)
         try:
             with server.accept() as conn1:
-                _read_lines(conn1, "USER ")
+                read_lines(conn1, "USER ")
                 reader1 = backend._reader_thread
                 assert reader1 is not None
 
                 assert backend.connect() is True
                 with server.accept() as conn2:
-                    _read_lines(conn2, "USER ")
+                    read_lines(conn2, "USER ")
                     reader2 = backend._reader_thread
                     assert reader2 is not None and reader2 is not reader1
                     assert wait_until(lambda: not reader1.is_alive(), timeout=6.0)
@@ -182,17 +145,3 @@ class TestDisconnectGuard:
         # The guard skips the join; the reader slot is left for the
         # next connect() to overwrite.
         assert backend._reader_thread is thread
-
-    def test_disconnect_from_other_thread_joins_reader(self, server: _IRCServer) -> None:
-        """A normal disconnect still joins and clears the reader thread."""
-        backend = _connected_backend(server)
-        try:
-            with server.accept() as conn:
-                _read_lines(conn, "USER ")
-                reader = backend._reader_thread
-                assert reader is not None
-                backend.disconnect()
-                assert backend._reader_thread is None
-                assert not reader.is_alive()
-        finally:
-            backend.disconnect()

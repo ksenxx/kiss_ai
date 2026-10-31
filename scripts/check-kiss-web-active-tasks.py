@@ -20,7 +20,16 @@ The probe connects to that URL, authenticates as a local client and
 speaks the daemon's JSON protocol:
 
 * Request:  ``{"type":"activeTasksQuery"}``
-* Response: ``{"type":"activeTasksResponse","count":<int>,"tabs":[...]}``
+* Response: ``{"type":"activeTasksResponse","count":<int>,"tabs":[...],
+  "restartPendingFile":<path>}`` -- the last key only from a daemon that
+  finishes a deferred restart by itself (``kiss.server.deferred_restart``).
+
+Output
+======
+
+For a busy daemon that names a ``restartPendingFile``, that path is the
+one line on stdout: ``install.sh`` records the restart it defers there.
+Nothing is printed otherwise.
 
 Exit codes
 ==========
@@ -110,7 +119,9 @@ def _probe_active_tasks(
     Returns a ``(exit_code, message)`` tuple.  ``exit_code`` follows
     the module docstring's contract (0 safe, 1 unsafe; with *strict*
     a daemon that cannot answer the query is unsafe too).  ``message``
-    is a single human-readable line written to stderr by ``main``.
+    is a single human-readable line written to stderr by ``main``; the
+    ``restartPendingFile`` of a busy daemon is printed to stdout here
+    (see Output above).
 
     The reader is a loop rather than a single ``recv`` because the
     daemon registers every connected client as a broadcast
@@ -211,6 +222,9 @@ def _probe_active_tasks(
     if count > 0:
         tabs_raw = msg.get("tabs") or []
         tabs = [t for t in tabs_raw if isinstance(t, str)]
+        restart_pending_file = msg.get("restartPendingFile")
+        if isinstance(restart_pending_file, str) and restart_pending_file:
+            print(restart_pending_file)
         return 1, (
             f"kiss-web has {count} in-flight task(s): "
             f"{', '.join(tabs) if tabs else '<unnamed>'}.  Refusing to kill — "

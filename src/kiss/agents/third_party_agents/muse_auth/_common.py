@@ -321,11 +321,13 @@ SURROGATE_PREFIX = "muse-sgt."
 # gate — a v5 daemon could fail a concurrent auto-migration and could
 # emit a rotated-away credential resolved before connection setup;
 # v7: daemon-side ``oauth2_refresh_token`` credentials from device-
-# authorization sign-ins, which a v6 daemon would fail to resolve).
+# authorization sign-ins, which a v6 daemon would fail to resolve;
+# v8: the ``generation`` op, which an enrollment interrupted mid-store
+# asks to learn whether the store landed).
 # The client restarts a running daemon whose ``status`` reports an
 # older protocol, so a detached pre-upgrade daemon cannot serve new
 # clients.
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 # One JSON object per line; requests carrying request/response bodies
 # are base64-encoded, so cap the frame to keep the daemon safe from

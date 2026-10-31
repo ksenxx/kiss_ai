@@ -140,7 +140,9 @@ class TestSteerInputSavedForAutocomplete:
         server, events = _make_server()
         st = AgentState("task-ask", tab_id="tab-ask", server_owned=True)
         st.is_task_active = True
+        # Pending as ``_publish_ask`` leaves it: the text and the ask's id.
         st.pending_ask_question = "API key?"
+        st.pending_ask_id = "ask-api-key"
         st.user_answer_queue = queue.Queue(maxsize=1)
         agent_state.register(st)
 
@@ -162,6 +164,7 @@ class TestSteerInputSavedForAutocomplete:
         st.is_task_active = True
         st.task_thread = threading.Thread(target=lambda: None)
         st.pending_ask_question = "password?"
+        st.pending_ask_id = "ask-password"
         st.user_answer_queue = queue.Queue(maxsize=1)
         agent_state.register(st)
 

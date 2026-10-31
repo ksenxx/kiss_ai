@@ -6,9 +6,9 @@
 
 The SEA replaced the bundled ``browser-devtools`` skill: it appends the
 DevTools workflow to the system prompt and switches the browser tools on,
-so the tests check that the skill is gone, the workflow names the six
-DevTools tools and their real arguments, the slash command resolves to
-this file, the settings turn the browser on and pin nothing else, the
+so the tests check that the workflow names the six DevTools tools and
+their real arguments and actions, the slash command resolves to this
+file, the settings turn the browser on and pin nothing else, the
 daemon-side loader stages the append as a system-prompt hook, and a real
 :class:`ChatSorcarAgent` run configured that way (against the scripted
 local chat-completions server) sends the default prompt with the workflow
@@ -26,7 +26,7 @@ import pytest
 
 from kiss.agents.seas.devtools import devtools_sea
 from kiss.agents.seas.devtools.devtools_sea import DevtoolsSea
-from kiss.agents.sorcar import sea_commands, skills, web_use_tool
+from kiss.agents.sorcar import sea_commands, web_use_tool
 from kiss.agents.sorcar.agent_dispatch import resolve_agent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
@@ -51,10 +51,8 @@ _DEVTOOLS_TOOLS = {
 }
 
 
-def test_the_skill_is_gone_and_the_workflow_names_the_real_tools() -> None:
-    """The ``browser-devtools`` skill folder no longer ships; the SEA's text names what exists."""
-    assert not (skills.bundled_skills_dir() / "browser").exists()
-    assert "browser-devtools" not in skills._load_bundled_skills(skills.bundled_skills_dir())
+def test_the_workflow_names_the_real_tools() -> None:
+    """The SEA's text names the tools, arguments and actions that exist."""
     text = devtools_sea.SYSTEM_PROMPT
     assert text.startswith(_HEADING + "\n\n")
     assert text.count("\n## ") == 0
@@ -73,13 +71,18 @@ def test_the_skill_is_gone_and_the_workflow_names_the_real_tools() -> None:
     assert 'wait_for("Loading", disappear=True)' in text
     assert 'list_network_requests(url_filter="/api", clear=True)' in text
     assert "list_console_messages(clear=True)" in text
-    # The ``use_my_chrome`` actions listed are the ones the tool accepts.
-    doc = web_use_tool.WebUseTool.use_my_chrome.__doc__ or ""
+    # The ``use_my_chrome`` actions listed are the ones the tool accepts: an
+    # unknown action is refused, before any bridge starts, with the valid ones.
+    tool = web_use_tool.WebUseTool(user_data_dir=None)
+    refusal = tool.use_my_chrome("no-such-action")
+    tool.close()
+    assert refusal.startswith("Error: unknown action 'no-such-action'. Use one of: "), refusal
+    accepted = set(refusal.split("Use one of: ", 1)[1].rstrip(".").split(", "))
     for action in (
         "list_tabs", "open_tab", "navigate", "snapshot", "click", "type_text",
         "evaluate", "screenshot", "activate_tab", "close_tab",
     ):
-        assert action in text and f'"{action}"' in doc, action
+        assert action in text and action in accepted, (action, accepted)
     # The JS recipes rendered with single braces (the text is an f-string).
     assert "{{" not in text and "}}" not in text
     assert "() => { const b = document.querySelector('button.submit');" in text

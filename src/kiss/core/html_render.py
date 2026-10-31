@@ -14,6 +14,8 @@ highlighted style, list items get bullets, and links show their targets.
 
 from __future__ import annotations
 
+import re
+
 from rich.text import Text
 
 from kiss.core.html_to_markdown import SkippingHTMLParser
@@ -69,9 +71,24 @@ class _HtmlToRichParser(SkippingHTMLParser):
         self._style_stack: list[str] = []
         self._list_stack: list[int | None] = []
         self._in_pre = 0
+        self._pre_end = 0
+        self._cell_start = 0
+
+    def _crop_spaces(self, floor: int) -> None:
+        """Remove the trailing spaces that were appended after text offset *floor*.
+
+        Spaces of ``<pre>`` text are content: nothing up to the end of
+        the last preformatted text (``_pre_end``) is removed.
+        """
+        plain = self.text.plain
+        excess = len(plain) - max(len(plain.rstrip(" ")), floor, self._pre_end)
+        if excess > 0:
+            self.text.right_crop(excess)
 
     def _newline(self, count: int = 1) -> None:
-        """Append newlines, collapsing runs beyond *count* blank lines."""
+        """End the line without its trailing spaces and append newlines,
+        collapsing runs beyond *count* blank lines."""
+        self._crop_spaces(0)
         plain = self.text.plain
         if not plain:
             return
@@ -85,6 +102,7 @@ class _HtmlToRichParser(SkippingHTMLParser):
         if self.skipped(tag, False):
             return
         if tag == "br":
+            self._crop_spaces(0)
             self.text.append("\n")
             return
         if tag == "hr":
@@ -96,6 +114,8 @@ class _HtmlToRichParser(SkippingHTMLParser):
             self._newline(2 if tag == "p" or tag.startswith("h") else 1)
         if tag == "pre":
             self._in_pre += 1
+        if tag in ("td", "th"):
+            self._cell_start = len(self.text)
         if tag == "ul":
             self._list_stack.append(None)
         elif tag == "ol":
@@ -132,21 +152,29 @@ class _HtmlToRichParser(SkippingHTMLParser):
         if tag in _BLOCK_TAGS:
             self._newline(2 if tag == "p" or tag.startswith("h") else 1)
         if tag in ("td", "th"):
+            self._crop_spaces(self._cell_start)
             self.text.append("  ")
 
     def handle_data(self, data: str) -> None:
-        """Append text content, collapsing whitespace outside ``<pre>``."""
+        """Append text content, collapsing whitespace outside ``<pre>``.
+
+        Outside ``<pre>`` each whitespace run becomes one space, dropped at
+        the start of a line or after a space, so text next to an inline tag
+        keeps exactly the spacing the HTML gives it.
+        """
         if self.skipping:
             return
         if not self._in_pre:
-            if not data.strip():
-                return
-            data = " ".join(data.split())
+            data = re.sub(r"\s+", " ", data)
             plain = self.text.plain
-            if plain and not plain.endswith(("\n", " ")):
-                data = " " + data
+            if not plain or plain.endswith(("\n", " ")):
+                data = data.lstrip(" ")
+            if not data:
+                return
         style = self._style_stack[-1] if self._style_stack else None
         self.text.append(data, style=style)
+        if self._in_pre:
+            self._pre_end = len(self.text)
 
 
 def html_to_rich(html: str) -> Text:

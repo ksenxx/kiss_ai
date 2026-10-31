@@ -15,6 +15,10 @@ const CFG = {
   modelUrl: 'https://models.example.com/model.tar.gz',
 };
 
+// Every window the tests open, closed after the last test: voice.js bounds
+// each engine load with a 30 s timer, which would keep node alive.
+const windows = [];
+
 // The in-page pipeline's engine loads from a script tag the page injects;
 // it never arrives in jsdom, so the mic parks in "loading" and nothing is
 // posted to the daemon (only a captured round's audio ever is).
@@ -26,11 +30,18 @@ function makeWindow(storedEnabled) {
     }
     w.addEventListener('kiss-voice-post', e => posted.push(e.detail));
   });
+  windows.push(win);
   return {win, posted};
 }
 
 function engineInjected(win) {
   return !!win.document.querySelector('script[src="/media/vosk.js"]');
+}
+
+// The next launch: a new window over what *first* stored (jsdom windows
+// do not share storage).
+function relaunch(first) {
+  return makeWindow(first.win.localStorage.getItem('kissVoiceEnabled'));
 }
 
 test('fresh storage (first install) keeps the mic OFF', () => {
@@ -59,7 +70,7 @@ test('turning the mic on is remembered for next launch', () => {
   micBtn(first.win).click();
   assert.ok(micBtn(first.win).classList.contains('voice-loading'));
   assert.strictEqual(first.win.localStorage.getItem('kissVoiceEnabled'), '1');
-  const second = makeWindow('1');
+  const second = relaunch(first);
   assert.ok(micBtn(second.win).classList.contains('voice-loading'));
 });
 
@@ -68,8 +79,9 @@ test('turning the mic off is remembered for next launch', () => {
   micBtn(first.win).click();
   assert.ok(micBtn(first.win).classList.contains('voice-off'));
   assert.strictEqual(first.win.localStorage.getItem('kissVoiceEnabled'), '0');
-  const second = makeWindow('0');
+  const second = relaunch(first);
   assert.ok(micBtn(second.win).classList.contains('voice-off'));
 });
 
+for (const win of windows) win.close();
 report('voiceMicAutoOn');

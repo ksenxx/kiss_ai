@@ -59,7 +59,7 @@ function makePage(opts) {
   return {win, posted, created};
 }
 
-const {send, sleep, ofType} = harness;
+const {send, sleep, ofType, byId} = harness;
 
 /** A pointer click (detail 1), as a mouse produces. */
 function click(win, el) {
@@ -89,10 +89,6 @@ function key(win, el, name, extra) {
       Object.assign({key: name, bubbles: true, cancelable: true}, extra || {}),
     ),
   );
-}
-
-function byId(win, id) {
-  return win.document.getElementById(id);
 }
 
 /**
@@ -245,8 +241,8 @@ async function openDirtyContentTab(ctx) {
     content: 'v1 on disk',
     version: 'ver-1',
   });
-  // The editor is created asynchronously (Monaco loads on demand).
-  for (let i = 0; i < 100 && created.length < 1; i++) await sleep(20);
+  // The stubbed editor is created on the next microtask.
+  await sleep(0);
   if (created.length < 1) throw new Error('the content tab created no editor');
   created[0].editor._type('v1 edited');
   return {editor: created[0].editor, posted};
@@ -304,6 +300,8 @@ function makeRunner() {
 module.exports = {
   WD,
   SHA_A,
+  SHA_B,
+  commit,
   makePage,
   send,
   sleep,

@@ -357,31 +357,65 @@ function testMalformedPathsExistIgnored() {
   console.log('  ok - malformed pathsExist replies are ignored');
 }
 
-function testLinkifierIdempotentOnCandidatesAndMissing() {
-  const {win} = makePage();
-  // Render the same panel content twice: missing paths stay demoted and
-  // no nested candidate/link spans are created.
-  send(win, {
-    type: 'result',
-    summary: 'see ' + realFile + ' and ' + missingFile,
-    success: true,
-  });
-  send(win, {
-    type: 'prompt',
-    text: 'see ' + realFile + ' and ' + missingFile,
-  });
-  for (const el of win.document.querySelectorAll(
-    '#output [data-path], #output [data-path-candidate], ' +
-      '#output [data-path-missing]',
-  )) {
+const FILELINK_SPANS =
+  '[data-path], [data-path-candidate], [data-path-missing]';
+
+function assertNoNestedFileLinkSpans(win, when) {
+  const panel = win.document.querySelector('#output .bash-panel-content');
+  for (const span of panel.querySelectorAll(FILELINK_SPANS)) {
     assert.strictEqual(
-      el.querySelectorAll(
-        '[data-path], [data-path-candidate], [data-path-missing]',
-      ).length,
+      span.querySelectorAll(FILELINK_SPANS).length,
       0,
-      'no nested filelink spans after repeated linkify passes',
+      'no nested filelink spans ' + when,
     );
   }
+}
+
+/** A `beforeScripts` hook: frames are queued and run by win.flushRaf(). */
+function queueFrames(win) {
+  win.flushRaf = harness.queueRaf(win).run;
+}
+
+/** Stream *text* as the running Bash tool's output and flush the frame. */
+function streamBash(win, tabId, text) {
+  send(win, {type: 'system_output', text, tabId});
+  win.flushRaf();
+}
+
+// A running Bash tool's streamed output is linkified again on every frame
+// flush, over a panel that already holds the earlier chunks' spans:
+// candidates whose checkPaths reply is still out, then the link and the
+// demoted (missing) path the reply made of them.  No later pass may wrap
+// those spans again, and the missing path stays demoted.
+function testLinkifierIdempotentOnCandidatesAndMissing() {
+  const {win, posted} = harness.makePage({beforeScripts: queueFrames});
+  const tabId = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId, startTs: Date.now()});
+  send(win, {
+    type: 'tool_call',
+    name: 'Bash',
+    command: 'ls',
+    tabId,
+    callId: 1,
+  });
+  streamBash(win, tabId, 'see ' + realFile + ' and ' + missingFile + '\n');
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path-candidate]').length,
+    2,
+    'setup: both paths are candidates while their check is out',
+  );
+  streamBash(win, tabId, 'more\n');
+  assertNoNestedFileLinkSpans(win, 'over candidates');
+  const check = posted.filter(m => m.type === 'checkPaths')[0];
+  send(win, {
+    type: 'pathsExist',
+    results: answerOnRealFs(check),
+    workDir: check.workDir,
+    tabId: check.tabId,
+  });
+  streamBash(win, tabId, 'done\n');
+  assertNoNestedFileLinkSpans(win, 'over a link and a missing path');
+  assert.strictEqual(findLinks(win, realFile).length, 1);
   assert.strictEqual(findLinks(win, missingFile).length, 0);
   win.close();
   console.log('  ok - linkifier is idempotent with existence checks');

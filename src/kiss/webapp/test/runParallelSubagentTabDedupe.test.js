@@ -129,6 +129,17 @@ function testPersistedReplayIdsDoNotDuplicate() {
     'a converged replay announcement must not close any tab id — a ' +
       'closeTab here unsubscribes the shared id for every client',
   );
+  // Live fan-out events for the shared ids keep each sub-agent on its
+  // one tab (where they render is subagentLiveEventsStream.test.js's).
+  for (const tabId of liveTabIds) {
+    send(win, {
+      type: 'tool_call',
+      name: 'Bash',
+      tabId,
+      extras: {command: 'echo sub-live'},
+    });
+  }
+  assertOneTabPerSubagent(win, taskIds, 'live events after the replay');
   win.close();
   console.log('  ok - persisted replay ids reuse one tab');
 }
@@ -188,9 +199,9 @@ function testReplayAfterExpandDoesNotDuplicate() {
   console.log('  ok - replay after expand reuses one tab');
 }
 
-// A sub-agent spawned while the panel is collapsed is remembered, and
-// a later duplicate `new_tab` for a sub-agent that already has a tab
-// must not open a second one.
+// A duplicate `new_tab` for a sub-agent that already has a tab must not
+// open a second one.  (The collapsed-panel registration is
+// testExpandAfterMixedRegistrationDoesNotDuplicate's.)
 function testRepeatedNewTabDoesNotDuplicate() {
   const {win, parentId, taskIds} = bootParallelRun(2, makeWebappClient(), {
     replay: true,
@@ -315,10 +326,10 @@ function testCollapsedStaysClosedAcrossIdSchemes() {
   console.log('  ok - collapsed panel ignores every id form');
 }
 
-// The daemon re-delivering a spawn (`new_tab`, always a live child) must
-// land on the child's one tab, and a finished sub-agent tab the user
-// closed by hand must stay closed when the daemon re-announces it (nor
-// may a sibling be duplicated).  The collapse/expand contract itself is
+// A sub-agent tab the user closed by hand stays closed: a running one
+// when the daemon re-delivers its spawn (`new_tab`, always a live
+// child), a finished one when the daemon re-announces it (nor may a
+// sibling be duplicated).  The collapse/expand contract itself is
 // pinned by runParallelPanelTabsSync.test.js.
 function testNewTabDoesNotRevivHandClosedSubagent() {
   const {
@@ -341,7 +352,12 @@ function testNewTabDoesNotRevivHandClosedSubagent() {
     parent_tab_id: parentId,
     taskId: '',
   });
-  assertOneTabPerSubagent(win, taskIds, 're-delivered new_tab');
+  assert.deepStrictEqual(
+    openSubTabIds(win),
+    [liveTabIds[1]],
+    'a re-delivered new_tab must not reopen the running sub-agent tab ' +
+      'the user closed by hand',
+  );
 
   finishFanOut(win, liveTabIds);
   togglePanel(win, panel);

@@ -29,6 +29,7 @@ import pytest
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.coding import coding_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.edit_guards import HEREDOC_UNRESOLVED_VERDICT
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.tool_verdict import ALLOW, refuse
@@ -40,8 +41,11 @@ MODEL = "gpt-5.6-luna"
 def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
     """Every LLM call is counted; the tool hook logs calls and answers human-only tools."""
     # The hook ends the trial when its container is gone, so the test needs a
-    # live one; without a Docker daemon the liveness check is skipped.
+    # live one; without a Docker daemon the liveness check is skipped, while a
+    # daemon without the image would report the stand-in "c" gone.
     live = _live_container("python:3.11-slim", "true")
+    if live is None and _docker_client() is not None:
+        pytest.skip("python:3.11-slim is not pulled")
     container_name = "c" if live is None else live.id
     try:
         config = tmp_path / "config.json"
@@ -98,8 +102,13 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     def Bash(command: str) -> str:  # noqa: N802
         return ""
 
-    assert [t.__name__ for t in harness.tools([Bash, decide])] == [
-        "Bash", "checkpoint", "rollback"]
+    def checkpoint(name: str) -> str:  # the host built-in of the same name
+        return ""
+
+    trial_tools = harness.tools([Bash, decide, checkpoint])
+    assert [t.__name__ for t in trial_tools] == ["Bash", "checkpoint", "rollback"]
+    # the trial's container checkpoint replaces the host one
+    assert trial_tools[1] == harness.checkpoint
     # The bundled ``coding`` SEA itself is a hidden worker: it is a factory
     # of trial SEAs, never a slash command of its own.
     assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
@@ -363,7 +372,7 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("run_commands_parallel",
                               {"commands": '["ls", "cat > /app/x <<EOF\\nx\\nEOF"]'}) == ALLOW
     dynamic = plain.on_tool_call("Bash", {"command": "cat > \"$OUT\" <<EOF\nx\nEOF"})
-    assert dynamic == refuse(coding_sea.HEREDOC_VERDICT.format(path='"$OUT"'))
+    assert dynamic == refuse(HEREDOC_UNRESOLVED_VERDICT.format(path="$OUT"))
     sed = plain.on_tool_call("Bash", {"command": "sed -i 's/a/b\\nc/' /app/x.py"})
     assert not sed.allowed and "Edit(" in sed.text
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}

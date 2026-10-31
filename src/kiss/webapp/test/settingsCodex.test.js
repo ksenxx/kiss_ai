@@ -25,7 +25,7 @@ const {
   click,
   byId,
 } = require('./simplify2_harness');
-const {openSettings, closeSettings} = require('./settings_helpers');
+const {openSettings, closeSettings, statusLine} = require('./settings_helpers');
 const {runAgentSubpanelTests} = require('./settings_agent_subpanel');
 
 const BASE = {installed: true, loggedIn: false, authMethod: 'none', useSubscription: true,
@@ -84,10 +84,6 @@ const CODEX = {
   ],
 };
 
-function statusLine(win) {
-  return byId(win, 'cfg-codex-status');
-}
-
 function testDeviceCodeLogin() {
   const {win, posted} = makePage();
   openSettings(win);
@@ -114,7 +110,7 @@ function testDeviceCodeLogin() {
   // The CLI finished the login: the status line reports it.
   send(win, {type: 'codexStatus', installed: true, loggedIn: true, authMethod: 'chatgpt',
     useSubscription: true, hasToken: false});
-  assert.ok(/Logged in with ChatGPT/.test(statusLine(win).textContent));
+  assert.ok(/Logged in with ChatGPT/.test(statusLine(win, 'codex').textContent));
 
   // A failure to start the login is reported in the row.
   click(win, btn);
@@ -259,7 +255,7 @@ function testLoginPollsTheStatusUntilLoggedIn() {
   assert.strictEqual(clock.pending(POLL_MS).length, 1, 'a saved API-key login is not the sign-in');
   send(win, LOGGED_IN);
   assert.strictEqual(clock.pending(POLL_MS).length, 0, 'a logged-in status stops the poll');
-  assert.ok(/Logged in with ChatGPT/.test(statusLine(win).textContent));
+  assert.ok(/Logged in with ChatGPT/.test(statusLine(win, 'codex').textContent));
 
   // A second prompt restarts a single poll; closing the panel ends it.
   click(win, btn);

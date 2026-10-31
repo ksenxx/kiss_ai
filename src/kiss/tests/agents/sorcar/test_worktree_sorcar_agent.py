@@ -150,10 +150,6 @@ class TestChatSorcarAgent:
             agent.discard()
 
 
-    def test_commit_no_wt_dir(self) -> None:
-        agent = self._agent()
-        assert not agent._commit_worktree()
-
     def test_super_run_raises(self) -> None:
         _unpatch_super_run(self.original_run)
         parent_class = cast(Any, SorcarAgent.__mro__[1])

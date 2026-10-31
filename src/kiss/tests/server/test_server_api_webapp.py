@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,9 +74,9 @@ class TestTrajectoryApiMethods(unittest.TestCase):
 
     def setUp(self) -> None:
         """Seed a private jobs root and point the resolver at it."""
-        self._jobs_root = (
-            Path(tempfile.mkdtemp(prefix="kiss_api_traj_")) / "jobs"
-        )
+        tmp = Path(tempfile.mkdtemp(prefix="kiss_api_traj_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self._jobs_root = tmp / "jobs"
         self._jobs_root.mkdir(parents=True)
         write_trajectory(
             self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A",
@@ -141,10 +142,12 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": _PASSWORD})
+        work_dir = tempfile.mkdtemp(prefix="kiss_api_wd_")
+        self.addCleanup(shutil.rmtree, work_dir, True)
         self._server = RemoteAccessServer(
             host="127.0.0.1",
             port=self._port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=work_dir,
             use_tunnel=False,
         )
         await self._server.start_async()

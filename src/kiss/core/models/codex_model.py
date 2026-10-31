@@ -37,8 +37,10 @@ R1 in :mod:`kiss.core.models.openai_compatible_model` use.  The JSONL
 event stream on stdout carries the answer and the usage.
 """
 
+import base64
 import contextlib
 import functools
+import importlib.metadata
 import json
 import logging
 import os
@@ -49,10 +51,10 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.codex_mcp_bridge import ServedCall, ToolBridge
+from kiss.core.models.codex_mcp_bridge import ToolBridge
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
@@ -60,24 +62,14 @@ from kiss.core.models.model import (
     _iter_jsonl,
     environ_without,
     parse_binary_attachments,
+    render_tool_call,
 )
 from kiss.core.processes import kill_process_tree, popen_process_group, run_process_group
 
+if TYPE_CHECKING:
+    import tiktoken
+
 logger = logging.getLogger(__name__)
-
-
-def _served_call_text(call: ServedCall) -> str:
-    """Render a tool call Codex made over MCP as the assistant turn that made it.
-
-    Args:
-        call: The call as the bridge answered it.
-
-    Returns:
-        The call as a Python-style invocation, the way the agent's
-        trajectory records every tool call.
-    """
-    arguments = ", ".join(f"{key}={value!r}" for key, value in call.arguments.items())
-    return f"```python\n{call.name}({arguments})\n```"
 
 
 # ``codex exec`` flags that turn the coding agent into a bare model: the
@@ -544,6 +536,72 @@ def _find_codex_cli() -> str:
     return path
 
 
+# GPT-5's tokenizer is tiktoken's ``o200k_base``.  ``tiktoken.get_encoding``
+# downloads its ranks, with no timeout, when tiktoken's cache lacks them, so
+# they are read from the copy litellm (a dependency of harbor) installs under
+# tiktoken's cache key.  The pattern is the one
+# ``tiktoken_ext.openai_public.o200k_base`` builds inline.
+_O200K_RANKS_FILE = "litellm/litellm_core_utils/tokenizers/fb374d419588a4632f3f557e76b4b70aebbca790"
+_O200K_PATTERN = "|".join(
+    [
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"\p{N}{1,3}",
+        r" ?[^\s\p{L}\p{N}]+[\r\n/]*",
+        r"\s*[\r\n]+",
+        r"\s+(?!\S)",
+        r"\s+",
+    ]
+)
+
+
+@functools.cache
+def _gpt5_encoding() -> "tiktoken.Encoding | None":
+    """Build GPT-5's tokenizer from litellm's copy of its ranks, once per process.
+
+    Returns:
+        The ``o200k_base`` encoding, or ``None`` when tiktoken, litellm or
+        litellm's copy of the ranks is missing or unreadable.
+    """
+    try:
+        import tiktoken
+
+        data = importlib.metadata.distribution("litellm").locate_file(_O200K_RANKS_FILE)
+        ranks = {
+            base64.b64decode(token): int(rank)
+            for token, rank in map(bytes.split, data.read_bytes().splitlines())
+        }
+        return tiktoken.Encoding(
+            "o200k_base", pat_str=_O200K_PATTERN, mergeable_ranks=ranks, special_tokens={}
+        )
+    except (ImportError, OSError, ValueError) as error:
+        logger.warning("No GPT-5 tokenizer (%s): Codex turns are sized by their bytes.", error)
+        return None
+
+
+# tiktoken's regex gives up with a PanicException on a whitespace run of about
+# a million characters (its backtracking stack holds a million entries), so the
+# text is counted in slices far shorter, at a token or so where a slice cuts.
+_TOKENIZER_SLICE_CHARS = 100_000
+
+
+def _gpt5_token_count(text: str) -> int:
+    """Count the GPT-5 tokens of *text*; without the tokenizer, its UTF-8 bytes.
+
+    The bytes bound the count from above: no byte-level BPE token is empty.
+    """
+    encoding = _gpt5_encoding()
+    if encoding is None:
+        # surrogatepass: a lone surrogate (a JSON "\ud800") must not fail the sizing.
+        return len(text.encode(errors="surrogatepass"))
+    return sum(
+        len(encoding.encode_ordinary(text[start : start + _TOKENIZER_SLICE_CHARS]))
+        for start in range(0, len(text), _TOKENIZER_SLICE_CHARS)
+    )
+
+
 class CodexModel(CLITextModel):
     """A model that delegates to the OpenAI Codex CLI for LLM completions.
 
@@ -685,7 +743,7 @@ class CodexModel(CLITextModel):
             self.conversation.append(
                 {
                     "role": "assistant",
-                    "content": _served_call_text(call),
+                    "content": render_tool_call(call.name, call.arguments),
                     "tool_calls": [
                         {
                             "id": f"call_{uuid.uuid4().hex[:8]}",
@@ -732,8 +790,15 @@ class CodexModel(CLITextModel):
         return args
 
     def _cli_env(self) -> dict[str, str] | None:
-        """The CLI's environment: the one :meth:`_prepare_turn_env` built."""
-        return self._turn_env
+        """The CLI's environment: the one :meth:`_prepare_turn_env` built.
+
+        While the tools are served over MCP it also holds the bridge's
+        secret (:meth:`ToolBridge.codex_env`), which Codex forwards to
+        the proxy it spawns.
+        """
+        if self._tool_bridge is None:
+            return self._turn_env
+        return {**self._turn_env, **self._tool_bridge.codex_env()}
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Codex CLI.
@@ -766,9 +831,9 @@ class CodexModel(CLITextModel):
         if self._tool_bridge is not None:
             preamble += CODEX_MCP_TOOLS_NOTE
         fd, instructions_file = tempfile.mkstemp(prefix="kiss-codex-", suffix=".md")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(preamble + (self.system_instruction_text() or ""))
         try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(preamble + (self.system_instruction_text() or ""))
             args = self._build_cli_args(instructions_file)
             with self._cli_turn(args, "Codex CLI") as proc:
                 proc.send_prompt(prompt)
@@ -950,6 +1015,36 @@ class CodexModel(CLITextModel):
             cache_read,
             cache_write,
         )
+
+    def context_tokens_from_response(self, response: Any) -> int:
+        """Estimate the context the model works in after the turn.
+
+        ``turn.completed`` sums the usage of every request the turn made,
+        and a turn that calls the bridged tools makes several over one
+        growing transcript.  With no per-request usage from the CLI, the
+        last and largest request is known only within bounds: at least
+        the average over ``requests`` (an upper bound on their number,
+        see :meth:`_parse_stream_events`) and at most the whole sum
+        (exactly the sum for a one-request turn).  Within them the size
+        of what the next turn sends decides (the instructions and the
+        transcript), so one huge tool result, or several calls made by
+        one request, count in full.  That size is counted with GPT-5's
+        tokenizer (:func:`_gpt5_token_count`): no ratio of characters or
+        bytes to tokens holds for prose and for token-dense text such as
+        JSON, CJK, emoji or base64 alike.
+
+        Args:
+            response: The dict returned by :meth:`generate`.
+
+        Returns:
+            The estimated context size in tokens; 0 without usage.
+        """
+        total = sum(self.extract_input_output_token_counts_from_response(response))
+        if not total or response.get("requests", 1) <= 1:
+            return total
+        text = CODEX_INSTRUCTIONS_PREAMBLE + (self.system_instruction_text() or "")
+        sent = _gpt5_token_count(text + self._build_prompt())
+        return min(total, max(total // int(response["requests"]), sent))
 
     def extract_cost_from_response(self, response: Any) -> float | None:
         """Price the turn at the OpenAI model's rate when the API key pays.

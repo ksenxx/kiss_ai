@@ -490,16 +490,21 @@ def _register_agent_task(agent: Any, key: str, chat_id: str) -> None:
         state.chat_id = chat_id
 
 
-def _unregister_bridge_state(agent: Any, key: str) -> None:
-    """Under ``STATE_LOCK``: deactivate and drop *agent*'s state unless the server owns it."""
+def _unregister_bridge_state(agent: Any, key: str) -> bool:
+    """Under ``STATE_LOCK``: deactivate and drop *agent*'s state unless the server owns it.
+
+    Returns:
+        Whether a state the bridge created was dropped.
+    """
     state = agent_state.get(key)
     if state is None or state.agent is not agent:
         state = agent_state.find_by_agent(agent)
     if state is None or state.server_owned:
-        return
+        return False
     state.is_task_active = False
     state.task_thread = None
     agent_state.unregister(state.task_id, state)
+    return True
 
 
 def _take_pending_messages(
@@ -957,15 +962,20 @@ class JsonPrinter(Printer):
         still does persistence / worktree post-processing
         after ``run()`` returns, so flipping ``is_task_active`` here
         would open a window where a concurrent merge/discard races the
-        runner.  States the bridge created itself (sub-agents,
-        standalone runs) are deactivated and removed here.
+        runner.  States the bridge created itself (sub-agents such as
+        the ``/update`` and merge-conflict runs, standalone runs) are
+        deactivated and removed here, and their per-task printer state
+        is freed with :meth:`cleanup_task`, as no task runner frees it.
 
         Args:
             agent: The live agent instance.
             task_id: The task id the run was registered under.
         """
         key = self._coerce_task_id(task_id)
-        locked_call(agent_state.STATE_LOCK, _unregister_bridge_state, agent, key)
+        if locked_call(agent_state.STATE_LOCK, _unregister_bridge_state, agent, key):
+            # Not under ``STATE_LOCK``: ``cleanup_task`` waits out an
+            # in-flight bash flush, whose broadcast takes that lock.
+            self.cleanup_task(key)
 
     def charge_task_usage(
         self, task_agent: Any, task_id: str, budget: float, tokens: int, steps: int,
@@ -1174,6 +1184,12 @@ class JsonPrinter(Printer):
         that render events locally regardless of the stamp still
         show it.
 
+        Resolving the watching tabs and broadcasting their copies form
+        one step under :attr:`delivery_lock`, which :meth:`cleanup_tab`
+        retires a subscription under: a tab unsubscribed meanwhile
+        (bound to a machine, re-subscribed by a replay) is either no
+        target or gets its copy before the retirement, never after it.
+
         Args:
             event: The event to broadcast; must not carry ``tabId``.
             task_id: Explicit task id used when the calling thread
@@ -1183,6 +1199,12 @@ class JsonPrinter(Printer):
                 watcher, and the sole (possibly empty) stamp of the
                 fallback copy when nothing is resolvable.
         """
+        locked_call(self.delivery_lock, self._broadcast_transient_copies, event, task_id, tab_id)
+
+    def _broadcast_transient_copies(
+        self, event: dict[str, Any], task_id: Any, tab_id: str,
+    ) -> None:
+        """Under ``delivery_lock``: the resolution and sends of :meth:`broadcast_transient`."""
         _task_key, targets = self._transient_targets(task_id, tab_id)
         for target in targets or [tab_id]:
             self.broadcast({**event, "tabId": target})
@@ -1602,15 +1624,23 @@ class JsonPrinter(Printer):
         # targets could resume after this cleanup and re-add the
         # cleaned tab to _model_override_tabs (and emit a trailing
         # agent modelPick to it) — resurrecting state no later restore
-        # could fix (gpt-5.6-sol conc review, finding 4).  Order:
-        # _model_pick_lock → _lock, the established edge.
+        # could fix (gpt-5.6-sol conc review, finding 4).
+        # delivery_lock: a delivery whose targets were resolved before
+        # this retirement (a fan-out, transient or talk copy for the
+        # tab) is sent wholly before it, so nothing of a task the tab
+        # stopped watching reaches it afterwards -- after a bind to a
+        # machine, interleaved with the machine's chat.  Order:
+        # _model_pick_lock → delivery_lock → _lock, the established edges.
         locked_call(
-            self._model_pick_lock, locked_call, self._lock, self._unsubscribe_tab, tab_id, keep_key,
+            self._model_pick_lock,
+            locked_call, self.delivery_lock,
+            locked_call, self._lock,
+            self._unsubscribe_tab, tab_id, keep_key,
         )
 
     def _unsubscribe_tab(self, tab_id: str, keep_key: str) -> None:
-        """Under ``_model_pick_lock`` and ``_lock``: drop *tab_id* from every task but
-        *keep_key*."""
+        """Under ``_model_pick_lock``, ``delivery_lock`` and ``_lock``: drop *tab_id* from every
+        task but *keep_key*."""
         self._model_override_tabs.discard(tab_id)
         self._sweep_expired_subscribers()
         for task_key in list(self._subscribers.keys()):
@@ -1629,8 +1659,9 @@ class JsonPrinter(Printer):
     ) -> None:
         """Remove all per-task state for *task_id* to free memory.
 
-        Called by the task-runner once a task has fully terminated.
-        Cancels any pending bash flush timer and drops the per-task
+        Called by the task-runner once a task has fully terminated, and
+        by :meth:`agent_task_finished` for a run the bridge registered
+        itself.  Cancels any pending bash flush timer and drops the per-task
         recording, persist-agent, and usage-offset entries.
 
         Bash-state teardown synchronizes with in-flight flushes in two
@@ -1939,10 +1970,11 @@ class JsonPrinter(Printer):
         :meth:`subscribe_tab`, :meth:`peek_recording_for_task` and
         :meth:`replay_snapshot`, so a viewer attaching now replays the
         run's final events.  A run whose state is already gone (the
-        printer bridge unregisters sub-agent and standalone runs just
-        before they stop recording) can no longer be attached to, so
-        its recording is dropped.  ``STATE_LOCK`` makes the check and
-        the retirement atomic with respect to a viewer's attach.
+        printer bridge unregisters sub-agent and standalone runs, and
+        frees their per-task state, just before they stop recording)
+        can no longer be attached to, so its recording is dropped.
+        ``STATE_LOCK`` makes the check and the retirement atomic with
+        respect to a viewer's attach.
 
         Returns:
             List of display-relevant events with consecutive deltas

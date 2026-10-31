@@ -5,6 +5,7 @@
 """Abstract base class and shared utilities for KISS agent printers."""
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,48 @@ def parse_result_yaml(raw: str) -> dict[str, Any] | None:
     return None
 
 
+# Commas only as thousands separators: "$1,25" is no figure (not 125).
+_COST_RE = re.compile(r"\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)")
+
+
+def parse_cost(value: Any) -> float | None:
+    """Return the USD figure of a cost field: a number, or a ``"$1.2345"`` string.
+
+    Args:
+        value: The field (``cost`` of a ``usage_info`` / ``result`` /
+            ``llm_call`` event, or a display cost).
+
+    Returns:
+        The figure; ``None`` for ``"N/A"``, a bool, or anything else
+        that is not one.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = _COST_RE.fullmatch(value.strip()) if isinstance(value, str) else None
+    return float(match.group(1).replace(",", "")) if match else None
+
+
+def event_cost(event: dict[str, Any]) -> float | None:
+    """Return the USD cost an event carries: its exact ``cost_usd``, else its ``cost``.
+
+    Events carry the unrounded figure as ``cost_usd`` next to the
+    four-decimal display string in ``cost``; the string is the fallback
+    for events without it (older versions, late-charge deltas).
+
+    Args:
+        event: A ``usage_info`` / ``result`` event, or a charge delta.
+
+    Returns:
+        The cost; ``None`` when neither field is one.
+    """
+    exact = event.get("cost_usd")
+    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
+        return float(exact)
+    return parse_cost(event.get("cost"))
+
+
 def cost_fields(
     cost: Any, cost_usd: float | None, budget_offset: float
 ) -> tuple[Any, float | None]:
@@ -46,8 +89,8 @@ def cost_fields(
     The ``"$x.xxxx"`` string is what the UI shows; the float is what a
     ``run_agent`` / ``run_parallel`` parent charges to its ledger
     (``daemon_client._net_totals``), so it must not go through the
-    four-decimal rounding of the string.  Non-dollar or malformed
-    costs (``"N/A"``, ``"$abc"``) without *cost_usd* pass through
+    four-decimal rounding of the string.  A cost that is no figure
+    (``"N/A"``, ``"$abc"``) without *cost_usd* passes through
     verbatim so a junk value never raises out of the emitting agent
     thread.
 
@@ -62,14 +105,7 @@ def cost_fields(
         *cost* unchanged) and the offset-adjusted USD float, ``None``
         when neither input yields a number.
     """
-    exact: float | None = None
-    if cost_usd is not None:
-        exact = float(cost_usd)
-    elif isinstance(cost, str) and cost.startswith("$"):
-        try:
-            exact = float(cost[1:])
-        except ValueError:
-            exact = None
+    exact = float(cost_usd) if cost_usd is not None else parse_cost(cost)
     if exact is None:
         return cost, None
     exact += budget_offset

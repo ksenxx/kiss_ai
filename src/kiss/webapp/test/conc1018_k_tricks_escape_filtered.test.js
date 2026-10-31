@@ -15,7 +15,7 @@
 // still closes the editor first and the sheet second.
 
 const assert = require('assert');
-const {makePage, click} = require('./simplify2_harness');
+const {makePage, click, typeInto} = require('./simplify2_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -29,11 +29,6 @@ function escape(win, el) {
       cancelable: true,
     }),
   );
-}
-
-function input(win, el, value) {
-  el.value = value;
-  el.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
 function editorOf(doc) {
@@ -53,7 +48,7 @@ function main() {
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
   const ta = editorOf(doc);
   assert.ok(ta, 'editor open on "Mine one"');
-  input(win, ta, 'My unsaved draft');
+  typeInto(win, ta, 'My unsaved draft');
 
   // The editor is on screen: Escape closes it, not the sheet.
   escape(win, ta);
@@ -61,9 +56,9 @@ function main() {
   assert.ok(panel.classList.contains('open'), 'the sheet stayed open');
 
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
-  input(win, editorOf(doc), 'My unsaved draft');
+  typeInto(win, editorOf(doc), 'My unsaved draft');
   search.focus();
-  input(win, search, 'bundled');
+  typeInto(win, search, 'bundled');
   assert.ok(!editorOf(doc), 'the editor row is filtered out');
 
   escape(win, search);
@@ -75,7 +70,7 @@ function main() {
   // The draft is latched: reopen, clear the query, it is back.
   doc.getElementById('tricks-btn').click();
   assert.ok(panel.classList.contains('open'));
-  input(win, search, '');
+  typeInto(win, search, '');
   const back = editorOf(doc);
   assert.ok(back, 'the editor row is back');
   assert.strictEqual(back.value, 'My unsaved draft');

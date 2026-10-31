@@ -130,12 +130,15 @@ class _Session:
     reaped: bool = False
 
 
-@dataclass
+@dataclass(eq=False)
 class _Opening:
     """An ``open`` in progress (waiting its turn or spawning), before its session exists.
 
     ``close``, ``viewer_gone`` and ``shutdown`` act on it as they would
-    on the session it is about to become.
+    on the session it is about to become.  Compared by identity: two
+    opens of one tab on one connection (a machine's stream forwards
+    every browser's) are equal by value, and ``open`` must deregister
+    its own, not the first equal one still waiting for its turn.
     """
 
     tab_id: str

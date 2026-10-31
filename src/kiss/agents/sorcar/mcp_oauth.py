@@ -197,7 +197,6 @@ class _RedirectHandler(BaseHTTPRequestHandler):
 class _RedirectServer(HTTPServer):
     """Loopback server receiving the authorization redirect."""
 
-    allow_reuse_address = True
     # Poll interval of ``handle_request``: how quickly the login thread
     # notices a cancel.
     timeout = 0.25
@@ -320,23 +319,18 @@ class MCPLoginSession:
     def wait(self, seconds: float) -> bool:
         """Wait up to *seconds* for the session to end; return True if it did.
 
-        Waits in 0.2 s slices: the sign-in tools call this on the task
-        thread, where an injected Stop lands only between C-level waits
-        and the tool-panel Stop is honoured through
+        Waits in short slices
+        (:func:`~kiss.core.tool_interrupt.wait_interruptible`): the
+        sign-in tools call this on the task thread, where an injected
+        Stop lands only between C-level waits and the tool-panel Stop is
+        honoured through
         :func:`~kiss.core.tool_interrupt.raise_if_interrupted` (a no-op
         outside a tool call, as from the command line).
 
         Raises:
             ToolCallInterrupted: When the calling tool call was stopped.
         """
-        deadline = time.monotonic() + seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if self._finished.wait(timeout=min(max(remaining, 0.0), 0.2)):
-                return True
-            tool_interrupt.raise_if_interrupted()
-            if remaining <= 0:
-                return False
+        return tool_interrupt.wait_interruptible(self._finished, seconds)
 
     def _run(self) -> None:
         """Run the async sign-in on this thread's own event loop."""
@@ -439,8 +433,10 @@ def resolve_server(name: str, url: str, transport: str, work_dir: str) -> MCPSer
 
     Raises:
         ValueError: When the server is unknown and no URL was given, the
-            configured server is not a remote one, or a different URL is
-            given for a configured name.
+            configured server is not a remote one, a different URL is
+            given for a configured name, or a new server cannot be saved
+            because ``$KISS_HOME/mcp.json`` does not parse (see
+            :func:`~kiss.agents.sorcar.mcp_servers.save_mcp_server`).
     """
     configured = load_mcp_servers(work_dir).get(name)
     if configured is not None:

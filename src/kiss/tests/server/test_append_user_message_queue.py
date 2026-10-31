@@ -667,8 +667,9 @@ class TestPendingMessagesClearedOnTaskFinish:
         }
 
         def fake_run(**_kwargs: Any) -> None:
-            st.pending_user_messages.append("queued during task")
-            st.pending_user_messages.append("also queued")
+            with server._state_lock:
+                server._route_prompt_to_owner(st, "queued during task", tab_id)
+                server._route_prompt_to_owner(st, "also queued", tab_id)
             # The re-dispatched follow-up is built from the command as
             # submitted (no ``model``: the tab's picker decides), so
             # switch the tab's picker to an unknown model: the follow-up

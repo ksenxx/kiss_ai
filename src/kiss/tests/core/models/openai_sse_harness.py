@@ -20,6 +20,7 @@ holding the connection open (used to reproduce a wedged provider).
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -215,6 +216,16 @@ class _DaemonThreadingHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Report a request's error, except a client that dropped the connection.
+
+        A stopped model request has its socket shut down on purpose; the
+        handler then reads or writes on a reset connection, which is no
+        error of the server.
+        """
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
 
 
 class ScriptedOpenAIServer:

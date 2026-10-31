@@ -79,7 +79,11 @@ def build_server(home: Path, port: int) -> Any:
     The server runs no cron scheduler: the user's scheduled jobs (and the
     default ones every installation gets) would spend money on unrelated
     work in the middle of a run, and the hand-over of jobs between homes
-    must not see the benchmark home as the user's last daemon home.
+    must not see the benchmark home as the user's last daemon home.  It
+    pins every task tree to the model the trial names
+    (:data:`~kiss.agents.sorcar.agent_dispatch.PIN_TASK_MODEL_ENV`): a trial
+    agent can neither ``set_model`` nor give a sub-task another model, so the
+    run scores the one model it is about.
 
     Args:
         home: The private ``KISS_HOME`` (prepared by :func:`prepare_home`).
@@ -92,7 +96,10 @@ def build_server(home: Path, port: int) -> Any:
     os.environ["KISS_HOME"] = str(home)
     os.environ["KISS_SORCAR_LOCAL"] = str(home / ENDPOINT_FILE)
 
+    from kiss.agents.sorcar.agent_dispatch import PIN_TASK_MODEL_ENV
     from kiss.server.web_server import RemoteAccessServer
+
+    os.environ[PIN_TASK_MODEL_ENV] = "1"
 
     return RemoteAccessServer(
         host="127.0.0.1",

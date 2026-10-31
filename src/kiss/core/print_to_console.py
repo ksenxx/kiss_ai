@@ -35,20 +35,23 @@ class _PrinterThreadState(threading.local):
     """Per-thread streaming state for :class:`ConsolePrinter`.
 
     ``bash_streamed`` (is a bash RESULT rule currently open?),
-    ``block_type`` (thinking vs normal text) and the three usage offsets
-    (what the printing agent has already spent in earlier sub-sessions)
-    describe the *agent* that is printing, not the terminal.  Parallel
-    sub-agents each run on their own thread and share one printer, so
-    keeping these per thread is what stops one sub-agent from closing
-    another's bash block, restyling another's tokens, or contributing
-    its own totals to another's result panel.  ``threading.local`` runs
-    ``__init__`` once per thread, so every thread starts from the same
-    defaults.
+    ``block_type`` (thinking vs normal text), ``task_id`` (the task whose
+    shared usage offsets this thread reports, see
+    :meth:`ConsolePrinter.set_usage_offsets`; ``""`` for none) and the
+    three plain usage offsets (what the printing agent has already spent
+    in earlier sub-sessions) describe the *agent* that is printing, not
+    the terminal.  Parallel sub-agents each run on their own thread and
+    share one printer, so keeping these per thread is what stops one
+    sub-agent from closing another's bash block, restyling another's
+    tokens, or contributing its own totals to another's result panel.
+    ``threading.local`` runs ``__init__`` once per thread, so every
+    thread starts from the same defaults.
     """
 
     def __init__(self) -> None:
         self.bash_streamed = False
         self.block_type = ""
+        self.task_id = ""
         self.tokens_offset = 0
         self.budget_offset = 0.0
         self.steps_offset = 0
@@ -61,7 +64,8 @@ class ConsolePrinter(Printer):
     ``talk`` synthesis, a daemon-side fold of a sub-task's spend), so
     this class faces the same fan-out ``JsonPrinter`` does.  It is
     protected the same way: state that belongs to the printing agent
-    is thread-local, the shared cursor position
+    is thread-local (a persisted task's usage offsets are keyed by its
+    task id instead, :meth:`set_usage_offsets`), the shared cursor position
     (``_mid_line``, a property of the one output stream) stays shared,
     and every public entry point holds ``_lock`` for its whole body so a
     panel and its rules are emitted as one uninterrupted unit.  The lock
@@ -81,32 +85,64 @@ class ConsolePrinter(Printer):
         self._lock = threading.RLock()
         self._thread_state = _PrinterThreadState()
         self._mid_line = False
+        self._task_offsets: dict[str, tuple[float, int, int]] = {}
+
+    def set_usage_offsets(self, task_id: Any, budget: float, tokens: int, steps: int) -> None:
+        """Store the usage offsets of *task_id* and bind the calling thread to them.
+
+        The plain setters write the calling thread's own offsets, which is
+        right for an agent publishing on its own thread but not for a
+        finished sub-agent's spend folded into its parent from the
+        sub-agent's thread; ``publish_usage_offsets`` names the parent's
+        task for that case.  The task's own thread binds itself at every
+        session-start publish, so a fold from any thread reaches that
+        thread's panels at once.
+
+        Args:
+            task_id: The task whose offsets change.
+            budget: The task's banked USD total.
+            tokens: The task's banked token total.
+            steps: The task's banked step total.
+        """
+        key = str(task_id)
+        locked_call(self._lock, self._task_offsets.__setitem__, key, (budget, tokens, steps))
+        self._thread_state.task_id = key
+
+    def _offsets(self) -> tuple[float, int, int]:
+        """*This thread's* ``(budget, tokens, steps)`` offsets: its bound task's, else its own."""
+        state = self._thread_state
+        if state.task_id:
+            return self._task_offsets[state.task_id]
+        return state.budget_offset, state.tokens_offset, state.steps_offset
 
     @property
     def tokens_offset(self) -> int:
         """Tokens *this thread's* agent spent before its current session."""
-        return self._thread_state.tokens_offset
+        return self._offsets()[1]
 
     @tokens_offset.setter
     def tokens_offset(self, value: int) -> None:
+        self._thread_state.task_id = ""
         self._thread_state.tokens_offset = value
 
     @property
     def budget_offset(self) -> float:
         """Dollars *this thread's* agent spent before its current session."""
-        return self._thread_state.budget_offset
+        return self._offsets()[0]
 
     @budget_offset.setter
     def budget_offset(self, value: float) -> None:
+        self._thread_state.task_id = ""
         self._thread_state.budget_offset = value
 
     @property
     def steps_offset(self) -> int:
         """Steps *this thread's* agent took before its current session."""
-        return self._thread_state.steps_offset
+        return self._offsets()[2]
 
     @steps_offset.setter
     def steps_offset(self, value: int) -> None:
+        self._thread_state.task_id = ""
         self._thread_state.steps_offset = value
 
     @property

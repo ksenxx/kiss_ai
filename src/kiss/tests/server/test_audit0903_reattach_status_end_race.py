@@ -32,6 +32,7 @@ task ends in setup and no LLM is ever invoked.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -156,6 +157,7 @@ class TestReattachStatusEndRace(TestCase):
         ):
             time.sleep(0.05)
         agent_state.agent_states.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _statuses(self, tab_id: str) -> list[bool]:
         return [

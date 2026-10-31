@@ -150,7 +150,8 @@ class TestFinalizeWorktree:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert not wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
 
@@ -161,7 +162,8 @@ class TestFinalizeWorktree:
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
         (wt_dir / "new.txt").write_text("work in progress\n")
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert not wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
         assert _run_git(repo, "show", f"{branch}:new.txt") == "work in progress\n"
@@ -176,7 +178,8 @@ class TestFinalizeWorktree:
         import shutil
 
         shutil.rmtree(wt_dir)
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
 
 class TestPreserveForReview:

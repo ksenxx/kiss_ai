@@ -387,9 +387,11 @@ function captureTimers(win, timers = []) {
 /**
  * Cancel and run now every captureTimers timer armed since index *from*
  * (removing them from *timers*), instead of waiting for its due time.
+ * A timer the page already cancelled stays quiet, as in a browser.
  */
 function fireCapturedTimers(win, timers, from = 0) {
   for (const t of timers.splice(from)) {
+    if (t.cleared) continue;
     win.clearTimeout(t.id);
     t.cb();
   }
@@ -958,6 +960,168 @@ function stubClipboard(win) {
   return {writes, last: () => (writes.length ? writes[writes.length - 1] : null)};
 }
 
+/**
+ * A remote-chat page (the surface with the #chat-machine drop-down),
+ * restored from the webview *state* it persisted when one is given.
+ *
+ * @returns {{win: object, posted: Array<object>, state: Function}}
+ *   `state()` is what the page persists now.
+ */
+function makeRemoteChatPage(state) {
+  const {win, posted, getState} = makePage({
+    bodyClass: 'remote-chat',
+    initialState: state || undefined,
+  });
+  return {win, posted, state: getState};
+}
+
+/**
+ * The per-chat machine picks a makeRemoteChatPage page persists, as a
+ * plain object of this realm (the page's objects have the page's
+ * prototypes, which deepStrictEqual compares).
+ */
+function persistedPicks(state) {
+  return JSON.parse(JSON.stringify(state().tabMachinePicks));
+}
+
+/**
+ * Deliver the daemon's `tabs_state` registry snapshot of `entries`, each
+ * `{tabId, title, chatId, workDir, scopeWorkDir}` built by snapshotEntry
+ * (every field but `tabId` optional; `scopeWorkDir` is sent when given).
+ */
+function sendTabsState(win, entries) {
+  const tabs = entries.map(e => {
+    const tab = snapshotEntry(e.tabId, e.title, e.chatId, e.workDir);
+    if (e.scopeWorkDir) tab.scopeWorkDir = e.scopeWorkDir;
+    return tab;
+  });
+  send(win, {type: 'tabs_state', tabs});
+}
+
+/**
+ * Give `win` the xterm.js stand-ins terminalTab.js drives (jsdom has
+ * neither xterm nor ResizeObserver): a `Terminal` that keeps what it is
+ * written, its focus count, its key / data / resize callbacks and its
+ * disposal; a `FitAddon` that counts its fits; a `ResizeObserver` that
+ * keeps its callback and its disconnection.
+ *
+ * @returns {{terminals: Array<object>, fits: Array<number>,
+ *   observers: Array<object>}} every terminal, fit and observer made.
+ */
+function installXtermStub(win) {
+  const terminals = [];
+  const fits = [];
+  const observers = [];
+  win.Terminal = class {
+    constructor() {
+      this.cols = 80;
+      this.rows = 24;
+      this.options = {};
+      this.written = '';
+      this.focused = 0;
+      this.disposed = false;
+      terminals.push(this);
+    }
+    open() {}
+    loadAddon() {}
+    attachCustomKeyEventHandler(handler) {
+      this.keyHandler = handler;
+    }
+    write(text) {
+      this.written += text;
+    }
+    onData(cb) {
+      this.dataCb = cb;
+    }
+    onResize(cb) {
+      this.resizeCb = cb;
+    }
+    focus() {
+      this.focused++;
+    }
+    getSelection() {
+      return '';
+    }
+    dispose() {
+      this.disposed = true;
+    }
+  };
+  win.FitAddon = {
+    FitAddon: class {
+      fit() {
+        fits.push(1);
+      }
+    },
+  };
+  win.ResizeObserver = class {
+    constructor(cb) {
+      this.cb = cb;
+      this.disconnected = false;
+      observers.push(this);
+    }
+    observe() {}
+    disconnect() {
+      this.disconnected = true;
+    }
+  };
+  return {terminals, fits, observers};
+}
+
+/**
+ * Lay out #output, which jsdom does not: a `viewH` px tall, 400 px wide
+ * scroller whose element children stack from its top, `heightOf(child)`
+ * px each, shifted up by its scrollTop.  It is installed on the element
+ * prototype, so it works before or after the page scripts run; every
+ * other element keeps jsdom's empty geometry.
+ */
+function stackOutputLayout(win, heightOf, viewH) {
+  const proto = win.Element.prototype;
+  const jsdomRect = proto.getBoundingClientRect;
+  function isOutput(el) {
+    return el.id === 'output';
+  }
+  function rect(top, height) {
+    return {top, bottom: top + height, height, left: 0, right: 400, width: 400};
+  }
+  Object.defineProperty(proto, 'scrollHeight', {
+    configurable: true,
+    get() {
+      if (!isOutput(this)) return 0;
+      let total = 0;
+      for (const row of this.children) total += heightOf(row);
+      return total;
+    },
+  });
+  Object.defineProperty(proto, 'clientHeight', {
+    configurable: true,
+    get() {
+      return isOutput(this) ? viewH : 0;
+    },
+  });
+  Object.defineProperty(proto, 'clientWidth', {
+    configurable: true,
+    get() {
+      return isOutput(this) ? 400 : 0;
+    },
+  });
+  proto.getBoundingClientRect = function () {
+    if (isOutput(this)) return rect(0, viewH);
+    const O = this.parentElement;
+    if (!O || !isOutput(O)) return jsdomRect.call(this);
+    let top = 0;
+    for (const row of O.children) {
+      if (row === this) break;
+      top += heightOf(row);
+    }
+    return rect(top - O.scrollTop, heightOf(this));
+  };
+}
+
+/** A real, valid 1x1 transparent PNG, base64-encoded. */
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
+  'YGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==';
+
 module.exports = {
   queueRaf,
   showTips,
@@ -1016,4 +1180,10 @@ module.exports = {
   wheel,
   getAdjacent,
   stubClipboard,
+  makeRemoteChatPage,
+  persistedPicks,
+  sendTabsState,
+  installXtermStub,
+  stackOutputLayout,
+  PNG_B64,
 };

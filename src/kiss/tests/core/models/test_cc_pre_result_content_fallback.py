@@ -244,12 +244,12 @@ class TestPreResultContentFallback:
         assert "tool_calls" in m._last_thinking_content
 
     def test_combined_empty_result_and_thinking(self) -> None:
-        """Tool calls from both text and thinking blocks are merged.
+        """The text block's tool calls win over the thinking block's.
 
         Thinking has tool calls and text deltas also have tool calls.
         The early-stop mechanism stops at the first text-block tool call,
-        but the merged parsing collects tool calls from all sources
-        (content + thinking) so both are extracted.
+        and the thinking is parsed only when the text calls no tool, so
+        only the text's call is extracted.
         """
         text_tool = json.dumps(
             {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://real.com"}}]}
@@ -282,8 +282,5 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        names = {fc["name"] for fc in function_calls}
-        assert len(function_calls) == 2
-        assert "go_to_url" in names
-        assert "Bash" in names
+        assert [fc["name"] for fc in function_calls] == ["go_to_url"]
         assert m._stopped_for_tool_calls is True

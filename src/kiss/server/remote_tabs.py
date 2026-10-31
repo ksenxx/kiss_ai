@@ -88,13 +88,17 @@ connecting while it runs is told the same ``new_tab``
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from typing import Any
 
-from kiss.agents.sorcar.machines import Machine, MachineError, load_machines
+from kiss.agents.sorcar.machines import Machine, MachineError
+from kiss.agents.sorcar.persistence import _record_steer_input
 from kiss.server.machine_stream import DROPPED_FIELDS, MachineStream
-from kiss.server.remote_views import RemoteViews
+from kiss.server.remote_views import RemoteViews, registered_machine
+
+logger = logging.getLogger(__name__)
 
 FORWARDED_COMMANDS = frozenset(
     {
@@ -104,13 +108,34 @@ FORWARDED_COMMANDS = frozenset(
         "userAnswer",
         "appendUserMessage",
         "interruptTool",
-        "selectModel",
+        "worktreeAction",
     }
 )
-"""Tab commands a bound tab sends to its machine instead of running here."""
+"""Tab commands a bound tab sends to its machine instead of running here.
+
+The Merge/Discard/Do-nothing bar of a bound tab (``worktreeAction``)
+is the machine's: its task left the worktree there, and the machine's
+``worktree_result`` comes back stamped with the tab.
+
+A model pick (``selectModel``) is not one: it is for the machine the
+chat header's drop-down shows, which the page names in its ``machine``
+field (:func:`~kiss.server.sidebar_panels.machine_models_reply`).
+"""
 
 BINDING_COMMANDS = frozenset({"submit", "run"})
 """The commands whose ``machine`` field binds (or unbinds) their tab."""
+
+TYPED_COMMANDS = frozenset({"submit", "appendUserMessage"})
+"""Forwarded commands whose ``prompt`` the user typed into the composer.
+
+Their text is remembered here too (``steer_inputs``, see
+:func:`_record_steer_input`) when it is handed to the machine: the
+machine keeps the task row or the steer echo, and this daemon's
+composer history (its ArrowUp list, ghost completions and ``/`` popup
+order) reads only its own database, so it would forget a prompt or a
+``/ask`` line typed into a bound tab.  A ``run`` is an API caller's
+text and a ``userAnswer`` an answer, not prompt history.
+"""
 
 ROUTED_COMMANDS = FORWARDED_COMMANDS | {"closeTab", "newChat", "resumeSession"}
 """The commands :meth:`RemoteTabs.route` looks at (``ready`` goes to :meth:`replay_to`)."""
@@ -470,6 +495,11 @@ class RemoteTabs:
                 tab = self._tabs.get(tab_id)
             if tab is None:
                 return False
+        if name in TYPED_COMMANDS:
+            try:
+                _record_steer_input(str(cmd.get("prompt", "") or ""))
+            except Exception:
+                logger.warning("typed text not recorded", exc_info=True)
         self._forward(tab, tab_id, cmd)
         return True
 
@@ -511,12 +541,14 @@ class RemoteTabs:
         one to another machine is retired for it (its sub-agent tabs
         ended), and a stream the remote dropped meanwhile (its relay
         thread ran :meth:`dropped` before this registration) refuses
-        the run instead of binding.  The machine's view stream (its pages and
+        the run instead of binding.  An unbind landing after the
+        registration stands the bind down at its publication
+        (:meth:`_publish`).  The machine's view stream (its pages and
         terminals, :class:`~kiss.server.remote_views.RemoteViews`) is
         connected meanwhile, not after the tab's stream: a chat opened
         from the machine waits for one round of handshakes, not two.
         """
-        machine = next((m for m in load_machines() if m.name == machine_name), None)
+        machine = registered_machine(machine_name)
         if machine is None:
             self._backend._agent_server._refuse_run(
                 tab_id,
@@ -581,31 +613,13 @@ class RemoteTabs:
                 if same is not None:
                     tab = same
                 announce = same is None
-            # Every surface shows the tab (same registry entry a local run
-            # publishes); its chat and task stay unbound here, they are the
-            # remote daemon's.  Registered before the binding is announced:
-            # a local client's delivery is narrowed to the tabs it can show.
-            # A sub-agent run (``parentTaskId``) gets no top-level tab, as
-            # one running here does not: the surfaces open its nested tab
-            # under the caller on the relayed ``new_tab``.
-            if not cmd.get("parentTaskId"):
-                # The title the prompt displaces is kept until the machine
-                # has answered: a path-only prompt (promptOpened, echoing
-                # the id stamped here) is no task, and the tab takes its
-                # old title back if nothing republished it meanwhile.
-                old_title = self._registry_title(tab_id)
-                generation = self._backend._agent_server._registry_update_tab(
-                    tab_id,
-                    title=title,
-                    work_dir=str(cmd.get("workDir", "") or ""),
-                    task_id="",
-                    create=True,
-                )
-                if cmd.get("type") == "submit":
-                    prompt_id = uuid.uuid4().hex
-                    cmd["promptId"] = prompt_id
-                    with tab.lock:
-                        tab.displaced_titles[tab_id] = (prompt_id, old_title, generation)
+            # Registered before the binding is announced: a local client's
+            # delivery is narrowed to the tabs it can show.  A sub-agent
+            # run (``parentTaskId``) gets no top-level tab, as one running
+            # here does not: the surfaces open its nested tab under the
+            # caller on the relayed ``new_tab``.
+            if not cmd.get("parentTaskId") and not self._publish(tab_id, tab, cmd, title):
+                return None
             if announce:
                 self._announce(tab_id, tab)
         finally:
@@ -716,6 +730,56 @@ class RemoteTabs:
         if ended is not None:
             self._end_stream(ended, orphans)
 
+    def _publish(self, tab_id: str, tab: RemoteTab, cmd: dict[str, Any], title: str) -> bool:
+        """Publish *tab_id*, bound to *tab*'s stream, in the shared tab registry.
+
+        Every surface shows the tab (the registry entry a local run
+        publishes) under *title*, with no chat or task: they are the
+        machine's.  The local chat the tab showed before goes, with the
+        chat view, the task pin and the printer subscriptions that went
+        with it: opening that chat in another tab does not displace this
+        one, and neither a run of it there nor a local task the tab was
+        streaming (still running in another tab) is fanned out to it.
+        Published in the critical section that checks the tab is still
+        on *tab*'s stream, so an unbind from another connection
+        (:meth:`_detach`: a ``closeTab``, ``newChat``, or local-chat
+        resume) lands wholly before it (nothing is published: a closed
+        tab stays closed, a resumed chat stays shown and subscribed) or
+        wholly after it.  A submit is stamped with an id
+        (``promptId``) the machine echoes on ``promptOpened``: a
+        path-only prompt is no task, and the tab takes back the title
+        it displaced if nothing republished it meanwhile.
+
+        Returns:
+            False when the tab left *tab*'s stream before the publication.
+        """
+        server = self._backend._agent_server
+        old_title = self._registry_title(tab_id)
+        with self._lock:
+            if self._tabs.get(tab_id) is not tab:
+                return False
+            # No chat id: nothing is displaced (one tab per local chat).
+            changed, _, generation = server.tab_registry.update_tab(
+                tab_id,
+                chat_id="",
+                title=title,
+                work_dir=str(cmd.get("workDir", "") or ""),
+                task_id="",
+                create=True,
+            )
+            with server._state_lock:
+                server._tab_chat_views.pop(tab_id, None)
+                server._tab_opened_task_ids.pop(tab_id, None)
+                server._printer_cleanup_tab(tab_id)
+        if changed:
+            server._publish_tabs_state()
+        if cmd.get("type") == "submit":
+            prompt_id = uuid.uuid4().hex
+            cmd["promptId"] = prompt_id
+            with tab.lock:
+                tab.displaced_titles[tab_id] = (prompt_id, old_title, generation)
+        return True
+
     def _registry_title(self, tab_id: str) -> str:
         """The title the shared tab registry holds for *tab_id* ("" when it has no entry)."""
         registry = self._backend._agent_server.tab_registry
@@ -770,8 +834,9 @@ class RemoteTabs:
         that announced the task (``new_tab``), else the stream of the
         ``parentTabId`` the resume names (a finished sub-agent of a
         replayed chat, whose ``new_tab`` this daemon never saw).  Any
-        other resume into a bound tab shows a local chat there: the tab
-        is unbound and the resume handled here.
+        other resume into a bound tab, or one whose bind is still
+        connecting, shows a local chat there: the tab is unbound (the
+        bind stands down) and the resume handled here.
         """
         machine_name = str(cmd.get("machine", "") or "")
         if machine_name:
@@ -800,7 +865,10 @@ class RemoteTabs:
                 tab = self._tabs.get(str(cmd.get("parentTabId", "") or ""))
             previous = self._tabs.get(tab_id)
             if tab is None:
-                if previous is not None and previous.tab_id == tab_id:
+                # A local chat shows in the tab: it leaves its own stream,
+                # and a bind still connecting for it stands down, as on a
+                # closeTab or newChat (both counted by _detach).
+                if previous is None or previous.tab_id == tab_id:
                     ended, orphans = self._detach(tab_id)
             else:
                 # One stream per tab: a tab bound to a machine, or on
@@ -914,10 +982,12 @@ class RemoteTabs:
     def dropped(self, tab: RemoteTab, lost: bool) -> None:
         """A stream ended: forget its tabs, and when it was *lost* end the tab's task.
 
-        The tab's run is refused (the surfaces show the loss) and the
-        stream finished off as an unbound one is (:meth:`_end_stream`:
-        its sub-agent tabs end too).  A stream already retired
-        (replaced, unbound) is nobody's loss.
+        The tab's run is refused (the surfaces show the loss; the
+        terminal status names the machine as ``lost``, as the task may
+        still be running there) and the stream finished off as an
+        unbound one is (:meth:`_end_stream`: its sub-agent tabs end
+        too).  A stream already retired (replaced, unbound) is nobody's
+        loss.
         """
         with self._lock:
             # Retired even when not (or no longer) registered: a stream
@@ -929,6 +999,7 @@ class RemoteTabs:
             self._backend._agent_server._refuse_run(
                 tab.tab_id,
                 f"lost the connection to {tab.machine.name}",
+                lost=tab.machine.name,
             )
             self._end_stream(tab, tab_ids)
 

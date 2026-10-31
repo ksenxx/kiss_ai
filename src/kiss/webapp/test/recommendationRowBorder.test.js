@@ -29,8 +29,14 @@ const TASKS = [
   'Fix the flaky terminal tab test',
 ];
 
+// The daemon's `machines` row shape (sidebar_panels.py).
 const MACHINES = [
-  {name: 'laptop', url: 'https://10.0.0.5:8787', local: true, reachable: true},
+  {
+    name: 'laptop',
+    address: 'https://10.0.0.5:8787',
+    local: true,
+    status: 'reachable',
+  },
 ];
 
 /** Boot a chat page with the given body attributes and the real CSS. */
@@ -76,6 +82,10 @@ function checkSurface() {
     '#meta-machines-list .machine-row',
   );
   assert.ok(machine, 'a machine row to compare against');
+  assert.ok(
+    !machine.classList.contains('unreachable'),
+    'setup: the row is the reachable machine a user sees',
+  );
   const machineStyle = win.getComputedStyle(machine);
   assert.strictEqual(
     machineStyle.borderTopStyle,

@@ -34,6 +34,8 @@ import sys
 import tarfile
 import textwrap
 import time
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -534,18 +536,35 @@ exit 0
 
 
 async def _busy_handler(ws: ServerConnection) -> None:
-    """Answer the active-tasks probe like a daemon with one task running."""
+    """Answer the active-tasks probe like a daemon with one task running.
+
+    It names no ``restartPendingFile``: a daemon from before deferred
+    restarts, which does not finish one by itself.
+    """
     await ws.recv()
     await ws.send(json.dumps({"type": "activeTasksResponse", "count": 1, "tabs": ["t"]}))
 
 
+async def _busy_handler_naming(record: Path, ws: ServerConnection) -> None:
+    """Answer like a busy daemon that finishes a deferred restart recorded in *record*."""
+    await ws.recv()
+    await ws.send(json.dumps({
+        "type": "activeTasksResponse", "count": 1, "tabs": ["t"],
+        "restartPendingFile": str(record),
+    }))
+
+
 async def _run_with_busy_daemon(
-    sandbox: Sandbox, endpoint: Path, commands: str, env: dict[str, str] | None = None
+    sandbox: Sandbox,
+    endpoint: Path,
+    commands: str,
+    env: dict[str, str] | None = None,
+    handler: Callable[[ServerConnection], Awaitable[None]] = _busy_handler,
 ) -> subprocess.CompletedProcess[str]:
-    """Run *commands* while a busy fake daemon is reachable through *endpoint*."""
+    """Run *commands* while a busy fake daemon (*handler*) is reachable through *endpoint*."""
     daemon_dir = sandbox.root / "busy"
     daemon_dir.mkdir()
-    async with fake_daemon(daemon_dir, _busy_handler, endpoint_file=endpoint):
+    async with fake_daemon(daemon_dir, handler, endpoint_file=endpoint):
         return await asyncio.to_thread(sandbox.run, commands, env)
 
 
@@ -597,29 +616,111 @@ def test_start_defers_while_the_daemon_has_tasks_in_flight(sandbox: Sandbox) -> 
             sandbox, endpoint, f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?'
         )
     )
-    assert "kiss-web has tasks in flight; restart deferred" in res.stdout
+    assert (
+        "kiss-web has tasks in flight; restart deferred (re-run this script once they finish)."
+        in res.stdout
+    )
     assert res.stdout.endswith("rc=0\n")
     assert sandbox.logged_calls() == []
     assert not (sandbox.home / ".config/systemd/user/kiss-web.service").exists()
+    assert not (sandbox.home / ".kiss" / ".kiss-web.restart-pending").exists()
+
+
+def test_start_records_the_deferred_restart_for_the_busy_daemon(sandbox: Sandbox) -> None:
+    """A daemon that names its record file gets the restart to finish later."""
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", _SYSTEMD_STUB)
+    kiss_home = sandbox.home / ".kiss"
+    record = kiss_home / ".kiss-web.restart-pending"
+    res = asyncio.run(
+        _run_with_busy_daemon(
+            sandbox,
+            kiss_home / "sorcar-local.json",
+            f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?',
+            handler=partial(_busy_handler_naming, record),
+        )
+    )
+    assert (
+        "kiss-web has tasks in flight; restart deferred: kiss-web restarts itself"
+        " onto this build once they finish." in res.stdout
+    )
+    assert res.stdout.endswith("rc=0\n")
+    assert json.loads(record.read_text(encoding="utf-8")) == {
+        "installer": str(REPO / "install.sh"),
+        "home": str(kiss_home),
+        "workdir": str(sandbox.workdir),
+    }
+    assert sorted(p.name for p in kiss_home.iterdir() if p.name.startswith(record.name)) == [
+        record.name
+    ]
+    assert sandbox.logged_calls() == []
+
+
+def test_a_restart_only_run_records_no_deferred_restart(sandbox: Sandbox) -> None:
+    """The daemon's own --restart-only attempt must not make it retry in a loop."""
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", _SYSTEMD_STUB)
+    kiss_home = sandbox.home / ".kiss"
+    record = kiss_home / ".kiss-web.restart-pending"
+    res = asyncio.run(
+        _run_with_busy_daemon(
+            sandbox,
+            kiss_home / "sorcar-local.json",
+            f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+            env={"_KISS_RESTART_ONLY": "1"},
+            handler=partial(_busy_handler_naming, record),
+        )
+    )
+    assert "restart deferred (re-run this script once they finish)." in res.stdout
+    assert not record.exists()
+    assert sandbox.logged_calls() == []
+
+
+def test_a_record_that_cannot_be_written_falls_back_to_a_re_run(sandbox: Sandbox) -> None:
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", _SYSTEMD_STUB)
+    record = sandbox.root / "no-such-dir" / ".kiss-web.restart-pending"
+    res = asyncio.run(
+        _run_with_busy_daemon(
+            sandbox,
+            sandbox.home / ".kiss" / "sorcar-local.json",
+            f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?',
+            handler=partial(_busy_handler_naming, record),
+        )
+    )
+    assert "restart deferred (re-run this script once they finish)." in res.stdout
+    assert res.stdout.endswith("rc=0\n")
+    assert not record.parent.exists()
+    assert sandbox.logged_calls() == []
 
 
 def test_start_defers_for_a_busy_daemon_of_the_stock_home_after_a_brand_switch(
     sandbox: Sandbox,
 ) -> None:
-    """The new runtime's home is empty, but ~/.kiss still owns a busy daemon."""
+    """The new runtime's home is empty, but ~/.kiss still owns a busy daemon.
+
+    The restart is recorded where that daemon reads it, for the brand's home.
+    """
     project = sandbox.project()
     sandbox.uname("Linux")
     sandbox.stub("systemctl", _SYSTEMD_STUB)
     endpoint = sandbox.home / ".kiss" / "sorcar-local.json"
+    record = sandbox.home / ".kiss" / ".kiss-web.restart-pending"
     res = asyncio.run(
         _run_with_busy_daemon(
             sandbox,
             endpoint,
             f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"; echo rc=$?',
             env={"KISS_HOME": str(sandbox.home / ".brand")},
+            handler=partial(_busy_handler_naming, record),
         )
     )
-    assert "restart deferred" in res.stdout
+    assert "restart deferred: kiss-web restarts itself" in res.stdout
+    assert json.loads(record.read_text(encoding="utf-8"))["home"] == str(sandbox.home / ".brand")
+    assert not (sandbox.home / ".brand" / ".kiss-web.restart-pending").exists()
     assert sandbox.logged_calls() == []
 
 

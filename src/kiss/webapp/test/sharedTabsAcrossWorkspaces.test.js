@@ -17,14 +17,11 @@
 
 const assert = require('assert');
 const {
-  makePage: makeChatPage,
   send,
   click: clickEl,
+  sendTabsState,
 } = require('./simplify2_harness');
-
-function makePage() {
-  return makeChatPage({bodyClass: 'remote-chat'});
-}
+const {makePage, runTests} = require('./workdir_helpers');
 
 function setWorkspace(win, dir) {
   send(win, {type: 'configData', config: {work_dir: dir}, apiKeys: {}});
@@ -50,32 +47,24 @@ function stripIds(win) {
     .map(el => el.dataset.tabId);
 }
 
-function entry(tabId, workDir, chatId, scopeWorkDir) {
-  return {
-    tabId: tabId,
-    chatId: chatId || '',
-    title: tabId,
-    workDir: workDir || '',
-    scopeWorkDir: scopeWorkDir || '',
-  };
-}
-
-const MIXED_SNAPSHOT = {
-  type: 'tabs_state',
-  tabs: [
-    entry('a1', '/ws/a', 'chat-1'),
-    entry('wt', '/ws/a/.kiss-worktrees/kiss_wt-7', 'chat-2'),
-    entry('b1', '/ws/b', 'chat-3'),
-    entry('un', '', 'chat-4'),
-    // A run_agent sub-task: runs in a scratch dir, scoped elsewhere.
-    entry('api', '/home/u/.kiss/channel_work', 'chat-5', '/ws/c'),
-  ],
-};
+const MIXED_TABS = [
+  {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
+  {tabId: 'wt', workDir: '/ws/a/.kiss-worktrees/kiss_wt-7', chatId: 'chat-2'},
+  {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-3'},
+  {tabId: 'un', chatId: 'chat-4'},
+  // A run_agent sub-task: runs in a scratch dir, scoped elsewhere.
+  {
+    tabId: 'api',
+    workDir: '/home/u/.kiss/channel_work',
+    chatId: 'chat-5',
+    scopeWorkDir: '/ws/c',
+  },
+];
 
 function testEveryRegistryTabIsShownWhateverTheWorkspace() {
   const {win, posted} = makePage();
   setWorkspace(win, '/ws/a');
-  send(win, MIXED_SNAPSHOT);
+  sendTabsState(win, MIXED_TABS);
   assert.deepStrictEqual(
     tabBarIds(win),
     ['a1', 'wt', 'b1', 'un', 'api'],
@@ -100,7 +89,7 @@ function testWorkspaceChangeLeavesTheTabBarAlone() {
   // and no placeholder tab is spawned.
   const {win} = makePage();
   setWorkspace(win, '/ws/a');
-  send(win, MIXED_SNAPSHOT);
+  sendTabsState(win, MIXED_TABS);
   win._testApi.switchToTab('b1'); // the Chats-panel pick
   assert.strictEqual(activeTabId(win), 'b1');
   const input = win.document.getElementById('task-input');
@@ -121,7 +110,7 @@ function testConfigArrivingAfterSnapshotChangesNothing() {
   // A late configData (the daemon answers after the first snapshot)
   // must not reshuffle a tab bar that was rendered without a workspace.
   const {win} = makePage();
-  send(win, MIXED_SNAPSHOT);
+  sendTabsState(win, MIXED_TABS);
   const before = tabBarIds(win);
   const active = activeTabId(win);
   setWorkspace(win, '/ws/b');
@@ -134,10 +123,10 @@ function testHistoryClickOnAnotherWorkspaceChatActivatesItsTab() {
   // switches to that tab instead of resuming the chat in a new one.
   const {win, posted} = makePage();
   setWorkspace(win, '/ws/a');
-  send(win, {
-    type: 'tabs_state',
-    tabs: [entry('a1', '/ws/a', 'chat-1'), entry('b1', '/ws/b', 'chat-2')],
-  });
+  sendTabsState(win, [
+    {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
+    {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
+  ]);
   send(win, {
     type: 'history',
     offset: 0,
@@ -175,10 +164,10 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
   // lists the file only on its own file screen, under its owner.
   const {win} = makePage();
   setWorkspace(win, '/ws/a');
-  send(win, {
-    type: 'tabs_state',
-    tabs: [entry('a1', '/ws/a', 'chat-1'), entry('b1', '/ws/b', 'chat-2')],
-  });
+  sendTabsState(win, [
+    {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
+    {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
+  ]);
   send(win, {
     type: 'fileContent',
     tabId: 'b1',
@@ -246,10 +235,10 @@ function testOneContentTabPerPathAcrossWorkspaces() {
   // Two chats in different folders opening the same absolute path
   // share one content tab: one editor per file.
   const {win} = makePage();
-  send(win, {
-    type: 'tabs_state',
-    tabs: [entry('a1', '/ws/a', 'chat-1'), entry('b1', '/ws/b', 'chat-2')],
-  });
+  sendTabsState(win, [
+    {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
+    {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
+  ]);
   send(win, {
     type: 'fileContent',
     tabId: 'a1',
@@ -275,8 +264,8 @@ function testReadySendsCanonicalWorkDir() {
   // (including '' = unpinned), never the stale local pin, or an empty
   // registry would be re-seeded with wrong pins.
   const {win, posted} = makePage();
-  send(win, {type: 'tabs_state', tabs: [entry('b1', '/ws/b', 'chat-1')]});
-  send(win, {type: 'tabs_state', tabs: [entry('b1', '', 'chat-1')]});
+  sendTabsState(win, [{tabId: 'b1', workDir: '/ws/b', chatId: 'chat-1'}]);
+  sendTabsState(win, [{tabId: 'b1', chatId: 'chat-1'}]);
   // A real outage (the daemon had been up), not a cold start: only
   // the former re-announces ready.
   send(win, {type: 'daemonStatus', connected: true});
@@ -301,21 +290,4 @@ const tests = [
   testReadySendsCanonicalWorkDir,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
-}
-if (failures > 0) {
-  console.error(failures + ' test(s) failed');
-  process.exit(1);
-}
-console.log('All ' + tests.length + ' sharedTabsAcrossWorkspaces tests passed');
-// jsdom keeps timers alive; end the process like the other suites do.
-process.exit(0);
+runTests(tests.map(fn => [fn.name, fn]));

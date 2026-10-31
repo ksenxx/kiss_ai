@@ -30,7 +30,6 @@ import signal
 import subprocess
 import tempfile
 import unittest
-import urllib.request
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
@@ -105,14 +104,14 @@ class TestAppWindowConnection(IsolatedAsyncioTestCase):
         await asyncio.sleep(0.3)
 
     async def _open(self) -> bool | None:
-        """What kiss-app learns: :func:`standalone_app.ask_app_window_open` on the daemon."""
-        url = f"https://127.0.0.1:{self.port}/"
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=self.ctx))
-        urllib.request.install_opener(opener)
-        try:
-            return await asyncio.to_thread(standalone_app.ask_app_window_open, url)
-        finally:
-            urllib.request.install_opener(urllib.request.build_opener())
+        """What kiss-app learns: :func:`standalone_app.ask_app_window_open` on the daemon.
+
+        Asked at the daemon's plain-HTTP loopback URL from its URL file,
+        as kiss-app does (it opens the probe itself, bypassing any proxy).
+        """
+        url = standalone_app.read_loopback_url(Path(self.tmpdir) / "remote-url.json")
+        self.assertIsNotNone(url)
+        return await asyncio.to_thread(standalone_app.ask_app_window_open, str(url))
 
     async def test_popup_connections_are_counted(self) -> None:
         """Open while a marked connection lives; other clients do not count, nor an overlap."""

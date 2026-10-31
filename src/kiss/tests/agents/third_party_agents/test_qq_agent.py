@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import requests
@@ -67,8 +67,8 @@ _TOKEN_PATH = "/getAppAccessToken"
 class _QQApiHandler(RecordingHandler):
     """Emulates the QQ open-platform token and message endpoints.
 
-    Every request is recorded on the :class:`RecordingServer` as
-    ``{"path", "authorization", "body"}``; see :func:`_sent`.  Wrong
+    Every request is recorded by :meth:`RecordingHandler.record_request`
+    with its parsed JSON body; see :func:`_sent`.  Wrong
     credentials are answered like the real API (an error body naming
     what arrived) so the test body, not a handler-thread traceback,
     reports the mismatch.
@@ -78,9 +78,7 @@ class _QQApiHandler(RecordingHandler):
         """Serve the token endpoint and the v2 message endpoints."""
         body = json.loads(self._read_raw().decode("utf-8"))
         authorization = self.headers.get("Authorization", "")
-        server = cast(RecordingServer, self.server)
-        server.requests.append({"path": self.path, "authorization": authorization, "body": body})
-        if self.path == _TOKEN_PATH:
+        if self.record_request(body)["path"] == _TOKEN_PATH:
             if body != {"appId": "qq_app", "clientSecret": _SECRET}:
                 self._json(400, {"code": 100007, "message": f"bad credentials: {body}"})
                 return

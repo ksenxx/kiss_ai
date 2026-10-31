@@ -90,38 +90,63 @@ def _drag(cdp, start: tuple[float, float], end: tuple[float, float],
 _SWIPE_MAX_MS = 1500
 
 # Records, next to the detector's own listeners, how long the page saw
-# the last finger down: the detector's clock, not the test's.
+# the last finger down: the detector's clock, not the test's.  It starts
+# on the window, before the detector's document listener, and stops on
+# the document after it, so it never reads less than the detector.
 _FINGER_CLOCK_JS = """() => {
   if (window.__fingerDownMs !== undefined) return;
   window.__fingerDownMs = 0;
   let at = 0;
   const opts = {capture: true, passive: true};
-  document.addEventListener('touchstart', () => { at = Date.now(); }, opts);
+  window.addEventListener('touchstart', () => { at = Date.now(); }, opts);
   document.addEventListener('touchend', () => {
     window.__fingerDownMs = Date.now() - at;
   }, opts);
 }"""
 
+# Resolves, once the clock above has the lifted finger (it is reset to
+# null before each drag), to that finger's time down and the screen
+# then on view (``%s``: the screen function).  A finger on a rendered
+# preview never reaches this document (the iframe's own detector posts
+# the swipe), so after a second the time down stays null.
+_LIFTED_JS = """new Promise(resolve => {
+  const until = Date.now() + 1000;
+  const read = () => (window.__fingerDownMs === null && Date.now() < until)
+    ? setTimeout(read, 10) : resolve([window.__fingerDownMs, (%s)()]);
+  read();
+})"""
+
 
 def _quick_drag(cdp, start: tuple[float, float], end: tuple[float, float],
                 steps: int = 6) -> None:
-    """:func:`_drag`, again when the page saw the finger down longer
-    than the detector allows: every touch event is a CDP round trip,
-    and on a loaded machine the whole finger can take longer than a
-    swipe may, which the detector rightly ignores.
+    """:func:`_drag`, again when the detector may have ignored the
+    finger as too slow: every touch event is a CDP round trip, and on a
+    loaded machine the whole finger can take longer than a swipe may,
+    which the detector rightly ignores.
 
-    The clock here and the detector's are read apart by at most a
-    millisecond, so only a finger down longer than the limit by more
-    than that is surely ignored and dragged again (a drag the detector
-    took is never repeated: that would swipe twice)."""
-    cdp.send("Runtime.evaluate", {"expression": f"({_FINGER_CLOCK_JS})()"})
+    The page clock never reads less than the detector's, so a time
+    under the limit is one the detector accepted.  At the limit or over
+    it may still have taken the swipe: the clock also counts what the
+    swipe does before the clock stops (turning the screen, a few ms).
+    So the screen decides: the finger is dragged again only when the
+    screen did not change, never after a drag the detector took (that
+    would swipe twice).  The detector turns the screen in the same
+    touchend dispatch, before the clock stops, so the two are read
+    together once the clock has the finger.  A finger this document
+    never saw (on a preview) is not judged."""
+    before = cdp.send("Runtime.evaluate", {
+        "expression": f"({_FINGER_CLOCK_JS})(), ({_SCREEN_JS})()",
+        "returnByValue": True,
+    })["result"]["value"]
     down = 0
     for _ in range(5):
+        cdp.send("Runtime.evaluate", {"expression": "window.__fingerDownMs = null"})
         _drag(cdp, start, end, steps)
-        down = cdp.send("Runtime.evaluate",
-                        {"expression": "window.__fingerDownMs",
-                         "returnByValue": True})["result"]["value"]
-        if down <= _SWIPE_MAX_MS + 1:
+        down, screen = cdp.send("Runtime.evaluate", {
+            "expression": _LIFTED_JS % _SCREEN_JS,
+            "awaitPromise": True, "returnByValue": True,
+        })["result"]["value"]
+        if down is None or down < _SWIPE_MAX_MS or screen != before:
             return
     raise AssertionError(f"the finger took {down} ms, never a swipe's time")
 

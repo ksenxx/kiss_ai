@@ -29,6 +29,7 @@ import time
 from kiss.agents.sorcar.cron_agent import _is_silent
 from kiss.core.models.model import (
     BINARY_ATTACHMENT_CLOSE,
+    BINARY_ATTACHMENT_OPEN,
     encode_binary_attachment,
     parse_binary_attachments,
 )
@@ -63,14 +64,14 @@ class TestParseBinaryAttachments:
         assert atts[0].data == _PNG_1PX
 
     def test_opener_quoted_inside_block_is_not_a_second_block(self):
-        # A Read of a file that quotes the sentinel yields an opener
-        # inside another block's span.  The outer payload is not base64
-        # (it contains ``<``), so the block is dropped; the inner opener
-        # must not then be paired with the same closer — the old scanner
-        # did exactly that and fabricated a zero-byte attachment.
-        inner = "<<KISS_BINARY_ATTACHMENT mime_type=image/png>>"
+        # An opener inside another block's span.  The outer payload is
+        # not base64 (it contains ``<``), so the block is dropped; the
+        # inner opener must not then be paired with the same closer —
+        # the old scanner did exactly that and fabricated a zero-byte
+        # attachment.
+        inner = BINARY_ATTACHMENT_OPEN.format(mime_type="image/png")
         text = (
-            "<<KISS_BINARY_ATTACHMENT mime_type=text/plain>>"
+            BINARY_ATTACHMENT_OPEN.format(mime_type="text/plain")
             + inner
             + BINARY_ATTACHMENT_CLOSE
             + " tail"
@@ -81,7 +82,7 @@ class TestParseBinaryAttachments:
         assert plain.endswith(" tail")
 
     def test_many_unclosed_openers_scan_linearly(self):
-        opener = "<<KISS_BINARY_ATTACHMENT mime_type=image/png>>"
+        opener = BINARY_ATTACHMENT_OPEN.format(mime_type="image/png")
         text = opener * 20_000 + "A" * 100_000 + BINARY_ATTACHMENT_CLOSE
         plain, atts = _timed(parse_binary_attachments, text)
         # One block spans the first opener through the single closer;

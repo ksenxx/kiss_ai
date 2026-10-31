@@ -58,41 +58,67 @@ the median and $3.27 at the 75th percentile while holding 28x their
 spend; the base alone covers three reviews in four."""
 REVIEW_BUDGET_PER_KLINE_USD = 5.0
 """Budget (USD) added per 1,000 changed lines the review has to read."""
+GIT_BIG_FILE_BYTES = 512 * 1024 * 1024
+"""git's default ``core.bigFileThreshold``: a bigger file is diffed as binary."""
 
 
 def changed_lines(work_dir: str) -> int:
     """Return the lines added and deleted in *work_dir* against ``HEAD``, untracked files included.
 
     ``0`` when *work_dir* is not a git repository or git is missing;
-    binary files count as none.
+    binary files count as none.  An untracked file counts as git's
+    numstat would count it once added (see :func:`_new_file_lines`).
 
     Args:
         work_dir: The directory whose diff a review is to read.
     """
+    # Bytes, not text: git prints a name unquoted (with ``-z``, or with
+    # ``core.quotePath`` off), and a name need not be UTF-8.
     try:
         numstat = subprocess.run(
             ["git", "diff", "--numstat", "HEAD"], cwd=work_dir, capture_output=True,
-            text=True, timeout=30, check=False,
+            timeout=30, check=False,
         ).stdout
         untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"], cwd=work_dir,
-            capture_output=True, text=True, timeout=30, check=False,
+            ["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=work_dir,
+            capture_output=True, timeout=30, check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return 0
     lines = 0
     for row in numstat.splitlines():
         # ``<added>\t<deleted>\t<path>``; binary files show ``-`` counts.
-        columns = row.split("\t", 2)
+        columns = row.split(b"\t", 2)
         for count in columns[:2]:
             lines += int(count) if count.isdigit() else 0
-    for name in untracked.splitlines():
-        try:
-            with open(os.path.join(work_dir, name), "rb") as handle:
-                lines += sum(1 for _ in handle)
-        except OSError:
-            continue
+    root = os.fsencode(work_dir)
+    for name in untracked.split(b"\0"):
+        if name:
+            lines += _new_file_lines(os.path.join(root, name))
     return lines
+
+
+def _new_file_lines(path: bytes) -> int:
+    """Return the lines ``git diff --numstat`` counts for the new file *path*.
+
+    A symlink is one line (its target, not followed); a binary file (a
+    NUL byte in its first 8,000 bytes, git's own test, or bigger than
+    :data:`GIT_BIG_FILE_BYTES`) and a file that cannot be read count
+    none.
+
+    Args:
+        path: The file's path.
+    """
+    if os.path.islink(path):
+        return 1
+    try:
+        with open(path, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > GIT_BIG_FILE_BYTES or b"\0" in handle.read(8000):
+                return 0
+            handle.seek(0)
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
 
 
 def review_budget(work_dir: str) -> float:

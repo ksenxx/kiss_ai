@@ -5,12 +5,14 @@
 """End-to-end tests of the bundled task-update agent
 (:mod:`kiss.agents.seas.task_update.task_update_sea`).
 
-The ``task_transcript`` tool is exercised against tasks persisted in
+The agent-level test runs a real :class:`ChatSorcarAgent` ReAct loop
+against the scripted local chat-completions server configured from the
+SEA's methods; its ``task_transcript`` call reads a task persisted in
 the test session's real SQLite history (``KISS_HOME`` is a temporary
-directory, see ``conftest.py``); the agent-level test runs a real
-:class:`ChatSorcarAgent` ReAct loop against the scripted local
-chat-completions server configured from the SEA's methods, so the
-digest really flows through the tool result into the finish summary.
+directory, see ``conftest.py``), so the digest really flows through the
+tool result into the finish summary.  The digest format itself is
+pinned by ``src/kiss/tests/agents/sorcar/test_task_digest.py``
+(``task_transcript`` wraps ``task_digest.transcript_page``).
 """
 
 from __future__ import annotations
@@ -35,25 +37,13 @@ from kiss.tests.agents.sorcar.local_model_server import (
 )
 
 
-def _persist_task(
-    prompt: str,
-    events: list[dict[str, Any]],
-    extra: dict[str, Any] | None = None,
-) -> str:
+def _persist_task(prompt: str, events: list[dict[str, Any]]) -> str:
     """Persist a still-running task row (started 90 s ago, no spend recorded yet) with
-    *events* and return its id; *extra* overrides the row's columns."""
-    columns: dict[str, Any] = {
-        "model": "test-model",
-        "startTs": int(time.time() * 1000) - 90_000,
-        "endTs": 0, "cost": 0, "steps": 0, "tokens": 0,
-        **(extra or {}),
-    }
-    return persist_task(prompt, events, **columns)
-
-
-def _entries(digest: str) -> list[str]:
-    """Return the numbered digest entries of a ``task_transcript`` page."""
-    return [line for line in digest.splitlines() if line.startswith("[")]
+    *events* and return its id."""
+    return persist_task(
+        prompt, events, model="test-model", startTs=int(time.time() * 1000) - 90_000,
+        endTs=0, cost=0, steps=0, tokens=0,
+    )
 
 
 def test_sea_methods_and_prompt_follow_the_contract() -> None:
@@ -68,115 +58,6 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert agent.tools([]) == [sea.task_transcript]
     assert agent.tools([print]) == [print, sea.task_transcript]
     assert_worker_contract(sea, agent, {"tool_profile": "bash", "max_budget": 1.0})
-
-
-def test_transcript_digests_a_running_task() -> None:
-    """Every persisted event kind lands in the digest in its compact form.
-
-    The events use the shapes the server's printer persists: a
-    ``tool_call`` keeps ``path`` / ``description`` / ``command`` /
-    ``content`` / ``old_string`` / ``new_string`` at the top level and
-    the remaining arguments under ``extras``; the ``prompt`` event holds
-    the chat-augmented prompt, which the digest skips in favour of the
-    row's own task text.
-    """
-    long_summary = "step " * 300  # 1500 chars: kept whole (limit 4000)
-    long_result = "x" * 700  # clipped to 500 chars
-    events: list[dict[str, Any]] = [
-        {"type": "task_settings", "settings": {"model": "test-model"}},
-        {"type": "system_prompt", "text": "SYSTEM TEXT MUST NOT APPEAR"},
-        {"type": "prompt", "text": "PREVIOUS CHAT CONTEXT MUST NOT APPEAR\n" * 200
-         + "Count the files"},
-        {"type": "thinking_start"},
-        {"type": "thinking_delta", "text": "Let me "},
-        {"type": "thinking_delta", "text": "look."},
-        {"type": "thinking_end"},
-        {"type": "text_delta", "text": "I will "},
-        {"type": "text_delta", "text": "list them."},
-        {"type": "text_end"},
-        {"type": "usage_info", "text": "Steps: 1/100, Budget: $0.01"},
-        {"type": "tool_call", "name": "Bash", "callId": 1,
-         "description": "list files", "command": "ls"},
-        {"type": "system_output", "text": "a.py\n"},
-        {"type": "system_output", "text": "b.py\n"},
-        {"type": "tool_result", "content": "", "tool_name": "Bash"},
-        {"type": "tool_call", "name": "Read", "callId": 2,
-         "path": "/work/dir/a.py", "lang": "python", "extras": {"max_lines": 40}},
-        {"type": "tool_result", "content": long_result, "is_error": True},
-        {"type": "tool_call", "name": "summary", "callId": 3,
-         "description": long_summary},
-        {"type": "tool_result", "content": "Summary recorded."},
-        {"type": "tool_call", "name": "Edit", "callId": 4, "path": "b.py",
-         "old_string": "x = 1", "new_string": ""},
-        {"type": "usage_info", "text": "Steps: 4/100, Budget: $0.05"},
-        {"type": "new_tab", "task_id": "child"},
-        {"type": "custom_note", "text": "a note"},
-    ]
-    task_id = _persist_task("Count the files", events)
-
-    digest = sea.task_transcript(task_id)
-    header, _sep, body = digest.partition("\n\n")
-    assert f"Task id: {task_id}" in header
-    assert "Task prompt: Count the files" in header
-    assert "PREVIOUS CHAT CONTEXT" not in digest
-    assert "Status: running" in header
-    assert "Model: test-model" in header
-    assert "Work dir: /work/dir" in header
-    assert "Elapsed: 1 min" in header
-    assert "Spend: Steps: 4/100, Budget: $0.05" in header
-    assert "SYSTEM TEXT MUST NOT APPEAR" not in digest
-    assert "NEW_TAB" not in digest and "USAGE_INFO" not in digest
-
-    entries = _entries(body)
-    assert entries[0] == "[0] THOUGHT: Let me look."
-    assert entries[1] == "[1] ASSISTANT: I will list them."
-    assert entries[2] == (
-        '[2] TOOL CALL Bash({"description": "list files", "command": "ls"})'
-    )
-    assert "[3] OUTPUT: a.py\nb.py\n[4] RESULT: \n" in body
-    assert entries[5] == (
-        '[5] TOOL CALL Read({"path": "/work/dir/a.py", "max_lines": 40})'
-    )
-    assert entries[6].startswith("[6] RESULT (error): " + "x" * 500)
-    assert entries[6].endswith("…[200 more chars]")
-    assert entries[7] == f"[7] SUMMARY: {long_summary}"
-    assert entries[8] == "[8] RESULT: Summary recorded."
-    assert entries[9] == (
-        '[9] TOOL CALL Edit({"path": "b.py", "old_string": "x = 1", '
-        '"new_string": ""})'
-    )
-    assert entries[10] == "[10] CUSTOM_NOTE: a note"
-    assert len(entries) == 11
-    assert "Transcript entries: 11" in header
-    assert digest.endswith("(end of transcript)")
-
-
-def test_transcript_of_a_finished_subagent_without_events() -> None:
-    """A finished sub-agent row with no events digests its prompt and result."""
-    start = int(time.time() * 1000) - 125_000
-    parent_id = _persist_task("Parent prompt", [])
-    task_id = _persist_task(
-        "Sub task prompt",
-        [{"type": "result", "text": "success: true\nsummary: done", "summary": "done"}],
-        extra={
-            "startTs": start,
-            "endTs": start + 65_000,
-            "subagent": {"parent_task_id": parent_id},
-        },
-    )
-    digest = sea.task_transcript(task_id)
-    assert "Status: finished" in digest
-    assert "Elapsed: 1 min 5 s" in digest
-    assert f"Sub-agent of task: {parent_id}" in digest
-    assert "Spend: not recorded yet" in digest
-    assert "[0] TASK RESULT: success: true\nsummary: done\n" in digest
-    assert len(_entries(digest)) == 1
-
-    bare = sea.task_transcript(_persist_task("Only a prompt", []))
-    assert "Task prompt: Only a prompt" in bare
-    assert "Transcript entries: 0" in bare
-    assert _entries(bare) == []
-    assert bare.endswith("(no transcript entries yet)")
 
 
 def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path) -> None:

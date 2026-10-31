@@ -211,7 +211,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
     offset: 0,
     generation: getHist.generation,
   });
-  const persisted = rows(win)[1];
+  const persisted = rowsByTitle(win)['running task'];
   assert.ok(
     persisted.querySelector('.sidebar-item-completed'),
     'green tick MUST persist across subsequent ' +

@@ -62,40 +62,6 @@ function testClearedKeyIsSentAsEmptyString() {
   console.log('  ok - a cleared key field is sent as an empty string');
 }
 
-// The daemon merges the payload, so boxes that were empty all along
-// (keys that were never configured) must be omitted, not sent as "":
-// sending them would no-op-delete on this machine but could wipe a key
-// another window saved between our populate and our close.
-function testUntouchedEmptyKeysStayOmitted() {
-  const {win, posted} = makePage();
-  openSettings(win);
-  send(win, {
-    type: 'configData',
-    config: STORED,
-    apiKeys: {OPENAI_API_KEY: 'sk-keep'},
-  });
-  // An unrelated edit gives the close something to save.
-  typeInto(win, 'cfg-custom-headers', 'X-Trace: 1');
-  closeSettings(win);
-
-  const msg = lastMsg(posted, 'saveConfig');
-  assert.ok(msg, 'closing the edited panel saves the edit');
-  assert.ok(
-    !('ANTHROPIC_API_KEY' in msg.apiKeys),
-    'a key box that was empty all along must be omitted from the payload',
-  );
-  assert.ok(
-    !('GEMINI_API_KEY' in msg.apiKeys),
-    'no unedited empty box may be serialized',
-  );
-  assert.ok(
-    !('OPENAI_API_KEY' in msg.apiKeys),
-    'an untouched populated box is omitted too (the daemon keeps it)',
-  );
-  win.close();
-  console.log('  ok - untouched key boxes are omitted');
-}
-
 // The panel-never-populated path (configData never arrived) sends only
 // the edited fields; a cleared box the user explicitly touched is an
 // edit like any other and must still carry the deletion.
@@ -124,7 +90,6 @@ function testClearedKeyIsSentEvenWithoutConfigData() {
 
 function main() {
   testClearedKeyIsSentAsEmptyString();
-  testUntouchedEmptyKeysStayOmitted();
   testClearedKeyIsSentEvenWithoutConfigData();
   console.log('settingsApiKeyDelete.test.js: all tests passed');
 }

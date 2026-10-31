@@ -41,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
     SeaError,
+    _split_slash_command,
     help_text_if_command,
     list_commands,
     run_picked_hook,
@@ -147,38 +148,8 @@ def sea_commands_event(commands: list[str]) -> dict[str, Any]:
     }
 
 
-# Prefix that flags an ``appendUserMessage`` as a live-side-channel
-# /ask query.  Kept identical to the SEA registry stem so a
-# ``list_commands`` reader and the interceptor agree on the name.
-_ASK_COMMAND_PREFIX = "/ask"
 # Seconds an /ask answering session may run before it is stopped.
 _ASK_TIMEOUT_SECONDS = 600.0
-
-
-def _split_ask_command(prompt: str) -> str | None:
-    """Return the question text of a ``/ask <question>`` prompt.
-
-    Returns the question with surrounding whitespace stripped when
-    *prompt* begins with ``/ask`` followed by whitespace and at least
-    one non-whitespace character; otherwise returns ``None``.  A bare
-    ``/ask`` or ``/ask   `` returns ``None`` (no question to answer),
-    and a prompt whose ``/ask`` prefix is glued to more text
-    (``/askme``) does not match — the same word-boundary rule the
-    general SEA slash-command parser uses.
-
-    Args:
-        prompt: The raw user message.
-
-    Returns:
-        The question text, or ``None``.
-    """
-    if not prompt.startswith(_ASK_COMMAND_PREFIX):
-        return None
-    tail = prompt[len(_ASK_COMMAND_PREFIX):]
-    if not tail or not tail[:1].isspace():
-        return None
-    question = tail.strip()
-    return question or None
 
 
 def _parse_int(value: Any) -> int | None:
@@ -285,6 +256,10 @@ class _CommandsMixin:
     # Ordering: taken BEFORE ``_state_lock`` and ``_save_config_lock``,
     # never while holding either.
     _work_dir_lock = threading.Lock()
+    # Serializes a model pick's final ``last_model`` write with every
+    # other pick's (``_cmd_select_model``).  Taken with no other lock
+    # held; takes ``_state_lock`` (briefly) and the config lock inside.
+    _last_model_lock = threading.Lock()
 
     # Admission barrier for the self-update: ``True`` from the moment
     # the web server decides to spawn ``install.sh`` (the idle poller's
@@ -344,7 +319,7 @@ class _CommandsMixin:
         def _find_viewer_task_states(
             self, viewer_tab_id: str,
         ) -> list[AgentState]: ...
-        def _get_models(self, conn_id: str = "") -> None: ...
+        def _get_models(self, conn_id: str = "", generation: int = 0) -> None: ...
         def _get_history(
             self,
             query: str | None,
@@ -369,6 +344,7 @@ class _CommandsMixin:
             task_id: str | None = None,
             conn_id: str = "",
             replay_id: str = "",
+            reopen: bool = False,
         ) -> None: ...
         def _defer_replay(
             self,
@@ -404,7 +380,7 @@ class _CommandsMixin:
         def _broadcast_autocommit_done(
             self, tab_id: str, *, success: bool, committed: bool, message: str,
             commit_message: str | None = None, work_dir: str = "", reply_to: str = "",
-        ) -> dict[str, Any]: ...
+        ) -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "",
         ) -> dict[str, Any]: ...
@@ -440,7 +416,11 @@ class _CommandsMixin:
         persisted ``config.work_dir`` via ``saveConfig``, the one root
         source ``ServerApi.dispatch``'s top-level ``workDir``
         normalization cannot see) would root every task — and the
-        ``@``-mention file scan — at the whole disk.
+        ``@``-mention file scan — at the whole disk.  Also refuses a
+        directory ``config.json`` could not record (unreadable, or its
+        lock held too long by another process): it is persisted before
+        it is adopted, so the live value, the disk and every client
+        stay on the same directory.
 
         Args:
             new_dir: The non-empty directory to adopt.
@@ -462,6 +442,19 @@ class _CommandsMixin:
         # disk and every client on the same directory — the last one
         # in.
         with _CommandsMixin._work_dir_lock:
+            # Every surface's chat-header work-dir drop-down lists the
+            # directories selected so far (most recent first); this is the
+            # one place every adopted directory passes through.  The
+            # persisted ``work_dir`` rides in the same locked write.
+            try:
+                with _CommandsMixin._save_config_lock:
+                    record_recent_work_dir(new_dir, {"work_dir": new_dir})
+            except OSError:  # a ``TimeoutError`` on the config lock too
+                logger.warning(
+                    "Could not record %r as the daemon work dir; keeping %r",
+                    new_dir, self.work_dir, exc_info=True,
+                )
+                return False
             with self._state_lock:
                 changed = self.work_dir != new_dir
                 if changed:
@@ -469,19 +462,13 @@ class _CommandsMixin:
                     self._file_index.ensure(new_dir)
                 if hasattr(self.printer, "work_dir"):
                     setattr(self.printer, "work_dir", new_dir)
-            # Every surface's chat-header work-dir drop-down lists the
-            # directories selected so far (most recent first); this is the
-            # one place every adopted directory passes through.  The
-            # persisted ``work_dir`` rides in the same locked write.
-            with _CommandsMixin._save_config_lock:
-                record_recent_work_dir(new_dir, {"work_dir": new_dir})
             if changed:
                 self.printer.broadcast(
                     {"type": "workDirChanged", "workDir": new_dir},
                 )
         return True
 
-    def _refuse_run(self, tab_id: str, text: str) -> None:
+    def _refuse_run(self, tab_id: str, text: str, lost: str = "") -> None:
         """Turn down a ``run`` on *tab_id* with an ``error`` broadcast.
 
         Both frontends raise the tab's running state optimistically
@@ -495,10 +482,15 @@ class _CommandsMixin:
         Args:
             tab_id: The tab whose submit is refused.
             text: The user-facing reason.
+            lost: The remote machine whose stream was lost while the
+                tab's task may still be running there; it marks the
+                status (``lost``) so an API client waiting on the run
+                does not take it for the task's own end.
         """
-        self.printer.broadcast(
-            {"type": "status", "running": False, "tabId": tab_id},
-        )
+        status: dict[str, Any] = {"type": "status", "running": False, "tabId": tab_id}
+        if lost:
+            status["lost"] = lost
+        self.printer.broadcast(status)
         self.printer.broadcast({
             "type": "error",
             "code": "prompt_refused",
@@ -893,8 +885,13 @@ class _CommandsMixin:
         self._interrupt_tool_call(cmd.get("tabId", ""), tool_name, call_id)
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
-        """Send available models list to the requesting connection only."""
-        self._get_models(cmd.get("connId", ""))
+        """Send available models list to the requesting connection only.
+
+        The reply echoes the command's ``generation``: the model picker
+        tells by it a reply asked before the user's latest pick.
+        """
+        generation = _parse_int(cmd.get("generation", 0))
+        self._get_models(cmd.get("connId", ""), generation or 0)
 
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
         """Update the selected model for a tab.
@@ -925,16 +922,19 @@ class _CommandsMixin:
         # commands.  The pending count and the pick generation keep a
         # concurrent ``_refresh_default_model`` from reverting the pick
         # with the still-stale file.  Overlapping picks write the file
-        # in no particular order: once its own write is done, a pick
-        # that a later one has superseded writes that newest pick
-        # again, so the last write of every pick names the newest and
-        # the file cannot end up with an older pick than memory.
+        # in no particular order, and a failed usage insert writes
+        # nothing: so after its own write every pick reads the newest
+        # pick and writes it under ``_last_model_lock``.  The last of
+        # those locked writes names the newest pick and nothing writes
+        # after it, so the file cannot end up older than memory.
         try:
-            _record_model_usage(model)
-            with self._state_lock:
-                newest = self._model_pick[1]
-            if newest != model:
-                _save_last_model(newest)
+            try:
+                _record_model_usage(model)
+            finally:
+                with _CommandsMixin._last_model_lock:
+                    with self._state_lock:
+                        newest = self._model_pick[1]
+                    _save_last_model(newest)
         finally:
             with self._state_lock:
                 self._model_picks_pending -= 1
@@ -1135,13 +1135,37 @@ class _CommandsMixin:
         Resolving the waiting state and delivering the answer (see
         :meth:`_deliver_user_answer`) form one critical section under
         ``_state_lock``.
+
+        An answer that names the ``questionId`` of the ``askUser`` it
+        answers is delivered only while that ask is the pending one.
+        Every surface shows the same question, so one surface's answer
+        can arrive after another's already answered it and the agent
+        asked its next question; delivered, it would answer that next
+        question and dismiss it everywhere.  Such a late answer (or one
+        arriving while nothing is pending) is dropped.  The id, minted
+        per ask (``_publish_ask``), tells apart two asks of the same
+        text, which the ``question`` text cannot: an answer naming only
+        the ``question`` is held to the text, and one naming neither (an
+        older client) is delivered as before.
         """
         ans_tab = cmd.get("tabId", "")
+        question = cmd.get("question")
+        question_id = cmd.get("questionId")
         with self._state_lock:
             owner = self._resolve_user_answer_state(ans_tab)
             q = owner.user_answer_queue if owner is not None else None
             if owner is None or q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
+                return
+            if isinstance(question_id, str) and question_id:
+                late = question_id != owner.pending_ask_id
+            else:
+                late = isinstance(question, str) and question != owner.pending_ask_question
+            if late:
+                logger.debug(
+                    "userAnswer dropped: %r (%r) is not the pending question",
+                    question_id, question,
+                )
                 return
             answer = cmd.get("answer", "")
             if not isinstance(answer, str):
@@ -1190,7 +1214,7 @@ class _CommandsMixin:
                 set containing *ans_tab*, which could dismiss an
                 unrelated tab's current question).
         """
-        owner.pending_ask_question = ""
+        owner.clear_pending_ask()
         agent_state.drain_queue(q)
         with contextlib.suppress(queue.Full):  # drained immediately above
             q.put_nowait(answer)
@@ -1215,10 +1239,11 @@ class _CommandsMixin:
         a task list typed mid-run never steers the running task.
 
         Exception — a pending ``ask_user_question``: while the agent
-        thread is blocked inside that tool (``owner.pending_ask_question``
-        is set and the state holds a live ``user_answer_queue``) it never
-        reaches the pre-step hook, so a steering message would sit
-        undrained and the agent would hang until the task is stopped
+        thread is blocked inside that tool (``owner.ask_pending()``,
+        whatever the question's text, and the state holds a live
+        ``user_answer_queue``) it never reaches the pre-step hook, so a
+        steering message would sit undrained and the agent would hang
+        until the task is stopped
         (history.db task ``e8a8407967d645c28c87750eda7a6cc0``: the user
         typed the reply into the chat box instead of the answer box).  A
         plain message typed then IS the answer and is delivered through
@@ -1277,7 +1302,7 @@ class _CommandsMixin:
             owner.queued_followup_tasks.extend(blocks)
             owner.queued_followup_files.extend(list(attachments or []) for _ in blocks)
             return True
-        if owner.pending_ask_question and owner.user_answer_queue is not None:
+        if owner.ask_pending() and owner.user_answer_queue is not None:
             self._deliver_user_answer(
                 owner, owner.user_answer_queue, prompt, tab_id,
             )
@@ -1356,7 +1381,7 @@ class _CommandsMixin:
             answer queue, or ``None``.
         """
         for state in self._find_viewer_task_states(tab_id):
-            if state.pending_ask_question and state.user_answer_queue is not None:
+            if state.ask_pending() and state.user_answer_queue is not None:
                 return state
         return None
 
@@ -1739,14 +1764,14 @@ class _CommandsMixin:
             # The captured id is the SAME task id the message was
             # queued against — the state lock is still held here, so
             # a successor task cannot have re-armed the tab yet.  The
-            # SEA parser (``sea_commands._split_slash_command``) is
-            # word-boundary strict at character zero (no leading
-            # whitespace), and this helper matches it: passing
-            # ``prompt`` without pre-stripping keeps ``  /ask q``
-            # (leading spaces) OUT of the side channel so it flows
-            # through the normal steering queue like any other typed
-            # message.
-            question = _split_ask_command(prompt)
+            # SEA slash-command parser decides, so the side channel
+            # takes exactly the prompts the ``ask`` command would: it
+            # is word-boundary strict at character zero (``/askme``
+            # and ``  /ask q``, leading spaces, flow through the normal
+            # steering queue like any other typed message), and a bare
+            # ``/ask`` has no question.
+            command = _split_slash_command(prompt)
+            question = command[1] if command is not None and command[0] == "ask" else ""
             # Read once under the lock: task teardown clears
             # ``owner.agent`` under this same lock, so a re-read after
             # the ``with`` block could hand the side channel ``None``
@@ -1765,7 +1790,7 @@ class _CommandsMixin:
             ask_question: str | None = None
             owner_chat_id = owner.chat_id
             remember = True
-            if question is not None and owner_task:
+            if question and owner_task:
                 ask_question = question
             else:
                 queued = self._queue_prompt_on_owner(owner, prompt, tab_id, attachments)
@@ -1837,6 +1862,9 @@ class _CommandsMixin:
         of the answer echoes it, and a ``replayDone`` to the asking
         connection ends the answer, so that daemon can tell the frames
         of this replay from the tab's other frames.
+
+        ``reopen: true`` marks a sub-agent tab the user asked for again
+        (an expanded fan-out panel), see ``_replay_session``.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
@@ -1856,6 +1884,7 @@ class _CommandsMixin:
             task_id=task_id,
             conn_id=conn_id,
             replay_id=replay_id,
+            reopen=cmd.get("reopen") is True,
         )
         if replay_id:
             self._broadcast_to_conn(
@@ -2241,6 +2270,11 @@ class _CommandsMixin:
         dedicated lock so two concurrent ``saveConfig`` commands (two
         windows closing their settings panels together) cannot
         interleave ``apply_config_to_env`` with a half-merged config.
+        A write that fails (``config.json`` unreadable, its lock held
+        too long by another process, a full disk) answers the sender
+        with an ``error`` and the settings as they stand.  The Chrome
+        bridge a newly ticked box asks for is started after the
+        replies, so its failure never costs the save its answer.
         """
         from kiss.core.user_config import (
             apply_config_to_env,
@@ -2259,40 +2293,46 @@ class _CommandsMixin:
         # refuses (a filesystem root) on disk, where it would shadow the
         # previously persisted directory on the next daemon start.
         new_work_dir = cfg.pop("work_dir", "")
+        conn_id = cmd.get("connId", "")
+        failure = ""
         with _CommandsMixin._save_config_lock:
             prev_password = load_config().get("remote_password", "")
-            save_config(cfg)
-            apply_config_to_env(load_config())
+            try:
+                save_config(cfg)
+                apply_config_to_env(load_config())
 
-            # Persist API keys INSIDE ``_save_config_lock``: each
-            # ``save_api_key`` edits the canonical key store and the
-            # shell RC, and serializing the writes under the same lock
-            # that already guards config.json keeps two concurrent
-            # ``saveConfig`` calls from interleaving.  An empty value
-            # deletes the key from every store (canonical file, legacy
-            # systemd mirror, shell RC) — that is the settings panel's
-            # delete path.
-            api_keys = cmd.get("apiKeys", {})
-            if not isinstance(api_keys, dict):
-                api_keys = {}
-            for key_name, key_value in api_keys.items():
-                if (
-                    isinstance(key_name, str)
-                    and isinstance(key_value, str)
-                ):
-                    save_api_key(key_name, key_value)
+                # Persist API keys INSIDE ``_save_config_lock``: each
+                # ``save_api_key`` edits the canonical key store and the
+                # shell RC, and serializing the writes under the same lock
+                # that already guards config.json keeps two concurrent
+                # ``saveConfig`` calls from interleaving.  An empty value
+                # deletes the key from every store (canonical file, legacy
+                # systemd mirror, shell RC) — that is the settings panel's
+                # delete path.
+                api_keys = cmd.get("apiKeys", {})
+                if not isinstance(api_keys, dict):
+                    api_keys = {}
+                for key_name, key_value in api_keys.items():
+                    if (
+                        isinstance(key_name, str)
+                        and isinstance(key_value, str)
+                    ):
+                        save_api_key(key_name, key_value)
+            except OSError as e:  # a ``TimeoutError`` on the config lock too
+                logger.warning("saveConfig failed", exc_info=True)
+                failure = f"Could not save the settings: {e}"
+        if failure:
+            self._send_error_to_sender(failure, cmd)
+            self._broadcast_to_conn(self._config_data_event(), conn_id)
+            return
 
         # Outside ``_save_config_lock``: ``_apply_new_work_dir`` takes
         # that (non-reentrant) lock itself to persist the directory.
         if new_work_dir:
             self._apply_new_work_dir(new_work_dir)
-        # A newly ticked "Chrome bridge" box takes effect now, not at the
-        # next daemon start (a no-op when the bridge already runs or the
-        # box is clear).
-        chrome_bridge.start_if_enabled()
-
-        conn_id = cmd.get("connId", "")
-        self._get_models(conn_id)
+        # Echoes the save's ``generation`` like ``getModels``: the picker
+        # keeps a pick made after the save over the list's old default.
+        self._get_models(conn_id, _parse_int(cmd.get("generation", 0)) or 0)
 
         event = self._config_data_event()
         new_password = event["config"].get("remote_password", "")
@@ -2302,6 +2342,10 @@ class _CommandsMixin:
                 conn_id,
             )
         self._broadcast_to_conn(event, conn_id)
+        # A newly ticked "Chrome bridge" box takes effect now, not at the
+        # next daemon start (a no-op when the bridge already runs or the
+        # box is clear).
+        chrome_bridge.start_if_enabled()
 
     def _cmd_get_my_models(self, cmd: dict[str, Any]) -> None:
         """Send the custom models from ``~/.kiss/MY_MODELS.json``.
@@ -2601,7 +2645,8 @@ class _CommandsMixin:
         (``setWorkDir`` with ``machine``) reads the adopted ``work_dir``
         and ``recent_work_dirs`` from it.  A refused directory (a
         filesystem root — blanked to ``""`` by ``ServerApi.dispatch`` or
-        turned down by :meth:`_apply_new_work_dir`) is reported to the
+        turned down by :meth:`_apply_new_work_dir` — or one
+        ``config.json`` could not record) is reported to the
         requesting connection with a ``notice`` and still answered,
         with the unchanged configuration, so the proxying daemon does
         not wait out its link timeout.

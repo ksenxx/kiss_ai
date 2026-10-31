@@ -137,7 +137,7 @@ class TestBug6FinalizeIgnoresCommitFailure:
 
         assert GitWorktreeOps.commit_all(wt_dir, "test") is False
 
-        result = agent._finalize_worktree()
+        result = agent._finalize_worktree(agent.worktrees[0])
         assert result is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
 
         assert wt_dir.exists()

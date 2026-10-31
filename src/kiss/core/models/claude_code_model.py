@@ -16,7 +16,7 @@ KISS drives Claude Code as a plain language model, not as a coding agent:
 the model invokes ``claude --print`` with ``--tools ""`` (no native
 tools), ``--safe-mode`` (no CLAUDE.md, skills, plugins, hooks or MCP
 servers from the user's settings), ``--strict-mcp-config`` and
-``--system-prompt`` carrying KISS's system prompt in place of Claude
+``--system-prompt-file`` carrying KISS's system prompt in place of Claude
 Code's own, and consumes the stream-json event stream emitted on stdout.
 KISS-level tools reach the model through the text-based ``tool_calls``
 protocol: tool descriptions are injected into that system prompt and the
@@ -32,11 +32,13 @@ The subprocess supervision both CLI-backed adapters share
 :mod:`kiss.core.models.codex_model` both import it from.
 """
 
+import contextlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -53,6 +55,7 @@ from kiss.core.models.model import (
     _iter_balanced_json_objects,
     _iter_jsonl,
     _iter_tool_calls_lists,
+    _parse_text_based_tool_calls,
     environ_without,
 )
 from kiss.core.processes import run_process_group
@@ -332,6 +335,28 @@ def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> No
                 target[key] = value
 
 
+@contextlib.contextmanager
+def _system_prompt_file(system_instruction: str | None) -> Iterator[str | None]:
+    """Hold *system_instruction* in a private temp file for the duration of the block.
+
+    Args:
+        system_instruction: The turn's system instruction, if any.
+
+    Yields:
+        The file's path, or ``None`` (and no file) without an instruction.
+    """
+    if not system_instruction:
+        yield None
+        return
+    fd, path = tempfile.mkstemp(prefix="kiss-claude-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(system_instruction)
+        yield path
+    finally:
+        os.unlink(path)
+
+
 class ClaudeCodeModel(CLITextModel):
     """A model that delegates to the Claude Code CLI for LLM completions.
 
@@ -365,7 +390,7 @@ class ClaudeCodeModel(CLITextModel):
             model_name: Full model name including ``cc/`` prefix (e.g. ``cc/opus``).
             model_config: Optional configuration. Recognised keys:
                 - ``system_instruction`` (str): Passed to the CLI as
-                  ``--system-prompt``, replacing Claude Code's own system
+                  ``--system-prompt-file``, replacing Claude Code's own system
                   prompt (see :meth:`_build_cli_args`).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed text token.
@@ -401,7 +426,7 @@ class ClaudeCodeModel(CLITextModel):
         self._api_model: str = ""
         self._request_count: int = 0
 
-    def _build_cli_args(self) -> list[str]:
+    def _build_cli_args(self, system_prompt_file: str | None = None) -> list[str]:
         """Build the ``claude`` CLI argument list.
 
         Always uses ``stream-json`` output format so that tokens can be
@@ -411,11 +436,18 @@ class ClaudeCodeModel(CLITextModel):
         The CLI runs as a bare model: ``--tools ""`` removes its native
         tools, ``--safe-mode`` and ``--strict-mcp-config`` (with no MCP
         config) drop the user's CLAUDE.md, skills, plugins, hooks and MCP
-        servers, and ``--system-prompt`` replaces Claude Code's system
+        servers, and ``--system-prompt-file`` replaces Claude Code's system
         prompt with KISS's ``system_instruction`` — delivered as genuine
         system text because Claude treats a "system prompt" arriving in
         the user turn as a prompt injection and refuses the plain-text
-        ``tool_calls`` protocol.
+        ``tool_calls`` protocol.  A file, because the prompt does not fit
+        on a command line: Sorcar's alone exceeds the 32,767 characters
+        Windows allows.
+
+        Args:
+            system_prompt_file: The file holding the system instruction
+                (:func:`_system_prompt_file`), or ``None`` to keep Claude
+                Code's own system prompt.
 
         Returns:
             List of CLI arguments.
@@ -436,9 +468,8 @@ class ClaudeCodeModel(CLITextModel):
             "--verbose",
             "--include-partial-messages",
         ]
-        system_instruction = self.system_instruction_text()
-        if system_instruction:
-            args += ["--system-prompt", system_instruction]
+        if system_prompt_file is not None:
+            args += ["--system-prompt-file", system_prompt_file]
         return args
 
     def generate(self) -> tuple[str, Any]:
@@ -467,7 +498,6 @@ class ClaudeCodeModel(CLITextModel):
             KeyboardInterrupt: If the user stopped the task mid-turn.
         """
         prompt = self._build_prompt()
-        args = self._build_cli_args()
         self._stopped_for_tool_calls = False
         self._partial_usage = {}
         self._open_message_usage = {}
@@ -476,7 +506,10 @@ class ClaudeCodeModel(CLITextModel):
         self._request_count = 0
         stop_on_tool_calls = self._tool_bearing_turn
 
-        with self._cli_turn(args, "Claude Code CLI") as proc:
+        with (
+            _system_prompt_file(self.system_instruction_text()) as system_prompt_file,
+            self._cli_turn(self._build_cli_args(system_prompt_file), "Claude Code CLI") as proc,
+        ):
             proc.send_prompt(prompt)
             content, result_json = self._parse_stream_events(
                 proc.lines(), stop_on_tool_calls=stop_on_tool_calls
@@ -868,17 +901,45 @@ class ClaudeCodeModel(CLITextModel):
                 )
         return cost * price_modifier_factor(response.get("usage") or {}, model)
 
-    def _tool_call_text(self, content: str) -> str:
-        """Parse the turn's thinking for ``tool_calls`` as well as its text.
+    def context_tokens_from_response(self, response: Any) -> int | None:
+        """Return the size of the turn's largest API request.
 
-        A reasoning model sometimes emits the block inside its thinking
-        and then stops, so the thinking content of the turn just finished
-        is appended to the text that is scanned.
+        The turn's ``usage`` sums every request the CLI made; the context
+        the model works in is one request's prompt plus its output, and
+        the largest request holds the latest state of the conversation.
+
+        Args:
+            response: The dict returned by :meth:`generate` or
+                :meth:`take_partial_usage_response`.
+
+        Returns:
+            The largest per-request token total in ``request_usages``, or
+            ``None`` when the response lists no request.
+        """
+        usages = response.get("request_usages") if isinstance(response, dict) else None
+        return max(
+            (
+                sum(self.extract_input_output_token_counts_from_response({"usage": usage}))
+                for usage in usages or []
+            ),
+            default=None,
+        )
+
+    def _tool_call_text(self, content: str) -> str:
+        """Return the turn's text, or its thinking when the text calls no tool.
+
+        A reasoning model sometimes emits the ``tool_calls`` block inside
+        its thinking and then stops, so the thinking of the turn just
+        finished is parsed when the text carries no call.  A call in the
+        text wins: a call drafted while reasoning and then revised must
+        not run beside the one the model emitted.
 
         Args:
             content: The turn's assistant text.
         """
-        return "\n".join([content, self._last_thinking_content])
+        if _parse_text_based_tool_calls(content):
+            return content
+        return self._last_thinking_content
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

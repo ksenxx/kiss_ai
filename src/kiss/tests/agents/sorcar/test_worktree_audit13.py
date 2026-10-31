@@ -41,23 +41,26 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a minimal git repo with one commit."""
     repo = tmp_path / name
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "t@t.com"],
         cwd=repo,
         capture_output=True,
+        check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "T"],
         cwd=repo,
         capture_output=True,
+        check=True,
     )
     (repo / "init.txt").write_text("init\n")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
         cwd=repo,
         capture_output=True,
+        check=True,
     )
     return repo
 

@@ -23,13 +23,11 @@ BUG-64: ``ChatSorcarAgent.run()`` silently drops
     have set ``_merge_conflict_warning`` just before calling
     ``run()``, and that warning is lost too.
 
-BUG-65: ``AgentServer._new_chat`` does not block when a merge
-    review is in progress.  ``_run_task_inner`` refuses new tasks
-    while ``tab.is_merging`` is True, but ``_new_chat`` calls
-    ``tab.agent.new_chat()`` which triggers ``_release_worktree``
-    that auto-commits + squash-merges — destroying the user's
-    hunk-picking intent and leaving the merge view stale.
-    Symmetric with the ``_run_task_inner`` guard.
+BUG-65 (gone, no test here): ``AgentServer._new_chat`` used to call
+    ``tab.agent.new_chat()``, whose ``_release_worktree`` auto-committed
+    and squash-merged while a merge review was in progress.
+    ``_new_chat`` no longer touches the tab's agent: ``newChat`` always
+    names a freshly minted tab id.
 
 RED-8: ``GitWorktreeOps.manual_merge_branch`` and
     ``ManualMergeResult`` are dead code — no production caller in

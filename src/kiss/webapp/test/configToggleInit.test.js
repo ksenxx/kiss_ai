@@ -155,7 +155,9 @@ function testSubmitBeforeConfigDataOmitsWebTools() {
 
 function testToggleStatePersistedOnSettingsClose() {
   const {win, posted} = makePage();
-  // The stored config lands in the form before the user touches it.
+  // The user opens the sheet; the stored config (the reply to the
+  // sheet's getConfig) lands in the form before they touch it.
+  openSettings(win);
   send(win, {
     type: 'configData',
     config: {
@@ -180,31 +182,15 @@ function testToggleStatePersistedOnSettingsClose() {
 
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');
-  assert.ok(
-    !('auto_commit_mode' in save.config) && !('is_worktree' in save.config),
-    'saveConfig must not carry the retired auto_commit_mode / is_worktree',
-  );
-  assert.ok(
-    !('classify_tasks' in save.config) &&
-      !('classify_with_decisions' in save.config),
-    'saveConfig must not carry classify_tasks / classify_with_decisions ' +
-      '(no longer in the Settings UI; the daemon keeps its stored values)',
-  );
-  assert.strictEqual(
-    save.config.use_web_browser,
-    false,
-    'saveConfig must persist use_web_browser from #cfg-use-web-tools',
-  );
-  assert.strictEqual(
-    save.config.use_memory,
-    false,
-    'saveConfig must persist use_memory from #cfg-use-memory',
-  );
-  assert.strictEqual(
-    'memory_dir' in save.config,
-    false,
-    'a full-form save must not carry memory_dir: the daemon merges the ' +
-      'payload, and a blank invented here would wipe the stored directory',
+  // (copied: the posted object belongs to the jsdom realm, whose
+  // Object.prototype deepStrictEqual would reject)
+  assert.deepStrictEqual(
+    {...save.config},
+    {use_web_browser: false, use_memory: false},
+    'saveConfig carries exactly the two edited toggles: the daemon merges ' +
+      'the payload, so the stored memory_dir / classify_* values (no ' +
+      'Settings field) and the retired auto_commit_mode / is_worktree stay ' +
+      'out of it',
   );
 
   // Round-trip: the server echoes the saved config back; a fresh
@@ -222,7 +208,7 @@ function testToggleStatePersistedOnSettingsClose() {
   console.log('  ok - settings close persists toggle state via saveConfig');
 }
 
-function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
+function testMemoryToggleEditSurvivesLateReplyAndFlushesAlone() {
   const {win, posted} = makePage();
   // Open the panel: no configData has arrived yet, the user unticks
   // "Use persistent memory" right away.
@@ -231,7 +217,7 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
   mem.checked = false;
   mem.dispatchEvent(new win.Event('change', {bubbles: true}));
 
-  // The 2-second configData poll now lands with the stored (true)
+  // The sheet-open getConfig reply lands late, with the stored (true)
   // value: an edited box must NOT be repainted.
   send(win, {
     type: 'configData',
@@ -241,9 +227,9 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
   assert.strictEqual(
     mem.checked,
     false,
-    "a configData poll must not overwrite the user's unticked #cfg-use-memory",
+    "a late configData must not overwrite the user's unticked #cfg-use-memory",
   );
-  // An untouched sibling still follows the poll.
+  // An untouched sibling still follows the reply.
   assert.strictEqual(
     win.document.getElementById('cfg-use-web-tools').checked,
     true,
@@ -259,13 +245,13 @@ function testMemoryToggleEditSurvivesPollAndFlushesAlone() {
     "saveConfig must carry the user's use_memory:false",
   );
   // The daemon merges the payload: the untouched sibling is left out,
-  // so its polled value cannot paint over another window's save.
+  // so its fetched value cannot paint over another window's save.
   assert.ok(
     !('use_web_browser' in save.config),
     'the untouched use_web_browser box is not re-sent',
   );
   win.close();
-  console.log('  ok - an edited memory box survives the poll and saves');
+  console.log('  ok - an edited memory box survives a late reply and saves');
 }
 
 /**
@@ -318,7 +304,7 @@ function main() {
   testMissingKeysDefaultToChecked();
   testSubmitBeforeConfigDataOmitsWebTools();
   testToggleStatePersistedOnSettingsClose();
-  testMemoryToggleEditSurvivesPollAndFlushesAlone();
+  testMemoryToggleEditSurvivesLateReplyAndFlushesAlone();
   testPartialSaveWhenPanelClosedBeforeConfigData({budget: true, memory: false});
   testPartialSaveWhenPanelClosedBeforeConfigData({budget: false, memory: true});
   testPartialSaveWhenPanelClosedBeforeConfigData({budget: true, memory: true});

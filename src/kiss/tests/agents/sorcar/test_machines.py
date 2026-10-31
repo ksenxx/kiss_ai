@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from kiss.agents.sorcar import machines as mach
 from kiss.core import tls_certs
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.server import sidebar_panels
+from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.server.web_server import _get_local_ips
 from kiss.tests.conftest import posix_only
 from kiss.tests.local_ws import make_test_tls
@@ -346,7 +348,7 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     # The whole wait is bounded, however many unrelated frames arrive.
     with pytest.raises(mach.MachineError, match="did not answer"):
         link.request({"type": "ping"}, "never-sent", timeout=0.5)
-    assert link._retry_at > time.monotonic()
+    assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
     # An already expired deadline fails even when the reply is buffered.
@@ -357,12 +359,13 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     time.sleep(0.3)
     with pytest.raises(mach.MachineError, match="no pong within 0s"):
         link.request({"type": "ping"}, "pong", timeout=0.0)
-    assert link._retry_at > time.monotonic()
+    assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
 
     dead = mach.Machine("dead", f"https://127.0.0.1:{_closed_port()}")
     dead.cert_file().write_text(machine.cert_file().read_text(), encoding="utf-8")
+    mach.save_machines([machine, dead])
     with pytest.raises(mach.MachineError, match="unreachable"):
         mach.fetch_history(dead, "", "", 50)
     assert "unreachable" in mach.machine_status(dead)
@@ -370,7 +373,7 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     # same message, without touching the network (a closed port would
     # answer instantly anyway, so the backoff deadline is what proves it).
     dead_link = mach.link_for(dead)
-    assert dead_link._retry_at > time.monotonic()
+    assert dead_link._health.retry_at > time.monotonic()
     dead_link._health.retry_at = time.monotonic() + 3600
     started = time.monotonic()
     with pytest.raises(mach.MachineError, match="unreachable"):
@@ -866,7 +869,7 @@ def test_ssh_enrollment_failures_are_reported_and_store_nothing(
     _row, row = sidebar_panels._machine_row(old)
     assert row["port"] == 0 and row["ip"] == "127.0.0.1" and "registered before" in row["error"]
     link = mach.link_for(old)
-    assert link._retry_at > time.monotonic()
+    assert link._health.retry_at > time.monotonic()
     started = time.monotonic()
     with pytest.raises(mach.MachineError, match="registered before certificate enrollment"):
         mach.fetch_history(old, "", "", 50)
@@ -1095,11 +1098,90 @@ def test_ssh_tunnel_reaches_a_daemon_whose_address_is_unreachable(
     assert mach._tunnels == {} and tunnel.process is None and not tunnel.alive()
 
 
+def _serve_tls(listener: socket.socket, ctx: ssl.SSLContext, stop: threading.Event) -> None:
+    """Answer every connection to *listener* with a TLS handshake until *stop* is set."""
+    listener.settimeout(0.1)
+    while not stop.is_set():
+        try:
+            conn, _ = listener.accept()
+        except TimeoutError:
+            continue
+        conn.settimeout(5.0)
+        try:
+            with ctx.wrap_socket(conn, server_side=True):
+                pass
+        except OSError:
+            conn.close()
+
+
+def test_ssh_tunnel_never_hands_over_a_port_another_program_took(
+    remote: RemoteDaemon, sshd: SshServer, tmp_path: Path,
+) -> None:
+    """A program that binds the tunnel's port before ssh does never gets the daemon's links.
+
+    The tunnel picks a free port and ssh binds it only after its login.
+    A TLS server of another program that took the port in between
+    used to pass for the forward (it accepts connections), so the
+    link's handshake met a stranger's certificate: ``refused the TLS
+    handshake: [SSL: CERTIFICATE_VERIFY_FAILED]``, and advice to add
+    the machine again.  Now the forward counts as up only once ssh says
+    its port is bound; ssh cannot bind the taken one, and the tunnel
+    forwards another port instead.
+    """
+    machine = mach.add_machine("near", sshd.login)
+    certfile, keyfile, _ca = make_test_tls(tmp_path)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile, keyfile)
+    stranger, stop = socket.socket(), threading.Event()
+    server = threading.Thread(target=_serve_tls, args=(stranger, ctx, stop), daemon=True)
+    picking = Pause(mach.ssh_command.__code__, lambda local: "-N" in local["options"])
+    try:
+        with picking, ThreadPoolExecutor(1) as pool:
+            status = pool.submit(mach.machine_status, machine)
+            assert picking.paused.wait(30)
+            taken = mach._tunnels[sshd.login].local_port
+            stranger.bind(("127.0.0.1", taken))
+            stranger.listen()
+            server.start()
+            picking.release()
+            assert status.result(timeout=60) == "reachable"
+        tunnel = mach._tunnels[sshd.login]
+        assert tunnel.alive() and tunnel.local_port not in (0, taken)
+    finally:
+        stop.set()
+        # Joined before the close: an accept() on the closed socket raises in the thread.
+        if server.is_alive():
+            server.join(timeout=5)
+        stranger.close()
+        mach.close_links()
+
+
+def test_ssh_tunnel_forwards_even_if_the_ssh_config_clears_forwardings(
+    remote: RemoteDaemon, sshd: SshServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ClearAllForwardings yes`` in the user's ssh config does not drop the tunnel's forward.
+
+    ssh would still run the ``LocalCommand`` that reports the forward up,
+    with nothing listening on the port.
+    """
+    machine = mach.add_machine("near", sshd.login)
+    config = tmp_path / "ssh_config"
+    config.write_text(
+        "ClearAllForwardings yes\n" + sshd.config.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(config))
+    try:
+        assert mach.machine_status(machine) == "reachable"
+    finally:
+        mach.close_links()
+
+
 _FAKE_SSH = '''#!__PYTHON__
-"""Stand-in for ssh: ``-G`` names a blackhole host, ``-N -L`` relays to the daemon,
-a command runs locally with KISS_HOME set, FAKE_SSH_FAIL refuses the forward,
-FAKE_SSH_SLOW (seconds) is a slow login before the forward is up, FAKE_SSH_PIDFILE
-records the forward's pid."""
+"""Stand-in for ssh: ``-G`` names a blackhole host, ``-N -L`` relays to the daemon
+and runs the ``LocalCommand`` once it listens, a command runs locally with KISS_HOME
+set, FAKE_SSH_FAIL refuses the forward (``login``: the login fails; ``stay``: the bind
+fails and ssh stays up, as Windows' does), FAKE_SSH_SLOW (seconds) is a slow login
+before the forward is up, FAKE_SSH_PIDFILE records the forward's pid."""
 import os
 import socket
 import subprocess
@@ -1115,12 +1197,20 @@ if "-N" not in args:
     env = dict(os.environ, KISS_HOME=os.environ["FAKE_SSH_HOME"])
     sys.exit(subprocess.run(args[-1], shell=True, env=env).returncode)
 _host, local, _rhost, remote = args[args.index("-L") + 1].split(":")
+local_command = next((a.split("=", 1)[1] for a in args if a.startswith("LocalCommand=")), "")
 if os.environ.get("FAKE_SSH_PIDFILE"):
     with open(os.environ["FAKE_SSH_PIDFILE"], "w") as handle:
         handle.write(str(os.getpid()))
-if os.environ.get("FAKE_SSH_FAIL"):
-    sys.stderr.write(f"bind [127.0.0.1]:{local}: Address already in use\\n"
-                     "Could not request local forwarding.\\n")
+fail = os.environ.get("FAKE_SSH_FAIL")
+if fail == "login":
+    sys.stderr.write("ksen@far.example.org: Permission denied (publickey).\\n")
+    sys.exit(255)
+if fail:
+    sys.stderr.write(f"bind [127.0.0.1]:{local}: Address already in use\\n")
+    sys.stderr.flush()
+    if fail == "stay":
+        time.sleep(60)
+    sys.stderr.write("Could not request local forwarding.\\n")
     sys.exit(255)
 if os.environ.get("FAKE_SSH_HANG"):
     time.sleep(60)
@@ -1142,8 +1232,15 @@ def pump(src, dst):
 
 
 server = socket.socket()
-server.bind(("127.0.0.1", int(local)))
+try:
+    server.bind(("127.0.0.1", int(local)))
+except OSError as exc:
+    sys.stderr.write(f"bind [127.0.0.1]:{local}: {exc.strerror}\\n"
+                     "Could not request local forwarding.\\n")
+    sys.exit(255)
 server.listen()
+if local_command:
+    subprocess.run(local_command, shell=True)
 while True:
     client, _ = server.accept()
     try:
@@ -1216,6 +1313,27 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
             f"far (ssh {login}) is unreachable: ssh {login} cannot forward its daemon port "
             f"{daemon.port}: Could not request local forwarding."
         )
+        monkeypatch.setenv("FAKE_SSH_FAIL", "login")
+        assert mach.machine_status(machine) == (
+            f"far (ssh {login}) is unreachable: ssh {login} cannot forward its daemon port "
+            f"{daemon.port}: ksen@far.example.org: Permission denied (publickey)."
+        )
+        # An ssh that stays up after a failed bind (Windows') is not waited for to the
+        # timeout, and no attempt on a new port starts once the timeout has passed.
+        monkeypatch.setenv("FAKE_SSH_FAIL", "stay")
+        bind_failed = (
+            rf"daemon port {daemon.port}: bind \[127\.0\.0\.1\]:\d+: Address already in use$"
+        )
+        started = time.monotonic()
+        with pytest.raises(mach.MachineError, match=bind_failed):
+            mach.SshTunnel(login, daemon.port).open(timeout=30.0)
+        assert time.monotonic() - started < 20.0
+        started = time.monotonic()
+        with pytest.raises(
+            mach.MachineError, match=f"{bind_failed}|did not open the port forward in time",
+        ):
+            mach.SshTunnel(login, daemon.port).open(timeout=1.0)
+        assert time.monotonic() - started < 2.9
         monkeypatch.delenv("FAKE_SSH_FAIL")
         monkeypatch.setenv("FAKE_SSH_HANG", "1")
         with pytest.raises(mach.MachineError, match="did not open the port forward in time"):
@@ -1229,6 +1347,52 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
             mach.SshTunnel(login, daemon.port).open(timeout=1.0)
     finally:
         mach.close_links()
+        daemon.stop()
+
+
+def _open_noting_the_thread(tunnel: mach.SshTunnel, idents: list[int]) -> int:
+    """Note this thread's ident in *idents*, then open *tunnel* on it."""
+    idents.append(threading.get_ident())
+    return tunnel.open()
+
+
+@fake_ssh_only
+def test_an_interrupted_tunnel_opening_does_not_vouch_for_its_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop during the ssh login leaves ssh running unconfirmed; its port is not trusted.
+
+    The runner's Stop raises ``KeyboardInterrupt`` on the task thread
+    wherever it is, here while the opener waits for ssh's word.  Another
+    program then binds the port ssh had yet to bind: the next open must
+    not take that answering port for the forward.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    monkeypatch.setenv("FAKE_SSH_SLOW", "30")
+    tunnel = mach.SshTunnel("ksen@far.example.org", daemon.port)
+    stranger = socket.socket()
+    idents: list[int] = []
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            opening = pool.submit(_open_noting_the_thread, tunnel, idents)
+            deadline = time.monotonic() + 30.0
+            while tunnel.process is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            taken = tunnel.local_port
+            stranger.bind(("127.0.0.1", taken))
+            stranger.listen()
+            assert inject_keyboard_interrupt(idents[0]) == 1
+            with pytest.raises(KeyboardInterrupt):
+                opening.result(timeout=30)
+        assert tunnel.process is not None and tunnel.process.poll() is None
+        assert not tunnel.alive()
+        monkeypatch.setenv("FAKE_SSH_SLOW", "0")
+        port = tunnel.open(timeout=20.0)
+        assert port != taken and tunnel.alive()
+    finally:
+        tunnel.close()
+        stranger.close()
         daemon.stop()
 
 
@@ -1304,7 +1468,7 @@ def test_slow_ssh_login_leaves_the_handshake_its_whole_budget(
         started = time.monotonic()
         assert link.request({"type": "ping"}, "pong", timeout=1.0)["type"] == "pong"
         assert time.monotonic() - started >= 1.5
-        assert link._retry_at == 0.0
+        assert link._health.retry_at == 0.0
         assert mach._tunnels[login].alive()
     finally:
         mach.close_links()

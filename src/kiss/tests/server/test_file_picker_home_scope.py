@@ -87,7 +87,7 @@ class TestComplementView:
         touch(home, "other/d.py")
         _build(reg, str(home / "proj"))
         index = reg._indexes[str(home)]
-        assert ("proj/", True) in index.view_keys()
+        assert ("proj/", True) in index._views, "prebuilt before any request"
         picker = reg.picker_for(str(home / "proj"))
         assert picker is not None and "other/d.py" in picker.home_rest.paths  # type: ignore[union-attr]
         reg.stop()

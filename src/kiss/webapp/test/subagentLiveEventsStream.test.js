@@ -95,6 +95,27 @@ function outputText(win) {
   return out ? out.textContent || '' : '';
 }
 
+/** Text a streamSubagentRun(..., marker) run puts in its transcript. */
+function runNeedles(marker) {
+  return [
+    'live-words-' + marker,
+    'pondering ' + marker,
+    'tool-output-' + marker,
+  ];
+}
+
+/** Assert the on-screen (parent) transcript shows none of *marker*'s run. */
+function assertNoLeak(win, marker) {
+  const text = outputText(win);
+  for (const needle of runNeedles(marker)) {
+    assert.strictEqual(
+      text.indexOf(needle),
+      -1,
+      'the parent transcript must not show sub-agent output: ' + needle,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -107,19 +128,11 @@ function testLiveEventsReachTheBackgroundSubagentTab() {
 
   // The parent tab is on screen; the sub-agent streams in the background.
   streamSubagentRun(win, subTabId, taskId, marker);
-
-  assert.ok(
-    outputText(win).indexOf('live-words-' + marker) === -1,
-    'the parent transcript must not show sub-agent output',
-  );
+  assertNoLeak(win, marker);
 
   clickTab(win, subTabId);
   const text = outputText(win);
-  for (const needle of [
-    'live-words-' + marker,
-    'pondering ' + marker,
-    'tool-output-' + marker,
-  ]) {
+  for (const needle of runNeedles(marker)) {
     assert.ok(
       text.indexOf(needle) !== -1,
       'the sub-agent tab must show its streamed events; missing "' +
@@ -133,18 +146,14 @@ function testLiveEventsReachTheBackgroundSubagentTab() {
 // Same stream, but the user is ALREADY standing on the sub-agent tab
 // when the events arrive (they clicked it the moment it opened).
 function testLiveEventsReachTheActiveSubagentTab() {
-  const {win, taskId, subTabId} = bootLiveSubagent();
+  const {win, parentId, taskId, subTabId} = bootLiveSubagent();
   const marker = 'fg';
 
   clickTab(win, subTabId);
   streamSubagentRun(win, subTabId, taskId, marker);
 
   const text = outputText(win);
-  for (const needle of [
-    'live-words-' + marker,
-    'pondering ' + marker,
-    'tool-output-' + marker,
-  ]) {
+  for (const needle of runNeedles(marker)) {
     assert.ok(
       text.indexOf(needle) !== -1,
       'the active sub-agent tab must show its streamed events; ' +
@@ -154,6 +163,9 @@ function testLiveEventsReachTheActiveSubagentTab() {
         JSON.stringify(text.slice(0, 400)),
     );
   }
+  // Back on the parent: nothing of the run leaked into its transcript.
+  clickTab(win, parentId);
+  assertNoLeak(win, marker);
 }
 
 // A transcript head replayed by `task_events` and a live tail must

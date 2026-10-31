@@ -16,9 +16,10 @@ repositories (no mocks, patches, fakes, or test doubles):
   porcelain-status parsing with ``splitlines()``, which splits inside
   an unquoted filename containing a raw unicode line separator
   (U+2028) when ``core.quotepath=false`` is in force (as it always is
-  via the module's ``_git`` wrapper).  It now routes through the
-  shared ``_porcelain_entries`` parser (which splits on ``\\n`` only)
-  — the same parser backing ``merge_flow._porcelain_paths``.
+  via the module's ``_git`` wrapper).  It now reads the NUL-separated
+  ``git status --porcelain -z`` through the shared
+  ``_porcelain_entries`` parser, the one the merge flow's
+  changed-files fallback uses too.
 
 * The canonical ``User prompt:`` / ``Result:`` commit-message block
   format was spelled independently in ``server/helpers.py`` (writer)
@@ -192,7 +193,7 @@ def test_copy_dirty_state_space_adjacent_names_and_rename(
 
 
 def test_porcelain_entries_rename_and_line_separator(tmp_path: Path) -> None:
-    """The shared parser handles renames and U+2028 names on real output."""
+    """The shared parser handles renames and U+2028 names on real ``-z`` output."""
     repo = _make_repo(tmp_path)
     (repo / "src.txt").write_text("v1\n")
     _git(repo, "add", "src.txt")
@@ -201,7 +202,7 @@ def test_porcelain_entries_rename_and_line_separator(tmp_path: Path) -> None:
     (repo / "u\u2028v.txt").write_text("x\n")
 
     status = subprocess.run(
-        ["git", "-c", "core.quotepath=false", "status", "--porcelain", "-uall"],
+        ["git", "status", "--porcelain", "-z", "-uall"],
         cwd=repo,
         capture_output=True,
         text=True,

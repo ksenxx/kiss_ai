@@ -21,7 +21,11 @@ Protocol (JSON text frames), a mutual challenge-response handshake:
 - extension -> server: ``{"type": "ping"}`` keepalive; answered with
   ``{"type": "pong"}`` (WebSocket activity keeps the MV3 service worker
   alive).
-- server -> extension: ``{"id": N, "cmd": "<name>", "args": {...}}``.
+- server -> extension: ``{"id": N, "cmd": "<name>", "args": {...}, "timeout_ms": T}``;
+  *T* is how long the server still waits for the reply, a little less than
+  its own timeout, and is the command's deadline in the extension (counted
+  from its arrival), so a command that runs over is answered with an error
+  while the server still listens.
 - extension -> server: ``{"id": N, "ok": true, "result": ...}`` or
   ``{"id": N, "ok": false, "error": "<message>"}``.
 
@@ -47,11 +51,11 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import secrets
 import threading
 import time
 from concurrent.futures import Future
+from contextlib import AbstractContextManager
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -61,7 +65,9 @@ from websockets.sync.server import Server, ServerConnection, serve
 
 from kiss.core.brand import BRAND, PRODUCT_NAME, render_brand
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.user_config import load_config
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +77,8 @@ CONFIG_FILE_NAME = "bridge-config.json"
 _EXTENSION_SOURCE = Path(__file__).resolve().parent / "chrome_extension"
 _EXTENSION_FILES = ("manifest.json", "background.js")
 _PROBE_TIMEOUT_SECS = 1.0
+_CONFIG_LOCK_TIMEOUT_SECS = 5.0
+_REPLY_MARGIN_SECS = 1.0  # the extension's deadline runs at most this much short of ours
 
 
 def extension_dir() -> Path:
@@ -228,6 +236,9 @@ class ChromeBridge:
         self._ids = count(1)
         self._conn: _Connection | None = None
         self._connected = threading.Event()
+        # Held while _conn and _connected change together: a drop that checks
+        # "is this still the live connection?" must not clear a newer one.
+        self._conn_lock = threading.Lock()
         self._server: Server | None = None
 
     @property
@@ -261,8 +272,10 @@ class ChromeBridge:
                 which owns the extension whenever it runs).
 
         Raises:
-            ChromeBridgeError: if the socket cannot be bound or another
-                process's bridge owns the config file.
+            ChromeBridgeError: if the socket cannot be bound, the extension
+                files or the config file cannot be written, the server
+                thread cannot start, or another process's bridge owns
+                the config file.
         """
         if self._write_config and not takeover:
             other = _live_bridge_port(extension_dir() / CONFIG_FILE_NAME)
@@ -283,8 +296,21 @@ class ChromeBridge:
             raise ChromeBridgeError(f"cannot listen on 127.0.0.1:{self._port}: {e}") from e
         self._port = self._server.socket.getsockname()[1]
         if self._write_config:
-            _write_config(install_extension() / CONFIG_FILE_NAME, self._port, self._token)
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+            try:
+                _write_config(install_extension() / CONFIG_FILE_NAME, self._port, self._token)
+            except OSError as e:  # an unwritable KISS_HOME, or the config lock stuck
+                self._server.shutdown()
+                self._server = None
+                raise ChromeBridgeError(
+                    f"cannot publish the bridge in {extension_dir()}: {e}"
+                ) from e
+        try:
+            threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        except RuntimeError as e:  # thread exhaustion
+            # Close the socket nobody would serve and withdraw the config
+            # that points the extension at it.
+            self.stop()
+            raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
         logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
 
     def stop(self) -> None:
@@ -297,17 +323,15 @@ class ChromeBridge:
         if self._server is not None:
             self._server.shutdown()
             self._server = None
-        if self._conn is not None:
-            conn = self._conn
+        conn = self._conn  # one read: the handler thread may drop it meanwhile
+        if conn is not None:
             self._drop_connection(conn, "bridge server stopped")
             try:
                 conn.ws.close()  # half-dead handlers keep the extension pinging otherwise
             except Exception:  # noqa: BLE001 - already gone
                 logger.debug("Exception caught", exc_info=True)
         if self._write_config:
-            config = extension_dir() / CONFIG_FILE_NAME
-            if _read_config(config).get("token") == self._token:
-                config.unlink(missing_ok=True)
+            _remove_config_if_owned(extension_dir() / CONFIG_FILE_NAME, self._token)
 
     def wait_for_extension(self, timeout: float) -> bool:
         """Block until an extension is connected or *timeout* seconds pass.
@@ -363,8 +387,16 @@ class ChromeBridge:
                 f"the extension connection stayed busy past {timeout:.0f}s; "
                 f"'{cmd}' was not sent"
             )
+        # The extension's deadline runs a little short of ours (a tenth, at
+        # most _REPLY_MARGIN_SECS): its "deadline exceeded" reply arrives
+        # while we still wait, instead of our timeout dropping the connection
+        # and every other command in flight.
+        budget = max(deadline - time.monotonic(), 0.0)
+        timeout_ms = round((budget - min(budget / 10, _REPLY_MARGIN_SECS)) * 1000)
         try:
-            conn.ws.send(json.dumps({"id": msg_id, "cmd": cmd, "args": args or {}}))
+            conn.ws.send(json.dumps(
+                {"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms}
+            ))
         except Exception as e:
             with conn.pending_lock:
                 conn.pending.pop(msg_id, None)
@@ -414,9 +446,9 @@ class ChromeBridge:
                     logger.debug("Exception caught", exc_info=True)
                 return
             ws.send(json.dumps({"type": "hello_ok", "proof": _proof(nonce, self._token)}))
-            old = self._conn
-            self._conn = conn
-            self._connected.set()
+            with self._conn_lock:
+                old, self._conn = self._conn, conn
+                self._connected.set()
             if old is not None:  # a second Chrome profile connected: keep the newest
                 try:
                     old.ws.close(4002, "replaced by a newer connection")
@@ -448,9 +480,10 @@ class ChromeBridge:
             fut.set_exception(ChromeBridgeError(str(msg.get("error", "extension error"))))
 
     def _drop_connection(self, conn: _Connection, reason: str) -> None:
-        if self._conn is conn:
-            self._conn = None
-            self._connected.clear()
+        with self._conn_lock:
+            if self._conn is conn:
+                self._conn = None
+                self._connected.clear()
         with conn.pending_lock:
             pending = list(conn.pending.values())
             conn.pending.clear()
@@ -469,18 +502,41 @@ def _proof(key: str, message: str) -> str:
     return hashlib.sha256(f"{key}:{message}".encode()).hexdigest()
 
 
+def _config_lock(config: Path) -> AbstractContextManager[bool]:
+    """The lock serialising the publication and the withdrawal of *config*."""
+    lock = config.with_name(f".{config.name}.lock")
+    return exclusive_file_lock(lock, timeout=_CONFIG_LOCK_TIMEOUT_SECS)
+
+
 def _write_config(config: Path, port: int, token: str) -> None:
     """Write the connection file the extension fetches at startup (mode 600).
 
-    The temp file is created O_EXCL with mode 600 from the start: the
-    token must never sit in a world-readable file, not even between
-    write and chmod.
+    The staged copy has mode 600 from the start (the token must never
+    sit in a world-readable file), and the write holds the config lock,
+    so a predecessor's :func:`_remove_config_if_owned` cannot unlink
+    this file between its ownership check and its unlink.
+
+    Raises:
+        OSError: when the file cannot be written; ``TimeoutError`` when
+            the lock stays held past :data:`_CONFIG_LOCK_TIMEOUT_SECS`.
     """
-    tmp = config.with_name(f"bridge-config.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps({"port": port, "token": token}))
-    os.replace(tmp, config)
+    with _config_lock(config):
+        atomic_write_text(config, json.dumps({"port": port, "token": token}), mode=0o600)
+
+
+def _remove_config_if_owned(config: Path, token: str) -> None:
+    """Delete *config* only while it still names *token*, under the config lock.
+
+    A successor bridge (normally a restarted daemon) may have published
+    its own file already; deleting that would leave the extension unable
+    to find it.  A failure is logged, never raised: this runs at exit.
+    """
+    try:
+        with _config_lock(config):
+            if _read_config(config).get("token") == token:
+                config.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("could not withdraw %s", config, exc_info=True)
 
 
 def _read_config(config: Path) -> dict[str, Any]:

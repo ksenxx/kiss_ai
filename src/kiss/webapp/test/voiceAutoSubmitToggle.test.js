@@ -11,7 +11,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  stubRaf,
+  recordTimers,
+  fireTimers,
+} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 
@@ -128,6 +134,8 @@ test('with auto submit off no "working on it" ack is played', () => {
 
 test('caret is restored before listeners see the input event', () => {
   const {win, posted} = makePage({stored: 'off'});
+  // main.js asks for a ghost completion 300 ms after the input event.
+  const ghostTimers = recordTimers(win, 300);
   const inp = input(win);
   inp.value = 'head tail';
   caret(win, 4);
@@ -146,10 +154,20 @@ test('caret is restored before listeners see the input event', () => {
 
   // main.js only asks for a ghost completion when the caret sits at the end
   // of the draft, so a mid-draft insertion must not schedule one.
+  fireTimers(ghostTimers);
   assert.strictEqual(
     posted.filter(m => m.type === 'complete').length,
     0,
     'a mid-draft insertion must not request a completion',
+  );
+  // Spoken at the end of the draft, the same insertion does request one.
+  caret(win, inp.value.length);
+  send(win, {type: 'voiceSpeech', text: 'END'});
+  fireTimers(ghostTimers);
+  assert.strictEqual(
+    posted.filter(m => m.type === 'complete').length,
+    1,
+    'an insertion at the end of the draft requests a completion',
   );
 });
 

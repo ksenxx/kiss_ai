@@ -52,7 +52,9 @@ const {send, clickTab} = harness;
 /**
  * A fresh copy of what the daemon stored of the requested fixture run.
  *
- * @param {number} index 0 for `recordedRun()`, 1 for `parentFanOutRun()`.
+ * @param {number} index 0 for `recordedRun()`; 1 for the fixture's
+ *   second run, a parent that fanned out one sub-agent and finished (the
+ *   run `testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers` replays).
  * @returns {Array<object>} The transcript the daemon would store.
  */
 function recordAsDaemon(index) {
@@ -77,12 +79,6 @@ const TS = 1767225600000;
 // by the time it finished, and only the daemon knows that.
 function recordedRun() {
   return JSON.parse(JSON.stringify(FIXTURE.runs[0]));
-}
-
-// A parent that fanned out one sub-agent and finished: the run
-// `testHiddenReplayThatClosesTheVisibleTabKeepsItsNumbers` replays.
-function parentFanOutRun() {
-  return JSON.parse(JSON.stringify(FIXTURE.runs[1]));
 }
 
 // What is left of that run once the daemon has recorded it: what a

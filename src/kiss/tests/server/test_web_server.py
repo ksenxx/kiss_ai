@@ -201,6 +201,13 @@ class TestWebPrinter(unittest.TestCase):
         self.assertTrue(any(e.get("taskId") == "t1" for e in captured))
 
 
+def _scratch_dir(test: unittest.TestCase) -> str:
+    """Create a temporary folder that *test* removes when it finishes; return its path."""
+    path = tempfile.mkdtemp(prefix="kiss_ws_test_")
+    test.addCleanup(shutil.rmtree, path, True)
+    return path
+
+
 def _connect_live_task(port: int) -> Any:
     """Connect to the server's websocket for a test that submits a live task.
 
@@ -240,7 +247,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -332,7 +339,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             _persistence._db_conn,
             _persistence._KISS_DIR,
         )
-        self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_ws_test_"))
+        self._persistence_dir = Path(_scratch_dir(self))
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
@@ -346,7 +353,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -358,6 +365,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
 
         import kiss.agents.sorcar.persistence as _persistence
+        _persistence._release_owner_marker()
         _persistence._close_db()
         (
             _persistence._DB_PATH,
@@ -1064,55 +1072,37 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(content["content"], "<h1>nested report</h1>\n")
             self.assertEqual(content["path"], str(report.resolve()))
 
-    async def test_ws_replay_task_events_restores_worktree_fallback(self) -> None:
-        """A ``task_events`` replay restores the worktree fallback.
+    async def test_ws_replay_of_running_worktree_task_restores_fallback(self) -> None:
+        """A replay of a running worktree task restores the worktree fallback.
 
         Session replay for a live tab first drops the tab's printer
-        state (``cleanup_tab``), and while the task is still running
-        nothing re-emits ``worktree_done`` — the historical
-        ``worktree_created`` nested in the replayed transcript is the
-        only copy of the pending worktree dir.  Tracking must scan the
-        nested events (in order, so a replayed successful
-        ``worktree_result`` still retires the entry).
+        state (``cleanup_tab``).  The task broadcast its
+        ``worktree_created`` once and never recorded it, so attaching
+        the tab to the running task re-sends the task's current
+        worktree.  Once the task's worktree is gone, a replay leaves no
+        fallback.
         """
+        import kiss.agents.sorcar.persistence as _persistence
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        from kiss.server import agent_state
+        from kiss.server.agent_state import AgentState
+        from kiss.tests.server.conftest import init_repo
+
         work_dir = self.server.work_dir
-        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-replay"
-        (wt_dir / "reports").mkdir(parents=True)
-        (wt_dir / "reports" / "live.html").write_text("<h1>live</h1>\n")
-
+        init_repo(work_dir)
+        agent = ChatSorcarAgent("agent")
+        agent._enter_work_dir(work_dir)
+        agent.create_worktree()
+        wt_work_dir = str(agent._wt_work_dir)
+        (Path(wt_work_dir) / "reports").mkdir(parents=True)
+        (Path(wt_work_dir) / "reports" / "live.html").write_text("<h1>live</h1>\n")
+        task_id, chat_id = _persistence._add_task("do work")
+        state = AgentState(
+            str(task_id), agent=agent, chat_id=chat_id, tab_id="replay-tab",
+            is_task_active=True,
+        )
+        agent_state.register(state)
         printer = self.server._printer
-        printer.broadcast(
-            {
-                "type": "worktree_created",
-                "worktreeDir": str(wt_dir),
-                "branch": "kiss/wt-replay",
-                "tabId": "replay-tab",
-            }
-        )
-        printer.cleanup_tab("replay-tab")
-        self.assertEqual(printer.worktree_dir_for_tab("replay-tab"), "")
-
-        # The replay envelope of a still-running task restores it.
-        printer.broadcast(
-            {
-                "type": "task_events",
-                "events": [
-                    {"type": "prompt", "text": "do work"},
-                    {
-                        "type": "worktree_created",
-                        "worktreeDir": str(wt_dir),
-                        "branch": "kiss/wt-replay",
-                    },
-                ],
-                "task": "do work",
-                "tabId": "replay-tab",
-            }
-        )
-        self.assertEqual(
-            printer.worktree_dir_for_tab("replay-tab"),
-            str(wt_dir),
-            "a replayed worktree_created must restore the fallback",
-        )
 
         async def recv_type(ws: Any, wanted: str) -> dict[str, Any]:
             deadline = asyncio.get_event_loop().time() + 5
@@ -1123,51 +1113,48 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     return ev
             raise AssertionError(f"no {wanted} reply received")
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "checkPaths",
-                        "paths": ["reports/live.html"],
-                        "workDir": work_dir,
-                        "tabId": "replay-tab",
-                    }
+        resume = {"type": "resumeSession", "chatId": chat_id, "tabId": "replay-tab"}
+        try:
+            async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                await asyncio.wait_for(ws.recv(), timeout=5)
+                await ws.send(json.dumps(resume))
+                await recv_type(ws, "task_events")
+                self.assertEqual(
+                    printer.worktree_dir_for_tab("replay-tab"),
+                    wt_work_dir,
+                    "the replay must restore the running task's worktree",
                 )
-            )
-            reply = await recv_type(ws, "pathsExist")
-            self.assertEqual(
-                reply["results"],
-                {"reports/live.html": True},
-                "the restored fallback must resolve the live artifact",
-            )
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "checkPaths",
+                            "paths": ["reports/live.html"],
+                            "workDir": work_dir,
+                            "tabId": "replay-tab",
+                        }
+                    )
+                )
+                reply = await recv_type(ws, "pathsExist")
+                self.assertEqual(
+                    reply["results"],
+                    {"reports/live.html": True},
+                    "the restored fallback must resolve the live artifact",
+                )
 
-        # A replay of an already-merged task nets out to no fallback.
-        printer.broadcast(
-            {
-                "type": "task_events",
-                "events": [
-                    {
-                        "type": "worktree_created",
-                        "worktreeDir": str(wt_dir),
-                        "branch": "kiss/wt-replay",
-                    },
-                    {
-                        "type": "worktree_result",
-                        "success": True,
-                        "message": "Merged branch 'kiss/wt-replay'.",
-                    },
-                ],
-                "task": "do work",
-                "tabId": "replay-tab",
-            }
-        )
-        self.assertEqual(
-            printer.worktree_dir_for_tab("replay-tab"),
-            "",
-            "a replayed successful worktree_result must retire the entry",
-        )
+                agent.discard()
+                await ws.send(json.dumps(resume))
+                await recv_type(ws, "task_events")
+                self.assertEqual(
+                    printer.worktree_dir_for_tab("replay-tab"),
+                    "",
+                    "a replay after the worktree is gone must leave no fallback",
+                )
+        finally:
+            state.is_task_active = False
+            agent_state.unregister(state.task_id, state)
+            if agent._wt_pending:
+                agent.discard()
 
     async def test_ws_close_tab_drops_worktree_fallback(self) -> None:
         """Closing a tab releases its pending-worktree fallback entry.
@@ -1429,7 +1416,7 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -1491,7 +1478,7 @@ class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -1533,7 +1520,7 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
-        self._tmpdir = tempfile.mkdtemp()
+        self._tmpdir = _scratch_dir(self)
 
         self._model_server = _FakeModelServer(self.model_port)
         self._model_server.start()
@@ -1748,8 +1735,8 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        self._tmpdir = tempfile.mkdtemp()
-        self._cert_dir = tempfile.mkdtemp()
+        self._tmpdir = _scratch_dir(self)
+        self._cert_dir = _scratch_dir(self)
         self._certfile = os.path.join(self._cert_dir, "cert.pem")
         self._keyfile = os.path.join(self._cert_dir, "key.pem")
         _generate_self_signed_cert(Path(self._certfile), Path(self._keyfile))
@@ -1816,7 +1803,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -2009,7 +1996,7 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=True,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
 
@@ -2152,7 +2139,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -2251,7 +2238,7 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             server = RemoteAccessServer(
                 host="127.0.0.1",
                 port=port,
-                work_dir=tempfile.mkdtemp(),
+                work_dir=_scratch_dir(self),
             )
             await server.start_async()
             try:
@@ -2285,7 +2272,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -2350,7 +2337,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -2361,12 +2348,21 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
+    def _connect(self) -> Any:
+        """Connect to the server's websocket, taking frames as large as the daemon's clients do.
+
+        The ``ready`` fan-out answers ``getInputHistory`` with every
+        prompt in the session's shared history database, which the
+        earlier tests of a full-suite split fill past the websockets
+        default limit of 1 MiB.
+        """
+        return connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(), max_size=_MAX_LINE_BYTES
+        )
+
     async def test_ready_with_restored_tabs(self) -> None:
         """ready command with restoredTabs triggers resumeSession for each."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=no_verify_ssl(),
-        ) as ws:
+        async with self._connect() as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -2406,10 +2402,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         open History sidebar refetches and converges on the current
         task list.
         """
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=no_verify_ssl(),
-        ) as ws:
+        async with self._connect() as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -2440,16 +2433,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         (unrelated clients already heard the live broadcast or will
         resync via their own ``ready``/reconnect).
         """
-        async with (
-            connect(
-                f"wss://127.0.0.1:{self.port}/ws",
-                ssl=no_verify_ssl(),
-            ) as ws_ready,
-            connect(
-                f"wss://127.0.0.1:{self.port}/ws",
-                ssl=no_verify_ssl(),
-            ) as ws_other,
-        ):
+        async with self._connect() as ws_ready, self._connect() as ws_other:
             for ws in (ws_ready, ws_other):
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2483,10 +2467,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
 
     async def test_ready_with_empty_restored_tabs(self) -> None:
         """ready command with empty restoredTabs doesn't crash."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=no_verify_ssl(),
-        ) as ws:
+        async with self._connect() as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -2544,7 +2525,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -2767,7 +2748,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         script = (
@@ -2812,7 +2793,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         script = (
             "import sys\n"
@@ -2856,7 +2837,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         server.tunnel_token = "fake-token-that-will-fail"
         result = server._start_tunnel()
@@ -2880,7 +2861,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -2995,7 +2976,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -3044,7 +3025,7 @@ class TestStopAsyncTimeout(IsolatedAsyncioTestCase):
             server = RemoteAccessServer(
                 host="127.0.0.1",
                 port=port,
-                work_dir=tempfile.mkdtemp(),
+                work_dir=_scratch_dir(self),
             )
             await server.start_async()
             await server.stop_async()
@@ -3068,7 +3049,7 @@ class TestWSHandlerInvalidJson(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3106,7 +3087,7 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3165,7 +3146,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3229,7 +3210,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
-        self._bin_dir = tempfile.mkdtemp()
+        self._bin_dir = _scratch_dir(self)
         self._orig_path = os.environ.get("PATH", "")
 
     async def asyncTearDown(self) -> None:
@@ -3264,7 +3245,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         try:
             url = server._start_named_tunnel()
@@ -3286,7 +3267,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         try:
             url = server._start_named_tunnel()
@@ -3308,7 +3289,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         try:
             url = server._start_named_tunnel()
@@ -3327,7 +3308,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake-token",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         url = server._start_named_tunnel()
         self.assertIsNone(url)
@@ -3357,7 +3338,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
 
     async def asyncTearDown(self) -> None:
@@ -3443,7 +3424,7 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         old_stderr = sys.stderr
         buf = io.StringIO()
@@ -3481,7 +3462,7 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
         """
         from kiss.agents.sorcar import agent_dispatch
 
-        work_dir = tempfile.mkdtemp()
+        work_dir = _scratch_dir(self)
         endpoint_file = os.path.join(work_dir, "sorcar-local.json")
         server = RemoteAccessServer(
             host="127.0.0.1",
@@ -3541,7 +3522,7 @@ class TestWSHandlerConnectionClosed(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3585,7 +3566,7 @@ class TestAuthTimeout(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3636,7 +3617,7 @@ class TestStartTunnelFileNotFound(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         result = server._start_tunnel()
         self.assertIsNone(result)
@@ -3649,7 +3630,7 @@ class TestStartTunnelFileNotFound(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             tunnel_token="fake",
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         result = server._start_tunnel()
         self.assertIsNone(result)
@@ -3673,7 +3654,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -3717,7 +3698,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -3776,7 +3757,7 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3827,7 +3808,7 @@ class TestHeadPartialBuffer(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -3892,7 +3873,7 @@ class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -4001,7 +3982,7 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -4059,7 +4040,7 @@ class TestStartMethodLifecycle(unittest.TestCase):
             host="127.0.0.1",
             port=port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
 
         error_box: list[Exception] = []
@@ -4133,7 +4114,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
@@ -4174,7 +4155,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
@@ -4228,7 +4209,7 @@ class TestBroadcastWsSendException(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -4289,7 +4270,7 @@ class TestStopAsyncWaitTimeout(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await server.start_async()
         self.assertIsNotNone(server._ws_server)
@@ -4322,7 +4303,7 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -4390,7 +4371,7 @@ class TestFocusInputSendFails(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
         )
         await self.server.start_async()
 
@@ -5163,7 +5144,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
@@ -5257,7 +5238,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=_scratch_dir(self),
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()

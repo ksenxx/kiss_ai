@@ -131,13 +131,13 @@ def test_stranded_execution_record_is_healed_for_later_loads(tmp_path: Path) -> 
     loaded: dict[str, Any] = {}
     loader = threading.Thread(target=_load, args=(sea, loaded), daemon=True)
     loader.start()
-    # The loader queues behind the stranded record, then the stopped thread ends.
-    loader.join(timeout=0.5)
-    assert not loaded
+    # The stopped thread no longer executes the file, so the loader drops the
+    # stranded record at once instead of queueing until that thread ends.
+    loader.join(timeout=10)
+    assert stopper.is_alive()
     release.set()
     stopper.join(timeout=10)
-    loader.join(timeout=10)
-    assert loaded == {"loaded": True}, "the load waited forever for the stopped thread"
+    assert loaded == {"loaded": True}, "the load waited for the stopped thread"
     assert module_name not in sea_settings._EXECUTING_OWNER
     # The file executes again normally afterwards, on this thread too.
     assert "Sea" in sea_settings.execute_python_file(str(sea))

@@ -35,24 +35,23 @@ agent run (external to the code under test).
 from __future__ import annotations
 
 import os
-import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 
 
-def _make_remote_server() -> Any:
+def _make_remote_server(tmp: Path) -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.web_server import RemoteAccessServer
 
-    tmp = tempfile.mkdtemp(prefix="kiss-conc2026-sweep-")
     return RemoteAccessServer(
         use_tunnel=False,
-        url_file=os.path.join(tmp, "url.json"),
-        local_endpoint_file=os.path.join(tmp, "sorcar-local.json"),
+        url_file=str(tmp / "url.json"),
+        local_endpoint_file=str(tmp / "sorcar-local.json"),
     )
 
 
@@ -126,10 +125,10 @@ def _register(task_id: str, tab_id: str, thread: threading.Thread) -> AgentState
 
 
 def test_sweep_does_not_reinterrupt_acknowledged_cleanup(
-    clean_registry: None,
+    clean_registry: None, tmp_path: Path,
 ) -> None:
     """A cooperatively stopped worker's slow cleanup runs to completion."""
-    remote = _make_remote_server()
+    remote = _make_remote_server(tmp_path)
     daemon = remote._agent_server
     state = _register("sweep-acked", "TAB-SWEEP-ACKED", threading.Thread())
     worker = _CooperativeWorker(daemon, state, cleanup_seconds=3.0)
@@ -147,10 +146,10 @@ def test_sweep_does_not_reinterrupt_acknowledged_cleanup(
 
 
 def test_sweep_still_interrupts_a_wedged_worker(
-    clean_registry: None,
+    clean_registry: None, tmp_path: Path,
 ) -> None:
     """The guarded injection still stops a worker ignoring the event."""
-    remote = _make_remote_server()
+    remote = _make_remote_server(tmp_path)
     state = _register("sweep-wedged", "TAB-SWEEP-WEDGED", threading.Thread())
     worker = _StubbornWorker(lifetime=60.0)
     state.task_thread = worker.thread
@@ -168,10 +167,10 @@ def test_sweep_still_interrupts_a_wedged_worker(
 
 
 def test_sweep_awaits_a_merging_task_thread(
-    clean_registry: None,
+    clean_registry: None, tmp_path: Path,
 ) -> None:
     """A task thread inside its post-task merge is joined, not injected."""
-    remote = _make_remote_server()
+    remote = _make_remote_server(tmp_path)
     state = _register("sweep-merge", "TAB-SWEEP-MERGE", threading.Thread())
     worker = _StubbornWorker(lifetime=3.0)  # the "merge": outlives the 1 s join
     state.task_thread = worker.thread

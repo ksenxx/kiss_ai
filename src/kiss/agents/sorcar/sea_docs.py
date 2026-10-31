@@ -61,7 +61,9 @@ GENERATED_FILES = (
 )
 """Pages (relative to :data:`REPO_ROOT`) whose ``sea-docs`` blocks are regenerated."""
 
-_BLOCK = re.compile(r"(<!-- sea-docs: ([\w-]+) -->\n)(.*?)(<!-- /sea-docs -->)", re.S)
+BLOCK = re.compile(r"(<!-- sea-docs: ([\w-]+) -->\n)(.*?)(<!-- /sea-docs -->)", re.S)
+"""A generated block: its opening marker line (group 1, naming the table in group 2), the
+table (group 3) and the closing marker (group 4)."""
 
 
 def type_name(expected: type | tuple[type, ...]) -> str:
@@ -212,7 +214,7 @@ def render(text: str, tables: dict[str, str] | None = None) -> str:
         KeyError: a block names an unknown table.
     """
     rendered = {} if tables is None else tables
-    return _BLOCK.sub(functools.partial(_replace_block, rendered), text)
+    return BLOCK.sub(functools.partial(_replace_block, rendered), text)
 
 
 def _replace_block(tables: dict[str, str], match: re.Match[str]) -> str:
@@ -223,7 +225,7 @@ def _replace_block(tables: dict[str, str], match: re.Match[str]) -> str:
     return f"{match.group(1)}{tables[name]}\n{match.group(4)}"
 
 
-def update_file(path: Path, check: bool, tables: dict[str, str] | None = None) -> bool:
+def update_file(path: Path, check: bool, tables: dict[str, str]) -> bool:
     """Regenerate the blocks of *path*; return whether it was (or would be) changed.
 
     Args:
@@ -251,11 +253,20 @@ def run(args: argparse.Namespace) -> int:
 
     Returns:
         ``0`` when every page is up to date (after writing), ``1`` when
-        ``--check`` found stale blocks.
+        ``--check`` found stale blocks or a page named on the command
+        line does not exist (each is reported as ``missing: <path>``).
     """
-    files = [Path(f) for f in args.files] or [REPO_ROOT / rel for rel in GENERATED_FILES]
+    if args.files:
+        files = [Path(f) for f in args.files]
+    else:  # an installed package lacks the website: skip the default pages it does not have
+        files = [path for path in (REPO_ROOT / rel for rel in GENERATED_FILES) if path.exists()]
+    missing = [path for path in files if not path.exists()]
+    for path in missing:
+        print(f"missing: {path}")
     tables: dict[str, str] = {}
-    stale = [path for path in files if path.exists() and update_file(path, args.check, tables)]
+    stale = [
+        path for path in files if path not in missing and update_file(path, args.check, tables)
+    ]
     for path in stale:
         print(("stale: " if args.check else "updated: ") + str(path))
-    return 1 if stale and args.check else 0
+    return 1 if missing or (stale and args.check) else 0

@@ -10,7 +10,8 @@
 // unfolds one.  The first `summary` tool call of the run then folds
 // them under the summary digest together with the step panels it
 // recounts, so the transcript above the digest holds nothing but the
-// task panel.  A later summary stops at the earlier one, as before.
+// task panel.  A later summary stops at the earlier one, as before
+// (summaryToolCollapse.test.js).
 
 const assert = require('assert');
 const {
@@ -292,47 +293,6 @@ function testPromptWithImageIsFoldedUnderSummary() {
   );
 }
 
-function testSecondSummaryStopsAtTheFirst() {
-  const {win, posted} = makePage();
-  startTask(win, posted, 'Two summaries');
-  send(win, {type: 'system_prompt', text: 'system text'});
-  send(win, {type: 'prompt', text: 'Two summaries'});
-  sendStep(win, 1);
-  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
-  send(win, {type: 'tool_result', name: 'summary', content: 'ok'});
-  sendStep(win, 2);
-  sendStep(win, 3);
-  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
-  const summaries = Array.from(output(win).querySelectorAll('.tc-summary'));
-  assert.strictEqual(summaries.length, 2);
-  const first = summaries[0];
-  const second = summaries[1];
-  assert.strictEqual(
-    first.parentElement,
-    output(win),
-    'the first summary stays top-level',
-  );
-  assert.ok(
-    first.querySelector(':scope > .summary-sub > .ev.prompt') &&
-      first.querySelector(':scope > .summary-sub > .ev.system-prompt'),
-    'the prompts sit under the first summary',
-  );
-  assert.strictEqual(
-    second.querySelectorAll(
-      ':scope > .summary-sub > .ev.prompt, :scope > .summary-sub > .ev.system-prompt',
-    ).length,
-    0,
-    'the second summary adopts no prompt',
-  );
-  assert.strictEqual(
-    second.querySelectorAll(':scope > .summary-sub > .tc').length,
-    2,
-    'the second summary adopts only the steps after the first',
-  );
-  win.close();
-  console.log('  ok - the second summary stops at the first');
-}
-
 function testSteerMessageStaysOutsideWhilePromptEchoFolds() {
   const {win, posted} = makePage();
   startTask(win, posted, 'Steered');
@@ -437,7 +397,6 @@ const TESTS = [
   testFirstSummaryFoldsPromptsUnderIt,
   testFirstSummaryFoldsPromptsEvenWhenUserUnfoldedThem,
   testPromptWithImageIsFoldedUnderSummary,
-  testSecondSummaryStopsAtTheFirst,
   testSteerMessageStaysOutsideWhilePromptEchoFolds,
   testReplayOfRunningTaskFoldsPromptsUnderSummary,
   testFinishedTaskFoldsEverythingIntoTrajectory,

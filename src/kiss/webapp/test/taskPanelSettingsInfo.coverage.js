@@ -15,7 +15,5 @@ gateRegions({
   testFile: 'taskPanelSettingsInfo.test.js',
   mark: 'taskinfo',
   label: 'task-settings info',
-  targets: [
-    {file: 'main.js', sourceUrl: 'taskinfo-main.js', minRegions: 3},
-  ],
+  targets: [{file: 'main.js', sourceUrl: 'taskinfo-main.js', regions: 5}],
 });

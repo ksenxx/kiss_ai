@@ -28,6 +28,7 @@ from pathlib import Path
 
 from kiss.core.models.model import (
     BINARY_ATTACHMENT_CLOSE,
+    BINARY_ATTACHMENT_OPEN,
     encode_binary_attachment,
     parse_binary_attachments,
 )
@@ -35,7 +36,9 @@ from kiss.core.models.model_info import PACKAGE_MODEL_INFO_PATH
 
 # One base64 character is never a valid quantum: b64decode raises
 # binascii.Error ("Incorrect padding") even with validate=False.
-_UNDECODABLE_BLOCK = "<<KISS_BINARY_ATTACHMENT mime_type=image/png>>Q" + BINARY_ATTACHMENT_CLOSE
+_UNDECODABLE_BLOCK = (
+    BINARY_ATTACHMENT_OPEN.format(mime_type="image/png") + "Q" + BINARY_ATTACHMENT_CLOSE
+)
 
 
 def test_undecodable_block_keeps_preceding_text() -> None:

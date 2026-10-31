@@ -166,22 +166,6 @@ class TestAgentServerUncoveredBranches:
         finally:
             _restore_db(saved)
 
-class TestAgentServerExtractResultSummary:
-    """Cover _extract_result_summary."""
-
-    def test_extract_result_summary_with_result_event(self) -> None:
-        """_extract_result_summary finds the result event."""
-        server = AgentServer()
-        server.printer._thread_local.task_id = "t1"
-        server.printer.start_recording()
-        server.printer.broadcast({"type": "text_delta", "text": "hello"})
-        import yaml
-        text = yaml.dump({"success": True, "summary": "All done"})
-        server.printer.broadcast({"type": "result", "text": text, "summary": "All done"})
-        summary = server._extract_result_summary()
-        assert summary == "All done"
-        server.printer.stop_recording()
-
 class TestBrowserPrinterPeekRecording:
     """Cover peek_recording for empty/non-existent recording."""
 

@@ -78,16 +78,22 @@ import sys
 import time
 
 here = os.path.dirname(os.path.abspath(sys.argv[0]))
+# A lingering opener stays up (like a browser that is its own launcher)
+# until the test removes the marker.  It records its pid so the test can
+# reap it: atomically and before the log line, so a test that saw the
+# launch always finds the complete pid.
+linger = os.path.exists(os.path.join(here, "linger"))
+if linger:
+    pid_file = os.path.join(here, "linger-pid")
+    tmp_file = f"{pid_file}.{os.getpid()}"
+    with open(tmp_file, "w") as fh:
+        fh.write(str(os.getpid()))
+    os.replace(tmp_file, pid_file)
 with open(os.path.join(here, "browser-log"), "a") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\\n")
 if os.path.exists(os.path.join(here, "refuse")):
     sys.exit(1)
-# A lingering opener stays up (like a browser that is its own launcher)
-# until the test removes the marker; it records its pid so the test can
-# wait for it to exit.
-if os.path.exists(os.path.join(here, "linger")):
-    with open(os.path.join(here, "linger-pid"), "w") as fh:
-        fh.write(str(os.getpid()))
+if linger:
     deadline = time.monotonic() + 30
     while os.path.exists(os.path.join(here, "linger")) and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -170,8 +176,9 @@ def _lingering_launches(home: Path) -> list[list[str]]:
     """Return the launches once a lingering opener has recorded one.
 
     A lingering opener outlives the launcher's grace period, so the launcher
-    returns while the opener may still be about to append its log line and
-    pid file; wait for the record instead of reading the log at once.
+    returns while the opener may still be about to write its pid file and
+    log line; wait for the record instead of reading the log at once (the
+    pid file is complete by then, so teardown can reap the opener).
     """
     assert wait_until(lambda: _opened(home) != [], timeout=10.0), "no launch recorded"
     return _opened(home)

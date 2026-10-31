@@ -766,6 +766,29 @@ def _remove_systemd_mirror() -> None:
         logger.warning("Failed to remove %s", mirror, exc_info=True)
 
 
+def _read_user_text(path: Path) -> str:
+    """Read the key store or a shell RC, keeping bytes that are not UTF-8.
+
+    Decoded with ``surrogateescape``: a stray Latin-1 byte (an old
+    ``café`` comment) becomes a lone surrogate instead of raising
+    ``UnicodeDecodeError``, which is no ``OSError`` and used to abort the
+    daemon start, and :func:`atomic_write_text` with the same handler
+    writes it back unchanged.
+    """
+    return path.read_text(encoding="utf-8", errors="surrogateescape")
+
+
+def _has_line_break(value: str) -> bool:
+    """Whether *value* holds a character ``str.splitlines`` breaks at.
+
+    Every reader of the key store and the RCs splits with ``splitlines``,
+    which also breaks at ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``, ``\\x85``,
+    ``\\u2028`` and ``\\u2029``: a value holding one is stored as two
+    lines and reloads cut short.
+    """
+    return "".join(value.splitlines()) != value
+
+
 @contextlib.contextmanager
 def _api_keys_store_flock() -> Iterator[None]:
     """Hold the cross-process flock guarding the canonical key store.
@@ -816,9 +839,7 @@ def _edit_api_keys_env_file_locked(
     env_path = api_keys_env_path()
     lines: list[str] = []
     if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines(
-            keepends=True,
-        )
+        lines = _read_user_text(env_path).splitlines(keepends=True)
     replaced: set[str] = set()
     new_lines: list[str] = []
     for line in lines:
@@ -845,7 +866,7 @@ def _edit_api_keys_env_file_locked(
     new_lines += tail
     # The store holds API keys: never world-readable, never observed
     # half-written by a shell that is sourcing it.
-    atomic_write_text(env_path, "".join(new_lines), mode=0o600)
+    atomic_write_text(env_path, "".join(new_lines), mode=0o600, errors="surrogateescape")
     _remove_systemd_mirror()
 
 
@@ -874,12 +895,14 @@ def save_api_key(key_name: str, key_value: str) -> None:
     in the settings panel genuinely unsets the key everywhere, including
     across the next daemon or service restart.
 
-    Values containing newlines are refused.  ``shlex.quote`` would
-    write a *valid multiline* quoted assignment, but every edit here is
-    line-oriented: a later replace or delete would rewrite only the
-    first physical line and leave the file syntactically broken (an
-    unterminated quote).  Real API keys are single-line, so the safe
-    contract is to reject the value outright.
+    Values containing a line break are refused: any character
+    ``str.splitlines`` breaks at (see :func:`_has_line_break`), not only
+    ``\\n`` and ``\\r``.  ``shlex.quote`` would write a *valid multiline*
+    quoted assignment, but every read and edit here is line-oriented: the
+    next start would load only the first line's fragment, and a later
+    replace or delete would rewrite only that line and leave the file
+    syntactically broken (an unterminated quote).  Real API keys are
+    single-line, so the safe contract is to reject the value outright.
 
     Also sets the key in the current process environment and refreshes
     the :data:`kiss.core.config.DEFAULT_CONFIG` singleton so subsequent
@@ -921,9 +944,9 @@ def save_api_key(key_name: str, key_value: str) -> None:
             key_name,
         )
         return
-    if "\n" in key_value or "\r" in key_value:
+    if _has_line_break(key_value):
         logger.warning(
-            "Refusing to save API key %s with an embedded newline",
+            "Refusing to save API key %s with an embedded line break",
             key_name,
         )
         return
@@ -1017,7 +1040,7 @@ def _update_rc_for_key(
         rc = target
     lines: list[str] = []
     if rc.exists():
-        lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = _read_user_text(rc).splitlines(keepends=True)
     kept = [line for line in lines if not _rc_line_sets_key(line, shell, key_name)]
     changed = len(kept) != len(lines)
     if (
@@ -1043,7 +1066,7 @@ def _update_rc_for_key(
         # The RC may hold API keys: never world-readable, never observed
         # half-written by a shell that is sourcing it.  (On Windows
         # ``os.chmod`` honours only the read-only bit.)
-        atomic_write_text(rc, "".join(kept), mode=0o600)
+        atomic_write_text(rc, "".join(kept), mode=0o600, errors="surrogateescape")
 
 
 def _refresh_config() -> None:
@@ -1197,7 +1220,7 @@ def _import_api_keys_store() -> None:
     """
     env_path = api_keys_env_path()
     try:
-        text = env_path.read_text(encoding="utf-8")
+        text = _read_user_text(env_path)
     except FileNotFoundError:
         text = ""
     except OSError:
@@ -1376,7 +1399,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
     for record in records:
         if "=" in record:
             k, _, v = record.partition("=")
-            if k in wanted and v and "\n" not in v and "\r" not in v and "\x00" not in v:
+            if k in wanted and v and not _has_line_break(v) and "\x00" not in v:
                 found[k] = v
     return found
 
@@ -1418,7 +1441,7 @@ def _migrate_legacy_rc_keys() -> None:
         store_text = ""
         if env_path.exists():
             try:
-                store_text = env_path.read_text(encoding="utf-8")
+                store_text = _read_user_text(env_path)
             except OSError:
                 logger.warning("Failed to read %s", env_path, exc_info=True)
                 return
@@ -1435,7 +1458,7 @@ def _migrate_legacy_rc_keys() -> None:
         for shell in ("bash", "zsh", "fish"):
             rc = _shell_rc_path(shell)
             try:
-                text = rc.read_text(encoding="utf-8")
+                text = _read_user_text(rc)
             except OSError:
                 continue
             rc_texts.append(text)

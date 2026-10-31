@@ -125,11 +125,14 @@ def test_missing_hook_directory_is_not_an_error(tmp_path: Path) -> None:
 def test_install_sh_documents_the_hooks_in_step_5_5() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
     assert 'report_step "[5/5]' in text
-    assert text.index('report_step "[5/5]') < text.index(
+    step5 = text.index('report_step "[5/5]')
+    assert step5 < text.index(
         'for hook in "$KISS_HOME_DIR"/post-install.d/*'
     ), "the hooks belong to the finishing step"
+    # Searched from step [5/5] on: a --restart-only run starts the daemon
+    # before step [1/5] and runs no hook at all.
     assert text.index('for hook in "$KISS_HOME_DIR"/post-install.d/*') < text.index(
-        "start_kiss_web_daemon \"$APP_DIR\""
+        "start_kiss_web_daemon \"$APP_DIR\"", step5
     ), "hooks run before the daemon restart"
 
 

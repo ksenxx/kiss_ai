@@ -13,7 +13,11 @@
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
-const {visibleTitles, finishedSession} = require('./history_helpers');
+const {
+  visibleTitles,
+  finishedSession,
+  selectFilter,
+} = require('./history_helpers');
 
 /** A finished row run by the script `sea` (undefined: a legacy row). */
 function session(id, title, sea, extra) {
@@ -36,12 +40,6 @@ function optionValues(win) {
   return Array.from(win.document.getElementById('hf-sea').options).map(
     o => o.value,
   );
-}
-
-function selectSea(win, value) {
-  const sel = win.document.getElementById('hf-sea');
-  sel.value = value;
-  sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
 function testMarkupAndDefault() {
@@ -104,22 +102,22 @@ function testSelectingSeaFiltersRows() {
   const {win} = makePage();
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
-  selectSea(win, 'write_paper_sea');
+  selectFilter(win, 'hf-sea', 'write_paper_sea');
   assert.deepStrictEqual(visibleTitles(win), [
     'paper task',
     'second paper task',
   ]);
 
-  selectSea(win, 'cron_agent');
+  selectFilter(win, 'hf-sea', 'cron_agent');
   assert.deepStrictEqual(visibleTitles(win), ['cron task']);
 
-  selectSea(win, '__none__');
+  selectFilter(win, 'hf-sea', '__none__');
   assert.deepStrictEqual(visibleTitles(win), [
     'legacy row without sea field',
     'plain task',
   ]);
 
-  selectSea(win, '');
+  selectFilter(win, 'hf-sea', '');
   assert.strictEqual(visibleTitles(win).length, 5, 'All restores every row');
   win.close();
   console.log('  ok - selecting a SEA / None / All filters the rows');
@@ -133,14 +131,14 @@ function testSeaFilterCombinesWithStatusChips() {
     session(3, 'failed plain', '', {failed: true}),
   ];
   send(win, {type: 'history', sessions: fixture, offset: 0});
-  selectSea(win, 'write_paper_sea');
+  selectFilter(win, 'hf-sea', 'write_paper_sea');
   const errors = win.document.getElementById('hf-errors');
   errors.checked = false;
   errors.dispatchEvent(new win.Event('change', {bubbles: true}));
   assert.deepStrictEqual(visibleTitles(win), ['ok paper']);
 
   // Nothing matches: the placeholder appears.
-  selectSea(win, '__none__');
+  selectFilter(win, 'hf-sea', '__none__');
   assert.deepStrictEqual(visibleTitles(win), []);
   assert.ok(
     win.document.querySelector('#history-list .sidebar-empty-filter'),
@@ -153,7 +151,7 @@ function testSeaFilterCombinesWithStatusChips() {
 function testSelectionSurvivesRefreshWithoutThatSea() {
   const {win} = makePage();
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
-  selectSea(win, 'cron_agent');
+  selectFilter(win, 'hf-sea', 'cron_agent');
 
   // A refresh whose rows no longer include cron_agent keeps the choice
   // as an option and hides every row.
@@ -187,7 +185,7 @@ function testSelectionSurvivesRefreshWithoutThatSea() {
   ]);
 
   // The None selection also survives a refresh.
-  selectSea(win, '__none__');
+  selectFilter(win, 'hf-sea', '__none__');
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
   assert.strictEqual(sel.value, '__none__');
   assert.deepStrictEqual(visibleTitles(win), [
@@ -200,9 +198,9 @@ function testSelectionSurvivesRefreshWithoutThatSea() {
   send(win, {type: 'history', sessions: [], offset: 0});
   assert.deepStrictEqual(optionValues(win), ['', '__none__']);
   assert.strictEqual(sel.value, '__none__');
-  selectSea(win, '');
+  selectFilter(win, 'hf-sea', '');
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
-  selectSea(win, 'cron_agent');
+  selectFilter(win, 'hf-sea', 'cron_agent');
   send(win, {type: 'history', sessions: [], offset: 0});
   assert.deepStrictEqual(optionValues(win), ['', '__none__', 'cron_agent']);
   assert.strictEqual(sel.value, 'cron_agent');

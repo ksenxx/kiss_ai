@@ -120,7 +120,6 @@
 
     const view = {
       el,
-      tabId,
       // CSS-pixel size of the page behind the last frame.
       pageWidth: 0,
       pageHeight: 0,

@@ -42,6 +42,7 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import textwrap
@@ -205,6 +206,7 @@ class TestEarlyReturnRuns(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-early-return-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         sea = self.tmp / "seas" / "slowhelp" / "slowhelp_sea.py"

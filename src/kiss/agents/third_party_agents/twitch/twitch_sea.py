@@ -35,6 +35,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    enroll_credential,
     save_json_config,
 )
 from kiss.agents.third_party_agents._device_auth import (
@@ -432,7 +433,7 @@ class TwitchChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def search_third_party_agents(self, query: str, limit: int = 10) -> str:
+    def search_channels(self, query: str, limit: int = 10) -> str:
         """Search for Twitch channels by name.
 
         Args:
@@ -445,7 +446,7 @@ class TwitchChannelBackend(ToolMethodBackend):
         try:
             params = {"query": query, "first": limit}
             result = self._get("/search/channels", params=params)
-            data = {"ok": True, "third_party_agents": result.get("data", [])}
+            data = {"ok": True, "channels": result.get("data", [])}
             return json.dumps(data, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -502,7 +503,11 @@ def _muse_authenticate(
     enrollment.  The store atomically replaces any previous vault entry
     (the vault never holds a half-written one); only the non-secret
     ``client_id``/``channel_name`` metadata is written to
-    ``config.json``.  The ``client_secret`` is never persisted in Muse
+    ``config.json``, by :func:`enroll_credential` under the config lock
+    together with the store: a failed metadata write leaves the vault
+    untouched, and a refused store puts the old metadata back, so the
+    old token stays paired with its own client id.  The
+    ``client_secret`` is never persisted in Muse
     mode: the connector does not use it, and an unused plaintext secret
     must not linger.  A daemon failure is reported without clearing the
     vault: whichever credential it holds at that point (the untouched
@@ -518,12 +523,9 @@ def _muse_authenticate(
     Returns:
         JSON string with the result.
     """
-    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
-
+    meta = {k: v for k, v in (("client_id", client_id), ("channel_name", channel_name)) if v}
     try:
-        meta = {k: v for k, v in (("client_id", client_id), ("channel_name", channel_name)) if v}
-        save_json_config(_config.path, meta)
-        store_credentials("twitch", credential, [])
+        enroll_credential(_config.path, meta, "twitch", credential)
         if not backend._wire_muse():  # pragma: no cover - credential was just stored
             return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:

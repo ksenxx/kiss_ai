@@ -123,7 +123,6 @@ def write_endpoint(path: Path, endpoint: LocalEndpoint) -> None:
         path: The endpoint file to write.
         endpoint: The daemon's local endpoint.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     with _endpoint_lock(path):
         atomic_write_text(path, json.dumps(asdict(endpoint), indent=2) + "\n", mode=0o600)
 
@@ -227,8 +226,8 @@ def connect(
             :func:`default_endpoint_path`.
         open_timeout: Seconds allowed for the TCP/TLS/WebSocket opening
             handshake and for the ``auth_ok`` reply.
-        max_size: Largest incoming frame accepted, in bytes (``None``
-            for the ``websockets`` default).
+        max_size: Largest incoming frame accepted, in bytes; ``None``
+            (the default) accepts frames of any size.
 
     Returns:
         The authenticated synchronous client connection.

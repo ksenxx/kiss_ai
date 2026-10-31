@@ -65,7 +65,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
                 self._state_lock = threading.RLock()
                 self._default_model = ""
 
-            def _get_models(self, conn_id: str = "") -> None:
+            def _get_models(self, conn_id: str = "", generation: int = 0) -> None:
                 pass
 
         server = FakeServer()

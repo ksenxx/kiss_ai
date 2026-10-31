@@ -260,8 +260,8 @@ def test_highlight_sheets_map_scopes_to_vscode_token_colours(
 
 def test_share_page_inlines_the_vscode_highlight_sheets() -> None:
     page = _build_share_page("t", "<div></div>")
-    assert ".hljs { color: #ccc; background: #2b2b2b; }" in page
-    assert ".hljs { color: #3b3b3b; background: #f8f8f8; }" in page
+    assert ".hljs { color: #ccc; }" in page
+    assert ".hljs { color: #3b3b3b; }" in page
     assert "highlight-github" not in page
 
 

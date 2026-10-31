@@ -20,6 +20,29 @@ const runner = makeRunner();
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const BRAND = 'Seamless Loop';
+const LABEL_ATTRS = [
+  'title',
+  'aria-label',
+  'data-tooltip',
+  'placeholder',
+  'alt',
+];
+
+/**
+ * Every string of the parsed page *doc* a user can read: its title, the
+ * text outside scripts and styles, and the labelling attributes.
+ */
+function readableStrings(doc) {
+  const body = doc.body.cloneNode(true);
+  for (const el of body.querySelectorAll('script, style')) el.remove();
+  const strings = [doc.title, body.textContent];
+  for (const el of doc.querySelectorAll('*')) {
+    for (const name of LABEL_ATTRS) {
+      if (el.hasAttribute(name)) strings.push(el.getAttribute(name));
+    }
+  }
+  return strings;
+}
 
 runner.test(
   'the rendered chat page names the brand, never the stock product',
@@ -44,8 +67,14 @@ runner.test(
       terminalTip,
       'Open a terminal on the machine running Seamless Loop as a tab',
     );
+    const readable = readableStrings(win.document);
     assert.ok(
-      !html.includes('KISS Sorcar'),
+      readable.some(s => s.includes('Welcome to ' + BRAND)),
+      'the welcome heading names the brand',
+    );
+    assert.deepStrictEqual(
+      readable.filter(s => s.includes('KISS Sorcar')),
+      [],
       'no user-visible string of the rendered page names the stock product',
     );
     win.close();

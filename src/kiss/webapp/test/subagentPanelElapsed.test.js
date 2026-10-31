@@ -31,8 +31,22 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, clickTab: activateTab} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  clickTab: activateTab,
+} = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
+
+// The window the running test opened; the runner closes it afterwards.
+const openWindows = [];
+
+/** A chat page, closed by the runner once its test ends. */
+function makePage() {
+  const page = makeChatPage();
+  openWindows.push(page.win);
+  return page;
+}
 
 /**
  * The `.panel-elapsed` label of *panel*'s own footer bar, or null.
@@ -410,6 +424,8 @@ for (const t of tests) {
     failures += 1;
     console.error('FAIL - ' + t.name);
     console.error(e && e.stack ? e.stack : String(e));
+  } finally {
+    while (openWindows.length) openWindows.pop().close();
   }
 }
 if (failures > 0) {
@@ -417,5 +433,3 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log('all subagentPanelElapsed tests passed');
-// pretendToBeVisual keeps a rAF scheduler alive; exit explicitly.
-process.exit(0);

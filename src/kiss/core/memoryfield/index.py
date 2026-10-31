@@ -560,7 +560,7 @@ class VectorIndex:
             return text
         return data[:MAX_PAGE_BYTES].decode("utf-8", errors="ignore")
 
-    def sync(self, verify: bool = False) -> SyncReport:
+    def sync(self, verify: bool = False, cancel: threading.Event | None = None) -> SyncReport:
         """Bring the index in line with the pages on disk.
 
         A page is skipped when its row was embedded under the current
@@ -607,6 +607,8 @@ class VectorIndex:
             verify: Hash every page even when its stat key matches (used by
                 ``memory_refresh`` to catch edits that preserved size and
                 timestamps).
+            cancel: Once set, no further embedding batch starts; the batch
+                in flight is still written, as with an interrupted build.
 
         Returns:
             A :class:`SyncReport` with per-category counts of the writes
@@ -663,6 +665,8 @@ class VectorIndex:
         if restats:
             report = self._write(stored, [], restats, [], report)
         for batch in _batches(pending):
+            if cancel is not None and cancel.is_set():
+                break
             vectors = _embed_all(self.embed, [item[4] for item in batch])
             rows = []
             for (filename, digest, raw, key, _), vector in zip(batch, vectors, strict=True):
@@ -851,16 +855,19 @@ class VectorIndex:
         rows = groups.get(len(query_vector))
         if rows is None:
             return []
-        # float32 BLAS scores only select candidates: every row within the
-        # float32 error bound of the k-th best (or of min_score) is rescored
-        # exactly with math.sumprod, so scores, ties and the min_score cut
-        # are the same as an exact scan (an orthogonal page scores 0.0).
+        # float32 BLAS scores only select candidates; each is within slack
+        # of its exact score.  The k best approximate rows all score at least
+        # kth_best - slack exactly, so every true top-k row does too and its
+        # approximation is at least kth_best - 2 * slack.  Every row above
+        # that floor (or within slack of min_score) is rescored exactly with
+        # math.sumprod, so scores, ties and the min_score cut are the same
+        # as an exact scan (an orthogonal page scores 0.0).
         approx = rows.vectors @ np.asarray(query_vector, dtype=np.float32)
         slack = float32_dot_error(len(query_vector))
         floor = min_score - slack
         if len(approx) > k:
             kth_best = float(np.partition(approx, len(approx) - k)[len(approx) - k])
-            floor = max(floor, kth_best - slack)
+            floor = max(floor, kth_best - 2 * slack)
         scored = sorted(
             (-math.sumprod(rows.vectors[i].tolist(), query_vector), int(i))
             for i in np.flatnonzero(approx >= floor)

@@ -24,6 +24,7 @@ Depends only on ``websockets`` and the sorcar/core layers.
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 import uuid
@@ -37,6 +38,7 @@ from websockets.sync.client import ClientConnection
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar.sea_apply import SETTING_FIELDS
 from kiss.core import tool_interrupt
+from kiss.core.printer import event_cost
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 """Largest daemon event frame the client accepts.
@@ -45,7 +47,7 @@ The daemon emits large single JSON events (e.g. ``system_prompt``
 carrying the full SYSTEM.md), so this MUST match the daemon-side frame
 limit (``web_server._MAX_LINE_BYTES``, 64 MiB).  A frame over the cap
 closes the connection with code 1009, which :func:`run` reports as a
-:class:`ConnectionError` (see :func:`_frame_limit_error`) instead of
+:class:`ConnectionLostError` (see :func:`_closed_error`) instead of
 silently misreporting a possibly terminal ``result`` event.
 """
 
@@ -116,6 +118,19 @@ class CancelledError(Exception):
         super().__init__(message)
         self.result = result
         self.confirmed = confirmed
+
+
+class ConnectionLostError(ConnectionError):
+    """The daemon connection failed after the ``run`` was sent.
+
+    Raised by :func:`run` when the daemon closes the connection (or
+    sends a frame over :data:`_MAX_LINE_BYTES`) while the task runs, or
+    when a stop cannot be written on the broken connection: the task
+    may still be running (and spending) on the daemon.  A failure
+    before the ``run`` went out, when no task can exist, is a plain
+    :class:`ConnectionError`.  Like every such abort of :func:`run` it
+    carries a ``task_result`` attribute with the spend reported so far.
+    """
 
 
 class RunRefusedError(Exception):
@@ -222,64 +237,6 @@ class TaskResult:
     settings: dict[str, Any] = field(default_factory=dict)
 
 
-def _resolve_endpoint_file(endpoint_file: str | Path | None) -> Path:
-    """Return the daemon endpoint file to read.
-
-    Precedence: explicit *endpoint_file* argument, then the
-    ``KISS_SORCAR_LOCAL`` environment variable, then the daemon's
-    default ``$KISS_HOME/sorcar-local.json``.
-
-    Args:
-        endpoint_file: Optional explicit endpoint file override.
-
-    Returns:
-        The resolved endpoint file path.
-    """
-    if endpoint_file:
-        return Path(endpoint_file)
-    return local_endpoint.default_endpoint_path()
-
-
-def _parse_cost(value: Any) -> float:
-    """Parse a daemon cost field (``"$0.1234"``, ``"N/A"``, or a number).
-
-    Args:
-        value: The ``cost`` field of a daemon ``result`` event.
-
-    Returns:
-        The cost in USD; ``0.0`` when the field is absent or unparseable.
-    """
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip().lstrip("$"))
-        except ValueError:
-            return 0.0
-    return 0.0
-
-
-def _event_cost(event: dict[str, Any]) -> float:
-    """Return the USD cost carried by a ``result`` / ``usage_info`` event.
-
-    The daemon sends the exact figure as ``cost_usd`` next to the
-    four-decimal ``"$x.xxxx"`` display string in ``cost``; the string is
-    the fallback for events (older daemons, late-charge deltas) without
-    it, so the spend a parent charges to its ledger is never truncated
-    to the display precision.
-
-    Args:
-        event: A daemon event carrying ``cost`` and possibly ``cost_usd``.
-
-    Returns:
-        The cost in USD; ``0.0`` when neither field yields a number.
-    """
-    exact = event.get("cost_usd")
-    if isinstance(exact, (int, float)):
-        return float(exact)
-    return _parse_cost(event.get("cost"))
-
-
 def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any]:
     """Return *event*'s task totals minus spend already charged elsewhere.
 
@@ -303,12 +260,12 @@ def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any
     """
     delta = event.get("ancestor_charged")
     if isinstance(delta, dict):
-        charged["cost"] += _event_cost(delta)
+        charged["cost"] += event_cost(delta) or 0.0
         charged["tokens"] += int(delta.get("tokens", 0) or 0)
         charged["steps"] += int(delta.get("steps", 0) or 0)
     steps = event.get("step_count", event.get("total_steps", 0))
     return {
-        "cost": _event_cost(event) - charged["cost"],
+        "cost": (event_cost(event) or 0.0) - charged["cost"],
         "total_tokens": int(event.get("total_tokens", 0) or 0) - charged["tokens"],
         "step_count": int(steps or 0) - charged["steps"],
     }
@@ -351,7 +308,7 @@ def _to_task_result(
     return TaskResult(
         text=str((event or {}).get("summary") or (event or {}).get("text") or ""),
         success=bool((event or {}).get("success", False)),
-        cost=_event_cost(spend),
+        cost=event_cost(spend) or 0.0,
         tokens=int(spend.get("total_tokens", 0) or 0),
         steps=int(steps or 0),
         chat_id=chat_id,
@@ -424,30 +381,84 @@ def resolve_sea_path(sea_path: str | None) -> str:
     return str(path)
 
 
-def _frame_limit_error() -> ConnectionError:
-    """Return the error for a daemon frame exceeding the client cap.
-
-    Reads :data:`_MAX_LINE_BYTES` at call time (tests shrink it).
-    """
-    return ConnectionError(
-        "The sorcar daemon sent an event frame larger "
-        f"than the {_MAX_LINE_BYTES}-byte client limit"
-    )
-
-
-def _closed_error(exc: ConnectionClosed) -> ConnectionError:
-    """Translate a closed daemon connection into the client's error.
+def _oversize_error_text(exc: ConnectionClosed) -> str:
+    """Return the error text of a close over a too-big daemon frame, or ``""``.
 
     A close this client itself initiated with code 1009 (message too
-    big) means the daemon sent a frame over :data:`_MAX_LINE_BYTES`;
-    any other close means the daemon went away before the task
-    finished.
+    big) means the daemon sent a frame over :data:`_MAX_LINE_BYTES`
+    (read at call time: tests shrink it), whether or not the ``run``
+    command was sent yet.
     """
     if exc.sent is not None and exc.sent.code == 1009:
-        return _frame_limit_error()
-    return ConnectionError(
-        "The sorcar daemon closed the connection before the task finished"
+        return (
+            "The sorcar daemon sent an event frame larger "
+            f"than the {_MAX_LINE_BYTES}-byte client limit"
+        )
+    return ""
+
+
+def _closed_error(exc: ConnectionClosed) -> ConnectionLostError:
+    """Translate a daemon connection closed while the task ran into the client's error.
+
+    A too-big frame is named (:func:`_oversize_error_text`); any other
+    close means the daemon went away before the task finished.
+    """
+    return ConnectionLostError(
+        _oversize_error_text(exc)
+        or "The sorcar daemon closed the connection before the task finished"
     )
+
+
+class _Inbox:
+    """The daemon connection's incoming frames, read on a helper thread.
+
+    The daemon stops a task by injecting ``KeyboardInterrupt`` into its
+    thread, and CPython can raise it right after a ``with lock:``
+    acquire returns, before the block's cleanup is armed.  Landing in
+    ``ws.recv()``, it left the websockets frame-assembler mutex held, so
+    the ``ws.close()`` in :func:`run`'s ``finally``, which takes the
+    same mutex, never returned.  Only this helper thread, which nothing
+    interrupts, calls ``ws.recv()``; the task thread waits on a
+    ``queue.SimpleQueue``, whose ``get`` takes no Python-level lock.
+    The queue is unbounded (no read flow control), which the local
+    daemon's event stream does not need.
+    """
+
+    def __init__(self, ws: ClientConnection) -> None:
+        """Start reading *ws*; the reader ends when the connection closes."""
+        self._frames: queue.SimpleQueue[str | bytes | BaseException] = queue.SimpleQueue()
+        threading.Thread(
+            target=self._pump, args=(ws,), name="sorcar-local-recv", daemon=True,
+        ).start()
+
+    def _pump(self, ws: ClientConnection) -> None:
+        """Queue every frame of *ws*, then the error that ended the reading."""
+        while True:
+            try:
+                frame = ws.recv()
+            except BaseException as exc:  # re-raised on the task thread
+                self._frames.put(exc)
+                return
+            self._frames.put(frame)
+
+    def recv(self, timeout: float) -> str | bytes:
+        """Return the next frame, like ``ws.recv(timeout=timeout)``.
+
+        Args:
+            timeout: Seconds to wait for a frame (positive).
+
+        Raises:
+            TimeoutError: When no frame arrived within *timeout*.
+            ConnectionClosed: When the connection closed (any other
+                error the reader hit is raised as is).
+        """
+        try:
+            frame = self._frames.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"no frame within {timeout:.1f}s") from None
+        if isinstance(frame, BaseException):
+            raise frame
+        return frame
 
 
 def _send(ws: ClientConnection, cmd: dict[str, Any]) -> None:
@@ -504,8 +515,8 @@ def _stop_and_await_confirmation(
         status must confirm the stop (:data:`_STOP_CONFIRM_GRACE_SECONDS`).
 
     Raises:
-        ConnectionError: When the stop could not even be sent, so the
-            task was neither stopped nor confirmed dead — raising a
+        ConnectionLostError: When the stop could not even be sent, so
+            the task was neither stopped nor confirmed dead — raising a
             plain ``TimeoutError`` would let a caller claim "was
             stopped"; the broken daemon connection is surfaced instead,
             like every other mid-run connection failure.
@@ -516,11 +527,31 @@ def _stop_and_await_confirmation(
     try:
         _send_stop(ws, tab_id, run_token)
     except OSError as send_exc:
-        raise ConnectionError(
+        raise ConnectionLostError(
             "The sorcar daemon connection failed while "
             f"stopping the {what} task: {send_exc}"
         ) from send_exc
     return deadline
+
+
+def _run_ended(aborted: BaseException | None, seen: _Observed) -> bool:
+    """Whether :func:`run` exits knowing its task is over on the daemon.
+
+    True on a normal return, once the task's ``result`` arrived, on a
+    confirmed stop and on a refused run (nothing ran).  Any other exit
+    (a plain timeout, an unconfirmed stop, a lost connection or
+    machine, an abort whose cascaded ``stop`` is unconfirmed) may leave
+    the task running.
+
+    Args:
+        aborted: The exception :func:`run` exits with, or ``None``.
+        seen: What the run's event stream reported.
+    """
+    if aborted is None or seen.result is not None:
+        return True
+    if isinstance(aborted, CancelledError):
+        return aborted.confirmed
+    return isinstance(aborted, (StoppedOnTimeoutError, RunRefusedError))
 
 
 def run_command(
@@ -1010,8 +1041,9 @@ def run(
             job thread and bounds the call by joining that thread, so
             it passes the call's bound through this.  ``None`` sends
             *timeout* when *stop_on_timeout*, else nothing.
-        endpoint_file: Daemon endpoint file override (defaults to
-            ``$KISS_SORCAR_LOCAL`` or ``$KISS_HOME/sorcar-local.json``).
+        endpoint_file: Daemon endpoint file override; empty or
+            ``None`` means :func:`local_endpoint.default_endpoint_path`
+            (``$KISS_SORCAR_LOCAL`` or ``$KISS_HOME/sorcar-local.json``).
         cancel: An event the caller may set from another thread to
             stop the task (``agent_job(..., "kill")``): the daemon is
             sent a ``stop`` and the wait continues until the task's
@@ -1057,16 +1089,18 @@ def run(
             *sea_path* is neither empty nor the path string
             of an existing Python (``.py``) file (see
             :func:`resolve_sea_path`).
-        ConnectionError: When no daemon is reachable at the endpoint,
-            the daemon drops the connection before the task finishes,
-            or a *stop_on_timeout* stop cannot be sent on the broken
-            connection (a plain ``TimeoutError`` would falsely imply
-            the task was stopped).
+        ConnectionError: When no daemon is reachable at the endpoint
+            or the ``run`` cannot be sent: no task was started.
+        ConnectionLostError: When the daemon drops the connection
+            after the ``run`` was sent, loses its connection to the
+            *machine* running the task (a terminal status marked
+            ``lost``), or a stop (*stop_on_timeout*, *cancel*) cannot
+            be sent on the broken connection (a plain ``TimeoutError``
+            would falsely imply the task was stopped): the task may
+            still be running.  A subclass of ``ConnectionError``.
         TimeoutError: When the task does not finish within *timeout*
             seconds (never raised when *timeout* is ``None``).  The
-            client then sends the daemon an explicit
-            ``closeTab`` for the task's tab and disconnects; the task
-            keeps running and its state is disposed when it ends —
+            client then disconnects and the task keeps running —
             unless *stop_on_timeout* is true, in which case the task
             is first stopped and its terminal status awaited (see the
             parameter's documentation).
@@ -1096,11 +1130,17 @@ def run(
     ``task_result`` attribute: a :class:`TaskResult` with the spend the
     dispatched task had reported so far, so the caller can still
     charge it.
+
+    Before disconnecting, the client asks the daemon to close the run's
+    tab (``closeTab``) once the task is known to be over: it returned,
+    its ``result`` arrived, its stop was confirmed or the run was
+    refused.  A task that may still be running keeps its tab on every
+    surface until a user closes it.  A sub-agent run's tab is closed on
+    every exit: no surface shows it (they show the parent's nested tab).
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
     sea_file = resolve_sea_path(sea_path)
-    path = _resolve_endpoint_file(endpoint_file)
     tab_id = f"api-{uuid.uuid4().hex}"
     # Client-minted per-submission run token.  Echoed on the run's
     # ``status`` events, and — critically — sent with the
@@ -1114,10 +1154,11 @@ def run(
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
     try:
         ws = local_endpoint.connect(
-            path,
+            Path(endpoint_file) if endpoint_file else None,
             open_timeout=10.0 if timeout is None else min(timeout, 10.0),
             max_size=_MAX_LINE_BYTES,
         )
+        inbox = _Inbox(ws)
         cmd = run_command(
             prompt,
             tab_id=tab_id,
@@ -1156,7 +1197,11 @@ def run(
         try:
             local_endpoint.send(ws, json.dumps(cmd))
         except ConnectionClosed as exc:
-            raise _closed_error(exc) from exc
+            # A plain ConnectionError: the run was never sent, so no task runs.
+            raise ConnectionError(
+                _oversize_error_text(exc)
+                or "The sorcar daemon closed the connection before the task was sent"
+            ) from exc
         started = False
         stopping = False  # stop sent (timeout or cancel); awaiting confirmation
         cancelled = False  # the stop was requested through *cancel*
@@ -1243,7 +1288,7 @@ def run(
                 # *remaining*.
                 wait = min(remaining, wake_seconds)
             try:
-                raw = ws.recv(timeout=wait)
+                raw = inbox.recv(wait)
             except TimeoutError:
                 # Pure wake-up (or, with a finite deadline, loop back so
                 # the remaining<=0 branch above decides between the
@@ -1277,6 +1322,15 @@ def run(
             elif etype == "task_settings" and isinstance(event.get("settings"), dict):
                 seen.settings = event["settings"]
             elif etype == "status":
+                if not event.get("running") and event.get("lost"):
+                    # The daemon lost its stream to the machine running
+                    # the task (``RemoteTabs.dropped``): the task may
+                    # still be running there, so this terminal status
+                    # is no proof of its end, nor is the
+                    # ``prompt_refused`` error that follows a refusal.
+                    raise ConnectionLostError(
+                        f"lost the connection to machine {event['lost']}"
+                    )
                 if event.get("running"):
                     started = True
                     if running is not None:
@@ -1354,16 +1408,20 @@ def run(
                 pass
         # The synthetic tab is this client's alone, and a disconnect no
         # longer tears tabs down (tabs are global state shared by every
-        # client), so explicitly ask the daemon to close it on every
-        # exit path.  For a still-running task (timeout) this merely
-        # flips ``frontend_closed`` and the state is disposed when the
-        # task ends; for a finished task it is disposed immediately.
+        # client), so ask the daemon to close it once the run is over.
+        # A task that may still be running keeps its tab until a user
+        # closes it: closing it would remove a running task's tab from
+        # every surface.  A sub-agent dispatch's tab is on no surface
+        # (they show the parent's ``__sub_`` tab, which the task's own
+        # done signal closes), so its close only lets the daemon
+        # dispose of the state when the task ends, and is always sent.
         # Best-effort: the daemon may be gone.
         if ws is not None:
-            try:
-                _send(ws, {"type": "closeTab", "tabId": tab_id})
-            except OSError:
-                pass
+            if parent_task_id or _run_ended(aborted, seen):
+                try:
+                    _send(ws, {"type": "closeTab", "tabId": tab_id})
+                except OSError:
+                    pass
             try:
                 ws.close()
             except Exception:

@@ -33,9 +33,9 @@ _SEA_PATH = Path(orbestrouter_sea.__file__).resolve()
 
 def test_both_models_are_openrouter_twins_of_the_bestrouter_models() -> None:
     """Fable 5.1 works, Astra reviews, both as priced ``openrouter/`` catalog entries."""
-    assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.1"
+    assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.1-max"
     assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra"
-    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1"
+    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1-max"
     assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra"
     for model in (orbestrouter_sea.PRIMARY_MODEL, orbestrouter_sea.REVIEW_MODEL):
         assert model in MODEL_INFO, model
@@ -57,7 +57,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     )
     flat = " ".join(protocol.split())
     for phrase in (
-        "Use 'openrouter/anthropic/claude-fable-5.1' model for all tasks, including software "
+        "Use 'openrouter/anthropic/claude-fable-5.1-max' model for all tasks, including software "
         "development.",
         "Use openrouter/openai/gpt-6-astra (not codex) through "
         "`run_agent(model=\"openrouter/openai/gpt-6-astra\", tool_profile=\"review\", "
@@ -68,7 +68,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     ):
         assert phrase in flat, phrase
     # The bestrouter's direct-vendor names never leak into the OpenRouter protocol.
-    assert "'claude-fable-5-1'" not in protocol and " gpt-6-astra " not in protocol
+    assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol and " gpt-6-astra " not in protocol
     # Same working rules as the bestrouter, word for word.
     rules = protocol.split("Working rules:", 1)[1]
     assert rules == bestrouter_sea.SYSTEM_PROMPT.split("Working rules:", 1)[1]
@@ -79,15 +79,12 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert_no_removed_getters(orbestrouter_sea)
 
 
-def test_orbestrouter_is_a_model_picker_sea() -> None:
-    """Registered under its command name in the picker registry; its only setting is the model."""
-    assert sea_commands.model_seas()["orbestrouter"] == _SEA_PATH
-    assert sea_commands.model_sea("orbestrouter") == _SEA_PATH
-    assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.PRIMARY_MODEL}
-
-
 def test_agent_file_loader_pins_the_openrouter_primary_model() -> None:
-    """The daemon-side loader sets the run's model and stages the protocol; no tools hook."""
+    """The only setting is the model; the daemon-side loader pins it and stages the protocol.
+
+    The tools pass through unchanged: the SEA has no tools hook of its own.
+    """
+    assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.PRIMARY_MODEL}
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "toolProfile": "full", "model": "x"}
     assert apply_sea(cmd) == {"model"}
     assert cmd["model"] == orbestrouter_sea.PRIMARY_MODEL

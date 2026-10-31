@@ -91,24 +91,12 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
         )
 
         preamble = r"""
-            var isRunning = false;
-            var isMerging = false;
             var inp = { value: '', disabled: false, style: {}, focus: function() {} };
-            var sendBtn = { disabled: false, style: {} };
-            var stopBtn = { style: {} };
-            var uploadBtn = { disabled: false };
-            var worktreeToggleBtn = { disabled: false };
-            var parallelToggleBtn = { disabled: false };
-            var modelBtn = { disabled: false };
             var tabs = [];
             var activeTabId = '';
             var _idCounter = 0;
             var _postedMessages = [];
-            var t0 = null;
             var transport = { postMessage: function(m) { _postedMessages.push(m); } };
-            var document = {
-                body: { classList: { contains: function() { return false; } } },
-            };
 
             // Mint a fresh-uuid-like id on every call so two calls
             // never collide.  Mirrors the real ``genTabId`` contract.
@@ -131,6 +119,9 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
                     workDir: tab.workDir || '',
                 });
             }
+            // createNewTab resets the page's running state; the composer
+            // controls that repaints are not under test here.
+            function setRunningState() {}
             function startTimer() {}
             function stopTimer() {}
             function removeSpinner() {}
@@ -146,21 +137,6 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             function setTaskText(text) { _lastTaskText = text; }
             var _lastTaskText = '';
 
-            function updateInputDisabled() {
-                var blocked = isRunning || isMerging;
-                inp.disabled = blocked;
-                sendBtn.disabled = blocked;
-            }
-            function setRunningState(running) {
-                isRunning = running;
-                sendBtn.style.display = running ? 'none' : 'flex';
-                stopBtn.style.display = running ? 'flex' : 'none';
-                uploadBtn.disabled = running;
-                worktreeToggleBtn.disabled = running;
-                parallelToggleBtn.disabled = running;
-                modelBtn.disabled = running;
-                updateInputDisabled();
-            }
             function makeTab(title) {
                 return {
                     id: _mintId(),
@@ -175,16 +151,11 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             }
             function saveCurrentTab() {
                 var tab = tabs.find(function(t) { return t.id === activeTabId; });
-                if (!tab) return;
-                tab.isRunning = isRunning;
-                tab.isMerging = isMerging;
-                tab.inputValue = inp.value;
+                if (tab) tab.inputValue = inp.value;
             }
             function restoreTab(tab) {
                 activeTabId = tab.id;
                 inp.value = tab.inputValue || '';
-                isMerging = tab.isMerging || false;
-                updateInputDisabled();
             }
 
             // Seed: a baseline chat tab that the user is currently on.

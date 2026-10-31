@@ -25,7 +25,13 @@ LLM/coding-assistant indexing") and verified live:
   `docs/sea-commands.md` but not this file, and five embedded copies have
   already drifted: in `sea-commands.md` the `/bestrouter` and
   `/orbestrouter` rows still say "through run_parallel" where the page now
-  says "through a non-blocking run_agent", the `/discover` and
+  says "through a non-blocking run_agent" (and name the routers' primary
+  models without the effort suffix: the page says `claude-fable-5-1-max`
+  and `openrouter/anthropic/claude-fable-5.1-max`, as `bestrouter_sea.py`
+  and `orbestrouter_sea.py` do, the copy `claude-fable-5-1` and
+  `openrouter/anthropic/claude-fable-5.1`; the `/sync` row, rewritten in
+  the same window, is identical in both),
+  the `/discover`, `/devtools` and
   `/sync_history_and_memory` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), and the channel table's "scratch
   directory" and "no inheritance" rows lack the page's cron-job sentence and
@@ -48,7 +54,7 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  25 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/discover`,
+  26 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
   `/forget`, `/git_extract_knowledge`, `/good_morning`, `/machine`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,

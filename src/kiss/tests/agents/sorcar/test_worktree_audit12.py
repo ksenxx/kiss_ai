@@ -47,21 +47,21 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     repo = tmp_path / name
     repo.mkdir()
     subprocess.run(
-        ["git", "init", "-b", "main"], cwd=repo, capture_output=True,
+        ["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True,
     )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=True,
     )
     (repo / "init.txt").write_text("init\n")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=True,
     )
     return repo
 

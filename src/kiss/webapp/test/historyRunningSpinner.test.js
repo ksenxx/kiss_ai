@@ -10,7 +10,7 @@ const {
   makePage: makeSharedPage,
   send,
   sendEmptyWorkDir,
-  rowsByTitle: rowsByTaskId,
+  rowsByTitle,
 } = require('./simplify2_harness');
 const {freezeClockAndStyle, makeRow} = require('./history_helpers');
 
@@ -49,7 +49,7 @@ function testDotRendersForRunningRow() {
   ];
   send(win, {type: 'history', sessions: SESSIONS, offset: 0});
 
-  const rows = rowsByTaskId(win);
+  const rows = rowsByTitle(win);
   const finished = rows['finished task'];
   const running = rows['running task'];
   const failed = rows['failed task'];
@@ -120,7 +120,7 @@ function testDotAppearsLiveOnStatusRunningTrue() {
   ];
   send(win, {type: 'history', sessions: initial, offset: 0});
 
-  let rows = rowsByTaskId(win);
+  let rows = rowsByTitle(win);
   assert.ok(rows['live task'], 'row must render initially');
   assert.strictEqual(
     dotOf(rows['live task']),
@@ -155,7 +155,7 @@ function testDotAppearsLiveOnStatusRunningTrue() {
     generation: generation,
   });
 
-  rows = rowsByTaskId(win);
+  rows = rowsByTitle(win);
   const row = rows['live task'];
   assert.ok(row, 'row must still render after the live refresh');
   const dot = dotOf(row);

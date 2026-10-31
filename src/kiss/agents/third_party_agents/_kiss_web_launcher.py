@@ -30,6 +30,7 @@ publishes it to the daemon-side ``tools()`` through
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import contextlib
 import shutil
@@ -127,9 +128,11 @@ def _stop_api_server() -> None:
     daemon is running.  The whole teardown runs under ``_API_SERVER_LOCK``
     (like the startup in :func:`_ensure_api_server`), so a concurrent
     launch cannot publish a replacement daemon while the old one is still
-    shutting down.  Tests that start the global daemon against a
-    temporary environment call this so later tests never reuse a daemon
-    wired to a deleted tmpdir.
+    shutting down.  Registered with :mod:`atexit` at import, so a process
+    that starts the daemon and never stops it still removes the private
+    directory when it exits.  Tests that start the global daemon against
+    a temporary environment call this so later tests never reuse a
+    daemon wired to a deleted tmpdir.
     """
     global _API_SERVER, _API_SERVER_ENDPOINT, _API_SERVER_THREAD
     with _API_SERVER_LOCK:
@@ -140,6 +143,9 @@ def _stop_api_server() -> None:
         _abort_api_server_startup(
             server._loop, thread, server, None, str(Path(endpoint).parent),
         )
+
+
+atexit.register(_stop_api_server)
 
 
 async def _stop_after_startup(server: RemoteAccessServer) -> None:
@@ -334,6 +340,7 @@ def run_agent_via_kiss_web(
             existing Python file.
         ConnectionError: When the daemon cannot be reached.
     """
+    from kiss.agents.sorcar.agent_dispatch import result_summary
     from kiss.server import sorcar
 
     prompt = prompt_template
@@ -377,9 +384,8 @@ def run_agent_via_kiss_web(
         timeout=None,
         endpoint_file=endpoint,
     )
-    summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(
-        {"success": result.success, "summary": summary},
+        {"success": result.success, "summary": result_summary(result)},
         sort_keys=False,
     ))
     if result.chat_id and isinstance(agent, KissWebChatAgent):

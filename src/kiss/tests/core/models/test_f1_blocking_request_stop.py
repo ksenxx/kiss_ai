@@ -28,6 +28,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import httpcore
+import openai
 import pytest
 
 from kiss.core import stop_signal
@@ -37,6 +39,7 @@ from kiss.core.models.openai_compatible_model import (
 )
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
+from kiss.tests.server.pause import Pause
 
 _MODEL = "gpt-blocking-under-test"
 _STOP_AFTER = 0.3
@@ -166,26 +169,84 @@ class _HeldEffortRejectionGateway:
         return Reply(json_body=_json_reply(request.path))
 
 
+class _TimedStop(threading.Event):
+    """A stop event that records when it was set (``set_at``, a monotonic time)."""
+
+    set_at: float | None = None
+
+    def set(self) -> None:
+        """Record the time, then set the event."""
+        self.set_at = time.monotonic()
+        super().set()
+
+
 def _run_with_stop(
     call: Callable[[], Any], stop: threading.Event, stop_after: float | None
 ) -> tuple[BaseException | None, float]:
-    """Run *call* under *stop*, fired *stop_after* seconds in if given; return (error, elapsed)."""
+    """Run *call* under *stop*, fired *stop_after* seconds in if given; return (error, elapsed).
+
+    *elapsed* runs from the Stop when *stop* is a :class:`_TimedStop`
+    that fired (how long the request took to reach the server is not
+    the Stop's latency), else from the start of *call*.
+    """
     stop_signal.set_thread_stop_event(stop)
     started = time.monotonic()
+    error: BaseException | None = None
     try:
         if stop_after is not None:
             threading.Timer(stop_after, stop.set).start()
         call()
-    except BaseException as error:  # noqa: BLE001 - the error is the result
-        return error, time.monotonic() - started
+    except BaseException as caught:  # noqa: BLE001 - the error is the result
+        error = caught
     finally:
         stop_signal.set_thread_stop_event(None)
-    return None, time.monotonic() - started
+    if isinstance(stop, _TimedStop) and stop.set_at is not None:
+        started = stop.set_at
+    return error, time.monotonic() - started
 
 
 def _worker_threads() -> list[threading.Thread]:
     """Return the live worker threads carrying a blocking model request."""
     return [t for t in threading.enumerate() if t.name == _WORKER_THREAD]
+
+
+def _stop_when(condition: Callable[[], bool]) -> threading.Event:
+    """Return a stop event that a thread sets as soon as *condition* holds.
+
+    The pending-request tests stop once the server holds the request, not
+    after a fixed delay: on a loaded machine the worker may still be
+    connecting by then, which is the case of
+    ``test_a_stop_while_the_connection_is_set_up_never_sends_the_request``.
+    """
+    stop = _TimedStop()
+    threading.Thread(target=_set_when, args=(condition, stop), daemon=True).start()
+    return stop
+
+
+def _set_when(condition: Callable[[], bool], event: threading.Event) -> None:
+    """Set *event* once *condition* holds, polling every 10 ms for at most 10 s."""
+    deadline = time.monotonic() + 10
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    event.set()
+
+
+def _on_the_worker(_frame_locals: dict[str, Any]) -> bool:
+    """Whether the thread entering a :class:`Pause` hook is the request's worker."""
+    return threading.current_thread().name == _WORKER_THREAD
+
+
+class _WorkerEntry:
+    """A :class:`Pause` matcher that never pauses: ``entered`` is set once the worker enters."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+
+    def __call__(self, frame_locals: dict[str, Any]) -> bool:
+        """Note the request's worker entering the hooked code, and let it go on."""
+        if _on_the_worker(frame_locals):
+            self.entered.set()
+        return False
 
 
 def _assert_unwound_promptly(server: Any, error: BaseException | None, elapsed: float) -> None:
@@ -214,7 +275,9 @@ def test_chat_completions_text_turn_unwinds_while_the_request_is_pending(
     """``_stream_text`` without a callback: the Stop interrupts the silent request."""
     model = OpenAICompatibleModel(_MODEL, base_url=silent_server.base_url, api_key="k")
     model.initialize("Say something.")
-    error, elapsed = _run_with_stop(model.generate, threading.Event(), _STOP_AFTER)
+    error, elapsed = _run_with_stop(
+        model.generate, _stop_when(lambda: bool(silent_server.requests)), None
+    )
     _assert_unwound_promptly(silent_server, error, elapsed)
     assert model.take_partial_usage_response() is None, "nothing arrived, nothing to bill"
     # The transport is still usable: the next turn gets a fresh connection.
@@ -230,8 +293,8 @@ def test_chat_completions_tools_turn_unwinds_while_the_request_is_pending(
     model.initialize("Use the finish tool.")
     error, elapsed = _run_with_stop(
         lambda: model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA),
-        threading.Event(),
-        _STOP_AFTER,
+        _stop_when(lambda: bool(silent_server.requests)),
+        None,
     )
     _assert_unwound_promptly(silent_server, error, elapsed)
 
@@ -240,10 +303,39 @@ def test_responses_turn_unwinds_while_the_request_is_pending(silent_server: Any)
     """v2's ``_request_response`` without a callback is interrupted the same way."""
     model = OpenAICompatibleModel2(_MODEL, base_url=silent_server.base_url, api_key="k")
     model.initialize("Say something.")
-    error, elapsed = _run_with_stop(model.generate, threading.Event(), _STOP_AFTER)
+    error, elapsed = _run_with_stop(
+        model.generate, _stop_when(lambda: bool(silent_server.requests)), None
+    )
     _assert_unwound_promptly(silent_server, error, elapsed)
     assert model.generate()[0] == "late but complete"
     assert len(silent_server.requests) == 2
+
+
+def test_a_stop_while_the_connection_is_set_up_never_sends_the_request(
+    silent_server: Any,
+) -> None:
+    """A Stop that lands before the request's connection is up: the request never goes out.
+
+    The worker is held on its way into httpcore's TCP connect (as a
+    starved thread or a slow handshake holds it) until the Stop has
+    unwound the turn and aborted the client.  The connection it then
+    opens was not in the pool the abort walked; the pool's abortable
+    backend shuts it down before httpcore writes on it, so the provider
+    never sees (nor bills) the stopped request and the worker ends at
+    once instead of waiting on the provider until the client timeout.
+    """
+    model = OpenAICompatibleModel2(_MODEL, base_url=silent_server.base_url, api_key="k")
+    model.initialize("Say something.")
+    with Pause(httpcore.SyncBackend.connect_tcp.__code__, _on_the_worker) as connecting:
+        error, _elapsed = _run_with_stop(
+            model.generate, _stop_when(connecting.paused.is_set), None
+        )
+    assert isinstance(error, KeyboardInterrupt), f"the stopped turn returned {error!r}"
+    deadline = time.monotonic() + _UNWIND_WITHIN
+    while _worker_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _worker_threads(), "the stopped request's worker still waits on the provider"
+    assert silent_server.requests == [], "the stopped request reached the provider"
 
 
 def test_a_stop_landing_with_the_reply_is_still_a_stop() -> None:
@@ -294,7 +386,10 @@ def test_an_abandoned_adaptive_probe_never_retries_through_the_next_turns_client
     worker is parked on the 400 until after the Stop unwound the turn and
     the next turn built a fresh client: the abandoned worker must not run
     its retry through that client, so the server sees the probe, the
-    next turn and nothing else.
+    next turn and nothing else.  The Stop lands once the worker holds
+    the 400 (it builds the SDK's status error), not merely once the
+    server got the probe: a Stop before the 400 arrives would skip the
+    rejection path this test is about.
     """
     gateway = _HeldEffortRejectionGateway()
     with ScriptedOpenAIServer(gateway) as server:
@@ -305,11 +400,14 @@ def test_an_abandoned_adaptive_probe_never_retries_through_the_next_turns_client
             model_config={"reasoning_effort": "high"},
         )
         model.initialize("Use the finish tool.")
-        error, elapsed = _run_with_stop(
-            lambda: model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA),
-            threading.Event(),
-            _STOP_AFTER,
-        )
+        rejected = _WorkerEntry()
+        with Pause(openai.APIStatusError.__init__.__code__, rejected):
+            error, elapsed = _run_with_stop(
+                lambda: model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA),
+                _stop_when(rejected.entered.is_set),
+                None,
+            )
+        assert rejected.entered.is_set(), "the worker never got the 400"
         assert isinstance(error, KeyboardInterrupt), f"the stopped turn returned {error!r}"
         assert elapsed < _UNWIND_WITHIN
         assert len(server.requests) == 1
@@ -401,8 +499,8 @@ def test_a_stopped_delegated_responses_turn_leaves_a_usable_client(silent_server
     model.initialize("Use the finish tool.")
     error, elapsed = _run_with_stop(
         lambda: model.generate_and_process_with_tools({}, tools_schema=_TOOLS_SCHEMA),
-        threading.Event(),
-        _STOP_AFTER,
+        _stop_when(lambda: bool(silent_server.requests)),
+        None,
     )
     _assert_unwound_promptly(silent_server, error, elapsed)
     assert silent_server.requests[0].path == "/v1/responses", "the turn was not delegated"

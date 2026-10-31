@@ -6,6 +6,7 @@
 """Anthropic model implementation for Claude models."""
 
 import base64
+import hashlib
 import logging
 import os
 from collections.abc import Callable
@@ -44,7 +45,7 @@ from kiss.core.models.model import (
     text_of_parts,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_error
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error, stop_or_stall_error
 
 if TYPE_CHECKING:
     from kiss.core.models.model_info import ModelInfo
@@ -427,12 +428,37 @@ def _tool_calls_to_tool_use_blocks(tool_calls: list[dict[str, Any]]) -> list[dic
     return blocks
 
 
+# Whisper transcripts of the audio clips this process converted, keyed by
+# (SHA-256 of the clip, MIME type): one short text per distinct clip.  A
+# conversation keeps foreign audio raw (an ``attachments`` entry or an
+# OpenAI ``input_audio`` part) and is converted again for every request
+# and keep-alive ping, each of which would otherwise pay for one more
+# Whisper call and could get a different transcript, changing the prompt
+# bytes the prompt cache is keyed on.
+_TRANSCRIPTS: dict[tuple[bytes, str], str] = {}
+
+
+def _transcript(att: Attachment) -> str:
+    """Return the Whisper transcript of audio *att*, transcribing each clip once.
+
+    A failure is not remembered, so the next request tries again; two
+    threads converting the same new clip at once may both transcribe it.
+    """
+    key = (hashlib.sha256(att.data).digest(), att.mime_type)
+    text = _TRANSCRIPTS.get(key)
+    if text is None:
+        text = transcribe_audio(att.data, att.mime_type)
+        _TRANSCRIPTS[key] = text
+    return text
+
+
 def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]]:
     """Convert :class:`Attachment` objects into Anthropic content blocks.
 
     Images become ``image`` blocks, PDFs become ``document`` blocks, and
-    audio is transcribed to text via Whisper when possible.  Unsupported
-    MIME types (e.g. video) are dropped with a warning.
+    audio is transcribed to text via Whisper when possible, once per clip
+    (:func:`_transcript`).  Unsupported MIME types (e.g. video) are
+    dropped with a warning.
 
     Args:
         attachments: The attachments to convert.
@@ -453,7 +479,7 @@ def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]
             blocks.append({"type": "document", "source": source})
         elif att.mime_type.startswith("audio/"):
             try:
-                text = transcribe_audio(att.data, att.mime_type)
+                text = _transcript(att)
                 blocks.append({"type": "text", "text": f"[Audio transcription]\n{text}"})
             except Exception as exc:
                 logger.warning(
@@ -1223,10 +1249,12 @@ class AnthropicModel(Model):
             # clock BEFORE the headers arrive) or the event-level one
             # (`stop_aware_events`' stall error).  A stop pressed while
             # the request was still silent has no watchdog to report it
-            # and must not be retried as a stall.
-            if stop_signal.stop_requested():
-                raise stop_error() from exc
-            raise self._stall_error() from exc
+            # and must not be retried as a stall.  A stall names the
+            # model: it is usually diagnosed from a log line that does
+            # not say which model was being asked.
+            raise stop_or_stall_error(
+                self._stream_stall_timeout, f"Anthropic model {self.model_name}"
+            ) from exc
         except Exception as exc:
             if stop_signal.stop_requested():
                 raise stop_error() from exc
@@ -1240,23 +1268,6 @@ class AnthropicModel(Model):
                 # succeed.
                 raise KISSError(_WORKSPACE_ID_HINT.format(error=exc)) from exc
             raise
-
-    def _stall_error(self) -> TimeoutError:
-        """Build the retryable stall error.
-
-        The message itself comes from
-        :func:`~kiss.core.models.stream_abort.stall_error`, so this
-        transport reports a stall in exactly the words the others do;
-        only the offending model is added, because a stall is usually
-        diagnosed from a log line that does not say which model was
-        being asked.
-
-        Returns:
-            The ``TimeoutError`` for the caller to raise.
-        """
-        return TimeoutError(
-            f"Anthropic model {self.model_name}: {stall_error(self._stream_stall_timeout)}"
-        )
 
     def _raise_on_refusal(self, response: Any) -> None:
         """Raise :class:`ModelRefusalError` when the model refused the request.

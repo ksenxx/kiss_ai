@@ -50,14 +50,14 @@ from kiss.tests.server.conftest import (
 def _init_git_repo(tmpdir: str) -> None:
     subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
+                   capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
+                   capture_output=True, check=True)
     Path(tmpdir, ".gitkeep").touch()
     Path(tmpdir, ".gitignore").write_text(".kiss/\n")
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
+                   capture_output=True, check=True)
 
 
 class _PromptCapture:
