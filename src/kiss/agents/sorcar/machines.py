@@ -87,7 +87,12 @@ from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE, recv_auth_reply, send
+from kiss.agents.sorcar.local_endpoint import (
+    LOCAL_ENDPOINT_FILE,
+    FrameJoiner,
+    recv_auth_reply,
+    send,
+)
 from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
@@ -1163,6 +1168,15 @@ class MachineLink:
         larger than that closed the socket with 1009 and reported the
         machine unreachable for :data:`DOWN_BACKOFF` seconds.
 
+        Both sockets ask for permessage-deflate (``compression``
+        ``"deflate"``, which the daemon at the other end grants): the
+        frames a link carries are JSON, and a machine's CHATS page
+        (``history``) or a relayed transcript (``task_events``) is
+        three to six times smaller compressed, which is what a slow
+        network between the two daemons notices.  An ssh forward
+        does not compress on its own, and TLS hides the bytes from
+        it anyway.
+
         The request socket's receive queue is unbounded (``max_queue``
         ``None``).  The daemon's watchdog pushes a ``heartbeat`` frame
         at every socket every 15 s, and the request socket only reads
@@ -1207,12 +1221,15 @@ class MachineLink:
                 "refused the forwarded connection"
             )
         ctx.check_hostname = False
-        auth = {"type": "auth", "link": not stream, "password": machine.password}
+        # ``parts``: the link joins the parts of a big frame (a
+        # transcript, a picture) the daemon sends in pieces, see
+        # ``local_endpoint.frame_parts``.
+        auth = {"type": "auth", "link": not stream, "parts": True, "password": machine.password}
         deadline = time.monotonic() + timeout
         try:
             ws = _ws_connect(
                 ws_url(url), ssl=ctx, open_timeout=_remaining(deadline),
-                close_timeout=2.0, compression=None, max_size=None,
+                close_timeout=2.0, compression="deflate", max_size=None,
                 max_queue=16 if stream else None,
                 ping_interval=LINK_PING_INTERVAL, ping_timeout=LINK_PING_TIMEOUT,
             )
@@ -1396,13 +1413,20 @@ class MachineLink:
             # carries ``more``.  Joined here, so the caller sees one
             # reply, as from a daemon that sent it whole; each piece
             # proves the daemon is answering and buys the next one the
-            # whole *timeout* again.
+            # whole *timeout* again.  So does each part of a big frame
+            # (``local_endpoint.frame_parts``: a replayed transcript, a
+            # picture), joined the same way.
             head: dict[str, Any] | None = None
             pieces: list[str] = []
+            joiner = FrameJoiner()
             while True:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"no {reply_type} within {timeout:g}s")
-                msg = json.loads(self._ws.recv(timeout=_remaining(deadline)))
+                whole = joiner.feed(json.loads(self._ws.recv(timeout=_remaining(deadline))))
+                if whole is None:
+                    deadline = time.monotonic() + timeout
+                    continue
+                msg = whole[0]
                 if not isinstance(msg, dict):
                     continue
                 if "generation" in msg and msg["generation"] != generation:

@@ -83,7 +83,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
 
         self.server._handle_command({"type": "getHistory"})
         sessions = self._sessions()
-        by_task = {s["preview"]: s for s in sessions}
+        by_task = {s["title"]: s for s in sessions}
 
         self.assertFalse(by_task["ok task"]["failed"])
         self.assertTrue(by_task["fail task"]["failed"])
@@ -113,7 +113,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
 
         self.server._handle_command({"type": "getHistory"})
         sessions = self._sessions()
-        by_task = {s["preview"]: s for s in sessions}
+        by_task = {s["title"]: s for s in sessions}
 
         self.assertTrue(by_task["killed task"]["failed"])
         self.assertTrue(by_task["recovered task"]["failed"])
@@ -140,7 +140,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         th._save_task_extra({"endTs": 1.0}, task_id=no_verdict_id)
 
         self.server._handle_command({"type": "getHistory"})
-        by_task = {s["preview"]: s for s in self._sessions()}
+        by_task = {s["title"]: s for s in self._sessions()}
 
         self.assertTrue(by_task["/machine add ksen@host"]["failed"])
         self.assertIn("failed", by_task["/machine add ksen@host"]["tags"])
@@ -180,7 +180,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         th._save_task_result(result="<p>no</p>", task_id=verdict_id, success=False)
 
         self.server._handle_command({"type": "getHistory"})
-        by_task = {s["preview"]: s for s in self._sessions()}
+        by_task = {s["title"]: s for s in self._sessions()}
         self.assertFalse(by_task["legacy task"]["failed"])
         self.assertTrue(by_task["verdict task"]["failed"])
 

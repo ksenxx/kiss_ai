@@ -126,7 +126,7 @@ async function main() {
     assert.strictEqual(sockets.length, 4, 'the second Unlock reconnects');
     sockets[3].fireOpen();
     assert.deepStrictEqual(frames(sockets[3]), [
-      {type: 'auth', password: 'typed-pw'},
+      {type: 'auth', password: 'typed-pw', parts: true},
     ]);
     sockets[3].fireMessage({type: 'auth_ok'});
     assert.ok(!dialogShown(doc), 'auth_ok closes the dialog');

@@ -82,7 +82,7 @@ class TestGetHistoryBranches:
         assert len(hist) == 1
         sessions = hist[0]["sessions"]
         assert len(sessions) == 2
-        long_session = [s for s in sessions if len(s["preview"]) > 50][0]
+        long_session = [s for s in sessions if len(s["title"]) > 50][0]
         assert long_session["title"] == "a" * 60
         assert not long_session["title"].endswith("...")
 
@@ -96,7 +96,7 @@ class TestGetHistoryBranches:
         assert len(hist) == 1
         sessions = hist[0]["sessions"]
         assert len(sessions) == 1
-        assert sessions[0]["preview"] == "fix the bug"
+        assert sessions[0]["title"] == "fix the bug"
 
 
 class TestActiveFileMatchesEqualLength:

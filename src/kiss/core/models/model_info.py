@@ -592,14 +592,29 @@ _PER_1M_PRICE_FIELDS = (
 
 
 def _require_number(key: str, value: Any) -> None:
-    """Raise ``TypeError`` unless *value* is a JSON number (a boolean is not).
+    """Raise unless *value* is a finite, non-negative JSON number (a boolean is not).
+
+    The same predicate as :func:`_is_price` applies to every price and
+    to the context length: a negative price would bill a negative cost,
+    an infinite one (``1e309``) or ``NaN`` a ``NaN`` cost, and an
+    integer beyond the float range (``10**400``) passes ``isinstance``
+    but raises ``OverflowError`` in the cache-price derivation
+    (:func:`_normalize_entry`), which runs after the loader's
+    try/except and would abort the whole catalog import.
 
     Args:
         key: The entry field, named in the error.
         value: The field's value.
+
+    Raises:
+        TypeError: When *value* is not a number.
+        ValueError: When it is negative, infinite, ``NaN`` or too large
+            for a float.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{key} must be a number, got {value!r}")
+    if not _is_price(value):
+        raise ValueError(f"{key} must be a finite, non-negative number, got {value!r}")
 
 
 def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
@@ -650,14 +665,19 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       ``False`` or ``None`` keeps the Chat Completions v1 transport.  A
       caller's ``model_config["use_responses_api"]`` always overrides it.
 
-    The context length and every price must be JSON numbers (an optional
-    price may also be absent or ``null``): a string price would otherwise
-    pass here and raise later in arithmetic, at import for the whole
-    catalog or in every cost lookup of the entry.
+    The context length and every price must be finite, non-negative
+    JSON numbers (an optional price may also be absent or ``null``): a
+    string price would otherwise pass here and raise later in
+    arithmetic, at import for the whole catalog or in every cost lookup
+    of the entry, and a negative, infinite or over-float one would bill
+    a negative or ``NaN`` cost or abort the catalog import (see
+    :func:`_require_number`).
 
     Raises:
         KeyError: When a required key is missing.
         TypeError: When the context length or a price is not a number.
+        ValueError: When one is negative, infinite, ``NaN`` or too
+            large for a float.
     """
     for key in _CUSTOM_MODEL_DEFAULTS:
         _require_number(key, entry[key])

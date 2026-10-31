@@ -51,7 +51,14 @@ local ones, with two differences:
 The remote addresses a ``terminalData`` or ``browserFrame`` to the
 stream's connection; the stream hands it to the connection that opened
 the terminal, or to every connection watching the page
-(``browserViewport``).  A terminal takes input, a resize and a close
+(``browserViewport``).  The stream acknowledges every frame to the
+machine as it arrives (``browserFrameAck``), so the machine keeps at
+most two frames in flight on the link (:mod:`kiss.server.frame_flow`)
+and a slow link carries the newest picture at its own pace instead of
+a backlog that delays the link's keepalive and loses the stream; the
+connections watching the page here acknowledge their frames to this
+daemon the same way, and the stream holds the newest frame back for
+one that is behind.  A terminal takes input, a resize and a close
 from the connection that opened it only, as the local
 :class:`~kiss.server.terminal_tab.TerminalService` does.  A connection
 that drops stops watching its pages, and its shells are hung up after
@@ -79,9 +86,11 @@ import contextlib
 import json
 import logging
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.sorcar.machines import Machine, MachineError, load_machines
+from kiss.server.frame_flow import FrameFlow
 from kiss.server.machine_stream import MachineStream
 from kiss.server.terminal_tab import GRACE_SECONDS
 
@@ -92,6 +101,7 @@ TERMINAL_COMMANDS = frozenset({
 })
 BROWSER_COMMANDS = frozenset({
     "browserOpen", "browserClose", "browserNavigate", "browserInput", "browserViewport",
+    "browserFrameAck",
 })
 VIEW_COMMANDS = TERMINAL_COMMANDS | BROWSER_COMMANDS
 """The commands :meth:`RemoteViews.route` looks at."""
@@ -160,6 +170,10 @@ class RemoteViewStream(MachineStream):
         viewers: By the remote's own tab id, the connections watching
             the page (a visible ``browserViewport``): every frame of
             the page goes to each of them.
+        flows: By the remote's own tab id, the frames in flight to each
+            of the page's viewers and the one held back for a viewer
+            that is behind (:class:`~kiss.server.frame_flow.FrameFlow`,
+            frames in their wire form).
         seen: The remote ids of the pages opened or closed over the
             stream before the machine answered :meth:`request_pages`
             (None once it has, or once it answered that it does not
@@ -183,6 +197,7 @@ class RemoteViewStream(MachineStream):
         self.openers: list[str] = []
         self.browser_tabs: dict[str, dict[str, Any]] = {}
         self.viewers: dict[str, set[str]] = {}
+        self.flows: dict[str, FrameFlow[str]] = {}
         self.seen: set[str] | None = set()
         self.send_lock = threading.Lock()
         super().__init__(machine, owner, f"remote-views-{machine.name}")
@@ -266,12 +281,18 @@ class RemoteViewStream(MachineStream):
         client.  The event is delivered under the lock, in the order
         the bookkeeping saw it (a ``ready`` snapshot copies the
         bookkeeping under the same lock).
+
+        A frame is acknowledged to the machine once it is here (after
+        the lock: nothing is sent under it), whether or not anyone
+        watches the page still; it goes to each viewer that is not
+        behind, and is held back for one that is (:attr:`flows`).
         """
         remote_id = str(msg.get("tab_id") or "")
         event = self._stamped(msg)
         if "tab_id" in msg:
             event["tab_id"] = namespaced(remote_id, self.machine.name)
-        to: list[str] = []  # [] = every client
+        text = json.dumps(event)
+        to: list[str] | None = None  # None = every client
         answered = False  # a browserOpen of ours failed: its opener is told
         with self.lock:
             if self.retired:
@@ -279,9 +300,14 @@ class RemoteViewStream(MachineStream):
             if self.seen is not None and kind in ("openBrowserTab", "closeBrowserTab"):
                 self.seen.add(remote_id)
             if kind == "browserFrame":
-                to = list(self.viewers.get(remote_id, ()))
-                if not to:
-                    return
+                flow = self.flows.get(remote_id)
+                if flow is None:
+                    flow = self.flows[remote_id] = FrameFlow(
+                        send=self._owner.deliver_to, schedule=self._later,
+                    )
+                for conn_id in self.viewers.get(remote_id, ()):
+                    flow.offer(conn_id, text)
+                to = []
             elif kind == "openBrowserTab":
                 self.browser_tabs[remote_id] = dict(event, focus=False)
                 if msg.get("focus") and not msg.get("popup") and self.openers:
@@ -293,19 +319,46 @@ class RemoteViewStream(MachineStream):
             elif kind == "closeBrowserTab":
                 self.browser_tabs.pop(remote_id, None)
                 self.viewers.pop(remote_id, None)
+                flow = self.flows.pop(remote_id, None)
+                if flow is not None:
+                    flow.close()
             elif kind == "browserError" and not remote_id:
                 if not self.openers:
                     return
                 to = [self.openers.pop(0)]
                 answered = True
-            text = json.dumps(event)
-            if to:
+            if to is None:
+                self._owner.deliver(text)
+            else:
                 for conn_id in to:
                     self._owner.deliver_to(conn_id, text)
-            else:
-                self._owner.deliver(text)
-        if kind == "closeBrowserTab" or answered:
+        if kind == "browserFrame":
+            with contextlib.suppress(MachineError):
+                self.send({"type": "browserFrameAck", "tab_id": remote_id})
+        elif kind == "closeBrowserTab" or answered:
             self._owner.close_if_idle(self)
+
+    def frame_acked(self, remote_id: str, conn_id: str) -> None:
+        """The connection *conn_id* received a frame of the page *remote_id*.
+
+        The frame held back for it while it was behind, if any, goes
+        to it now; see :attr:`flows`.
+        """
+        with self.lock:
+            flow = self.flows.get(remote_id)
+            if flow is not None:
+                flow.acked(conn_id)
+
+    def _later(self, delay: float, callback: Callable[[], None]) -> None:
+        """Run *callback* under the lock after *delay* seconds (a flow's grace release)."""
+        def run() -> None:
+            with self.lock:
+                if not self.retired:
+                    callback()
+
+        timer = threading.Timer(delay, run)
+        timer.daemon = True
+        timer.start()
 
     def _stamped(self, msg: dict[str, Any]) -> dict[str, Any]:
         """A copy of *msg* without the remote's addressing, stamped with the machine."""
@@ -455,6 +508,11 @@ class RemoteViews:
             if existing is None:
                 return True  # the page went with its stream: nothing left to tell
             stream = existing
+            if name == "browserFrameAck":
+                # Answers a frame this stream relayed, not one of the
+                # machine's: the stream acknowledged that one itself.
+                stream.frame_acked(remote_id, conn_id)
+                return True
             frame["tab_id"] = remote_id
             self._forward(stream, name, remote_id, conn_id, cmd, frame)
         if name == "terminalClose":
@@ -515,6 +573,9 @@ class RemoteViews:
                     watching.add(conn_id)
                 else:
                     watching.discard(conn_id)
+                    flow = stream.flows.get(tab_id)
+                    if flow is not None:
+                        flow.forget(conn_id)
                     if watching:
                         return False
         return True
@@ -638,6 +699,8 @@ class RemoteViews:
             hidden: list[str] = []
             with stream.send_lock:
                 with stream.lock:
+                    for flow in stream.flows.values():
+                        flow.forget(conn_id)
                     for remote_id, watching in stream.viewers.items():
                         if conn_id in watching:
                             watching.discard(conn_id)
@@ -707,6 +770,10 @@ class RemoteViews:
             )
             stream.retired = True
             if lost:
+                logger.warning(
+                    "%s: %d page(s) and %d terminal(s) shown from it close here",
+                    text, len(stream.browser_tabs), len(stream.terminals),
+                )
                 for tab_id, conn_id in stream.terminals.items():
                     self.deliver_to(conn_id, json.dumps({
                         "type": "terminalError", "tab_id": tab_id, "text": text, "machine": name,
@@ -725,6 +792,9 @@ class RemoteViews:
             stream.openers.clear()
             stream.browser_tabs.clear()
             stream.viewers.clear()
+            for flow in stream.flows.values():
+                flow.close()
+            stream.flows.clear()
         if still_bound:
             timer = threading.Timer(REOPEN_DELAY, self.open_for, (name,))
             timer.daemon = True

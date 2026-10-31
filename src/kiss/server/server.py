@@ -52,7 +52,7 @@ from kiss.agents.sorcar.persistence import (
     _is_failed_result,
     _load_chat_events_by_task_id,
     _load_history,
-    _load_input_history,
+    _load_input_texts,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
@@ -237,7 +237,83 @@ def _safe_start_ms(value: object) -> int:
         return 0
 
 
-def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
+def _is_embedded_image(im: object) -> bool:
+    """Whether *im* (an ``images`` entry) carries a picture's base64 payload."""
+    return isinstance(im, dict) and isinstance(im.get("b64"), str) and bool(im["b64"])
+
+
+def _event_images(ev: object) -> list[dict[str, Any]]:
+    """The pictures embedded in event *ev* (``images`` entries with a base64 payload), in order."""
+    images = ev.get("images") if isinstance(ev, dict) else None
+    if not isinstance(images, list):
+        return []
+    return [im for im in images if _is_embedded_image(im)]
+
+
+def _lazy_replay_images(evs: list[dict[str, Any]], task_id: str) -> list[dict[str, Any]]:
+    """Return *evs* with every embedded picture replaced by a handle fetched on demand.
+
+    A ``tool_result``'s ``images`` carry base64 PNGs (a screenshot, a
+    plot: ``JsonPrinter._collect_result_images``), which are most of
+    a replayed transcript's bytes on the wire since base64 does not
+    compress, while the page shows them only when their panel is open
+    and scrolled to.  Each picture keeps its ``mime`` and ``path`` and
+    loses its ``b64`` for ``lazy: {taskId, index}``, *index* being
+    its ordinal among the pictures of the whole transcript in event
+    order; ``media/main.js`` asks for the picture (``getReplayImage``)
+    when it comes into view and :func:`_replay_image` finds it by the
+    same count.  Events with pictures are copied, never changed in
+    place: a running task's replay reads the printer's live recording,
+    whose dicts are the ones later replays and fetches read.
+
+    Args:
+        evs: The transcript's events, in order.
+        task_id: The task the transcript belongs to.
+    """
+    out: list[dict[str, Any]] = []
+    index = 0
+    for ev in evs:
+        if not _event_images(ev):
+            out.append(ev)
+            continue
+        images: list[Any] = []
+        for im in ev["images"]:
+            if _is_embedded_image(im):
+                images.append(
+                    {k: v for k, v in im.items() if k != "b64"}
+                    | {"lazy": {"taskId": task_id, "index": index}}
+                )
+                index += 1
+            else:
+                images.append(im)
+        out.append({**ev, "images": images})
+    return out
+
+
+def _replay_image(events: object, index: int) -> dict[str, Any] | None:
+    """The *index*-th embedded picture of *events*, as :func:`_lazy_replay_images` counts them.
+
+    Args:
+        events: The transcript's events (the persisted rows or the
+            printer's live recording), in order.
+        index: The picture's ordinal in the transcript.
+
+    Returns:
+        The picture's ``images`` entry (``b64``, ``mime``, ``path``), or
+        ``None`` when the transcript has no such picture.
+    """
+    if not isinstance(events, list) or index < 0:
+        return None
+    seen = 0
+    for ev in events:
+        for im in _event_images(ev):
+            if seen == index:
+                return im
+            seen += 1
+    return None
+
+
+def _coalesced_replay_events(events: object, task_id: str = "") -> list[dict[str, Any]]:
     """Coalesce a persisted event list for a replay broadcast.
 
     Persisted streams store one row per streamed token; merging
@@ -245,11 +321,15 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     ``text_delta`` / ``system_output``) before broadcasting shrinks the
     ``task_events`` / ``adjacent_task_events`` payload and the
     frontend's replay loop by orders of magnitude while rendering
-    identically.
+    identically.  With a *task_id*, the embedded pictures are replaced
+    by handles the client fetches on demand
+    (:func:`_lazy_replay_images`), before the frame budget is measured.
 
     Args:
         events: The ``events`` value loaded from persistence (typed
             ``object`` by the loaders; always a list of event dicts).
+        task_id: The task the events belong to; empty keeps the
+            pictures embedded.
 
     Returns:
         The coalesced event list.  Empty when *events* is not a list.
@@ -257,6 +337,8 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         return []
     evs = cast("list[dict[str, Any]]", events)
+    if task_id:
+        evs = _lazy_replay_images(evs, task_id)
     for ev in evs:
         legacy = ev.get("_timestamp")
         if "_timestamp" in ev and not isinstance(legacy, (int, float)):
@@ -281,15 +363,31 @@ MAX_REPLAY_EVENT_TEXT_CHARS = 200_000
 #: oldest events are left out and a note says so.
 MAX_REPLAY_FRAME_BYTES = 16 * 1024 * 1024
 _REPLAY_DELTA_TYPES = frozenset({"thinking_delta", "text_delta", "system_output"})
+#: A CHATS row's ``title`` (its task text) is cut to this many
+#: characters (head and tail kept; ``chat_first_task`` comes from its
+#: loader already cut to 1000).  The sidebar shows three lines of it,
+#: the tooltip and the tab's own task panel the rest; the whole prompt
+#: is in the transcript's ``prompt`` event once the task is opened.
+#: Uncut, one pasted prompt of 100 KB made every page of 50 rows
+#: (re-sent on each task start and finish) a long wait on a slow
+#: network; nine rows in ten are under 300 characters.
+HISTORY_TITLE_CHARS = 2_000
 
 
-def _clip_text(text: str, limit: int) -> str:
-    """Return *text* cut to *limit* characters keeping its head and tail."""
+def _clip_text(text: str, limit: int, where: str = "replay") -> str:
+    """Return *text* cut to *limit* characters keeping its head and tail.
+
+    Args:
+        text: The text to cut.
+        limit: The characters to keep, half from each end.
+        where: What the cut text is part of, named in the note that
+            replaces the omitted middle.
+    """
     if len(text) <= limit:
         return text
     half = limit // 2
     omitted = len(text) - 2 * half
-    return text[:half] + f"\n... [{omitted} characters omitted from replay] ...\n" + text[-half:]
+    return text[:half] + f"\n... [{omitted} characters omitted from {where}] ...\n" + text[-half:]
 
 
 def _event_bytes(ev: dict[str, Any]) -> int:
@@ -1276,12 +1374,17 @@ class AgentServer(
             result = str(entry.get("result", "") or "")
             entry_id = _coerce_id(entry.get("id"))
             is_running = entry_id is not None and entry_id in running_task_ids
+            # ``title`` is the row's task text, sent once and cut to
+            # ``HISTORY_TITLE_CHARS``: the page shows its first lines,
+            # the tooltip and the tab's task panel the rest.  (It used
+            # to travel whole and twice, as ``preview`` too, which was
+            # most of a CHATS page's bytes on a slow network;
+            # ``main.js`` reads ``title`` first.)
             session: dict[str, Any] = {
                 "id": chat_id,
                 "task_id": entry_id,
-                "title": task,
+                "title": _clip_text(task, HISTORY_TITLE_CHARS, "this row"),
                 "timestamp": entry.get("timestamp", 0),
-                "preview": task,
                 "has_events": has_events,
                 "failed": (_is_failed_result(result, entry.get("success")) and not is_running),
                 "is_running": is_running,
@@ -1409,7 +1512,7 @@ class AgentServer(
             paths.insert(0, current)
         return paths
 
-    def _get_input_history(self, conn_id: str = "") -> None:
+    def _get_input_history(self, conn_id: str = "", since: float = 0.0) -> None:
         """Send deduplicated composer texts for arrow-key cycling.
 
         Loads the full persisted history — every task stored in
@@ -1419,11 +1522,34 @@ class AgentServer(
         requesting connection's ``conn_id`` (when non-empty) so the
         reply reaches only the window that asked.
 
+        The reply's ``newest`` is the time of the most recent use among
+        the texts sent; a page that passes it back as *since* (the
+        page's ``tasks_updated`` refresh, its ``ready`` after a
+        reconnect) gets only the texts used after it, with ``since``
+        echoed so it merges them on top of the list it holds instead
+        of replacing it: the whole list is hundreds of kilobytes on a
+        slow network and used to travel at every task start or finish.
+        A delta cannot name a prompt a deleted task or chat took with
+        it, so a page whose list predates the last deletion
+        (``_input_history_cut``) gets the whole list again, and
+        ``newest`` never falls before that deletion.
+
         Args:
             conn_id: Requesting connection id (``""`` for direct callers).
+            since: The ``newest`` of the reply the client holds;
+                ``0`` for the whole list.
         """
-        tasks = list(dict.fromkeys(t for raw in _load_input_history() if (t := raw.strip())))
-        event: dict[str, Any] = {"type": "inputHistory", "tasks": tasks}
+        if since < self._input_history_cut:
+            since = 0.0
+        texts = _load_input_texts(since=since)
+        tasks = list(dict.fromkeys(t for raw, _used in texts if (t := raw.strip())))
+        newest = max((used for _raw, used in texts), default=0.0)
+        event: dict[str, Any] = {
+            "type": "inputHistory", "tasks": tasks,
+            "newest": max(newest, since, self._input_history_cut),
+        }
+        if since > 0:
+            event["since"] = since
         self._broadcast_to_conn(event, conn_id)
 
     def _close_tab(self, tab_id: str) -> None:
@@ -2431,7 +2557,7 @@ class AgentServer(
             if live_events:
                 result["events"] = live_events
             replayed_events = with_synthesized_events(
-                _coalesced_replay_events(result["events"]),
+                _coalesced_replay_events(result["events"], str(result.get("task_id") or "")),
                 result,
             )
             self.printer.broadcast(
@@ -2464,6 +2590,30 @@ class AgentServer(
                 live_only=subagent_info is not None,
                 transcripts=not conn_id,
             )
+
+    def replay_image(self, task_id: str, index: int) -> dict[str, Any] | None:
+        """The *index*-th picture of *task_id*'s transcript, as its replays number them.
+
+        A replay sends each embedded picture as a ``lazy`` handle
+        (:func:`_lazy_replay_images`); the page asks for the picture
+        by that handle when it comes into view.  The transcript is
+        read where the replay read it: the printer's live recording
+        while the task runs (the events table lags behind it), else
+        the events table.
+
+        Args:
+            task_id: The task whose transcript holds the picture.
+            index: The picture's ordinal in the transcript.
+
+        Returns:
+            The picture's ``images`` entry (``b64``, ``mime``, ``path``),
+            or ``None`` when the task or the picture is unknown.
+        """
+        events: object = self.printer.peek_recording_for_task(task_id)
+        if not events:
+            result = _load_chat_events_by_task_id(task_id)
+            events = result["events"] if result else []
+        return _replay_image(events, index)
 
     def _emit_pending_ask(self, tab_id: str) -> None:
         """Re-broadcast a still-pending ask-user question to *tab_id*.
@@ -2842,7 +2992,7 @@ class AgentServer(
                         {
                             "type": "task_events",
                             "events": with_synthesized_events(
-                                _coalesced_replay_events(row["events"]),
+                                _coalesced_replay_events(row["events"], str(sub_task_id)),
                                 row,
                             ),
                             "task": description,
@@ -3256,7 +3406,10 @@ class AgentServer(
                 if source.running() or self._viewer_owns_other_busy_run(tab_id, source):
                     return
             events = with_synthesized_events(
-                _coalesced_replay_events(self.printer.peek_recording_for_task(source.task_id)),
+                _coalesced_replay_events(
+                    self.printer.peek_recording_for_task(source.task_id),
+                    str(source.task_id or ""),
+                ),
                 session,
             )
             if any(ev.get("type") == "result" for ev in events):
@@ -3300,7 +3453,7 @@ class AgentServer(
             "task_id": result["task_id"] if result else None,
             "events": (
                 with_synthesized_events(
-                    _coalesced_replay_events(result["events"]),
+                    _coalesced_replay_events(result["events"], str(result["task_id"] or "")),
                     result,
                 )
                 if result

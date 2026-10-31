@@ -2772,7 +2772,7 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     return [_safe_str(row["task"]) for row in rows]
 
 
-def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
+def _load_input_history(limit: int = _MAX_INPUT_HISTORY, since: float = 0.0) -> list[str]:
     """Return the most recent distinct texts the user typed into the composer.
 
     Combines the listable ``task_history`` rows (sub-agent rows
@@ -2792,14 +2792,44 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
     Args:
         limit: Maximum number of texts returned (the most recent ones);
             defaults to :data:`_MAX_INPUT_HISTORY`.
+        since: When positive, only the texts used after this time
+            (:func:`_load_input_texts`).
     """
+    return [text for text, _used in _load_input_texts(limit, since)]
+
+
+def _load_input_texts(
+    limit: int = _MAX_INPUT_HISTORY, since: float = 0.0,
+) -> list[tuple[str, float]]:
+    """Return ``(text, time of its most recent use)`` pairs of the composer history.
+
+    The pairs behind :func:`_load_input_history`, most recent first.
+    With a positive *since* only the texts used after that time are
+    returned: a page that holds the whole list refreshes it with the
+    one or two texts a task start or finish added, not the whole list
+    again (half a megabyte on a slow network, at every task event).
+
+    Args:
+        limit: Maximum number of pairs returned (the most recent ones).
+        since: A time (seconds, as the rows' ``timestamp``) a reply
+            reported as its newest use; ``0`` for every text.
+    """
+    task_where, steer_where = NOT_SUBAGENT, ""
+    params: list[float] = []
+    if since > 0:
+        task_where = f"{NOT_SUBAGENT} AND timestamp > ?"
+        steer_where = "timestamp > ?"
+        params = [float(since), float(since)]
     db = _get_db()
     with _rw_lock.read_lock():
         rows = db.execute(
-            _input_texts_sql("task", NOT_SUBAGENT, "", _INPUT_TEXTS_RECENT_TAIL),
-            (int(limit),),
+            _input_texts_sql(
+                "task, MAX(timestamp) AS used", task_where, steer_where,
+                _INPUT_TEXTS_RECENT_TAIL,
+            ),
+            (*params, int(limit)),
         ).fetchall()
-    return [_safe_str(row["task"]) for row in rows]
+    return [(_safe_str(row["task"]), _safe_float(row["used"], 0.0)) for row in rows]
 
 
 # The ``/name`` head of a slash-command prompt: the same characters

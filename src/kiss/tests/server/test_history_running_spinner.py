@@ -175,7 +175,7 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
     sessions = event["sessions"]
     row = next(
         s for s in sessions
-        if s["preview"] == "running task from real backend"
+        if s["title"] == "running task from real backend"
     )
     assert row["is_running"] is True, (
         "alive-thread row must broadcast is_running=True even when the "

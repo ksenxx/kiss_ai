@@ -81,7 +81,7 @@ async function run() {
   cached.sockets[0].fireOpen();
   try {
     assert.deepStrictEqual(frames(cached.sockets[0]), [
-      {type: 'auth', password: ''},
+      {type: 'auth', password: '', parts: true},
     ]);
     cached.sockets[0].fireMessage({type: 'auth_required'});
     await settle();
@@ -91,6 +91,7 @@ async function run() {
     assert.deepStrictEqual(frames(cached.sockets[0]).at(-1), {
       type: 'auth',
       password: 'right',
+      parts: true,
     });
     assert.strictEqual(storage.local.getItem(KEY), null, 'still pending');
     cached.sockets[0].fireMessage({type: 'auth_ok'});
@@ -115,7 +116,7 @@ async function run() {
   reloaded.sockets[0].fireOpen();
   try {
     assert.deepStrictEqual(frames(reloaded.sockets[0]), [
-      {type: 'auth', password: 'right'},
+      {type: 'auth', password: 'right', parts: true},
     ]);
     reloaded.sockets[0].fireMessage({type: 'auth_ok'});
     await settle();

@@ -1157,6 +1157,7 @@ def run(
             Path(endpoint_file) if endpoint_file else None,
             open_timeout=10.0 if timeout is None else min(timeout, 10.0),
             max_size=_MAX_LINE_BYTES,
+            parts=True,
         )
         inbox = _Inbox(ws)
         cmd = run_command(
@@ -1214,6 +1215,8 @@ def run(
             if tool_interrupt.current_tool_call() is not None or cancel is not None
             else _NO_DEADLINE_WAKE_SECONDS
         )
+        # A big frame of the daemon's comes as parts (``local_endpoint.frame_parts``).
+        joiner = local_endpoint.FrameJoiner()
         while True:
             # The calling task's tool-call panel Stop is honored
             # cooperatively: every wake checks it (raising
@@ -1297,9 +1300,12 @@ def run(
             except ConnectionClosed as exc:
                 raise _closed_error(exc) from exc
             try:
-                event = json.loads(raw)
+                whole = joiner.feed(json.loads(raw))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if whole is None:
+                continue
+            event = whole[0]
             if not isinstance(event, dict) or event.get("tabId") != tab_id:
                 continue
             etype = event.get("type")

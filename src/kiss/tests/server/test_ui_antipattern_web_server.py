@@ -317,7 +317,7 @@ def test_cancel_explains_and_offers_enter_password(_browser):
         page.fill("#auth-modal-input", _PASSWORD)
         page.click("#auth-modal-ok")
         sent = [json.loads(d) for d in page.evaluate("window.__last().sent")]
-        assert sent[-1] == {"type": "auth", "password": _PASSWORD}
+        assert sent[-1] == {"type": "auth", "password": _PASSWORD, "parts": True}
     finally:
         context.close()
 
@@ -392,7 +392,7 @@ def test_submit_on_a_dead_socket_reconnects_at_once(_browser):
         )
         page.evaluate("window.__fireOpen()")
         sent = [json.loads(d) for d in page.evaluate("window.__last().sent")]
-        assert sent == [{"type": "auth", "password": _PASSWORD}]
+        assert sent == [{"type": "auth", "password": _PASSWORD, "parts": True}]
         page.evaluate("window.__fireMessage({type: 'auth_ok'})")
         page.wait_for_timeout(50)
         assert page.evaluate(

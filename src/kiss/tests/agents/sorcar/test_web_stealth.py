@@ -25,7 +25,9 @@ properties :mod:`kiss.agents.sorcar.web_stealth` provides:
    (twice for the two-step variant), on its button when the widget's
    frame is wider than the button (fiverr), and a page without the bar is
    reported; an Anubis proof-of-work page gets its longer wait; a Google
-   "unusual traffic" page is answered by re-running the query on Bing.
+   "unusual traffic" page is answered by re-running the query on Bing;
+   AWS WAF's blank token challenge (known by its script alone) is waited
+   out and its CAPTCHA puzzle is reported without pressing "Begin".
 
 Unreachable without doubles (documented, not mocked): the ``chrome``
 channel branch of ``chrome_channel`` (needs Google Chrome installed), the
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -52,6 +55,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -59,6 +63,8 @@ import pytest
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.tool_interrupt import inject_async_exception
+
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux") or shutil.which("Xvfb") is None,
@@ -179,8 +185,17 @@ class _Handler(BaseHTTPRequestHandler):
     (a narrow button in a wide frame among hidden copies); ``/anubis``
     answers the first request per query with an Anubis page that reloads
     after 16 s (more than the ordinary 12 s wait); ``/sorry/index`` is
-    Google's "unusual traffic" page; ``/headers`` echoes the request's
-    ``User-Agent`` and ``Sec-CH-UA`` headers as JSON.
+    Google's "unusual traffic" page; ``/aws-challenge`` answers the first
+    request per query with AWS WAF's blank token interstitial (HTTP 202,
+    empty title, no text, the ``*.awswaf.com`` challenge script -- which
+    the test's route makes reload the page after 1.5 s) and content
+    afterwards; ``/aws-captcha`` is AWS WAF's puzzle page (HTTP 405, title
+    "Human Verification", the "Begin" button counting its clicks in
+    ``window.begins``) and ``/aws-challenge-captcha`` the token
+    interstitial first and the puzzle afterwards, as a fresh profile gets
+    them; ``/malformed-script`` is content with a script ``src`` that is
+    not a URL; ``/headers`` echoes the request's ``User-Agent`` and
+    ``Sec-CH-UA`` headers as JSON.
     """
 
     challenge_hits: dict[str, int] = {}
@@ -189,6 +204,7 @@ class _Handler(BaseHTTPRequestHandler):
         """Answer the request according to its path."""
         path = urlparse(self.path).path
         headers = {}
+        status = 200
         if path == "/events":
             body = _EVENTS_PAGE
         elif path.startswith("/challenge"):
@@ -253,6 +269,28 @@ class _Handler(BaseHTTPRequestHandler):
                 "detected unusual traffic from your computer network. IP address: 10.0.0.1"
                 "</body>"
             )
+        elif path == "/aws-challenge":
+            n = self.challenge_hits.get(self.path, 0) + 1
+            self.challenge_hits[self.path] = n
+            if n == 1:
+                status = 202
+                body = _AWS_CHALLENGE_PAGE
+            else:
+                body = "<title>Real content</title><body><h1>Welcome</h1></body>"
+        elif path == "/aws-captcha":
+            status = 405
+            body = _AWS_CAPTCHA_PAGE
+        elif path == "/aws-challenge-captcha":
+            n = self.challenge_hits.get(self.path, 0) + 1
+            self.challenge_hits[self.path] = n
+            status = 202 if n == 1 else 405
+            body = _AWS_CHALLENGE_PAGE if n == 1 else _AWS_CAPTCHA_PAGE
+        elif path == "/malformed-script":
+            # Chromium keeps a script ``src`` that is not a URL as written.
+            body = (
+                "<title>Real content</title><script src='https://[broken/challenge.js'>"
+                "</script><body><h1>Welcome</h1></body>"
+            )
         elif path == "/headers":
             echo = {
                 "user_agent": self.headers.get("User-Agent", ""),
@@ -262,7 +300,7 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             body = "<title>inert</title><body>a page</body>"
         payload = body.encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         for key, value in headers.items():
@@ -272,6 +310,31 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         """Silence the default stderr request log."""
+
+
+# AWS WAF's two stock interstitials as semanticscholar.org served them on
+# 30-31 Oct 2026 (markup trimmed): the Challenge action's blank page, whose
+# token script reloads the page once a token is set, and the CAPTCHA
+# action's puzzle page, whose "Begin" button opens the picture puzzle.
+_AWS_WAF_HOST = "https://0123456789ab.35039563.us-east-2.token.awswaf.com/0123456789ab/4996efde3854"
+_AWS_CHALLENGE_PAGE = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title></title>
+<script type="text/javascript">window.gokuProps = {{"key": "AQID", "iv": "A6xF", "context": "hob"}};
+</script><script src="{_AWS_WAF_HOST}/fba16e1c8e93/challenge.js"></script></head>
+<body><div id="challenge-container"></div></body></html>"""
+_AWS_CAPTCHA_PAGE = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>Human Verification</title>
+<script type="text/javascript">window.gokuProps = {{"key": "AQID", "iv": "A6xF", "context": "hob"}};
+</script><script src="{_AWS_WAF_HOST}/fba16e1c8e93/challenge.js"></script>
+<script src="{_AWS_WAF_HOST.replace(".token.", ".captcha.")}/fba16e1c8e93/captcha.js"></script>
+</head><body><div id="captcha-container"><div id="root" class="amzn-captcha-modal">
+<h1>Let's confirm you are human</h1>
+<p id="root-instructions">Complete the security check before continuing. This step verifies
+that you are not a bot, which helps to protect your account and prevent spam.</p>
+<button class="amzn-captcha-verify-button btn-primary" onclick="window.begins++">Begin</button>
+<div class="amzn-captcha-lang-selector"><label for="lang">Select language</label>
+<select id="lang"><option>English</option><option>Deutsch</option></select>
+<button class="amzn-captcha-lang-apply">Apply</button></div></div></div>
+<script>window.begins = 0</script></body></html>"""
 
 
 _TURNSTILE_WIDGET = (
@@ -299,6 +362,25 @@ def _serve_turnstile_widget(route) -> None:
 def _serve_slow_turnstile_widget(route) -> None:
     """Answer the iframe request with the checkbox whose verdict takes 5 s."""
     route.fulfill(status=200, content_type="text/html", body=_SLOW_TURNSTILE_WIDGET)
+
+
+def _serve_aws_waf_script(route) -> None:
+    """Answer a ``*.awswaf.com`` script request like the token challenge.
+
+    On the blank interstitial (no title) the page reloads after 1.5 s,
+    as the real script does once it holds a token; on the puzzle page,
+    which carries the same script, it does nothing.
+    """
+    route.fulfill(
+        status=200,
+        content_type="application/javascript",
+        body="if (!document.title) setTimeout(() => location.reload(), 1500)",
+    )
+
+
+def _serve_inert_script(route) -> None:
+    """Answer a script request with a script that does nothing."""
+    route.fulfill(status=200, content_type="application/javascript", body="")
 
 
 @pytest.fixture(scope="module")
@@ -1075,6 +1157,121 @@ def test_anubis_proof_of_work_gets_its_longer_wait(tool, server):
     assert web_stealth.challenge_wait_secs(web_stealth.CLOUDFLARE_CHALLENGE) == 12
 
 
+def test_aws_waf_token_challenge_is_waited_out(tool, server):
+    """AWS WAF's blank Challenge interstitial yields the real page, not "(empty page)".
+
+    The 202 page has an empty title and no text at all, only the
+    ``*.awswaf.com`` token script (answered here by the test's route),
+    which reloads the page once its token is set; semanticscholar.org
+    came back as an empty page three times in the task history when it
+    was read before that.
+    """
+    tool.go_to_url(f"{server}/inert")  # launches the browser: ``_context`` is None before
+    tool._context.route("https://*.awswaf.com/**", _serve_aws_waf_script)
+    path = f"/aws-challenge?t={time.time_ns()}"
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(server + path)
+        elapsed = time.monotonic() - start
+    finally:
+        tool._context.unroute("https://*.awswaf.com/**")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree and "(empty page)" not in tree
+    # The interstitial was served and the content only after its 1.5 s
+    # reload: the tool waited through the blank page rather than
+    # returning it.
+    assert _Handler.challenge_hits[path] == 2
+    assert 1.5 <= elapsed < 12, elapsed
+    assert web_stealth.widget_presses(web_stealth.AWS_WAF_CHALLENGE) == 0
+    assert web_stealth.challenge_wait_secs(web_stealth.AWS_WAF_CHALLENGE) == 12
+
+
+def test_aws_waf_captcha_puzzle_is_reported_without_pressing_begin(tool, server):
+    """The puzzle page is reported after its short wait; its "Begin" button is never pressed.
+
+    "Begin" opens a picture puzzle only a person solves, so pressing it
+    would help nobody; the note tells the agent to show the browser or
+    use another source, and the page's own tree follows it.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(f"{server}/aws-captcha")
+        elapsed = time.monotonic() - start
+        begins = _main(tool, "window.begins")  # the page's own world, as its script sees it
+    finally:
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: 127.0.0.1:") and "(AWS WAF CAPTCHA puzzle)" in first, first
+    assert "show_browser()" in first
+    assert "Page: Human Verification" in tree and "Begin" in tree
+    assert begins == 0
+    assert 3 <= elapsed < 12, elapsed
+    assert tool._challenge_widget(web_stealth.AWS_WAF_CAPTCHA) is None
+    assert web_stealth.widget_presses(web_stealth.AWS_WAF_CAPTCHA) == 0
+    assert web_stealth.challenge_wait_secs(web_stealth.AWS_WAF_CAPTCHA) == 3
+
+
+def test_aws_waf_puzzle_after_token_challenge_gets_the_puzzles_short_wait(tool, server):
+    """The token challenge handing over to the puzzle is reported ~3 s after the puzzle shows.
+
+    A fresh profile gets the blank 202 page first (a 12 s wait), then the
+    405 puzzle; the wait is re-derived from the page now showing rather
+    than running the token challenge's 12 s down on a puzzle no wait
+    clears.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_aws_waf_script)
+    path = f"/aws-challenge-captcha?t={time.time_ns()}"
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(server + path)
+        elapsed = time.monotonic() - start
+    finally:
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note:") and "(AWS WAF CAPTCHA puzzle)" in first, first
+    assert "Page: Human Verification" in tree
+    assert _Handler.challenge_hits[path] == 2
+    # 1.5 s on the blank page, 3 s on the puzzle, some overhead -- not 12 s.
+    assert 4.5 <= elapsed < 10, elapsed
+
+
+def test_bench_verdict_tells_expected_puzzles_from_other_blocks(tool, server):
+    """The bench passes a known puzzle only for its vendor, with the agent's note."""
+    spec = importlib.util.spec_from_file_location(
+        "web_stealth_bench", _REPO_ROOT / "scripts" / "web_stealth_bench.py"
+    )
+    assert spec is not None and spec.loader is not None
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    try:
+        puzzle = f"{server}/aws-captcha"
+        result = tool.go_to_url(puzzle)
+        # A page that is not in the list is simply blocked.
+        assert bench.verdict(tool, puzzle, result).startswith("BLOCKED(AWS WAF CAPTCHA puzzle)")
+        bench.KNOWN_PUZZLES[puzzle] = (web_stealth.AWS_WAF_CAPTCHA, "Real content")
+        assert bench.verdict(tool, puzzle, result).startswith("PUZZLE(AWS WAF CAPTCHA puzzle)")
+        # Another vendor's block on the same page is not the expected puzzle.
+        bench.KNOWN_PUZZLES[puzzle] = (web_stealth.CLOUDFLARE_CHALLENGE, "Real content")
+        assert bench.verdict(tool, puzzle, result).startswith("BLOCKED(AWS WAF CAPTCHA puzzle)")
+    finally:
+        tool._context.unroute("https://*.awswaf.com/**")
+    # The content page (the site's policy relaxed) is OK; an unrecognised
+    # page that is not the content either is the failure the list exists for.
+    content = f"{server}/press-hold-done"
+    result = tool.go_to_url(content)
+    bench.KNOWN_PUZZLES[content] = (web_stealth.AWS_WAF_CAPTCHA, "Real content")
+    assert bench.verdict(tool, content, result) == "OK"
+    bench.KNOWN_PUZZLES[content] = (web_stealth.AWS_WAF_CAPTCHA, "Semantic Scholar")
+    assert bench.verdict(tool, content, result).startswith("BLOCKED(None) unrecognised page")
+    assert bench.verdict(tool, f"{server}/other", result) == "OK"
+    assert bench.verdict(tool, content, "Error navigating: boom").startswith("ERROR ")
+
+
 def test_live_cloudflare_protected_site_loads(tool):
     """A real Cloudflare-protected publisher that challenged this network loads.
 
@@ -1152,9 +1349,66 @@ def test_challenge_vendor_recognises_each_vendor():
          "detect if a user is a bot or a human"): None,
         ("How to scrape Perimeter X: Please verify you are human?",
          "we might encounter messages like \"Please verify you are Human: Press & Hold\""): None,
+        # AWS WAF's CAPTCHA page (semanticscholar.org, 30 Oct 2026) by its
+        # wording; its title alone is too generic.
+        ("Human Verification",
+         "Let's confirm you are human\n\nComplete the security check before continuing. This "
+         "step verifies that you are not a bot, which helps to protect your account and "
+         "prevent spam.\n\nBegin\nSelect language"): "AWS WAF CAPTCHA puzzle",
+        ("Human Verification", "Our identity verification product"): None,
+        ("AWS WAF CAPTCHA docs", "the page says 'Let's confirm you are human' and shows"): None,
     }
     for (title, body), expected in cases.items():
         assert web_stealth.challenge_vendor(title, body) == expected, (title, body)
+
+
+def test_challenge_vendor_knows_aws_waf_pages_by_their_scripts():
+    """AWS WAF's interstitials are told by their scripts: the blank one needs a blank page."""
+    waf = "https://c09bc9c04079.35039563.us-east-2.token.awswaf.com/c09bc9c04079/4996efde3854"
+    challenge = f"{waf}/fba16e1c8e93/challenge.js"
+    captcha = f"{waf.replace('.token.', '.captcha.')}/fba16e1c8e93/captcha.js"
+    vendor = web_stealth.challenge_vendor
+    # The Challenge action's page: empty title, no text, the token script.
+    assert vendor("", "", challenge) == "AWS WAF challenge"
+    assert vendor("", "  \n", f"https://cdn.example.com/app.js {challenge}") == "AWS WAF challenge"
+    # A site that embeds the same SDK script on its own pages (which have text).
+    assert vendor("Semantic Scholar", "Search 200M papers", challenge) is None
+    assert vendor("", "Loading...", challenge) is None
+    # The CAPTCHA page in another language is known by its puzzle script.
+    assert vendor("Human Verification", "Best\u00e4tigen Sie, dass Sie ein Mensch sind",
+                  f"{challenge} {captcha}") == "AWS WAF CAPTCHA puzzle"
+    # The puzzle script on a site's own page (AWS WAF's CAPTCHA JavaScript
+    # API renders the puzzle inside a login form) is content, not a block.
+    assert vendor("Store checkout", "Your shopping cart", f"{challenge} {captcha}") is None
+    assert vendor("", "", captcha) is None
+    # Other scripts, and unrelated hosts or paths that merely mention the names.
+    assert vendor("", "", "https://cdn.example.com/challenge.js") is None
+    assert vendor("", "", "https://awswaf.com.evil.example/x/captcha.js") is None
+    assert vendor("", "", "https://cdn.example.com/.awswaf.com/a/challenge.js") is None
+    mention = "https://cdn.example.com/sdk.js?url=https://x.awswaf.com/a/challenge.js"
+    assert vendor("", "", mention) is None
+    assert vendor("Human Verification", "", f"{captcha}.map") is None
+    assert vendor("Human Verification", "", f"{captcha};not-js") is None
+    assert vendor("", "", f"http://{challenge[8:]}") is None
+    assert vendor("", "", f"{challenge}?v=2") == "AWS WAF challenge"
+    assert vendor("", "", "https://x.awswaf.com:443/a/b/challenge.js") == "AWS WAF challenge"
+    assert vendor("", "", "HTTPS://X.AWSWAF.COM/a/b/challenge.js") == "AWS WAF challenge"
+    # Script sources that are not URLs (Chromium keeps them as written)
+    # are skipped, not raised on, and do not hide a vendor script after them.
+    for bad in ("https://[broken/challenge.js", "https://x.awswaf.com:bad/challenge.js",
+                "https://x.awswaf.com:65536/challenge.js"):
+        assert vendor("", "", bad) is None, bad
+        assert vendor("", "", f"{bad} {challenge}") == "AWS WAF challenge", bad
+    assert vendor("", "", "") is None
+    assert vendor("inert", "a page") is None
+
+
+def test_content_with_a_malformed_script_source_is_still_content(tool, server):
+    """A page whose script ``src`` is not a URL is returned as content, not as an error."""
+    tree = tool.go_to_url(f"{server}/malformed-script")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert tool._challenge_vendor() is None
 
 
 def test_search_fallback_url_maps_google_queries_to_bing():

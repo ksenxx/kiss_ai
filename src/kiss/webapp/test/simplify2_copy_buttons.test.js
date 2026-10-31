@@ -24,6 +24,8 @@ const SESSION = {
   task_id: 42,
   title: 'my task',
   timestamp: 1_700_000_000,
+  // A daemon before 2026-10-31 sent the text a second time as
+  // `preview`; the row reads `title` first.
   preview: 'my task preview',
   has_events: false,
   failed: false,
@@ -51,7 +53,7 @@ async function run() {
   const idleSvg = rowBtn.innerHTML;
   rowBtn.click();
   await sleep(0);
-  assert.deepStrictEqual(copied, ['my task preview'], 'row copies preview');
+  assert.deepStrictEqual(copied, ['my task'], 'row copies its title');
   assert.ok(rowBtn.classList.contains('copied'), 'row button flashes');
   assert.notStrictEqual(rowBtn.innerHTML, idleSvg, 'icon swaps to check');
 
