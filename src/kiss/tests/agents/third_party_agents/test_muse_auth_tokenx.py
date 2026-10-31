@@ -428,9 +428,12 @@ def test_msteams_daemon_side_token_exchange(
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
     assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
     assert vault_has_credentials("msteams")
-    # Reads flow without grants and reuse the cached token: no second
-    # exchange happens for the next Graph call.
-    assert backend.list_teams()
+    # Reads flow without grants and reuse the cached token: the next
+    # Graph call carries the same token and no second exchange happens.
+    assert json.loads(backend.list_teams())["ok"] is True
+    graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
+    assert graph[-1]["path"].startswith("/v1.0/me/joinedTeams")
+    assert bearer_of(graph[-1]) == "Bearer graph-tok-1"
     assert len(api_server.token_requests) == 1
 
 
@@ -477,7 +480,6 @@ def test_msteams_token_endpoint_down_is_a_safe_error(
     muse_env: Path,
     api_server: _TokenXApiServer,
     refusing_port: int,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dead token endpoint reports class + URL, never form contents."""
     store_credentials("msteams", _client_credential_info(f"http://127.0.0.1:{refusing_port}"), [])
@@ -1263,7 +1265,7 @@ def test_failed_rotations_keep_the_prior_credential(
     rejected = json.loads(auth_tools(tg_agent)["authenticate_telegram"]("1:rotated-but-wrong"))
     assert rejected["ok"] is False
     assert vault_has_credentials("telegram")
-    assert not vault_has_credentials("telegram-pending")
+    assert not list((muse_auth_dir() / "vault").glob("telegram-pending-*.json"))
     # The previously wired backend still works end to end.
     assert json.loads(auth_tools(tg_agent)["check_telegram_auth"]())["ok"] is True
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
@@ -1345,7 +1347,7 @@ def test_telegram_authenticate_handles_nonjson_probe(
     assert "getMe failed" in result["error"]
     # Nothing was enrolled and no scratch entry lingered.
     assert not vault_has_credentials("telegram")
-    assert not vault_has_credentials("telegram-pending")
+    assert not list((muse_auth_dir() / "vault").glob("telegram-pending-*.json"))
 
 
 def test_cli_import_rejects_non_string_values(muse_env: Path) -> None:

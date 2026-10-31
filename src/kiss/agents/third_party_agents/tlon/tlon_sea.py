@@ -121,7 +121,7 @@ class TlonChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_third_party_agents(self, group_path: str) -> str:
+    def list_channels(self, group_path: str) -> str:
         """List channels in an Urbit group.
 
         Args:

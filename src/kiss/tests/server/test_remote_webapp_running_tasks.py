@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         self._persistence_dir = Path(
             tempfile.mkdtemp(prefix="kiss_running_tasks_test_"),
         )
+        self.addCleanup(shutil.rmtree, self._persistence_dir, True)
         _persistence._KISS_DIR = self._persistence_dir
         _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
@@ -63,10 +65,12 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             self._saved_registry = dict(agent_state.agent_states)
             agent_state.agent_states.clear()
 
+        work_dir = self._persistence_dir / "work"
+        work_dir.mkdir()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=str(work_dir),
         )
         await self.server.start_async()
 

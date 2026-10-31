@@ -55,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import textwrap
 import threading
@@ -169,6 +170,7 @@ class TestStopWrappedInterrupt(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-wrap-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.loop = asyncio.new_event_loop()

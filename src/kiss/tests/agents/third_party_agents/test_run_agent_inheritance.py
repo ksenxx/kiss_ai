@@ -58,9 +58,6 @@ from kiss.tests.server.parallel_agent_harness import (
     tool_call_response,
 )
 
-DUMMY_SEA = str(
-    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
-)
 PARENT_MODEL = "gpt-4o-mini"
 PARENT_CONFIG = {"base_url": "http://127.0.0.1:1/v1", "api_key": "kiss-test-key"}
 PARENT_BASE_PROMPT = "You are the parent run's replacement system prompt."
@@ -257,7 +254,7 @@ def _dispatch(
     result = dispatch_result(
         "sorcar_sea",
         "say hi",
-        DUMMY_SEA,
+        agent_dispatch.DEFAULT_AGENT_PATH,
         parent.work_dir,
         model_name,
         budget,
@@ -494,7 +491,7 @@ class Sea(BaseSea):
         result = dispatch_result(
             "sorcar_sea",
             "say hi",
-            DUMMY_SEA,
+            agent_dispatch.DEFAULT_AGENT_PATH,
             str(env.repo),
             "",
             None,
@@ -703,7 +700,7 @@ class _DelegatingModel:
             return tool_call_response("create_worktree", {})
         return tool_call_response(
             "run_agent",
-            {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
+            {"task": "say hi", "agent": agent_dispatch.DEFAULT_AGENT_PATH, "timeout": "30"},
         )
 
 

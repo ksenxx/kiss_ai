@@ -25,7 +25,7 @@ from typing import Any
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.tests.server.conftest import run_git
+from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 from ._memory_printer import MemoryPrinter
 
@@ -36,11 +36,12 @@ def _make_repo(path: Path) -> Path:
         ["git", "init", "-b", "main", str(path)],
         capture_output=True, check=True,
     )
-    run_git(path, "config", "user.email", "t@t.com")
-    run_git(path, "config", "user.name", "T")
+    assert_repo_root(path)
+    run_git_checked(path, "config", "user.email", "t@t.com")
+    run_git_checked(path, "config", "user.name", "T")
     (path / "README.md").write_text("# Test\n")
-    run_git(path, "add", ".")
-    run_git(path, "commit", "-m", "initial")
+    run_git_checked(path, "add", ".")
+    run_git_checked(path, "commit", "-m", "initial")
     return path
 
 

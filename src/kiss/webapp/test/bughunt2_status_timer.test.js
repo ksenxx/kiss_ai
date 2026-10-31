@@ -9,6 +9,7 @@ const assert = require('assert');
 const {
   makePage,
   send,
+  clickTab,
   fakeIntervals,
   readyTabId,
 } = require('./simplify2_harness');
@@ -31,8 +32,13 @@ function testBackgroundLocalTabStatusKeepsOwnT0() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'bg-sub-tab',
+    parent_tab_id: activeId,
     description: 'sub agent work',
   });
+  assert.ok(
+    win.document.querySelector('#tab-list .chat-tab[data-tab-id="bg-sub-tab"]'),
+    'the background sub-agent tab must be open before its status arrives',
+  );
 
   send(win, {
     type: 'status',
@@ -58,6 +64,12 @@ function testBackgroundLocalTabStatusKeepsOwnT0() {
     'Running 6s',
     'BUG: background-tab status clobbered the active timer ' +
       `(header now "${statusText.textContent}")`,
+  );
+  clickTab(win, 'bg-sub-tab');
+  assert.strictEqual(
+    statusText.textContent,
+    'Running 30m 1s',
+    'the background tab must keep the t0 its own status carried',
   );
   win.close();
   console.log(

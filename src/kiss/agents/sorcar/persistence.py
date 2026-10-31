@@ -4,9 +4,12 @@
 # add your name here
 """SQLite persistence for task history, chat events, model and file usage.
 
-All data is stored in a single SQLite database at ``~/.kiss/history.db``
-using WAL mode for concurrent access.  Four tables hold task history,
-chat events, model usage counters, and file usage counters.
+All data is stored in a single SQLite database, ``history.db`` in the
+KISS home directory (``$KISS_HOME`` or the brand's home, e.g.
+``~/.s10s`` for Seamless Loop), using WAL mode for concurrent access.
+Its tables hold task history, per-chat summaries, chat events, model
+and file usage counters, frequent tasks, text typed into running tasks,
+tombstones of deleted tasks and chats, and the replayed event journals.
 
 Thread safety is achieved with:
 - **Per-thread connections** via ``threading.local()`` so concurrent
@@ -27,6 +30,7 @@ import os
 import queue
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -35,7 +39,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Any, Literal, cast
+from typing import IO, Any, Literal, TypeGuard, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked, locked_call
 from kiss.agents.sorcar.chat_summary import NOT_SUBAGENT, launch_ms, upsert_chat_summary
@@ -48,10 +52,12 @@ from kiss.agents.sorcar.history_columns import (
     complete_rows,
     missing_columns,
 )
-from kiss.agents.sorcar.task_metadata import write_task_tags
+from kiss.agents.sorcar.task_metadata import trajectory_has_secret, write_task_tags
 from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.locked import LockTimeoutError
 from kiss.core.models.model_info import _strip_provider_prefix
+from kiss.core.printer import event_cost
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +125,14 @@ class _Token:
     that generator is collected, or is CLOSED (``gi_frame is None`` no
     matter who still retains the frame object),
     :meth:`_RWLock._token_active` pronounces the acquisition over.  The
-    reference must be weak — a strong one would close the cycle
-    ``token → generator → frame → token``, and an acquisition leaked
-    WITHOUT ``__exit__`` (an injected stop can land between
-    ``__enter__`` returning and the ``with`` block installing, orphaning
-    the context manager) would then survive until a full garbage
-    collection instead of dying by refcount the moment its thread
-    unwinds.
+    reference must be weak, and the frame must not hold its own
+    generator either (the generator pops itself out of the ``box`` it
+    arrives in): either would close a cycle through the frame, and an
+    acquisition leaked WITHOUT ``__exit__`` (an injected stop can land
+    between ``__enter__`` returning and the ``with`` block installing,
+    orphaning the context manager) would then block other threads until
+    a garbage collection, instead of dying by refcount, on its own
+    thread, the moment its context manager is released.
 
     ``owner`` records the acquiring thread.  A dead exception↔frame
     reference CYCLE (the stop's traceback in a killed thread) can keep
@@ -206,10 +213,12 @@ class _RWLock:
       idempotently reversible without knowing whether it executed, so
       no state/flag pairing exists to tear.
     * The condition's mutex is an ``RLock``: its C ``acquire`` records
-      the owning thread atomically, so :meth:`_teardown` consults
-      ``RLock._is_owned()`` — ground truth, not a flag a torn store
-      could miss — and releases every recursion level this thread
-      still holds.  Being reentrant, teardown can always re-enter the
+      the owning thread and recursion level atomically, so
+      :meth:`_teardown` consults ``RLock._recursion_count()`` — ground
+      truth, not a flag a torn store could miss — and releases every
+      level this thread still holds, except those of a critical
+      section a garbage collection interrupted to finalize an orphaned
+      acquisition.  Being reentrant, teardown can always re-enter the
       mutex even when the injection landed while it was already held
       (a plain ``Lock`` self-deadlocks there).  Teardown retries a
       bounded number of times, re-raising a newly injected exception
@@ -283,8 +292,13 @@ class _RWLock:
 
     @classmethod
     def _any_alive(cls, refs: set[weakref.ref[_Token]]) -> bool:
-        """Return True when any weakref in *refs* has an active token."""
-        return any(cls._token_active(ref) for ref in refs)
+        """Return True when any weakref in *refs* has an active token.
+
+        Walks a snapshot: a garbage collection during the walk can run a
+        token's weakref callback, or an orphaned acquisition's teardown,
+        on this thread, and both discard from *refs*.
+        """
+        return any(cls._token_active(ref) for ref in tuple(refs))
 
     def _drop_reader_ref(self, ref: weakref.ref[_Token]) -> None:
         """Withdraw a reader registration and wake waiters.
@@ -323,21 +337,23 @@ class _RWLock:
         any registration, so :meth:`_token_active` can pronounce the
         acquisition over (``gi_frame is None``) even when an escaped
         exception's traceback retains the frame and token forever.
+        The generator pops itself out of the box, so its frame keeps no
+        strong reference to it and an orphaned acquisition dies with
+        its context manager.
 
         Returns:
             A context manager holding read access for its block.
         """
         box: list[Any] = []
         cm = self._read_lock_gen(box)
-        box.append(getattr(cm, "gen", None))
+        box.append(cm.gen)
         return cm
 
     @contextmanager
     def _read_lock_gen(self, box: list[Any]) -> Iterator[None]:
         """Generator body of :meth:`read_lock`; *box* carries its generator."""
         token = _Token()
-        gen = box[0] if box else None
-        token.gen = weakref.ref(gen) if gen is not None else None
+        token.gen = weakref.ref(box.pop()) if box else None
         ref = _TokenRef(token, self._drop_reader_ref)
         try:
             self._cond.acquire()
@@ -366,15 +382,14 @@ class _RWLock:
         """
         box: list[Any] = []
         cm = self._write_lock_gen(box)
-        box.append(getattr(cm, "gen", None))
+        box.append(cm.gen)
         return cm
 
     @contextmanager
     def _write_lock_gen(self, box: list[Any]) -> Iterator[None]:
         """Generator body of :meth:`write_lock`; *box* carries its generator."""
         token = _Token()
-        gen = box[0] if box else None
-        token.gen = weakref.ref(gen) if gen is not None else None
+        token.gen = weakref.ref(box.pop()) if box else None
         ref = _TokenRef(token, self._drop_writer_ref)
         try:
             self._cond.acquire()
@@ -400,6 +415,14 @@ class _RWLock:
         the repair has committed (never swallowed: a stop aimed at the
         surrounding task must still reach it).
 
+        A ``GeneratorExit`` in flight means ``close()`` is finalizing an
+        orphaned acquisition suspended at its ``yield``, which holds no
+        mutex level of its own.  That finalizer can run inside a garbage
+        collection on any thread, in the middle of another critical
+        section of this lock, so the levels found on entry stay held.
+        Every other teardown runs on the acquiring thread outside any
+        critical section, and every level it finds is released.
+
         Args:
             ref: The acquisition's weak reference to withdraw.
             token: The acquisition's token; the explicit parameter
@@ -407,6 +430,11 @@ class _RWLock:
                 healing path — cannot run concurrently with this one.
             writer: Whether the acquisition was a write acquisition.
         """
+        keep = (
+            self._mutex._recursion_count()  # type: ignore[attr-defined]
+            if isinstance(sys.exception(), GeneratorExit)
+            else 0
+        )
         caught: BaseException | None = None
         for _ in range(self._REPAIR_ATTEMPTS):
             try:
@@ -417,11 +445,11 @@ class _RWLock:
                         self._drop_reader_ref(ref)
                     break
                 finally:
-                    # Ground truth from the C RLock: releases whatever
-                    # this thread still holds — whether the injection
-                    # landed before, inside, or after the acquisition's
-                    # own release — and nothing when it holds nothing.
-                    while self._mutex._is_owned():  # type: ignore[attr-defined]
+                    # Ground truth from the C RLock: releases every
+                    # level above ``keep`` this thread still holds —
+                    # whether the injection landed before, inside, or
+                    # after the acquisition's own release.
+                    while self._mutex._recursion_count() > keep:  # type: ignore[attr-defined]
                         self._cond.release()
             except BaseException as exc:  # second injected stop mid-repair
                 caught = exc
@@ -551,12 +579,12 @@ def _process_owner_token() -> str:
         return _owner_state[1]
     _discard_owner_state()
     token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    marker = Path(current_dir) / f"{token}.lock"
+    handle: IO[Any] | None = None
     try:
         _ensure_kiss_dir()
         Path(current_dir).mkdir(parents=True, exist_ok=True)
-        handle = open(
-            Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
-        )
+        handle = open(marker, "w", encoding="utf-8")
         if not lock_exclusive(handle, blocking=False):  # pragma: no cover
             raise BlockingIOError(f"{token}.lock is already held")
         handle.write(f"{os.getpid()}\n")
@@ -565,9 +593,25 @@ def _process_owner_token() -> str:
         logger.warning(
             "could not publish task-owner liveness marker", exc_info=True,
         )
+        if handle is not None:
+            # No row will ever name this token, so nothing else would
+            # delete the file.
+            _delete_owner_marker(handle, marker)
         return ""
     _owner_state = (current_dir, token, handle)
     return token
+
+
+def _delete_owner_marker(handle: IO[Any], marker: Path) -> None:
+    """Close *handle*, releasing its kernel lock, and delete *marker*."""
+    try:
+        handle.close()
+    except OSError:  # a publish whose flush failed fails again on close
+        pass
+    try:
+        marker.unlink()
+    except OSError:  # pragma: no cover — already swept by another process
+        pass
 
 
 def _discard_owner_state() -> None:
@@ -583,14 +627,7 @@ def _discard_owner_state() -> None:
         return
     directory, token, handle = _owner_state
     _owner_state = None
-    try:
-        handle.close()
-    except OSError:  # pragma: no cover — close of a dead handle
-        pass
-    try:
-        (Path(directory) / f"{token}.lock").unlink()
-    except OSError:  # pragma: no cover — already swept by another process
-        pass
+    _delete_owner_marker(handle, Path(directory) / f"{token}.lock")
 
 
 def _release_owner_marker() -> None:
@@ -1013,6 +1050,34 @@ def _recover_orphaned_sidecars(current_path: str, observed: _ShmMapping) -> None
         _invalidate_chat_context_cache("")
 
 
+def _close_idle_conn(conn: _LockedConnection, checkpointed: bool) -> bool:
+    """Close *conn*, a handle on a dead mapping, checkpointing first unless one was.
+
+    The caller holds ``conn.lock``, so no statement runs on the handle.
+
+    Args:
+        conn: The handle to close.
+        checkpointed: Whether an earlier handle already checkpointed.
+
+    Returns:
+        Whether a checkpoint has been taken, by now or before.
+    """
+    if not checkpointed:
+        # Fails with "interrupted" on a handle whose paused statement
+        # the caller's interrupt hit; the next idle handle checkpoints
+        # instead.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            checkpointed = True
+        except sqlite3.Error:
+            logger.debug("Exception caught", exc_info=True)
+    try:
+        conn.close()
+    except sqlite3.Error:
+        logger.debug("Exception caught", exc_info=True)
+    return checkpointed
+
+
 def _recover_orphaned_sidecars_locked(current_path: str, observed: _ShmMapping) -> bool:
     """Body of :func:`_recover_orphaned_sidecars`; the caller holds ``_init_tables_lock``.
 
@@ -1050,31 +1115,16 @@ def _recover_orphaned_sidecars_locked(current_path: str, observed: _ShmMapping) 
             conn.interrupt()
         except sqlite3.Error:  # already closed behind the registry's back
             logger.debug("Exception caught", exc_info=True)
-        # The acquire sits inside the try (the ``locked_call`` shape): a
-        # Stop injected right after it returns still reaches the
-        # ``finally``, which otherwise would leave another thread's
-        # connection lock held by this thread for good (gh-74174).
         try:
-            if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-                continue  # busy: its owner closes it on its next _get_db()
-            if not checkpointed:
-                # Fails with "interrupted" on a handle whose
-                # paused statement the interrupt above hit; the
-                # next idle handle checkpoints instead.
-                try:
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    checkpointed = True
-                except sqlite3.Error:
-                    logger.debug("Exception caught", exc_info=True)
-            try:
-                conn.close()
-            except sqlite3.Error:
-                logger.debug("Exception caught", exc_info=True)
-        finally:
-            try:
-                conn.lock.release()
-            except RuntimeError:  # the acquire timed out, or never took effect
-                pass
+            checkpointed = locked_call(
+                conn.lock,
+                _close_idle_conn,
+                conn,
+                checkpointed,
+                acquire_timeout=max(0.0, deadline - time.monotonic()),
+            )
+        except LockTimeoutError:
+            continue  # busy: its owner closes it on its next _get_db()
         _drop_open_conn_locked(key)
     _db_conn = None
     _bump_db_generation()
@@ -1199,7 +1249,7 @@ _INPUT_TEXTS_SELECT = (
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
-def is_task_history_id(value: object) -> bool:
+def is_task_history_id(value: object) -> TypeGuard[str]:
     """Return True when *value* is shaped like a ``task_history.id``.
 
     The canonical id format is the un-hyphenated 32-character
@@ -1219,9 +1269,7 @@ def _coerce_parent_task_id(value: object) -> str:
     "not a sub-agent" — preventing garbage parent ids from being
     silently persisted as text that never matches any real UUID.
     """
-    if isinstance(value, str) and _TASK_ID_RE.fullmatch(value):
-        return value
-    return ""
+    return value if is_task_history_id(value) else ""
 
 
 def _extract_parent_task_id(payload: dict[str, object]) -> str:
@@ -2693,10 +2741,10 @@ def _input_texts_sql(
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     """Find recent unique tasks starting with *query* (case-sensitive).
 
-    The SQL ``GLOB`` filter does case-sensitive prefix matching server
-    side; in Python we then deduplicate identical task strings while
-    preserving their most-recent-first ordering so the dropdown menu
-    never shows the same suggestion twice.
+    The SQL ``GLOB`` filter does case-sensitive prefix matching, and the
+    ``GROUP BY task`` tail collapses identical task strings to one row
+    ordered by their latest use, so the dropdown menu never shows the
+    same suggestion twice.
 
     Args:
         query: The prefix string to match against task text.
@@ -2715,13 +2763,13 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
         rows = db.execute(
             _input_texts_sql(
                 "task",
-                f"task GLOB ? AND LENGTH(task) > ? AND {NOT_SUBAGENT}",
+                f"CAST(task AS TEXT) GLOB ? AND LENGTH(task) > ? AND {NOT_SUBAGENT}",
                 "text GLOB ? AND LENGTH(text) > ?",
                 _INPUT_TEXTS_RECENT_TAIL,
             ),
             (pattern, len(query), pattern, len(query), limit),
         ).fetchall()
-    return [row["task"] for row in rows]
+    return [_safe_str(row["task"]) for row in rows]
 
 
 def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
@@ -2731,6 +2779,15 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
     excluded) with the ``steer_inputs`` table, most recent first —
     a text's position is that of its most recent use in either
     table.  Feeds the composer's ArrowUp history.  Thread-safe.
+
+    The texts go through :func:`_safe_str`, as every other JSON-bound
+    column read does: a BLOB in the TEXT ``task`` column (a hand-edited
+    or third-party database) made ``json.dumps`` of the
+    ``inputHistory`` reply raise, so the composer's history request
+    was never answered.  The readers that filter on the text
+    (:func:`_prefix_match_tasks`, :func:`_load_slash_command_usage`)
+    match ``CAST(task AS TEXT)``: whether ``GLOB`` matches a BLOB at all
+    depends on how SQLite was built (``LIKE_DOESNT_MATCH_BLOBS``).
 
     Args:
         limit: Maximum number of texts returned (the most recent ones);
@@ -2742,7 +2799,7 @@ def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
             _input_texts_sql("task", NOT_SUBAGENT, "", _INPUT_TEXTS_RECENT_TAIL),
             (int(limit),),
         ).fetchall()
-    return [row["task"] for row in rows]
+    return [_safe_str(row["task"]) for row in rows]
 
 
 # The ``/name`` head of a slash-command prompt: the same characters
@@ -2771,14 +2828,14 @@ def _load_slash_command_usage() -> dict[str, tuple[int, float]]:
         rows = db.execute(
             _input_texts_sql(
                 "task, timestamp",
-                f"task GLOB '/*' AND {NOT_SUBAGENT}",
+                f"CAST(task AS TEXT) GLOB '/*' AND {NOT_SUBAGENT}",
                 "text GLOB '/*'",
                 "",
             ),
         ).fetchall()
     usage: dict[str, tuple[int, float]] = {}
     for row in rows:
-        m = _SLASH_COMMAND_HEAD_RE.match(str(row["task"] or ""))
+        m = _SLASH_COMMAND_HEAD_RE.match(_safe_str(row["task"]))
         if m is None:
             continue
         count, last = usage.get(m.group(1), (0, 0.0))
@@ -2787,7 +2844,15 @@ def _load_slash_command_usage() -> dict[str, tuple[int, float]]:
 
 
 def _record_steer_input(text: str) -> None:
-    """Remember *text* typed into a running task's composer.
+    """Remember *text* typed into the composer where no local task row will hold it.
+
+    That is a message typed into a running task (an ``appendUserMessage``,
+    a ``/ask`` line, a ``run`` sent to a busy tab; see
+    ``_echo_injected_prompt``) and any prompt or message typed into a tab
+    bound to a remote machine, whose task row and steer echo are the
+    machine's (``RemoteTabs.route``).  Without the row the composer
+    history (ArrowUp, ghost completions, ``/`` popup order) built by
+    :func:`_load_input_history` would never offer the text again.
 
     Upserts the ``steer_inputs`` row so a repeated message only
     refreshes its ``timestamp``.  The table is capped at
@@ -2962,7 +3027,6 @@ def _log_orphaned_task_forensics(
 _USAGE_STEPS_RE = re.compile(r"Steps:\s*(\d+)")
 _USAGE_TOKENS_RE = re.compile(r"Total tokens:\s*([\d,]+)")
 _USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
-_COST_FIELD_RE = re.compile(r"\$?(\d+(?:\.\d+)?)")
 
 
 def _recovered_progress_from_events(
@@ -3077,13 +3141,9 @@ def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
         totals["steps"] = steps
     if isinstance(tokens, int) and not isinstance(tokens, bool):
         totals["tokens"] = tokens
-    exact = event.get("cost_usd")
-    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
-        totals["cost"] = float(exact)
-        return totals
-    cost_m = _COST_FIELD_RE.fullmatch(str(event.get("cost", "")))
-    if cost_m:
-        totals["cost"] = float(cost_m.group(1))
+    cost = event_cost(event)
+    if cost is not None:
+        totals["cost"] = cost
     return totals
 
 
@@ -3637,6 +3697,8 @@ def _save_task_extra(
     """
     _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
+    finished = _safe_int(extra.get("endTs"), 0) > 0
+    has_secret = _scan_finished_trajectory(db, task_id) if finished else None
     with _rw_lock.write_lock(), _immediate_txn(db):
         resolved = _resolve_task_id(db, task_id)
         if resolved is None:
@@ -3668,8 +3730,36 @@ def _save_task_extra(
         db.execute(
             f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
         )
-        if _safe_int(extra.get("endTs"), 0) > 0:
-            _finalize_task_metadata(db, resolved)
+        if finished:
+            _finalize_task_metadata(db, resolved, has_secret)
+
+
+def _scan_finished_trajectory(db: sqlite3.Connection, task_id: str | None) -> bool | None:
+    """Scan the trajectory of finished task *task_id* for a secret, holding no lock.
+
+    :func:`_save_task_extra` calls this before it takes the write lock
+    and its ``BEGIN IMMEDIATE``: the scan reads every persisted event of
+    the task (seconds for a long one), and under those locks it stalled
+    every reader and writer of the daemon and every other process
+    writing ``history.db``.  A WAL reader needs neither lock.
+
+    Args:
+        db: The calling thread's connection.
+        task_id: The finished row's id.
+
+    Returns:
+        The :func:`trajectory_has_secret` verdict, or ``None`` when no
+        row has the id (the save then finds none either, or scans under
+        its lock should the row appear in between).
+    """
+    if not is_task_history_id(task_id):
+        return None
+    row = db.execute(
+        "SELECT task, result FROM task_history WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return trajectory_has_secret(db, task_id, row["task"], row["result"])
 
 
 def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
@@ -3708,7 +3798,9 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
     )
 
 
-def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
+def _finalize_task_metadata(
+    db: sqlite3.Connection, task_id: str, has_secret: bool | None = None
+) -> None:
     """Derive the finished task's ``tags`` and refresh its chat's summary row.
 
     Called inside :func:`_save_task_extra`'s transaction once the row
@@ -3720,6 +3812,8 @@ def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
     Args:
         db: The connection holding the write transaction.
         task_id: The finished row's id.
+        has_secret: The secret verdict the caller computed before it
+            took the write lock; ``None`` scans the events here.
     """
     row = db.execute(
         "SELECT task, result, success, chat_id, parent_task_id "
@@ -3728,7 +3822,7 @@ def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
     ).fetchone()
     if row is None:
         return
-    write_task_tags(db, task_id, row)
+    write_task_tags(db, task_id, row, has_secret)
     if not row["parent_task_id"] and row["chat_id"]:
         upsert_chat_summary(db, _safe_str(row["chat_id"]))
 
@@ -4409,7 +4503,8 @@ def _journal_file_lock(
         except TimeoutError:
             logger.warning(
                 "journal lock %s.lock held by another process for over %.0fs; "
-                "proceeding without it", sidecar, timeout,
+                "an append goes to a spill file, a replay or prune waits for "
+                "the next round", sidecar, timeout,
             )
             yield False
             return
@@ -5378,10 +5473,11 @@ def _events_session_dict(
 
     Returns:
         Dict with ``task``, ``task_id``, ``events``, ``chat_id``, and
-        ``extra`` keys.
+        ``extra`` keys (``task`` through :func:`_safe_str`: the dict is
+        JSON-bound, and a hand-edited database can hold a BLOB there).
     """
     return {
-        "task": row["task"],
+        "task": _safe_str(row["task"]),
         "task_id": str(row["id"]),
         "events": _decode_event_rows(event_rows),
         "chat_id": str(row["chat_id"] or ""),

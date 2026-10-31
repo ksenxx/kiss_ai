@@ -16,16 +16,16 @@
 'use strict';
 
 const assert = require('assert');
-const {spawnSync} = require('child_process');
+const {spawn, spawnSync} = require('child_process');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-const CHILD_TIMEOUT_MS = 5 * 60 * 1000;
-// spawnSync's default is 1 MiB, after which the child is SIGKILLed with
-// ENOBUFS and a passing but chatty suite would look like a failure.
-const CHILD_MAX_OUTPUT = 64 * 1024 * 1024;
+// Below run-all.js's 120 s suite limit, so a hung suite is killed and
+// reported here (and its coverage directory removed) first.
+const CHILD_TIMEOUT_MS = 90 * 1000;
 
 // Node 24+ enables the Maglev compiler and background Sparkplug compilation;
 // either can hang `process.exit()` (nodejs/node#64274), which is why
@@ -33,34 +33,62 @@ const CHILD_MAX_OUTPUT = 64 * 1024 * 1024;
 // when the gate itself was started without them.
 const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 
+// Windows has no process groups to lead or kill, and a pipe handed to a
+// child as fd 3 is not readable through `net.Socket({fd: 3})` there
+// (`read ENOTCONN`): the suite runs without the guard below, and the
+// timeout kills the suite itself.
+const WINDOWS = process.platform === 'win32';
+
+/** SIGKILL process group `pgid`; a group already gone is fine. */
+function killGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // ESRCH: every process of the group has exited.
+  }
+}
+
 /**
  * Run `testFile` (a path relative to this directory) under NODE_V8_COVERAGE
  * and return the parsed V8 coverage reports it produced.
  *
- * The child inherits this process's V8 flags plus V8_FLAGS and is SIGKILLed
- * after CHILD_TIMEOUT_MS, so a hung suite is reported here by name instead
- * of being orphaned when run-all.js kills the gate.  The suite's own output
- * is forwarded; when it fails or times out the coverage directory is
+ * The suite runs under a guard (`guardSuite`, this file run as a script)
+ * that leads a new process group, so the suite and everything it starts
+ * are killed together, whether or not they hold this process's output (a
+ * worker started with stdio 'ignore' does not).  The group is SIGKILLed
+ * as soon as the guard returns, when the suite exits or after
+ * CHILD_TIMEOUT_MS (the guard is SIGKILLed first), so nothing the suite
+ * started outlives the gate, run by run-all.js or on its own.  Should the
+ * gate itself be killed first, the guard kills the group.
+ *
+ * The child runs with V8_FLAGS only.  This process's own flags are not
+ * passed on: a `node -e` / `-p` gate would make the child run that code
+ * again (and recurse) instead of the suite, and `--watch` or `--inspect`
+ * do not belong to it either; a preload in NODE_OPTIONS still reaches it
+ * through the environment.  The suite writes straight to this process's
+ * stdout and stderr, so what it printed survives a kill of the whole
+ * process group.  When it fails or times out the coverage directory is
  * removed and the process exits with the suite's status.
  */
 function runCovered(testFile, mark) {
   const covDir = fs.mkdtempSync(path.join(os.tmpdir(), `${mark}-cov-`));
-  const flags = process.execArgv.concat(
-    V8_FLAGS.filter(f => !process.execArgv.includes(f)),
-  );
+  const suite = path.join(__dirname, testFile);
   const res = spawnSync(
     process.execPath,
-    [...flags, path.join(__dirname, testFile)],
+    WINDOWS ? [...V8_FLAGS, suite] : [...V8_FLAGS, __filename, suite],
     {
       env: Object.assign({}, process.env, {NODE_V8_COVERAGE: covDir}),
-      encoding: 'utf-8',
+      // fd 3: the guard's lifeline to this process (see guardSuite).
+      stdio: WINDOWS
+        ? ['ignore', 'inherit', 'inherit']
+        : ['ignore', 'inherit', 'inherit', 'pipe'],
+      detached: !WINDOWS,
       timeout: CHILD_TIMEOUT_MS,
       killSignal: 'SIGKILL',
-      maxBuffer: CHILD_MAX_OUTPUT,
     },
   );
-  process.stdout.write(res.stdout || '');
-  process.stderr.write(res.stderr || '');
+  // pid 0: the guard never started, and -0 would name our own group.
+  if (res.pid && !WINDOWS) killGroup(res.pid);
   if (res.status !== 0) {
     fs.rmSync(covDir, {recursive: true, force: true});
     let why = 'the functional test itself FAILED';
@@ -265,4 +293,25 @@ function gateRegions(opts) {
   );
 }
 
+/**
+ * The guard `runCovered` starts as `node coverage_gate.js <suite>`, the
+ * leader of a new process group: run `suite` in that group and exit with
+ * its status.  Fd 3 is a pipe from the gate, which never writes to it, so
+ * its end means the gate is gone before it could kill the group (killed
+ * with its own process group, as run-all.js stops a gate, or by a
+ * terminal's Ctrl-C, which reaches only the gate's group); the guard then
+ * SIGKILLs the group, itself, the suite and what it started included.
+ */
+function guardSuite(suite) {
+  const child = spawn(process.execPath, [...V8_FLAGS, suite], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  child.on('exit', code => process.exit(code === null ? 1 : code));
+  const gate = new net.Socket({fd: 3, readable: true, writable: false});
+  gate.on('close', () => killGroup(process.pid));
+  gate.resume();
+}
+
 module.exports = {runCovered, measure, gateRegions};
+
+if (require.main === module) guardSuite(process.argv[2]);

@@ -317,10 +317,10 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
     """With the SEA's configuration the model sees the three tools, ``run_agent`` and real results.
 
     The scripted model builds a writer task, reads the loop status of one
-    review on disk, and finishes.  The test checks the offered tools (no
-    browser), that the default system prompt was kept
-    and the coordinator rules appended, and that both tool results flowed
-    back through the tool-result messages.
+    review on disk, and finishes.  The test checks the offered tools,
+    that the default system prompt was kept and the coordinator rules
+    appended, and that both tool results flowed back through the
+    tool-result messages.
     """
     review = _review(tmp_path, "p-round1-review.txt", "Rating: 10\nRecommendation: strong accept\n")
     script = [
@@ -352,8 +352,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             "run_agent",
             "Bash",
             "finish",
-        } <= names
-        assert "go_to_url" not in names, names
+        } <= names, names
         system = system_message(request)
         assert not system.startswith(sea.SYSTEM_PROMPT)
         assert "# Revise-and-review loop coordinator" in system

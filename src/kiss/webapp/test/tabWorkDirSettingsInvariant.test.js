@@ -191,8 +191,8 @@ function testRootDirsAreSkippedOnBothSides() {
     '/path/task-recorded',
     'a root global work_dir must be treated as none, leaving the tab folder',
   );
-  // ... and a root tab folder (an old poisoned task row) is not adopted,
-  // so with no usable directory at all the command carries none.
+  // ... and a root tab folder (an old poisoned task row) is not adopted:
+  // the tab keeps the folder it already had.
   send(win, {
     type: 'task_events',
     tabId: tabId,

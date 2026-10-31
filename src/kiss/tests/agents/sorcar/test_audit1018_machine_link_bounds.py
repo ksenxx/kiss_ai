@@ -47,7 +47,7 @@ def _empty_registry() -> Iterator[None]:
 
 @pytest.fixture
 def black_hole(tmp_path: Path) -> Iterator[mach.Machine]:
-    """A registered-looking machine whose port accepts connections and never answers."""
+    """A registered machine whose port accepts connections and never answers."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
@@ -70,6 +70,7 @@ def black_hole(tmp_path: Path) -> Iterator[mach.Machine]:
     cert = machine.cert_file()
     cert.parent.mkdir(parents=True, exist_ok=True)
     cert.write_bytes(make_test_tls(tmp_path)[0].read_bytes())
+    mach.save_machines([machine])
     yield machine
     stop.set()
     thread.join(5)
@@ -109,7 +110,7 @@ def test_turn_wait_and_handshake_are_bounded_by_the_timeouts(black_hole: mach.Ma
         link.request({"type": "ping"}, "pong", timeout=0.5)
     assert time.monotonic() - started < 2.0
     # A busy link is not a down machine: no back-off was started.
-    assert link._retry_at == 0.0
+    assert link._health.retry_at == 0.0
     slow.join(mach.REQUEST_TIMEOUT + 10)
     assert not slow.is_alive(), "the slow request's handshake outlived REQUEST_TIMEOUT"
     assert "unreachable" in str(outcome["error"])
@@ -123,7 +124,7 @@ def test_lanes_share_the_back_off(black_hole: mach.Machine) -> None:
     default = mach.link_for(black_hole)
     with pytest.raises(mach.MachineError, match="unreachable") as first:
         default.request({"type": "ping"}, "pong", timeout=1.0)
-    assert default._retry_at > time.monotonic()
+    assert default._health.retry_at > time.monotonic()
     started = time.monotonic()
     panels = mach.link_for(black_hole, "panels")
     assert panels is not default
@@ -133,7 +134,7 @@ def test_lanes_share_the_back_off(black_hole: mach.Machine) -> None:
     assert str(again.value) == str(first.value)
     # The back-off is one record: clearing it on either lane dials again.
     panels._health.retry_at = 0.0
-    assert default._retry_at == 0.0
+    assert default._health.retry_at == 0.0
     # A lane made after the links were retired starts afresh.
     mach.close_links()
     assert mach.link_for(black_hole, "panels")._health is not panels._health

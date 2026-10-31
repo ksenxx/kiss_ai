@@ -142,6 +142,7 @@ def charge_side_channel_usage(
     tokens: int,
     steps: int,
     epoch: Any = None,
+    tab_id: str = "",
 ) -> None:
     """Charge a side channel's spend to the task it worked for.
 
@@ -161,11 +162,17 @@ def charge_side_channel_usage(
     live agent like an unfinished one.  A task that finishes in the
     moment between the row check and the bank, after its final save
     read its counters, loses the spend (the same narrow window every
-    live-agent bank has).
+    live-agent bank has).  A charge that fails (a row update, a usage
+    broadcast, a chat-event write) is logged, never raised: it must not
+    cost the caller what follows it, the tabs' ``subagentDone`` or the
+    ``/ask`` answer panel.
 
     Args:
         printer: The printer that shows the task's tabs, or ``None``.
-        task_agent: The live agent of the task *task_id*.
+        task_agent: The live agent of the task *task_id*, or ``None``
+            when the spend is already on that agent's counters (the
+            task's own agent charging spend made after its row was
+            saved): an unfinished row's final save then includes it.
         task_id: The task's persisted ``task_history`` row id.
         budget: USD spent.
         tokens: Tokens spent.
@@ -173,13 +180,19 @@ def charge_side_channel_usage(
         epoch: *task_agent*'s usage epoch captured when the side channel
             started (see ``RelentlessAgent._attribute_usage``), or
             ``None`` for its current one.
+        tab_id: A tab that gets *task_id*'s new totals besides the tabs
+            watching the task (whose subscriptions lapse a few minutes
+            after it ends), or ``""``.
     """
     if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
         return
-    locked_call(
-        TASK_USAGE_LOCK, _charge_locked,
-        printer, task_agent, task_id, budget, tokens, steps, epoch,
-    )
+    try:
+        locked_call(
+            TASK_USAGE_LOCK, _charge_locked,
+            printer, task_agent, task_id, budget, tokens, steps, epoch, tab_id,
+        )
+    except Exception:
+        log.warning("side-channel spend of task %s not charged", task_id, exc_info=True)
 
 
 def _charge_locked(
@@ -190,6 +203,7 @@ def _charge_locked(
     tokens: int,
     steps: int,
     epoch: Any,
+    tab_id: str,
 ) -> None:
     """Charge the spend to the row or the live agent (``TASK_USAGE_LOCK`` held).
 
@@ -201,14 +215,7 @@ def _charge_locked(
     )
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
 
-    try:
-        updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
-    except Exception:
-        log.warning(
-            "could not add side-channel spend to task %s", task_id,
-            exc_info=True,
-        )
-        return
+    updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
     _race_delay()  # test hook: widens the row-check-to-bank window
     if not updated and not running:
         # No row for the task (its run persists none, or has not
@@ -226,10 +233,13 @@ def _charge_locked(
             agent = state.agent if state is not None else None
             epoch = None
         if agent is None:
-            log.warning(
-                "side-channel spend of task %s not charged to running "
-                "task %s: no live agent", task_id, running,
-            )
+            # No agent for the task's own row: the spend is already on
+            # the counters its final save reads (see ``task_agent``).
+            if running != task_id:
+                log.warning(
+                    "side-channel spend of task %s not charged to running "
+                    "task %s: no live agent", task_id, running,
+                )
         else:
             _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
             banked = True
@@ -274,7 +284,9 @@ def _charge_locked(
             }
         stamp_event_ts(event)
         if printer is not None:
-            printer.broadcast_transient(event, task_id=row_id)
+            printer.broadcast_transient(
+                event, task_id=row_id, tab_id=tab_id if row_id == task_id else "",
+            )
         _append_chat_event(dict(event), task_id=row_id)
     if updated and printer is not None:
         printer.broadcast({"type": "tasks_updated"})
@@ -326,7 +338,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
 
     Raises:
         Exception: Whatever the child's run raised (after the spend was
-            attributed).
+            attributed), with that spend in USD as its
+            ``task_update_cost`` attribute.
     """
     from kiss.agents.sorcar.chat_sorcar_agent import (
         ChatSorcarAgent,
@@ -391,21 +404,20 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             web_tools=ask_settings["use_web_tools"],
             use_memory=ask_settings["use_memory"],
         )
+    except BaseException as exc:
+        # A stopped or failed run spent too: the panel shows it.
+        exc.task_update_cost = _live_agent_usage(agent)[0]  # type: ignore[attr-defined]
+        raise
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
         try:
             charge_side_channel_usage(
                 printer, parent_agent, task_id, budget, tokens, steps, epoch=epoch,
             )
-        except Exception:
-            # The charge (a row update, a usage broadcast, a chat-event
-            # write) must not cost the tabs their ``subagentDone``:
-            # without it every surface watching the parent keeps the
-            # child's nested tab open, spinner and all, until a reload.
-            log.warning(
-                "side-channel spend of task %s not charged", task_id, exc_info=True,
-            )
         finally:
+            # Whatever the charge did: without ``subagentDone`` every
+            # surface watching the parent keeps the child's nested tab
+            # open, spinner and all.
             if printer is not None:
                 _notify_subagent_done(
                     printer, _persisted_task_id(agent), sub_tab_id, model_name,
@@ -447,7 +459,8 @@ class TaskUpdateRunner:
     Args:
         run_sea: Runs the agent for ``(parent_agent, task_id)`` and
             returns ``(answer, cost)``; :func:`run_task_update_sea` by
-            default.
+            default.  A run that raises reports its cost as the
+            exception's ``task_update_cost`` (0 when it has none).
     """
 
     def __init__(self, run_sea: TaskUpdateSeaRunner = run_task_update_sea) -> None:
@@ -531,12 +544,14 @@ class TaskUpdateRunner:
         text, cost, error = "", 0.0, ""
         try:
             text, cost = self._run_sea(parent_agent, task_id)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             # The task was stopped while its update ran: the child shares
             # the task's stop event and ends with it.
             error = "The task was stopped before this update finished."
+            cost = getattr(exc, "task_update_cost", 0.0)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            cost = getattr(exc, "task_update_cost", 0.0)
             log.warning("task update for %s failed", task_id, exc_info=True)
         finally:
             # Also on a BaseException: an update pinned on ``running``

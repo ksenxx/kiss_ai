@@ -7530,10 +7530,11 @@ class TestReviewBugReproductions38:
 class TestModelSwitchingIntoV2:
     """Conversations handed off from other providers must work in v2.
 
-    The Sorcar ``set_model`` tool hands a live conversation over verbatim
-    (``new_model.conversation = old_model.conversation``).  These tests
-    assign foreign-format conversations to an ``OpenAICompatibleModel2``
-    and assert on the exact JSON sent to ``/v1/responses``.
+    A model switch hands a live conversation over with
+    ``hand_off_conversation`` (in Chat Completions format when the
+    endpoint changes).  These tests assign foreign-format conversations
+    to an ``OpenAICompatibleModel2`` and assert on the exact JSON sent to
+    ``/v1/responses``.
     """
 
     def test_chat_handoff_tool_turn_becomes_native_items(
@@ -7933,3 +7934,97 @@ class TestModelSwitchingRoundTrip:
             fc["call_id"]
             for fc in _wire_items_by_type(_last_body(), "function_call")
         ] == ["call_01"]
+
+
+_OPENAI_REASONING = {"id": "rs_0a1b2c", "type": "reasoning", "summary": []}
+_OPENAI_CALL = {
+    "id": "fc_0a1b2c",
+    "type": "function_call",
+    "call_id": "call_openai1",
+    "name": "reveal_secret",
+    "arguments": '{"index":1}',
+    "status": "completed",
+}
+# Items as Together's Responses endpoint issued them for
+# openai/gpt-oss-120b on 2026-10-30, after an OpenAI turn.
+_TOGETHER_REASONING = {
+    "id": "reasoning_responses-01a18cec-b9fa",
+    "type": "reasoning",
+    "content": [{"type": "reasoning_text", "text": "I should call the tool."}],
+}
+_TOGETHER_MESSAGE = {
+    "id": "msg_responses-01a18cec-b9fa",
+    "type": "message",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": "Calling it."}],
+}
+_TOGETHER_CALL = {
+    "id": "call_01a18cec-c40f",
+    "type": "function_call",
+    "call_id": "call_01a18cec-c40f",
+    "name": "reveal_secret",
+    "arguments": '{"index":2}',
+    "status": "completed",
+}
+_TWO_VENDOR_CONVERSATION: list[dict[str, Any]] = [
+    {"role": "user", "content": "Reveal secret 1."},
+    _OPENAI_REASONING,
+    _OPENAI_CALL,
+    {"type": "function_call_output", "call_id": "call_openai1", "output": "PLUTONIUM-KITE"},
+    {"role": "user", "content": "Reveal secret 2."},
+    _TOGETHER_REASONING,
+    _TOGETHER_MESSAGE,
+    _TOGETHER_CALL,
+    {"type": "function_call_output", "call_id": "call_01a18cec-c40f", "output": "MARIGOLD-ANVIL"},
+    {"id": "item_42", "type": "message", "role": "assistant", "content": "Both revealed."},
+    {"role": "user", "content": "List both secrets."},
+]
+
+
+class TestForeignResponsesItemsAfterHandOff:
+    """A hop between two Responses vendors replays the other vendor's items.
+
+    OpenAI rejects a reasoning item it did not issue and any item id
+    without its own prefix (``Expected an ID that begins with 'fc'``), so
+    the hop Together ``openai/gpt-oss-120b`` -> ``gpt-4o`` failed every
+    request with ``Missing required parameter: 'input[8].summary'``.
+    """
+
+    def test_openai_request_drops_foreign_reasoning_and_ids(self, capture_server: str) -> None:
+        """OpenAI gets its own items verbatim and the foreign ones without
+        reasoning and ids; the stored conversation keeps everything."""
+        base_url = capture_server.removesuffix("/v1") + "/api.openai.com/v1"
+        m = OpenAICompatibleModel2("gpt-4o", base_url=base_url, api_key="k")
+        m.initialize("seed")
+        m.conversation = copy.deepcopy(_TWO_VENDOR_CONVERSATION)
+        text, _resp = m.generate()
+        assert text == "ok"
+        body = _last_body()
+        assert _wire_items_by_type(body, "reasoning") == [_OPENAI_REASONING]
+        together_call = {k: v for k, v in _TOGETHER_CALL.items() if k != "id"}
+        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, together_call]
+        assert [item.get("id") for item in _wire_items_by_type(body, "message")] == [
+            "msg_responses-01a18cec-b9fa",
+            None,
+        ]
+        assert [item["call_id"] for item in _wire_items_by_type(body, "function_call_output")] == [
+            "call_openai1",
+            "call_01a18cec-c40f",
+        ]
+        assert m.conversation[: len(_TWO_VENDOR_CONVERSATION)] == _TWO_VENDOR_CONVERSATION
+
+    def test_together_request_replays_its_items_verbatim(self, capture_server: str) -> None:
+        """An endpoint without id rules (Together) gets every item as stored."""
+        base_url = capture_server.removesuffix("/v1") + "/api.together.xyz/v1"
+        m = OpenAICompatibleModel2("openai/gpt-oss-120b", base_url=base_url, api_key="k")
+        m.initialize("seed")
+        m.conversation = copy.deepcopy(_TWO_VENDOR_CONVERSATION)
+        m.generate()
+        body = _last_body()
+        assert _wire_items_by_type(body, "reasoning") == [_OPENAI_REASONING, _TOGETHER_REASONING]
+        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, _TOGETHER_CALL]
+        assert [item.get("id") for item in _wire_items_by_type(body, "message")] == [
+            "msg_responses-01a18cec-b9fa",
+            "item_42",
+        ]

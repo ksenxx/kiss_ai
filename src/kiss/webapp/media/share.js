@@ -9,7 +9,8 @@
 // the task's panel above the task's transcript, as in the chat page's
 // thread — so this script re-creates the interactions the chat page
 // attaches through JavaScript: collapsing / expanding event panels
-// (media/main.js addCollapse).  The styling
+// by click or by Enter / Space on a focused header, keeping the
+// header's aria-expanded in step (media/main.js addCollapse).  The styling
 // comes from the page's inlined main.css, driven purely by the same
 // classes this script toggles.
 (function () {
@@ -49,17 +50,36 @@
   }
 
   /**
-   * Fill or clear a panel's one-line collapsed preview, mirroring
-   * collapsePreview in media/main.js: an expanded panel and a summary
-   * panel show no preview; a collapsed panel with a description
-   * argument (Bash, run_agent, run_parallel, run_commands_parallel)
-   * previews its description and a collapsed Read or Write panel its
-   * path (no "description:" / "path:" label); any other collapsed
-   * panel previews its content text.
+   * Keep a collapsible panel's own header aria-expanded true to its
+   * state, mirroring syncCollapseAria in media/main.js.
+   *
+   * @param {Element} panelEl The collapsible panel.
+   */
+  function syncCollapseAria(panelEl) {
+    const headers = panelEl.querySelectorAll('.collapse-header');
+    for (let i = 0; i < headers.length; i++) {
+      if (headers[i].closest('.collapsible') !== panelEl) continue;
+      headers[i].setAttribute(
+        'aria-expanded',
+        panelEl.classList.contains('collapsed') ? 'false' : 'true',
+      );
+      return;
+    }
+  }
+
+  /**
+   * Sync a panel's header aria-expanded and fill or clear its one-line
+   * collapsed preview, mirroring collapsePreview in media/main.js: an
+   * expanded panel and a summary panel show no preview; a collapsed
+   * panel with a description argument (Bash, run_agent, run_parallel,
+   * run_commands_parallel) previews its description and a collapsed
+   * Read or Write panel its path (no "description:" / "path:" label);
+   * any other collapsed panel previews its content text.
    *
    * @param {Element} panelEl The collapsible panel.
    */
   function collapsePreview(panelEl) {
+    syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
     if (
@@ -494,25 +514,43 @@
    * @param {Element} tabEl The clicked or activated .chat-tab.
    */
   function activateShareTab(tabEl) {
-    const id = tabEl.getAttribute('data-sub-tab-id');
-    selectSubTab(id === null ? null : id);
+    selectSubTab(tabEl.getAttribute('data-sub-tab-id'));
+  }
+
+  /**
+   * Close, as the user, the sub-agent tab whose close button is
+   * *closeEl* (the root tab has none).
+   *
+   * @param {Element} closeEl The clicked or activated .chat-tab-close.
+   */
+  function closeTabOfButton(closeEl) {
+    const tabEl = closeEl.closest('.chat-tab');
+    const id = tabEl && tabEl.getAttribute('data-sub-tab-id');
+    if (id) closeSubagentTab(id, true);
   }
 
   document.addEventListener('keydown', e => {
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
+    const activates = e.key === 'Enter' || e.key === ' ';
+    // A focused panel header (role=button in the export) acts on Enter /
+    // Space like a click, as the chat page's onDisclosureHeaderKey; a
+    // control inside the header keeps its own keys.
+    if (activates && target.classList.contains('collapse-header')) {
+      e.preventDefault();
+      target.click();
+      return;
+    }
     const closeEl = target.closest('.chat-tab-close');
-    if (closeEl && (e.key === 'Enter' || e.key === ' ')) {
+    if (closeEl && activates) {
       e.preventDefault();
       e.stopPropagation();
-      const tabEl = closeEl.closest('.chat-tab');
-      const id = tabEl && tabEl.getAttribute('data-sub-tab-id');
-      if (id) closeSubagentTab(id, true);
+      closeTabOfButton(closeEl);
       return;
     }
     const tabEl = target.closest('.chat-tab');
     if (!tabEl) return;
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (activates) {
       e.preventDefault();
       activateShareTab(tabEl);
     } else if (
@@ -633,9 +671,7 @@
     const closeEl = target.closest('.chat-tab-close');
     if (closeEl) {
       e.stopPropagation();
-      const closeTabEl = closeEl.closest('.chat-tab');
-      const closeId = closeTabEl && closeTabEl.getAttribute('data-sub-tab-id');
-      if (closeId) closeSubagentTab(closeId, true);
+      closeTabOfButton(closeEl);
       return;
     }
     const tabEl = target.closest('.chat-tab');

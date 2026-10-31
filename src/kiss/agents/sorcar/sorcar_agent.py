@@ -24,13 +24,14 @@ from typing import Any, NamedTuple, cast
 
 import yaml
 
-from kiss.agents.sorcar._concurrency import interruptible_locked_call, locked_call
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.agent_dispatch import (
     kill_jobs_of,
     live_agent_jobs,
     make_agent_job_tool,
     make_run_agent_tool,
     make_run_parallel_tool,
+    task_model_pinned,
 )
 from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.container_jobs import ContainerJobs
@@ -88,7 +89,7 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MemoryTools
-from kiss.core.models.model import Attachment
+from kiss.core.models.model import Attachment, hand_off_conversation
 from kiss.core.models.model_info import (
     MODEL_INFO,
     OPENAI_COMPATIBLE_PROVIDERS,
@@ -127,8 +128,11 @@ tools of every configured MCP server."""
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     # Run commands and read files (and their output).
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
-    # Change files — in a git worktree the agent creates and merges itself.
-    "edit": frozenset({"Edit", "Write", "create_worktree", "commit_and_merge"}),
+    # Change files — in a git worktree the agent creates and merges itself,
+    # with named snapshots of it to roll back to.
+    "edit": frozenset({
+        "Edit", "Write", "create_worktree", "commit_and_merge", "checkpoint", "rollback",
+    }),
     # Drive the Chromium browser.
     "browser": BROWSER_TOOL_NAMES,
     # Persistent memory pages.
@@ -613,7 +617,8 @@ def auto_commit_changes(
             message" toast without a follow-up.  When
             ``commit_staged`` returns ``False`` after *message_fn*
             (e.g. a pre-commit hook rejected the commit), or when a
-            Stop (``KeyboardInterrupt``) lands during *message_fn*,
+            Stop (``KeyboardInterrupt``) lands during *message_fn* or
+            the git commands after it (a slow pre-commit hook),
             ``notify_fn("failed", "")`` is invoked instead so the
             sticky "generating" toast always gets a terminal update.
 
@@ -626,29 +631,31 @@ def auto_commit_changes(
     GitWorktreeOps.stage_all(commit_dir)
     if not GitWorktreeOps.has_staged_changes(commit_dir):
         return False
-    _safe_notify(notify_fn, "generating", "")
     try:
-        msg = message_fn(commit_dir, user_prompt, task_result)
-    except Exception:
-        logger.debug(
-            "LLM commit message generation failed; using fallback", exc_info=True,
-        )
-        msg = fallback_commit_message(user_prompt, task_result)
+        _safe_notify(notify_fn, "generating", "")
+        try:
+            msg = message_fn(commit_dir, user_prompt, task_result)
+        except Exception:
+            logger.debug(
+                "LLM commit message generation failed; using fallback", exc_info=True,
+            )
+            msg = fallback_commit_message(user_prompt, task_result)
+        GitWorktreeOps.stage_all(commit_dir)
+        committed = GitWorktreeOps.commit_staged(commit_dir, msg)
+        if committed:
+            _safe_notify(notify_fn, "committed", _commit_subject(msg))
+        else:
+            # Terminal notification for the failure path: without it the
+            # sticky "Generating commit message" toast (emitted above)
+            # would linger in the chat page forever after e.g. a pre-commit
+            # hook rejection.
+            _safe_notify(notify_fn, "failed", "")
     except BaseException:
-        # A Stop during the model call: no commit follows, so close the
-        # sticky "generating" toast before the interrupt propagates.
+        # A Stop anywhere above (the model call, a slow pre-commit hook):
+        # close the sticky "generating" toast before the interrupt
+        # propagates.
         _safe_notify(notify_fn, "failed", "")
         raise
-    GitWorktreeOps.stage_all(commit_dir)
-    committed = GitWorktreeOps.commit_staged(commit_dir, msg)
-    if committed:
-        _safe_notify(notify_fn, "committed", _commit_subject(msg))
-    else:
-        # Terminal notification for the failure path: without it the
-        # sticky "Generating commit message" toast (emitted above)
-        # would linger in the chat page forever after e.g. a pre-commit
-        # hook rejection.
-        _safe_notify(notify_fn, "failed", "")
     return committed
 
 
@@ -718,6 +725,21 @@ def _agent_usage(agent: Any) -> tuple[float, int, int]:
     )
 
 
+def _subagent_done_event(tab_id: str) -> dict[str, Any]:
+    """Build the ``subagentDone`` event closing sub-agent tab *tab_id*.
+
+    The event names no ``connId``, so it reaches every connection; a
+    caller addressing one connection adds its scope keys.
+
+    Args:
+        tab_id: The sub-agent tab to close.
+
+    Returns:
+        The event dict to broadcast.
+    """
+    return {"type": "subagentDone", "tab_id": tab_id, "tabId": ""}
+
+
 def _broadcast_subagent_done(
     printer: Any, tab_ids: list[str], model: str = "",
 ) -> None:
@@ -741,7 +763,7 @@ def _broadcast_subagent_done(
     restore = getattr(printer, "restore_model_pick", None)
     for vid in tab_ids:
         try:
-            broadcast({"type": "subagentDone", "tab_id": vid, "tabId": ""})
+            broadcast(_subagent_done_event(vid))
             if callable(restore) and model:
                 restore(model, vid)
         except Exception:
@@ -921,8 +943,6 @@ def _attribute_sub_usage(
     budget: float,
     tokens: int,
     steps: int,
-    key: str | None = None,
-    seq: int = 0,
     epoch: Any = None,
 ) -> None:
     """Attribute sub-agents' cost, tokens, and steps to the parent *agent*.
@@ -954,20 +974,14 @@ def _attribute_sub_usage(
         budget: USD spend to add.
         tokens: Token count to add.
         steps: Step count to add.
-        key: Stable transaction source for a retryable adjustment (an
-            abandoned-child reclaim); ``None`` for one-shot
-            attributions (fan-out totals, TTS), which need no dedup
-            identity because they are appended at most once.
-        seq: Per-*key* monotonic sequence number (a reclaim's
-            generation); ignored for one-shot attributions.
         epoch: The ledger epoch object the commit is bound to (see
             ``RelentlessAgent._attribute_usage``), or ``None`` for the
-            agent's current epoch.  A reclaim passes the epoch
-            captured when the abandoned child was registered, so a
+            agent's current epoch.  A ``run_agent`` dispatch or a side
+            channel passes the epoch captured when it started, so a
             concurrent reset can never divert a prior task's spend
             into the new task's ledger.
     """
-    agent._attribute_usage(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
+    agent._attribute_usage(budget, tokens, steps, epoch=epoch)
     printer: Any = agent.printer
     if printer is not None:
         try:
@@ -1521,15 +1535,14 @@ class SorcarAgent(RelentlessAgent):
                 "emotion": emotion,
                 "talkId": uuid.uuid4().hex,
             }
+            from kiss.core.speech_synthesis import synthesize_talk_audio
+
             tts_usage: dict[str, Any] = {}
             try:
-                from kiss.core.speech_synthesis import synthesize_talk_audio
-
+                # None on every synthesis failure: talk degrades to text.
                 synthesized = synthesize_talk_audio(
                     text, language, emotion, usage_out=tts_usage,
                 )
-            except Exception:
-                synthesized = None
             finally:
                 # Also on a Stop (KeyboardInterrupt) that unwinds through
                 # here: the synthesis already banked its spend in
@@ -1606,6 +1619,10 @@ class SorcarAgent(RelentlessAgent):
                 useful_tools.run_commands_parallel,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
+            if self._subagent_info is None:
+                # A sub-agent edits its caller's tree in place: its rollback
+                # would also undo the caller's and its siblings' work.
+                tools.extend([useful_tools.checkpoint, useful_tools.rollback])
             tools.extend([self.create_worktree, self.commit_and_merge])
             # The Read dedupe assumes an earlier output is still in the
             # model's context; the executor calls this when it is not.
@@ -1656,6 +1673,11 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
+            if task_model_pinned():
+                return (
+                    f"Refused: this daemon pins every task to its model, {self.model_name} "
+                    "(a benchmark run measures one model); continue with it."
+                )
             target = self._current_executor or self
             old_model = getattr(target, "model", None)
             if old_model is None:
@@ -1748,8 +1770,7 @@ class SorcarAgent(RelentlessAgent):
                 # would be sent to Bedrock and vice versa.
                 setattr(new_model, "api_key", old_api_key)  # noqa: B010
             new_model.initialize("")
-            new_model.conversation = old_model.conversation
-            new_model.usage_info_for_messages = old_model.usage_info_for_messages
+            hand_off_conversation(old_model, new_model)
             old_sigs = getattr(old_model, "_thought_signatures", None)
             new_sigs = getattr(new_model, "_thought_signatures", None)
             if isinstance(old_sigs, dict) and isinstance(new_sigs, dict):
@@ -2456,9 +2477,15 @@ class SorcarAgent(RelentlessAgent):
                     # never a tool this run cannot have:
                     # the browser needs the settings panel's "Use web
                     # tools", the fan-out needs parallel mode, memory needs
-                    # a memory root, ``decide`` the decisions model and
-                    # ``skill`` a configured user or project skill.
+                    # a memory root, ``decide`` the decisions model,
+                    # ``skill`` a configured user or project skill, the
+                    # worktree tools a host (not container) run and
+                    # ``checkpoint`` / ``rollback`` a top-level host run.
                     offered = set(allowed)
+                    if docker_image:
+                        offered -= {"create_worktree", "commit_and_merge", "checkpoint", "rollback"}
+                    elif self._subagent_info is not None:
+                        offered -= {"checkpoint", "rollback"}
                     if not web_tools:
                         offered -= BROWSER_TOOL_NAMES
                     if not is_parallel:
@@ -2938,15 +2965,20 @@ class SorcarAgent(RelentlessAgent):
         messages = []
         for wt in self.worktrees:
             branch = wt.branch
-            message = self._merge_one(wt, conflict_resolver=resolve_merge_conflict)
+            try:
+                message = self._merge_one(wt, conflict_resolver=resolve_merge_conflict)
+            finally:
+                # A merge that failed (a rejected hook, a conflict the
+                # merge agent could not resolve) or was interrupted (the
+                # chat panel's per-tool Stop) after the directory was
+                # removed leaves the branch pending without a working
+                # copy: give it back so the task can fix the problem and
+                # retry, instead of editing the user's checkout while the
+                # worktree counts as active.
+                stranded = self._wt_for_repo(wt.repo_root) is not None and not wt.wt_dir.exists()
+                reattached = self._reattach_after_failed_merge(wt) if stranded else ""
+            message += reattached
             merged = self._wt_for_repo(wt.repo_root) is None
-            if not merged and not wt.wt_dir.exists():
-                # The branch holds the commits but its directory is
-                # gone: give the task its working copy back so it can
-                # fix the problem (a rejected hook, a conflict the merge
-                # agent could not resolve) and retry, instead of editing
-                # the user's checkout while the worktree counts as active.
-                message += self._reattach_after_failed_merge(wt)
             self._broadcast_to_watchers({
                 "type": "worktree_result",
                 "action": "merge",
@@ -3013,6 +3045,8 @@ class SorcarAgent(RelentlessAgent):
           a worktree, checkout paths of the work dir's own worktree
           (the tools remap them), git-ignored paths, and repositories
           whose worktree setup failed pass.
+        * ``rollback`` is refused the same way while the work dir is in
+          a repository checkout (see :meth:`_guard_rollback`).
         * The first ``finish`` while a worktree is unmerged is refused
           once, asking for ``commit_and_merge``; a second ``finish``
           passes so the agent is never trapped.
@@ -3035,12 +3069,16 @@ class SorcarAgent(RelentlessAgent):
                 "Call commit_and_merge() first, then finish again (or finish again "
                 "as is to leave the branch for the user to merge or discard)."
             )
-        if name not in ("Write", "Edit") or not isinstance(args.get("file_path"), str):
+        if name not in ("Write", "Edit", "rollback"):
             return None
         # A run without the tool (a WorkerSea, a profile without the
         # edit group's worktree tools) or in a Docker container (no
         # worktree can isolate it) edits the tree in place.
         if "create_worktree" not in self._run_tool_names or self.docker_manager is not None:
+            return None
+        if name == "rollback":
+            return self._guard_rollback()
+        if not isinstance(args.get("file_path"), str):
             return None
         path = Path(_absolutize(args["file_path"], self.work_dir)).resolve()
         if inside_kiss_worktree(path):
@@ -3070,6 +3108,31 @@ class SorcarAgent(RelentlessAgent):
             f"Error: {name} of {path} refused: it is inside the git repository "
             f"{repo} and is not git-ignored. Call {call} first, "
             f"then retry the {name}."
+        )
+
+    def _guard_rollback(self) -> str | None:
+        """Refuse ``rollback`` while the work dir is in a repository checkout.
+
+        ``rollback`` restores the whole git working tree holding the work
+        dir and deletes the files created since the checkpoint, so in the
+        user's own checkout it would also undo what the user (or another
+        task) changed there meanwhile.  Inside a worktree, outside any
+        repository, and in a repository whose worktree setup failed (the
+        task edits it in place) the rollback passes.
+
+        Returns:
+            The refusal text, or ``None`` to let the call through.
+        """
+        work_dir = Path(self.work_dir or "").resolve()
+        if inside_kiss_worktree(work_dir):
+            return None
+        repo = GitWorktreeOps.discover_repo(work_dir)
+        if repo is None or repo.resolve() in self._unisolated_repos:
+            return None
+        return (
+            f"Error: rollback refused: the work dir {work_dir} is in the checkout of "
+            f"the git repository {repo}, where a rollback would also undo the user's "
+            "own changes. Call create_worktree() first and take checkpoints there."
         )
 
     def _isolating_worktree_dir(self, repo: Path) -> Path | None:
@@ -3175,9 +3238,9 @@ class SorcarAgent(RelentlessAgent):
         # tree under the cross-process flock, so the capture takes the
         # flock too (repo_lock -> flock order, like every other taker).
         # Another tab's merge may hold ``repo_lock`` for minutes while
-        # its conflict resolver runs, so the acquire is sliced to keep
-        # this task stoppable (``interruptible_locked_call``).
-        return interruptible_locked_call(
+        # its conflict resolver runs; ``locked_call`` slices the acquire,
+        # which keeps this task stoppable.
+        return locked_call(
             repo_lock(repo), self._setup_worktree_locked, repo, work_dir_str,
         )
 
@@ -3202,11 +3265,13 @@ class SorcarAgent(RelentlessAgent):
             # branches were just removed.  The reclaim's locked body
             # starts with ``prepare_repo`` (the ``.kiss-worktrees/``
             # exclude and the untracked cache), so it is not repeated here.
+            # Both spare the live branches: a sibling agent between its
+            # ``_finalize_worktree`` and ``_do_merge`` has a branch no
+            # worktree lists, and only this set protects it in-process.
+            live = self._live_worktree_branches()
             try:
-                GitWorktreeOps.reclaim_orphaned_worktrees(
-                    repo, exclude_branches=self._live_worktree_branches(),
-                )
-                GitWorktreeOps.sweep_orphaned_state(repo)
+                GitWorktreeOps.reclaim_orphaned_worktrees(repo, exclude_branches=live)
+                GitWorktreeOps.sweep_orphaned_state(repo, exclude_branches=live)
             except Exception:  # pragma: no cover — unexpected git failure
                 logger.warning("Orphan-worktree maintenance failed", exc_info=True)
             branch = GitWorktreeOps.new_task_branch(repo)
@@ -3278,11 +3343,11 @@ class SorcarAgent(RelentlessAgent):
     # Commit / merge engine
     # ------------------------------------------------------------------
 
-    def _commit_worktree(self, wt: GitWorktree | None = None) -> bool:
+    def _commit_worktree(self, wt: GitWorktree) -> bool:
         """Commit any uncommitted changes in a worktree.
 
         Args:
-            wt: The worktree to commit; ``None`` for the first pending one.
+            wt: The worktree to commit.
 
         Stages all changes once, generates a commit message from the
         staged diff, then commits the already-staged changes.  Falls
@@ -3294,9 +3359,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             True if a commit was created, False if nothing to commit.
         """
-        if wt is None:
-            wt = self._wt
-        if wt is None or not wt.wt_dir.exists():
+        if not wt.wt_dir.exists():
             return False
         commit_run_id = f"autocommit-{time.time_ns()}"
         user_prompt, task_result = self._commit_context()
@@ -3362,33 +3425,29 @@ class SorcarAgent(RelentlessAgent):
 
     def _broadcast_to_watchers(
         self, event: dict[str, object], printer: Any = None,
-    ) -> bool:
+    ) -> None:
         """Broadcast *event* so it reaches this agent's tab.
 
         The printer's ``broadcast_transient`` primitive resolves every
         tab currently watching the task and stamps one copy per tab,
         falling back to this agent's tab; printers without it get one
-        copy stamped with the tab id directly.
+        copy stamped with the tab id directly.  Without a
+        ``broadcast``-capable printer the event is dropped.
 
         Args:
             event: The event to route; must not carry ``tabId``.
             printer: The printer to broadcast through; ``None`` uses
                 this agent's own ``printer`` attribute.
-
-        Returns:
-            False when there is no ``broadcast``-capable printer (the
-            event is dropped), True once it was broadcast.
         """
         if printer is None:
             printer = getattr(self, "printer", None)
         if printer is None or not hasattr(printer, "broadcast"):
-            return False
+            return
         transient = getattr(printer, "broadcast_transient", None)
         if callable(transient):
             transient(event, task_id=_persisted_task_id(self) or None, tab_id=self._tab_id)
         else:
             printer.broadcast({**event, "tabId": self._tab_id})
-        return True
 
     def _commit_and_clean_worktree(
         self, wt: GitWorktree,
@@ -3430,13 +3489,11 @@ class SorcarAgent(RelentlessAgent):
         self._restore_work_dir_after_teardown(wt)
         return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
 
-    def _finalize_worktree(
-        self, wt: GitWorktree | None = None,
-    ) -> _WorktreeCleanupOutcome:
+    def _finalize_worktree(self, wt: GitWorktree) -> _WorktreeCleanupOutcome:
         """Commit, remove worktree, prune; log why a worktree was preserved.
 
         Args:
-            wt: The worktree to finalize; ``None`` for the first pending one.
+            wt: The worktree to finalize.
 
         Returns:
             :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED` when the
@@ -3445,9 +3502,6 @@ class SorcarAgent(RelentlessAgent):
             retry, or ignored output could not be rescued — the
             worktree directory is preserved so no work is lost.
         """
-        if wt is None:
-            wt = self._wt
-        assert wt is not None
         outcome, leftover = self._commit_and_clean_worktree(wt)
         if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
@@ -3494,7 +3548,7 @@ class SorcarAgent(RelentlessAgent):
             main tree whose ``git stash push`` failed returns
             :attr:`MergeResult.STASH_FAILED` without touching the repo.
         """
-        return interruptible_locked_call(
+        return locked_call(
             repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver,
         )
 
@@ -3791,9 +3845,12 @@ class SorcarAgent(RelentlessAgent):
         return "\n\n".join(messages)
 
     def discard(self, *, rescue_ignored: bool = False) -> str:
-        """Throw away every pending task branch and worktree, checkout original.
+        """Throw away every pending task branch and worktree.
 
-        Every step is idempotent — safe to call multiple times.
+        The user's checkout keeps its branch; only a checkout of the
+        task branch itself is moved back to the branch the task started
+        from, so the branch can be deleted.  Every step is idempotent —
+        safe to call multiple times.
 
         Args:
             rescue_ignored: When True, git-ignored files the task
@@ -3827,7 +3884,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             The confirmation or "Discard deferred" message.
         """
-        return interruptible_locked_call(
+        return locked_call(
             repo_lock(wt.repo_root), self._discard_one_locked, wt, rescue_ignored,
         )
 
@@ -3851,7 +3908,10 @@ class SorcarAgent(RelentlessAgent):
                 )
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
             self._restore_work_dir_after_teardown(wt)
-            if wt.original_branch:
+            # The task never moved the main checkout: the user's branch
+            # stays, unless it is the task branch itself (checked out
+            # after its worktree was removed), which blocks the delete.
+            if wt.original_branch and GitWorktreeOps.current_branch(wt.repo_root) == wt.branch:
                 ok, err = GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
                 if not ok:
                     checkout_warning = f"\n⚠️  Could not checkout '{wt.original_branch}': {err}"
@@ -3903,14 +3963,11 @@ class SorcarAgent(RelentlessAgent):
             self._preserve_one_for_review(wt)
         return True
 
-    def _preserve_one_for_review(self, wt: GitWorktree) -> _WorktreeCleanupOutcome:
+    def _preserve_one_for_review(self, wt: GitWorktree) -> None:
         """Preserve one pending worktree (see :meth:`_retire_previous_worktree`).
 
         Args:
             wt: A pending worktree of this agent.
-
-        Returns:
-            The cleanup outcome of the worktree's commit.
         """
         outcome, leftover = self._commit_and_clean_worktree(wt)
         if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
@@ -3946,7 +4003,6 @@ class SorcarAgent(RelentlessAgent):
         # Otherwise the worktree is preserved on disk, but the keep
         # decision is not durable yet: keep the claim so a later retry
         # (or an explicit merge/discard) can still make it so.
-        return outcome
 
     def _keep_for_review(self, wt: GitWorktree) -> bool:
         """Make the "keep *wt* for manual review" decision durable.
@@ -4014,7 +4070,9 @@ class SorcarAgent(RelentlessAgent):
         (:func:`~kiss.agents.sorcar.persistence._add_late_task_usage`),
         with a persisted ``usage_info`` carrying each row's new totals
         so a replay shows them, also when the retirement is interrupted
-        after the call was billed.  A row that is still running is left
+        after the call was billed.  Under the daemon a still-running
+        ancestor (the caller of a sub-task whose tab closed) banks the
+        spend on its live agent.  A row that is still running is left
         alone: its own final save reads the live counters.
         """
         budget_before, tokens_before, _steps = _agent_usage(self)
@@ -4038,6 +4096,14 @@ class SorcarAgent(RelentlessAgent):
         task_id = _persisted_task_id(self)
         if not task_id or (d_budget <= 0 and d_tokens <= 0):
             return
+        printer: Any = getattr(self, "printer", None)
+        charge_task_usage = getattr(printer, "charge_task_usage", None)
+        if charge_task_usage is not None:
+            # The daemon's late-usage policy, which can also reach a
+            # running ancestor's live agent.  No live agent of this task
+            # is passed: the spend is already on this agent's counters.
+            charge_task_usage(None, task_id, d_budget, d_tokens, 0)
+            return
         try:
             updated, _running = _add_late_task_usage(task_id, d_tokens, d_budget, 0)
         except Exception:
@@ -4054,7 +4120,6 @@ class SorcarAgent(RelentlessAgent):
                 "total_steps": row_steps,
                 "ts": int(time.time() * 1000),
             }, task_id=row_id)
-        printer: Any = getattr(self, "printer", None)
         if updated and printer is not None and hasattr(printer, "broadcast"):
             printer.broadcast({"type": "tasks_updated"})
 

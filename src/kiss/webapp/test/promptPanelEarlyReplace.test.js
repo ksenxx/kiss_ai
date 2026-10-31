@@ -13,9 +13,9 @@ function panels(win, cls) {
 }
 
 // The early panels render at once; the authoritative events then
-// replace them in place (one panel each, the authoritative text: pinned
-// by promptPanelsCollapsedAndSummarized.test.js) and the replaced panel
-// sheds its `early` mark and carries the authoritative raw text.
+// replace them in place: still one panel each, showing the
+// authoritative text instead of the early one, without the `early`
+// mark, and carrying the authoritative raw text.
 function testEarlyPanelsRenderThenShedTheirMark() {
   const {win} = makePage();
 
@@ -37,6 +37,12 @@ function testEarlyPanelsRenderThenShedTheirMark() {
 
   sys = panels(win, 'system-prompt');
   pr = panels(win, 'prompt');
+  assert.strictEqual(sys.length, 1, 'the system prompt replaced its panel');
+  assert.strictEqual(pr.length, 1, 'the prompt replaced its panel');
+  assert.ok(sys[0].textContent.includes('authoritative SYSTEM text'));
+  assert.ok(!sys[0].textContent.includes('early SYSTEM text'));
+  assert.ok(pr[0].textContent.includes('authoritative FULL prompt'));
+  assert.ok(!pr[0].textContent.includes('early USER text'));
   assert.strictEqual(sys[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.rawText, 'authoritative FULL prompt');

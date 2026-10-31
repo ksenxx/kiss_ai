@@ -90,12 +90,15 @@ async function main() {
   api.switchToTab(second);
   await startPipeline(page);
   speakRound(page); // round B
-  assert.strictEqual(
-    posted.filter(m => m.type === 'voiceTranscribe').length,
-    2,
-  );
+  const audio = posted.filter(m => m.type === 'voiceTranscribe');
+  assert.strictEqual(audio.length, 2);
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'words spoken in chat B QB1'});
+  // The daemon echoes round B's tag.
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'words spoken in chat B QB1',
+    round: audio[1].round,
+  });
   assert.deepStrictEqual(
     posted
       .filter(m => m.type === 'submit')

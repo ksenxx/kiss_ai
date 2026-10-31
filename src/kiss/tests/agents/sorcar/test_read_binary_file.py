@@ -22,7 +22,11 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
-from kiss.core.models.model import parse_binary_attachments
+from kiss.core.models.model import (
+    BINARY_ATTACHMENT_CLOSE,
+    BINARY_ATTACHMENT_OPEN,
+    parse_binary_attachments,
+)
 from kiss.core.printer import truncate_result
 
 _PNG_1x1 = bytes.fromhex(
@@ -71,8 +75,8 @@ def test_read_png_returns_sentinel_with_base64_payload(temp_dir):
 
     result = UsefulTools().Read(str(png_path))
 
-    assert "<<KISS_BINARY_ATTACHMENT mime_type=image/png>>" in result
-    assert "<</KISS_BINARY_ATTACHMENT>>" in result
+    assert BINARY_ATTACHMENT_OPEN.format(mime_type="image/png") in result
+    assert BINARY_ATTACHMENT_CLOSE in result
     expected_b64 = base64.b64encode(_PNG_1x1).decode("ascii")
     assert expected_b64 in result
 
@@ -301,7 +305,7 @@ def test_read_audio_file_encodes_as_attachment(temp_dir):
     wav.write_bytes(_WAV_BYTES)
     result = UsefulTools().Read(str(wav))
 
-    assert "<<KISS_BINARY_ATTACHMENT mime_type=audio/" in result
+    assert BINARY_ATTACHMENT_OPEN.split("{mime_type}")[0] + "audio/" in result
     _, attachments = parse_binary_attachments(result)
     assert len(attachments) == 1
     assert attachments[0].mime_type.startswith("audio/")

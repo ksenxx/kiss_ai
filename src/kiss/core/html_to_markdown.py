@@ -174,9 +174,6 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         if self._pre is not None:
             self._end_pre()
         while self._tables:
-            if len(self._tables) == 1:
-                self._end_table_tag("td")
-                self._end_table_tag("tr")
             self._end_table_tag("table")
         self.drop_empty_marker()
 
@@ -270,22 +267,31 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         self._newline(1)
         self._emit_marker(state.indent + marker)
 
+    def _separate(self) -> None:
+        """Append a space unless the text is empty or already ends in whitespace."""
+        if self.text and not self.text.endswith((" ", "\n")):
+            self._append(" ")
+
     def _start_table_tag(self, tag: str) -> None:
-        """Open a table, row or cell; nested tables flow into the enclosing cell."""
+        """Open a table, row or cell; nested tables flow into the enclosing cell.
+
+        As in a browser, a new row closes the open cell and row, and a new
+        cell closes the open cell, so omitted ``</td>``/``</tr>`` lose nothing.
+        """
         if tag == "table":
             if not self._tables:
                 self._newline(2)
             self._tables.append([])
-        elif len(self._tables) != 1 or self._cell_start >= 0:
-            if self.text and not self.text.endswith((" ", "\n")):
-                self._append(" ")
+        elif len(self._tables) != 1:
+            self._separate()
         elif tag == "tr":
-            if self._row is not None:
-                self._tables[0].append(self._row)
+            self._end_table_tag("tr")
             self._row = []
-        elif self._row is not None:
-            self._cell_start = len(self.text)
-            self._cell_marker_end = self._marker_end
+        else:
+            self._end_table_tag(tag)
+            if self._row is not None:
+                self._cell_start = len(self.text)
+                self._cell_marker_end = self._marker_end
 
     def handle_endtag(self, tag: str) -> None:
         """Close block/inline constructs."""
@@ -369,30 +375,33 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         self._newline(2)
 
     def _end_table_tag(self, tag: str) -> None:
-        """Close a cell, row or table; the table is emitted when it closes."""
+        """Close a cell, row or table; the table is emitted when it closes.
+
+        Closing a row or the table first closes its open cell, and closing
+        the table its open row, as a browser does for omitted end tags.
+        The text of a nested table's cells stays space-separated.
+        """
         if not self._tables:
             return
-        if tag == "table":
-            rows = self._tables.pop()
-            if not self._tables:
-                self._emit_table(rows)
-        elif len(self._tables) != 1:
+        if len(self._tables) != 1:
+            self._separate()
+            if tag == "table":
+                self._tables.pop()
             return
-        elif tag == "tr":
-            if self._row is not None:
-                self._tables[0].append(self._row)
-                self._row = None
-        elif self._row is not None and self._cell_start >= 0:
+        if self._row is not None and self._cell_start >= 0:
             cell = " ".join(self.text[self._cell_start:].split())
             self.text = self.text[: self._cell_start]
             self._marker_end = self._cell_marker_end
             self._row.append(cell.replace("|", "\\|"))
             self._cell_start = -1
+        if tag in ("tr", "table") and self._row is not None:
+            self._tables[0].append(self._row)
+            self._row = None
+        if tag == "table":
+            self._emit_table(self._tables.pop())
 
     def _emit_table(self, rows: list[list[str]]) -> None:
         """Emit *rows* as a pipe table whose first row is the header."""
-        self._row = None
-        self._cell_start = -1
         rows = [row for row in rows if row]
         if not rows:
             return

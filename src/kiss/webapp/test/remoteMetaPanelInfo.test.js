@@ -835,6 +835,9 @@ async function main() {
         content.textContent.includes('chat tab notes'),
         'opening a file view keeps the report on screen',
       );
+      // The file slid the panel off, which stops the poll
+      // (metaPanelPoll_sweep1030); the drawer tab brings it back.
+      click(win, win.document.getElementById('meta-drawer'));
       const before = polls(wv).length;
       wv.clock.tick(POLL_MS);
       assert.ok(polls(wv).length > before, 'the poll keeps running');

@@ -61,8 +61,9 @@ import json, os, sys, pathlib
 record_dir = pathlib.Path({record_dir!r})
 n = len(list(record_dir.glob("call-*.json")))
 prompt = sys.stdin.read()
-(record_dir / f"call-{{n}}.json").write_text(
-    json.dumps({{"argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd()}}))
+system = pathlib.Path(sys.argv[sys.argv.index("--system-prompt-file") + 1]).read_text()
+(record_dir / f"call-{{n}}.json").write_text(json.dumps(
+    {{"argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd(), "system": system}}))
 for event in {events!r}:
     print(json.dumps(event))
 """
@@ -113,7 +114,7 @@ def test_relentless_passes_work_dir_as_cli_cwd(
     assert Path(calls[0]["cwd"]).resolve() == work_dir.resolve()
     argv = calls[0]["argv"]
     assert argv[argv.index("--tools") + 1] == ""
-    system_text = argv[argv.index("--system-prompt") + 1]
+    system_text = calls[0]["system"]
     assert "finish" in system_text and "tool_calls" in system_text
     assert "Say done." in calls[0]["prompt"]
     payload = yaml.safe_load(result)

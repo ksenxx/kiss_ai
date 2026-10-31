@@ -26,8 +26,7 @@ def _command(plan: dict[str, Any]) -> dict[str, Any]:
     kwargs = agent_dispatch.dispatch_command(
         plan["prompt"], plan["sea_path"], plan["work_dir"], plan["model_name"], plan["budget"],
         plan["timeout"], plan["parent_agent"], plan["scope_work_dir"], plan["options"],
-        plan["inherit"], plan["settings"], plan["workspace"], plan["timeout_explicit"],
-        plan["siblings"],
+        plan["inherit"], plan["settings"], plan["workspace"], plan["siblings"],
     )
     kwargs["timeout"] = kwargs.pop("record_timeout")
     return daemon_client.run_command(plan["prompt"], tab_id="t", run_token="r", **kwargs)

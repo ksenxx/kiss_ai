@@ -12,25 +12,12 @@ const {installAudio} = require('./speech_helpers');
 
 const B64 = 'SUQzBAAAAAAAAA==';
 
-// Models a real HTMLMediaElement closely enough for playTalkAudio:
-// `ended` fires asynchronously, after play() has returned and the
-// stall sampler is installed, so completion clears that sampler
-// instead of orphaning it; currentTime and pause() exist because the
-// sampler (installed after play() returns) reads the one and retires a
-// stalled clip with the other.
-function playThenEnd(win, player) {
-  player.currentTime = 0;
-  player.pause = () => {};
-  win.setTimeout(() => player.fire('ended'), 0);
-  return Promise.resolve();
-}
-
 function makePage() {
   let played;
   const {win, posted} = makeChatPage({
     beforeScripts(win) {
       stubRaf(win);
-      played = installAudio(win, player => playThenEnd(win, player));
+      played = installAudio(win);
     },
   });
 
@@ -43,8 +30,8 @@ const runner = makeRunner();
 const report = runner.report;
 
 // Each test gets a fresh page and the page is closed afterwards, pass
-// or fail, so its pending timers (the Audio stub's `ended`, main.js's
-// talk stall sampler) cannot keep node alive.
+// or fail, so its pending timers (main.js's talk stall sampler) cannot
+// keep node alive.
 function test(name, fn) {
   const page = makePage();
   try {

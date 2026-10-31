@@ -19,7 +19,13 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  startRunningTask,
+  PNG_B64,
+} = require('./simplify2_harness');
 
 const pages = [];
 
@@ -27,24 +33,6 @@ function openPage() {
   const page = makePage({beforeScripts: stubRaf});
   pages.push(page.win);
   return page;
-}
-
-// A real, valid 1x1 transparent PNG.
-const PNG_B64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
-  'YGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==';
-
-function startTask(wv, chatId) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  send(wv.win, {type: 'clear', chat_id: chatId, tabId: ready.tabId});
-  send(wv.win, {
-    type: 'status',
-    running: true,
-    tabId: ready.tabId,
-    startTs: Date.now(),
-  });
-  return ready.tabId;
 }
 
 /** The task's tool panels: on the transcript while it runs, inside its
@@ -62,7 +50,7 @@ const IMAGE = {path: '/w/shot.png', mime: 'image/png', b64: PNG_B64};
 function testLiveStreamKeepsImagePanelOpen() {
   const wv = openPage();
   const win = wv.win;
-  const TAB = startTask(wv, 'chat-imgpanel-1');
+  const TAB = startRunningTask(win, wv.posted);
 
   // Panel 1: a plain Read.  Panel 2: a screenshot with an image.
   send(win, {type: 'tool_call', name: 'Read', path: 'a.txt', tabId: TAB});
@@ -199,7 +187,7 @@ function testReplayKeepsImagePanelOpenAndVisible() {
 function testSummaryAdoptionKeepsImageVisible() {
   const wv = openPage();
   const win = wv.win;
-  const TAB = startTask(wv, 'chat-imgpanel-3');
+  const TAB = startRunningTask(win, wv.posted);
   send(win, {
     type: 'tool_call',
     name: 'screenshot',

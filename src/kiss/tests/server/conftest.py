@@ -113,16 +113,44 @@ def run_git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_git_checked(cwd: str | Path, *args: str) -> str:
+    """Run ``git *args`` in *cwd* and return its stdout; raise ``RuntimeError`` if git fails."""
+    result = run_git(cwd, *args)
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed in {cwd}: {result.stderr.strip()}")
+    return result.stdout
+
+
+def assert_repo_root(repo: str | Path) -> None:
+    """Raise ``RuntimeError`` unless *repo* is the root of its own git repository.
+
+    A folder whose ``git init`` failed resolves to the enclosing
+    repository (with ``TMPDIR`` inside a checkout: the developer's), and
+    under a git hook's exported ``GIT_DIR`` / ``GIT_WORK_TREE`` every
+    folder resolves to the hook's repository.  A test that went on to
+    configure and commit there would rewrite that repository.
+    """
+    top = run_git(repo, "rev-parse", "--show-toplevel").stdout.strip()
+    if not top or Path(top).resolve() != Path(repo).resolve():
+        raise RuntimeError(f"{repo} is not the root of its own git repository (top: {top!r})")
+
+
 def init_repo(repo: str | Path) -> None:
-    """Create a git repository at *repo*, on branch ``main``, with one committed ``seed.txt``."""
+    """Create a git repository at *repo*, on branch ``main``, with one committed ``seed.txt``.
+
+    Every git step must succeed, and *repo* must be the root of its own
+    repository (:func:`assert_repo_root`) before anything is configured
+    or committed; otherwise ``RuntimeError`` is raised.
+    """
     Path(repo).mkdir(parents=True, exist_ok=True)
-    run_git(repo, "init", "-q", "-b", "main")
-    run_git(repo, "config", "user.email", "test@example.com")
-    run_git(repo, "config", "user.name", "Test User")
-    run_git(repo, "config", "commit.gpgsign", "false")
+    run_git_checked(repo, "init", "-q", "-b", "main")
+    assert_repo_root(repo)
+    run_git_checked(repo, "config", "user.email", "test@example.com")
+    run_git_checked(repo, "config", "user.name", "Test User")
+    run_git_checked(repo, "config", "commit.gpgsign", "false")
     Path(repo, "seed.txt").write_text("seed\n", encoding="utf-8")
-    run_git(repo, "add", "seed.txt")
-    run_git(repo, "commit", "-q", "-m", "seed")
+    run_git_checked(repo, "add", "seed.txt")
+    run_git_checked(repo, "commit", "-q", "-m", "seed")
 
 
 def kiss_wt_branches(repo: str | Path) -> list[str]:

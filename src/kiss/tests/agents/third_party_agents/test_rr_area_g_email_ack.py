@@ -14,7 +14,7 @@ mail ``\\Seen``.
 These tests drive the REAL ``EmailChannelBackend`` — stdlib
 ``imaplib.IMAP4_SSL`` and ``smtplib.SMTP_SSL`` clients — against a
 minimal in-test IMAP and SMTP server pair speaking real TLS with a
-self-signed certificate (generated with ``cryptography``).  The
+loopback certificate issued by the product's ``tls_certs``.  The
 servers are real socket servers, not mocks of any KISS code.
 
 The runner is the real ``ChannelRunner``: its ``_launch_task`` goes over
@@ -26,14 +26,12 @@ the daemon actually received.
 
 from __future__ import annotations
 
-import datetime
-import ipaddress
 import logging
 import socket
 import ssl
 import threading
 from collections.abc import Iterator
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +41,8 @@ from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.email.email_sea import EmailChannelBackend, _config
 from kiss.agents.third_party_agents.irc import irc_sea
+from kiss.core import tls_certs
+from kiss.tests.agents.third_party_agents.irc_test_utils import IRCServer, read_lines
 from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
 from kiss.tests.agents.third_party_agents.recording_daemon import (
     RecordingDaemon,
@@ -72,41 +72,14 @@ pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _make_ssl_context(tmp_path: Path) -> ssl.SSLContext:
-    """Generate a self-signed localhost certificate and server context."""
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
+    """Issue a loopback certificate in *tmp_path* and return a server context for it.
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(days=1))
-        .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
-            critical=False,
-        )
-        .sign(key, hashes.SHA256())
-    )
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
-    )
+    The email clients use the stdlib's unverified default context, so
+    the daemon's own local-CA certificate (it covers ``127.0.0.1``) works.
+    """
+    cert_path, key_path = tls_certs.ensure_local_tls_pair(tmp_path)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(cert_path), str(key_path))
+    context.load_cert_chain(cert_path, key_path)
     return context
 
 
@@ -443,17 +416,6 @@ class TestEmailAckMessage:
         assert imap.unseen() == []
 
 
-def _recv_line(conn: socket.socket) -> bytes:
-    """Read one CRLF-terminated line from *conn*."""
-    line = b""
-    while not line.endswith(b"\r\n"):
-        chunk = conn.recv(1)
-        if not chunk:
-            break
-        line += chunk
-    return line
-
-
 class TestRunnerAckDispatch:
     """ChannelRunner._ack_message with a backend that has no ack hook.
 
@@ -470,19 +432,14 @@ class TestRunnerAckDispatch:
 
     def test_backend_without_hook_is_untouched(self, daemon: RecordingDaemon) -> None:
         """A backend without ``ack_message`` processes and replies normally."""
-        with socket.create_server(("127.0.0.1", 0)) as listener:
-            listener.settimeout(5.0)
-            irc_sea._config.save(
-                {"server": "127.0.0.1", "port": str(listener.getsockname()[1]), "nick": "bot"}
-            )
+        with closing(IRCServer()) as server:
+            irc_sea._config.save({"server": "127.0.0.1", "port": str(server.port), "nick": "bot"})
             backend = irc_sea.IRCChannelBackend()
             try:
                 # Deliver one PRIVMSG on a first connection; the reader
                 # thread queues it for the next poll.
                 assert backend.connect() is True, backend.connection_info
-                first, _ = listener.accept()
-                with first:
-                    first.settimeout(5.0)
+                with server.accept() as first:
                     first.sendall(b":alice!a@example.com PRIVMSG #general :hi\r\n")
                     assert wait_until(lambda: not backend._message_queue.empty())
                     runner = ChannelRunner(backend=backend, channel_name="#general", agent_name="t")
@@ -491,13 +448,11 @@ class TestRunnerAckDispatch:
                     assert runner.run_once() == 1
                 assert len(daemon.launched_prompts) == 1
                 assert "hi" in daemon.launched_prompts[0]
-                second, _ = listener.accept()
-                with second:
-                    second.settimeout(5.0)
-                    lines = [_recv_line(second) for _ in range(4)]
-                assert lines[0] == b"NICK bot\r\n"
-                assert lines[2] == b"JOIN #general\r\n"
-                assert lines[3].startswith(b"PRIVMSG #general :")
-                assert _REPLY_TEXT.encode() in lines[3]
+                with server.accept() as second:
+                    lines = read_lines(second, "PRIVMSG")
+                assert lines[0] == "NICK bot"
+                assert lines[2] == "JOIN #general"
+                assert lines[3].startswith("PRIVMSG #general :")
+                assert _REPLY_TEXT in lines[3]
             finally:
                 backend.disconnect()

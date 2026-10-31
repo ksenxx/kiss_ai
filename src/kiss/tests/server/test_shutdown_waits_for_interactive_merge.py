@@ -40,7 +40,12 @@ from kiss.core import user_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.conftest import find_free_port, run_git
+from kiss.tests.server.conftest import (
+    assert_repo_root,
+    find_free_port,
+    run_git,
+    run_git_checked,
+)
 from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
 _TAB = "merge-tab"
@@ -149,13 +154,14 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
     def _init_repo(self) -> None:
         """Create a git repo with one commit on ``main``."""
-        run_git(self.repo, "init", "-q", "-b", "main")
-        run_git(self.repo, "config", "user.email", "test@example.com")
-        run_git(self.repo, "config", "user.name", "Test User")
-        run_git(self.repo, "config", "commit.gpgsign", "false")
+        run_git_checked(self.repo, "init", "-q", "-b", "main")
+        assert_repo_root(self.repo)
+        run_git_checked(self.repo, "config", "user.email", "test@example.com")
+        run_git_checked(self.repo, "config", "user.name", "Test User")
+        run_git_checked(self.repo, "config", "commit.gpgsign", "false")
         (self.repo / "README.md").write_text("hello\n", encoding="utf-8")
-        run_git(self.repo, "add", "README.md")
-        run_git(self.repo, "commit", "-q", "-m", "initial")
+        run_git_checked(self.repo, "add", "README.md")
+        run_git_checked(self.repo, "commit", "-q", "-m", "initial")
 
     def _install_blocking_hook(self) -> None:
         """Install a real ``pre-commit`` hook that blocks the merge's commit."""

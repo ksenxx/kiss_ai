@@ -16,21 +16,32 @@
 'use strict';
 
 const assert = require('assert');
+const {send, click, ofType} = require('./simplify2_harness');
 const {
-  makePage: makeChatPage,
-  send,
-  click,
-  ofType,
-} = require('./simplify2_harness');
-const {loadHistory, makeSession} = require('./history_helpers');
+  loadHistory,
+  makeSession,
+  makeConnectedRemotePage: makePage,
+} = require('./history_helpers');
 
-function makePage() {
-  const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
-  send(win, {type: 'daemonStatus', connected: true});
-  return {win, posted};
+/**
+ * Load a one-row history and return that row with its delete controls:
+ * the trash icon `del` and the confirmation box with its Delete (`yes`)
+ * and Cancel (`no`) buttons.
+ */
+function loadRow(win) {
+  loadHistory(win, [makeSession()]);
+  const row = win.document.querySelector('#history-list .running-item');
+  const confirm = row.querySelector(
+    '.sidebar-item-actions > .sidebar-item-confirm',
+  );
+  return {
+    row,
+    del: row.querySelector('.sidebar-item-actions > .sidebar-item-delete'),
+    confirm,
+    yes: confirm.querySelector('.sidebar-confirm-yes'),
+    no: confirm.querySelector('.sidebar-confirm-no'),
+  };
 }
-
-const SESSION = makeSession();
 
 /**
  * What a browser's hit test finds at the point where `el` was: `el`
@@ -67,15 +78,8 @@ function clickAt(win, el) {
 // the very task being deleted.
 function testDoubleClickDeletesOnceAndOpensNothing() {
   const {win, posted} = makePage();
-  loadHistory(win, [SESSION]);
-  const row = win.document.querySelector('#history-list .running-item');
-  const del = row.querySelector('.sidebar-item-actions > .sidebar-item-delete');
-  const confirm = row.querySelector(
-    '.sidebar-item-actions > .sidebar-item-confirm',
-  );
+  const {row, del, confirm, yes, no} = loadRow(win);
   click(win, del);
-  const yes = confirm.querySelector('.sidebar-confirm-yes');
-  const no = confirm.querySelector('.sidebar-confirm-no');
   assert.strictEqual(clickAt(win, yes), yes);
   assert.strictEqual(confirm.style.display, '', 'the box stays in place');
   assert.strictEqual(yes.disabled, true, 'Delete is spent');
@@ -114,13 +118,7 @@ function testDoubleClickDeletesOnceAndOpensNothing() {
 // the spent box up: Cancel folds it, the trash icon asks afresh.
 function testRefusedDeleteCancelsAndAsksAgain() {
   const {win, posted} = makePage();
-  loadHistory(win, [SESSION]);
-  const row = win.document.querySelector('#history-list .running-item');
-  const del = row.querySelector('.sidebar-item-actions > .sidebar-item-delete');
-  const confirm = row.querySelector(
-    '.sidebar-item-actions > .sidebar-item-confirm',
-  );
-  const yes = confirm.querySelector('.sidebar-confirm-yes');
+  const {del, confirm, yes, no} = loadRow(win);
   click(win, del);
   clickAt(win, yes);
   send(win, {
@@ -128,7 +126,7 @@ function testRefusedDeleteCancelsAndAsksAgain() {
     text: 'Cannot delete the task: its task is still running. Stop it first.',
   });
   assert.strictEqual(yes.disabled, true);
-  click(win, confirm.querySelector('.sidebar-confirm-no'));
+  click(win, no);
   assert.strictEqual(confirm.style.display, 'none', 'Cancel folds the box');
   assert.strictEqual(del.style.display, '', 'the trash icon is back');
   assert.strictEqual(win.document.activeElement, del);
@@ -148,12 +146,7 @@ function testRefusedDeleteCancelsAndAsksAgain() {
 
 function testConfirmBoxSwallowsClicks() {
   const {win, posted} = makePage();
-  loadHistory(win, [SESSION]);
-  const row = win.document.querySelector('#history-list .running-item');
-  const del = row.querySelector('.sidebar-item-actions > .sidebar-item-delete');
-  const confirm = row.querySelector(
-    '.sidebar-item-actions > .sidebar-item-confirm',
-  );
+  const {del, confirm} = loadRow(win);
   click(win, del);
   // A click on the box itself (the gap between Delete and Cancel).
   click(win, confirm);

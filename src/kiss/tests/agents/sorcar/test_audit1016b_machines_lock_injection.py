@@ -31,8 +31,10 @@ fails on the pre-fix ``with`` sites and passes on the fixed ones.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +122,7 @@ _DRIVERS: dict[str, type] = {
 
 def run_hammer(name: str) -> None:
     """Child-process body: hammer the path *name* and check the locks stay free."""
+    mach.save_machines([MACHINE])  # link_for caches the links of registered machines only
     driver = _DRIVERS[name]()
     locks: dict[str, object] = {
         "_links_lock": mach._links_lock, "_tunnels_lock": mach._tunnels_lock,
@@ -147,11 +150,12 @@ def run_hammer(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(_DRIVERS))
-def test_machines_locks_survive_injection(name: str) -> None:
+def test_machines_locks_survive_injection(name: str, tmp_path: Path) -> None:
     """No lock site a task thread reaches in ``machines`` leaks under injection."""
     proc = subprocess.run(
         [sys.executable, "-c", f"import {__name__} as m; m.run_hammer({name!r})"],
         capture_output=True, text=True, timeout=180, check=False,
+        env={**os.environ, "KISS_HOME": str(tmp_path)},  # the child's registry
     )
     assert proc.returncode == 0, f"{name}: {proc.stderr[-3000:]}"
 

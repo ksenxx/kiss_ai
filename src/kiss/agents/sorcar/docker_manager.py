@@ -24,7 +24,7 @@ import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.edit_guards import rewrite_guard
+from kiss.agents.sorcar.edit_guards import heredoc_guard, rewrite_guard
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _output_budget,
@@ -271,20 +271,24 @@ def _timeout_message(timeout_seconds: float, output: str) -> str:
 
 
 def _refuse_or_lift(
-    command: str, workdir: str, timeout_seconds: float,
+    command: str, workdir: str | None, timeout_seconds: float, exists: Callable[[str], bool],
 ) -> tuple[str | None, float]:
     """Apply the guards of the container ``Bash`` tools to *command*.
 
     The destructive and install-timeout guards of the host ``Bash``
-    (:func:`refuse_or_lift`) and its refusal of shell rewrites that
-    belong in ``Edit`` (:func:`rewrite_guard`).
+    (:func:`refuse_or_lift`), and its refusals of shell rewrites that
+    belong in ``Edit``: :func:`rewrite_guard`, and :func:`heredoc_guard`,
+    which calls *exists* to learn whether a here-document's target exists
+    in the container (or the exec bridge's environment, whose *workdir*
+    is ``None`` when unknown).
 
     Returns:
         ``(refusal, timeout_seconds)``: the guard's message (``None``
         when the command may run) and the possibly lifted deadline.
     """
     guard, timeout_seconds = refuse_or_lift(command, workdir, timeout_seconds)
-    return guard or rewrite_guard(command), timeout_seconds
+    refusal = guard or rewrite_guard(command) or heredoc_guard(command, workdir, exists)
+    return refusal, timeout_seconds
 
 
 def _with_exit_code(output: str, exit_code: int) -> str:
@@ -690,7 +694,8 @@ class DockerManager:
 
         print(description)
 
-        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds)
+        exists = functools.partial(self._path_exists, container, timeout_seconds, self.stop_event)
+        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds, exists)
         if guard is not None:
             return guard
         exit_code, output = self._exec(
@@ -772,16 +777,38 @@ class DockerManager:
             timeout, ``-1`` when the exec failed to run or was stopped),
             the output and the wall time spent.
         """
-        guard, timeout_seconds = _refuse_or_lift(command, self.workdir, timeout_seconds)
-        if guard is not None:
-            return -1, guard, 0.0
         started = time.monotonic()
-        try:
+        try:  # the guard probes the container too
+            exists = functools.partial(self._path_exists, container, timeout_seconds, cancel)
+            guard, timeout_seconds = _refuse_or_lift(
+                command, self.workdir, timeout_seconds, exists,
+            )
+            if guard is not None:
+                return -1, guard, 0.0
             exit_code, output = self._exec(container, command, timeout_seconds, cancel)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             exit_code, output = -1, f"Error: {e}"
         return exit_code, output, time.monotonic() - started
+
+    def _path_exists(
+        self,
+        container: Container,
+        timeout_seconds: float,
+        cancel: threading.Event | None,
+        path: str,
+    ) -> bool:
+        """Whether *path* may exist in *container* (the here-document guard's probe).
+
+        The probe is an exec like any command (:meth:`_exec`), so the
+        command's deadline and a Stop bound it.  A probe that gave no
+        answer (timed out or stopped) counts as existing: the copy is
+        refused, never run on a target nobody checked.
+        """
+        exit_code, _ = self._exec(
+            container, f"test -e {shlex.quote(path)}", timeout_seconds, cancel,
+        )
+        return exit_code != 1
 
     def _exec(
         self,

@@ -108,7 +108,7 @@ def test_msteams_send_message_without_thread(graph_server) -> None:
 def test_msteams_tool_urls_use_channels(graph_server) -> None:
     """All channel tool methods must use the Graph 'channels' resource."""
     backend = _make_backend(graph_server)
-    assert json.loads(backend.list_third_party_agents("team1"))["ok"]
+    assert json.loads(backend.list_channels("team1"))["ok"]
     assert json.loads(backend.list_channel_messages("team1", "chan1"))["ok"]
     assert json.loads(backend.post_channel_message("team1", "chan1", "x"))["ok"]
     assert json.loads(backend.reply_to_message("team1", "chan1", "MSG1", "y"))["ok"]

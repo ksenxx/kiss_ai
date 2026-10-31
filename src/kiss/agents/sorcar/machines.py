@@ -92,6 +92,7 @@ from kiss.core import tls_certs
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import LockTimeoutError
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,10 @@ LINK_PING_TIMEOUT = 20.0
 """Seconds a keepalive ping may go unanswered before the socket counts as dead."""
 SSH_TIMEOUT = 30.0
 """Seconds an ``ssh`` login (the enrollment, opening a port-forward) may take."""
+FORWARD_UP = "kiss-forward-up"
+"""What a port-forward's ``LocalCommand`` prints: ssh runs it once the local port is bound."""
+FORWARD_ATTEMPTS = 3
+"""Local ports :meth:`SshTunnel.open` tries when another program binds the one it picked."""
 REGISTRY_LOCK_TIMEOUT = 60.0
 """Seconds :func:`registry_lock` waits for another holder before giving up.
 
@@ -524,6 +529,9 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
     :data:`ENROLL_TIMEOUT` seconds), and only then publishes the pin
     and the registry entry, so a wrong address or password changes
     nothing (an existing machine of that name keeps its pin and entry).
+    The staging file is removed however the call ends: a Stop's
+    injected ``KeyboardInterrupt`` (the ``/machine add`` tool runs on
+    the task thread) or a busy registry lock must not leave it behind.
 
     Raises:
         MachineError: On a bad name or address, an unreachable daemon,
@@ -546,17 +554,16 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
     cert = machine.cert_file()
     cert.parent.mkdir(parents=True, exist_ok=True)
     staged = cert.with_name(f".{cert.name}.{os.getpid()}.{secrets.token_hex(4)}.new")
-    staged.write_text(pem, encoding="utf-8")
     try:
+        staged.write_text(pem, encoding="utf-8")
         _first_handshake(machine, staged, deadline)
-    except MachineError:
-        staged.unlink(missing_ok=True)
-        raise
-    with registry_lock():
-        os.replace(staged, cert)
-        machines = [m for m in load_machines() if m.name != name]
-        machines.append(machine)
-        save_machines(machines)
+        with registry_lock():
+            os.replace(staged, cert)
+            machines = [m for m in load_machines() if m.name != name]
+            machines.append(machine)
+            save_machines(machines)
+    finally:
+        staged.unlink(missing_ok=True)  # gone already once published
     return machine
 
 
@@ -733,8 +740,8 @@ class SshTunnel:
     """An ``ssh -N -L`` port-forward from a local loopback port to an SSH machine's daemon.
 
     :meth:`open` starts ``ssh -N -L 127.0.0.1:<local>:127.0.0.1:<remote>
-    user@host`` (through :func:`ssh_command`) and waits until the local
-    port accepts connections; :meth:`alive` says whether the ssh process
+    user@host`` (through :func:`ssh_command`) and waits until ssh says
+    the local port is bound; :meth:`alive` says whether the ssh process
     still runs and the port still answers; :meth:`close` ends the
     process.  :func:`tunnel_port` keeps one tunnel per ``ssh`` login
     and re-opens a dead one on the next connection.
@@ -752,12 +759,18 @@ class SshTunnel:
         # right after a ``with lock:``'s ``__enter__`` (gh-74174).
         self._lock = threading.RLock()
         self._last_line = ""
+        # Set by the ssh process's output once it said its forward is up.
+        self._up = threading.Event()
 
     def alive(self) -> bool:
-        """Return whether the ssh process runs and its local port accepts a connection."""
+        """Return whether the ssh process runs, said its forward is up, and the port answers.
+
+        A process that never said so (its opening was interrupted) is
+        not alive even if the port answers: another program may hold it.
+        """
         return (
             self.process is not None and self.process.poll() is None
-            and _port_accepts(self.local_port)
+            and self._up.is_set() and _port_accepts(self.local_port)
         )
 
     def open(self, timeout: float = SSH_TIMEOUT) -> int:
@@ -765,8 +778,9 @@ class SshTunnel:
 
         Raises:
             MachineError: When ``ssh`` is missing, exits (its last
-                stderr line is quoted) or does not open the port within
-                *timeout* seconds.
+                output line is quoted), cannot bind any of
+                :data:`FORWARD_ATTEMPTS` local ports or does not open
+                the forward within *timeout* seconds.
         """
         return locked_call(self._lock, self._open_locked, timeout)
 
@@ -774,48 +788,89 @@ class SshTunnel:
         """:meth:`open`'s body, under the lock."""
         if self.alive():
             return self.local_port
+        deadline = time.monotonic() + timeout
+        for _ in range(FORWARD_ATTEMPTS):
+            if self._forward(deadline):
+                return self.local_port
+            if time.monotonic() >= deadline:
+                break
+        raise self._forward_error()
+
+    def _forward(self, deadline: float) -> bool:
+        """Start ssh forwarding a newly picked local port; return whether the forward is up.
+
+        Up means ssh ran the ``LocalCommand`` that prints
+        :data:`FORWARD_UP`, which it does only once the local port is
+        bound.  The port answering would prove nothing: another program
+        may bind it after :func:`_free_port` let it go and before ssh
+        does, and would then get this daemon's connections.  ssh then
+        fails to bind it and False is returned, for the caller to pick
+        another port; ssh failing otherwise raises.
+        """
         self._kill()
         self.local_port = _free_port()
         forward = f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}"
+        # ClearAllForwardings in the user's ssh config would drop the -L
+        # and still run the LocalCommand.
         cmd = ssh_command(
-            self.ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-            "-L", forward,
+            self.ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ClearAllForwardings=no",
+            "-o", "ServerAliveInterval=15", "-o", "PermitLocalCommand=yes",
+            "-o", f"LocalCommand=echo {FORWARD_UP}", "-L", forward,
         )
         self._last_line = ""
         try:
             self.process = subprocess.Popen(
-                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
             )
         except OSError as exc:
             raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
+        taken = threading.Event()
         reader = threading.Thread(
-            target=self._read_stderr, args=(self.process,), daemon=True,
-            name=f"ssh-tunnel-stderr {self.ssh}",
+            target=self._read_output,
+            args=(self.process, f"bind [127.0.0.1]:{self.local_port}:", self._up, taken),
+            daemon=True, name=f"ssh-tunnel-output {self.ssh}",
         )
         reader.start()
-        deadline = time.monotonic() + timeout
-        while True:
-            if self.process.poll() is not None:
+        while not self._up.wait(0.05):
+            if taken.is_set() or self.process.poll() is not None:
+                with suppress(subprocess.TimeoutExpired):
+                    # Windows' ssh stays up after a failed bind.
+                    self.process.wait(min(1.0, _remaining(deadline)))
+                self._kill()
                 reader.join(timeout=2.0)
-                message = f"ssh {self.ssh} cannot forward its daemon port {self.remote_port}"
-                raise MachineError(
-                    f"{message}: {self._last_line}" if self._last_line else message
-                )
-            if _port_accepts(self.local_port):
-                return self.local_port
+                if taken.is_set():
+                    return False
+                raise self._forward_error()
             if time.monotonic() >= deadline:
                 self._kill()
                 raise MachineError(f"ssh {self.ssh} did not open the port forward in time")
-            time.sleep(0.05)
+        return True
 
-    def _read_stderr(self, process: subprocess.Popen[bytes]) -> None:
-        """Keep the last stderr line of *process* (and keep its pipe from filling up)."""
-        assert process.stderr is not None
-        for raw in process.stderr:
+    def _forward_error(self) -> MachineError:
+        """Return the error of a forward ssh gave up on, quoting ssh's last line."""
+        message = f"ssh {self.ssh} cannot forward its daemon port {self.remote_port}"
+        return MachineError(f"{message}: {self._last_line}" if self._last_line else message)
+
+    def _read_output(
+        self, process: subprocess.Popen[bytes], taken_prefix: str,
+        up: threading.Event, taken: threading.Event,
+    ) -> None:
+        """Read *process*'s output to its end (so its pipe never fills up).
+
+        :data:`FORWARD_UP` sets *up*; any other line is kept as the last
+        line, and one starting with *taken_prefix* (ssh's report that it
+        could not bind the local port) sets *taken*.
+        """
+        assert process.stdout is not None
+        for raw in process.stdout:
             line = raw.decode("utf-8", "replace").strip()
-            if line:
+            if line == FORWARD_UP:
+                up.set()
+            elif line:
                 self._last_line = line
+                if line.startswith(taken_prefix):
+                    taken.set()
 
     def close(self) -> None:
         """Kill the ssh process, if any, and forget the port."""
@@ -831,25 +886,20 @@ class SshTunnel:
         connection hangs; a login in progress is fresh and is left
         alone rather than waited for.
         """
-        # ``locked_call``'s shape with a non-blocking acquire (see
-        # :meth:`MachineLink.request`).
         try:
-            if self._lock.acquire(blocking=False):
-                self._kill()
-        finally:
-            try:
-                self._lock.release()
-            except RuntimeError:
-                pass
+            locked_call(self._lock, self._kill, acquire_timeout=0)
+        except LockTimeoutError:
+            pass  # being opened: the login is fresh
 
     def _kill(self) -> None:
-        """Kill the ssh process, if any, and forget the port (under the lock)."""
+        """Kill the ssh process, if any, and forget its port and readiness (under the lock)."""
         if self.process is not None:
             if self.process.poll() is None:
                 self.process.kill()
             self.process.wait()
             self.process = None
         self.local_port = 0
+        self._up = threading.Event()
 
 
 def _free_port() -> int:
@@ -895,6 +945,12 @@ def _evict_tunnels(kept: set[str]) -> list[SshTunnel]:
     return [_tunnels.pop(ssh) for ssh in gone]
 
 
+def _drop_tunnel(ssh: str, tunnel: SshTunnel) -> None:
+    """Forget *tunnel* if it is still *ssh*'s cached one (under the lock)."""
+    if _tunnels.get(ssh) is tunnel:
+        del _tunnels[ssh]
+
+
 def tunnel_port(ssh: str, remote_port: int) -> int:
     """Return the local port forwarding to ``127.0.0.1:remote_port`` on *ssh*.
 
@@ -910,21 +966,31 @@ def tunnel_port(ssh: str, remote_port: int) -> int:
     one to close it, so it is closed here and the caller is told to
     try again, as a retired :class:`MachineLink` tells it.
 
+    A login the registry no longer holds is refused before anything is
+    opened: a :class:`Machine` read before a ``/machine remove`` (a
+    status check, a stream's dial) would otherwise cache and open its
+    forward after the removal's :func:`close_tunnels` swept, and
+    nothing would close it.  The registry is read after the tunnel is
+    cached and the sweep runs after the registry is written, so a
+    removal either shows in that read or sweeps the tunnel.
+
     Raises:
         MachineError: When the forward cannot be opened (see
-            :meth:`SshTunnel.open`) or the registry changed while it
-            was opening.
+            :meth:`SshTunnel.open`), the registry no longer holds *ssh*,
+            or the registry changed while it was opening.
     """
     tunnel, stale = locked_call(_tunnels_lock, _cached_tunnel, ssh, remote_port)
     if stale is not None:
         stale.close()
-    # Test hook (no-op in production): widens the window between the
-    # lookup and the open so the close_tunnels race is deterministic
-    # under KISS_RACE_DELAY.
-    _race_delay()
-    port = tunnel.open()
-    if locked_call(_tunnels_lock, _tunnels.get, ssh) is tunnel:
-        return port
+    if any(machine.ssh == ssh for machine in load_machines()):
+        # Test hook (no-op in production): widens the window between the
+        # lookup and the open so the close_tunnels race is deterministic
+        # under KISS_RACE_DELAY.
+        _race_delay()
+        port = tunnel.open()
+        if locked_call(_tunnels_lock, _tunnels.get, ssh) is tunnel:
+            return port
+    locked_call(_tunnels_lock, _drop_tunnel, ssh, tunnel)
     tunnel.close()
     raise MachineError(f"ssh {ssh}: the machine registry changed, try again")
 
@@ -995,16 +1061,6 @@ class MachineLink:
         self._dialing = 0
         self._idle = threading.Condition(self._lock)
 
-    @property
-    def _retry_at(self) -> float:
-        """Monotonic time before which the link reports the last failure without dialling."""
-        return self._health.retry_at
-
-    @property
-    def _last_error(self) -> str:
-        """The failure the link reports until :attr:`_retry_at`."""
-        return self._health.last_error
-
     def _check_available(self) -> None:
         """Raise the error a retired or backed-off link answers with, if any.
 
@@ -1015,9 +1071,13 @@ class MachineLink:
         if forget_after_sleep():
             self._drop()
         if self._retired:
-            raise MachineError(f"{self.machine.name}: the machine registry changed, try again")
-        if time.monotonic() < self._retry_at:
-            raise MachineError(self._last_error)
+            raise self._retired_error()
+        if time.monotonic() < self._health.retry_at:
+            raise MachineError(self._health.last_error)
+
+    def _retired_error(self) -> MachineError:
+        """Return the error every request of a retired link fails with (no back-off)."""
+        return MachineError(f"{self.machine.name}: the machine registry changed, try again")
 
     def _fail(self, message: str, backoff: float = 0.0) -> MachineError:
         """Record *message* as the link's failure, start the backoff, return the error.
@@ -1188,6 +1248,9 @@ class MachineLink:
     ) -> dict[str, Any]:
         """Send *cmd* and return the first *reply_type* event answering it.
 
+        An empty *reply_type* is for a command the daemon does not
+        answer (``recordFileUsage``): ``{}`` is returned once it is sent.
+
         The command is stamped with a fresh ``generation``; a reply that
         echoes a ``generation`` must echo this one (``history`` does),
         frames already buffered from before the command are discarded
@@ -1208,9 +1271,12 @@ class MachineLink:
 
         A socket kept from an earlier request may have died meanwhile
         (the daemon restarted, a network blip, its idle keepalive
-        failed): the request is then sent again over a fresh socket
-        before the machine counts as down, so a stale socket alone
-        never starts the back-off.  One kept across a sleep of the
+        failed): when that shows before the command went out, it is
+        sent again over a fresh socket before the machine counts as
+        down, so a stale socket alone never starts the back-off.  A
+        close while waiting for the answer fails the request: the
+        machine may have run the command, and a paste or a cherry-pick
+        must not run twice.  One kept across a sleep of the
         host is dropped before use (:func:`forget_after_sleep`): it is
         dead, and a request on it would hang for its whole budget.
 
@@ -1227,23 +1293,21 @@ class MachineLink:
                 password, does not answer within *timeout* seconds,
                 or the link's turn did not come within them.
         """
-        # ``locked_call`` with a bounded acquire, in its exact shape:
-        # the ``acquire`` inside the ``try`` so a KeyboardInterrupt
-        # landing right after it still reaches the ``finally``, whose
-        # first instruction is the release (CPython gh-74174); after a
-        # missed acquire the release is refused with ``RuntimeError``.
         try:
-            if not self._lock.acquire(timeout=timeout):
-                raise MachineError(
-                    f"{self.machine.name} ({self.machine.address()}) is busy: "
-                    f"no {reply_type} within {timeout:g}s"
-                )
-            return self._request_locked(cmd, reply_type, timeout, errors)
-        finally:
-            try:
-                self._lock.release()
-            except RuntimeError:
-                pass
+            return locked_call(
+                self._lock,
+                self._request_locked,
+                cmd,
+                reply_type,
+                timeout,
+                errors,
+                acquire_timeout=timeout,
+            )
+        except LockTimeoutError:
+            raise MachineError(
+                f"{self.machine.name} ({self.machine.address()}) is busy: "
+                f"no {reply_type} within {timeout:g}s"
+            ) from None
 
     def _request_locked(
         self, cmd: dict[str, Any], reply_type: str, timeout: float, errors: bool,
@@ -1293,14 +1357,20 @@ class MachineLink:
         in the error); *errors* is :meth:`request`'s.
 
         Raises:
-            ConnectionClosed: When the socket closed before the answer
-                came (the caller decides whether to reconnect).
+            ConnectionClosed: When the socket was found closed before the
+                command went out (the caller may send it again on a
+                fresh socket).
             MachineError: When the daemon did not answer before
-                *deadline* (the link then backs off).
+                *deadline*, or the socket closed after the command went
+                out: the machine may have run it, so it must not be sent
+                again (the link then backs off); or the link was
+                retired (:meth:`retire` closed the socket): the
+                registry-changed error, with no back-off.
         """
         assert self._ws is not None
         self._generation += 1
         generation = self._generation
+        sent = False
         try:
             # Bounded like the reads: a plain ``ws.send`` has no
             # deadline, and one stuck under this lock (the daemon
@@ -1318,6 +1388,9 @@ class MachineLink:
             # this request's answer nor delay it.
             self._drain_buffered(deadline)
             send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
+            sent = True
+            if not reply_type:
+                return {}
             # A reply sent in pieces (a big file's ``fileContent``, see
             # ``web_server._reply_frames``): every piece but the last
             # carries ``more``.  Joined here, so the caller sees one
@@ -1364,7 +1437,16 @@ class MachineLink:
                 # count the machine as down.
                 if errors:
                     return {"type": reply_type, "error": str(msg.get("text") or "error")}
-        except (TimeoutError, ValueError, OSError) as exc:
+        except (ConnectionClosed, TimeoutError, ValueError, OSError) as exc:
+            if self._retired:  # retire() closed the socket under the request
+                self._drop()
+                raise self._retired_error() from exc
+            # A close before the command went out is the caller's to retry
+            # on a fresh socket.  After it, the machine may have the command
+            # (a paste, a cherry-pick, an auto-commit): sending it again
+            # could run it twice.
+            if isinstance(exc, ConnectionClosed) and not sent:
+                raise
             self._drop()
             raise self._fail(
                 f"{self.machine.name} ({self.machine.address()}) did not answer: {exc}"
@@ -1443,10 +1525,11 @@ class MachineLink:
         that fetched it just before cannot re-open a socket nothing
         closes any more.  Does not wait for a request in flight: the
         socket is closed first, outside the lock, which wakes the
-        request's read with ``ConnectionClosed`` (its re-connect then
-        finds the link retired), and only then the lock is taken to
-        forget the socket.  A request still in its handshake, which
-        the close cannot reach, is waited for (:data:`REQUEST_TIMEOUT`
+        request's read with ``ConnectionClosed`` (the request then fails
+        with the registry-changed error, sent or not, and never
+        re-connects), and only then the lock is taken to forget the
+        socket.  A request still in its handshake, which the close
+        cannot reach, is waited for (:data:`REQUEST_TIMEOUT`
         at most, plus its exchange), and so is a stream handshake
         (:meth:`open_connection`, outside the lock; the ssh login's
         :data:`SSH_TIMEOUT` more): the tunnel it opens must exist
@@ -1477,16 +1560,19 @@ _links: dict[tuple[str, str, str, str, str], MachineLink] = {}
 _links_lock = threading.RLock()
 
 
-def _cached_link(machine: Machine, lane: str) -> MachineLink:
+def _cached_link(machine: Machine, lane: str) -> MachineLink | None:
     """Return the cached *lane* link to *machine*, made on first use (under the lock).
 
     A new lane's link shares the machine's back-off record with the
     lanes already cached, so a machine found down on one lane is not
-    dialled again by each of the others.
+    dialled again by each of the others.  ``None`` when the registry
+    no longer holds *machine* as given (see :func:`link_for`).
     """
     key = (machine.name, machine.url, machine.password, machine.ssh, lane)
     link = _links.get(key)
     if link is None:
+        if machine not in load_machines():
+            return None
         health = next(
             (other._health for other_key, other in _links.items() if other_key[:4] == key[:4]),
             None,
@@ -1506,11 +1592,25 @@ def link_for(machine: Machine, lane: str = "") -> MachineLink:
     the Explorer) on the default lane never wait for it.  Every lane
     is retired together by :func:`close_links`.
 
+    A machine the registry no longer holds as given (a
+    :class:`Machine` read before a ``/machine remove`` or a
+    re-registration) gets a retired link of its own, which answers
+    every request with "the machine registry changed, try again" as a
+    link the change retired does: a cached one would open a socket
+    after the change's sweep (:func:`close_links`), and nothing would
+    close it.  The registry is read under the cache's lock, under which
+    the sweep evicts after the registry is written, so a change either
+    shows in that read or evicts the link.
+
     Args:
         machine: The registered machine.
         lane: The link's lane; "" for the default one.
     """
-    return locked_call(_links_lock, _cached_link, machine, lane)
+    link = locked_call(_links_lock, _cached_link, machine, lane)
+    if link is None:
+        link = MachineLink(machine)
+        link.retire()
+    return link
 
 
 def _evict_links(kept: set[tuple[str, str, str, str]]) -> list[MachineLink]:

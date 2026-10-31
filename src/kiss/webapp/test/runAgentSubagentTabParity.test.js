@@ -351,13 +351,6 @@ function fanoutPanels(win) {
   );
 }
 
-/** The task ids each panel recorded, as JSON (jsdom-realm arrays). */
-function panelChildren(panels) {
-  return JSON.stringify(
-    panels.map(p => (p._rpSubagents || []).map(en => String(en.taskId))),
-  );
-}
-
 /** The task ids a collapsed fan-out panel resumes when expanded. */
 function expandedChildren(win, posted, panel) {
   const before = posted.length;
@@ -366,6 +359,20 @@ function expandedChildren(win, posted, panel) {
     .slice(before)
     .filter(m => m.type === 'resumeSession')
     .map(m => String(m.taskId));
+}
+
+/**
+ * The task ids each fan-out panel of *panels* resumes when the user
+ * unfolds it (a panel still unfolded is folded first); each is left
+ * folded, the tabs it reopened closed again.
+ */
+function childrenOfPanels(win, posted, panels) {
+  return panels.map(p => {
+    if (!p.classList.contains('collapsed')) togglePanel(win, p);
+    const ids = expandedChildren(win, posted, p);
+    togglePanel(win, p);
+    return ids;
+  });
 }
 
 function runAgentNoChildDoesNotStealNextSpawn() {
@@ -514,11 +521,6 @@ function runAgentMultiChildDispatchLive() {
       .some(m => m.type === 'resumeSession' && m.taskId === 'c2'),
     'the second child is resumed into its tab',
   );
-  assert.strictEqual(
-    panelChildren([panel]),
-    JSON.stringify([['c1', 'c2']]),
-    'both children belong to the one run_agent call',
-  );
 
   send(win, {type: 'subagentDone', tab_id: parentId + '__sub_c2', tabId: ''});
   assert.strictEqual(subagentTabEls(win).length, 0, 'child 2 tab closed');
@@ -540,17 +542,17 @@ function runAgentMultiChildDispatchLive() {
   );
 
   // Expanding brings both children back, collapsing closes both.
-  panel
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.deepStrictEqual(
+    expandedChildren(win, posted, panel),
+    ['c1', 'c2'],
+    'both children belong to the one run_agent call',
+  );
   assert.strictEqual(
     subagentTabEls(win).length,
     2,
     'expanding reopens every child of the dispatch',
   );
-  panel
-    .querySelector('.tc-h')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  togglePanel(win, panel);
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
@@ -569,7 +571,7 @@ function replayAttributesInterleavedCalls() {
   // nothing in common with the call's `task`). The daemon re-announces
   // the four persisted rows in spawn order with their start stamps;
   // each must land on the call that was running when it started.
-  const {win, parentId} = makePage();
+  const {win, posted, parentId} = makePage();
   const T0 = 1_700_000_000_000;
   parentTabsState(win, parentId);
   send(win, {
@@ -650,11 +652,6 @@ function replayAttributesInterleavedCalls() {
   const panels = fanoutPanels(win);
   assert.strictEqual(panels.length, 3, 'three fan-out panels replayed');
   assert.strictEqual(
-    panelChildren(panels),
-    JSON.stringify([['a1', 'a2'], ['p1'], ['s1']]),
-    'each finished child is recorded on the call that was running when it started',
-  );
-  assert.strictEqual(
     subagentTabEls(win).length,
     0,
     'no finished child gets a tab on replay',
@@ -664,6 +661,11 @@ function replayAttributesInterleavedCalls() {
       p.classList.contains('collapsed'),
       'every finished panel replays collapsed',
     );
+  assert.deepStrictEqual(
+    childrenOfPanels(win, posted, panels),
+    [['a1', 'a2'], ['p1'], ['s1']],
+    'each finished child is recorded on the call that was running when it started',
+  );
 
   // Expanding the first run_agent panel reopens exactly its two children.
   panels[0]
@@ -684,7 +686,7 @@ function replayWithoutStampsFallsBackToCounting() {
   // Legacy transcripts carry no `ts` and legacy rows no `startTs`: the
   // run_parallel children are still dealt by declared count, in spawn
   // order, and whatever is left goes to the newest panel.
-  const {win, parentId} = makePage();
+  const {win, posted, parentId} = makePage();
   parentTabsState(win, parentId);
   send(win, {
     type: 'task_events',
@@ -735,14 +737,14 @@ function replayWithoutStampsFallsBackToCounting() {
     });
   });
   assert.strictEqual(
-    panelChildren(fanoutPanels(win)),
-    JSON.stringify([['p1', 'p2'], ['a1']]),
-    'unstamped rows fill the declared run_parallel count first, the rest go to the newest panel',
-  );
-  assert.strictEqual(
     subagentTabEls(win).length,
     0,
     'no finished child gets a tab on replay',
+  );
+  assert.deepStrictEqual(
+    childrenOfPanels(win, posted, fanoutPanels(win)),
+    [['p1', 'p2'], ['a1']],
+    'unstamped rows fill the declared run_parallel count first, the rest go to the newest panel',
   );
   win.close();
   console.log('  ok - replay without stamps falls back to declared counts');
@@ -754,7 +756,7 @@ function replayBoundaryTieBelongsToNextCall() {
   // first child may share one millisecond. A child cannot start on the
   // very millisecond its own call's result is stamped (it finished
   // before that), so the tie is the next call's.
-  const {win, parentId} = makePage();
+  const {win, posted, parentId} = makePage();
   const T0 = 1_700_000_000_000;
   parentTabsState(win, parentId);
   send(win, {
@@ -814,9 +816,9 @@ function replayBoundaryTieBelongsToNextCall() {
       startTs,
     });
   });
-  assert.strictEqual(
-    panelChildren(fanoutPanels(win)),
-    JSON.stringify([['first-child'], ['second-child']]),
+  assert.deepStrictEqual(
+    childrenOfPanels(win, posted, fanoutPanels(win)),
+    [['first-child'], ['second-child']],
     "a start on a call's own start millisecond is that call's; on the previous call's result millisecond it is not the previous call's",
   );
   win.close();
@@ -855,11 +857,6 @@ function doneUnderfilledRunParallelDoesNotStealLiveRunAgentChild() {
     taskId: '',
   });
   assert.strictEqual(
-    panelChildren(fanoutPanels(win)),
-    JSON.stringify([[], ['real-child']]),
-    'the live spawn belongs to the call still running, not to the returned, underfilled run_parallel',
-  );
-  assert.strictEqual(
     subagentTabEls(win).length,
     1,
     'the run_agent child gets its tab',
@@ -869,6 +866,25 @@ function doneUnderfilledRunParallelDoesNotStealLiveRunAgentChild() {
       .slice(before)
       .some(m => m.type === 'resumeSession' && m.taskId === 'real-child'),
     'the run_agent child is resumed into its tab',
+  );
+  // Once the child and its call are done, unfolding each panel shows
+  // which call owns the child.
+  send(win, {
+    type: 'subagentDone',
+    tab_id: subagentTabEls(win)[0].dataset.tabId,
+  });
+  send(win, {
+    type: 'tool_result',
+    tool_name: 'run_agent',
+    is_error: false,
+    content: 'success: true',
+    taskId: PARENT_TASK,
+    tabId: parentId,
+  });
+  assert.deepStrictEqual(
+    childrenOfPanels(win, posted, fanoutPanels(win)),
+    [[], ['real-child']],
+    'the live spawn belongs to the call still running, not to the returned, underfilled run_parallel',
   );
   win.close();
   console.log(
@@ -935,15 +951,10 @@ function freshReconnectShowsRunningChild(toolName) {
     isDone: false,
     startTs: T0 + 2000,
   });
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    1,
+  assert.deepStrictEqual(
+    subagentTabEls(win).map(el => el.dataset.tabId),
+    [subTabId],
     toolName + ': the running child gets a tab on the reconnected client',
-  );
-  assert.strictEqual(
-    panelChildren([panel]),
-    JSON.stringify([[CHILD]]),
-    'the child is recorded on the in-flight panel',
   );
   assert.ok(
     !posted.slice(before).some(m => m.type === 'closeTab'),
@@ -955,6 +966,20 @@ function freshReconnectShowsRunningChild(toolName) {
     subagentTabEls(win).length,
     0,
     toolName + ': subagentDone closes it',
+  );
+  // Once the call returns, its folded panel reopens exactly that child.
+  send(win, {
+    type: 'tool_result',
+    tool_name: toolName,
+    is_error: false,
+    content: 'success: true',
+    taskId: PARENT_TASK,
+    tabId: parentId,
+  });
+  assert.deepStrictEqual(
+    childrenOfPanels(win, posted, [panel]),
+    [[CHILD]],
+    'the child is recorded on the in-flight panel',
   );
   win.close();
   console.log(

@@ -25,7 +25,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {lastMsg: lastOfType} = require('./simplify2_harness');
+const {lastMsg: lastOfType, sendTabsState} = require('./simplify2_harness');
 
 /**
  * Let a `fileContent` reply settle: with the harness's stubbed Monaco,
@@ -41,18 +41,6 @@ const {test, report} = h.makeRunner();
 function connect(win) {
   h.send(win, {type: 'configData', config: {work_dir: h.WD}, apiKeys: {}});
   h.send(win, {type: 'daemonStatus', connected: true});
-}
-
-function tabsState(win, entries) {
-  h.send(win, {
-    type: 'tabs_state',
-    tabs: entries.map(e => ({
-      tabId: e.id,
-      chatId: e.chat || '',
-      title: e.id,
-      workDir: e.workDir || '',
-    })),
-  });
 }
 
 const FILE_PATH = '/shared/notes.txt';
@@ -153,7 +141,7 @@ async function openDirtyTab(ctx) {
   await test('an outage re-arms the manual Git Commit button', () => {
     const {win, posted} = h.makePage();
     connect(win);
-    tabsState(win, [{id: 'a1', workDir: '/ws/a', chat: 'chat-1'}]);
+    sendTabsState(win, [{tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'}]);
     const btn = h.byId(win, 'autocommit-btn');
     h.click(win, btn);
     assert.strictEqual(h.ofType(posted, 'autocommitAction').length, 1);
@@ -246,7 +234,7 @@ async function openDirtyTab(ctx) {
   await test('a Shift keyup lost to a window blur does not stick', () => {
     const {win, posted} = h.makePage();
     connect(win);
-    tabsState(win, [{id: 'a1', workDir: '/ws/a', chat: 'chat-1'}]);
+    sendTabsState(win, [{tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'}]);
     const inp = h.byId(win, 'task-input');
     inp.value = 'hello';
     win.document.dispatchEvent(
@@ -274,9 +262,9 @@ async function openDirtyTab(ctx) {
     // screen, so the host is told which chat it belongs to.
     const {win, posted} = h.makePage({narrow: true});
     connect(win);
-    tabsState(win, [
-      {id: 'a1', workDir: h.WD, chat: 'chat-1'},
-      {id: 'b1', workDir: h.WD, chat: 'chat-2'},
+    sendTabsState(win, [
+      {tabId: 'a1', workDir: h.WD, chatId: 'chat-1'},
+      {tabId: 'b1', workDir: h.WD, chatId: 'chat-2'},
     ]);
     // The stacked remote lists the Explorer only while its drawer is open.
     h.click(win, h.byId(win, 'meta-drawer-btn'));
@@ -321,9 +309,9 @@ async function openDirtyTab(ctx) {
   await test('a file opened from a file view is reported under its root chat', () => {
     const {win, posted} = h.makePage({narrow: true});
     connect(win);
-    tabsState(win, [
-      {id: 'b1', workDir: '/ws/b', chat: 'chat-2'},
-      {id: 'a1', workDir: '/ws/a', chat: 'chat-1'},
+    sendTabsState(win, [
+      {tabId: 'b1', workDir: '/ws/b', chatId: 'chat-2'},
+      {tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'},
     ]);
     win._testApi.switchToTab('a1');
     assert.strictEqual(win._testApi.getActiveTabId(), 'a1', 'precondition');
@@ -359,7 +347,7 @@ async function openDirtyTab(ctx) {
   await test('an Edit diff of thousands of lines renders every row', () => {
     const {win} = h.makePage();
     connect(win);
-    tabsState(win, [{id: 'a1', workDir: '/ws/a', chat: 'chat-1'}]);
+    sendTabsState(win, [{tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'}]);
     const lines = n => Array.from({length: n}, (_, i) => 'line ' + i);
     const oldS = lines(3000).join('\n');
     const newS = lines(3000)

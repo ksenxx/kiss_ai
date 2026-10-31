@@ -220,6 +220,10 @@ def test_new_machine_reveals_the_machines_section(
 ) -> None:
     page = _open(browser, harness)
     try:
+        # The Machines subpanel lists the registry of the machine the
+        # drop-down shows, and an earlier test may leave one of box's
+        # chats open: show this daemon's.
+        page.select_option("#chat-machine", "")
         collapsed = (
             "() => document.getElementById('meta-machines').classList.contains('collapsed')"
         )

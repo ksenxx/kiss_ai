@@ -19,7 +19,6 @@ fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
 
 import pytest
 
@@ -71,11 +70,10 @@ class _SheetsRequestHandler(RecordingHandler):
     """Emulates the Google Sheets v4 + Drive v3 REST APIs and records requests."""
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self.record_request(None)
+        path = self.record_request(None)["path"]
         if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"message": "Unauthorized"}}))
             return
-        path = urlparse(self.path).path
         if path == "/spreadsheets/ss1":
             self._reply(200, json.dumps(_SPREADSHEET_INFO))
         elif path == "/spreadsheets/fail500":
@@ -94,11 +92,10 @@ class _SheetsRequestHandler(RecordingHandler):
 
     def do_PUT(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         body = self._read_body()
-        self.record_request(body)
+        path = self.record_request(body)["path"]
         if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"message": "Unauthorized"}}))
             return
-        path = urlparse(self.path).path
         if path.startswith("/spreadsheets/ss1/values/"):
             self._reply(200, json.dumps({"updatedRange": "Sheet1!A1:B2", "updatedCells": 4}))
         else:
@@ -106,11 +103,10 @@ class _SheetsRequestHandler(RecordingHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         body = self._read_body()
-        self.record_request(body)
+        path = self.record_request(body)["path"]
         if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"message": "Unauthorized"}}))
             return
-        path = urlparse(self.path).path
         if path == "/spreadsheets":
             sheets = (body or {}).get("sheets", [{"properties": {"title": "Sheet1"}}])
             self._reply(

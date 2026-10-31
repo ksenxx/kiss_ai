@@ -7,9 +7,8 @@
   'use strict';
 
   // The daemon commands the chat page sends.  Commands the daemon
-  // accepts from other clients only (the Python ``run`` API,
-  // ``getTabsState``, the ``ready`` fan-out's ``getModels``) are not
-  // here.
+  // accepts from other clients only (the Python ``run`` API, the
+  // installer's ``activeTasksQuery``) are not here.
   const SORCAR_API_COMMANDS = [
     'submit',
     'appendUserMessage',
@@ -31,6 +30,7 @@
     'getInputHistory',
     'getSeaCommands',
     'getWelcomeInfo',
+    'getModels',
     'selectModel',
     'getConfig',
     'saveConfig',
@@ -103,14 +103,7 @@
     };
     SORCAR_API_COMMANDS.forEach(name => {
       api[name] = function (fields) {
-        const msg = {};
-        if (fields) {
-          Object.keys(fields).forEach(k => {
-            msg[k] = fields[k];
-          });
-        }
-        msg.type = name;
-        post(msg);
+        post(Object.assign({}, fields, {type: name}));
       };
     });
     return api;

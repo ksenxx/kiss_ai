@@ -4,14 +4,12 @@
  * Dark Modern includes dark_plus.json, which includes dark_vs.json
  * (extensions/theme-defaults/themes in microsoft/vscode); the values
  * below are those files' tokenColors, mapped onto highlight.js's
- * scope classes.  The block background is Dark Modern's
- * textCodeBlock.background.
+ * scope classes.  The block's background and padding come from
+ * main.css's .hljs rule (the theme's textCodeBlock.background).
  */
-pre code.hljs { display: block; overflow-x: auto; padding: 1em; }
+pre code.hljs { display: block; overflow-x: auto; }
 
-code.hljs { padding: 3px 5px; }
-
-.hljs { color: #ccc; background: #2b2b2b; }
+.hljs { color: #ccc; }
 
 /* keyword, storage, constant.language, variable.language */
 .hljs-doctag,

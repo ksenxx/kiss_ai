@@ -72,15 +72,14 @@ function testDescriptionHtmlIsSanitized() {
     null,
     'script tags must be stripped by the sanitizer',
   );
-  const img = desc.querySelector('img');
-  if (img) {
-    assert.strictEqual(
-      img.getAttribute('onerror'),
-      null,
-      'onerror handlers must be stripped by the sanitizer',
-    );
-  }
-  assert.strictEqual(win.__pwned, undefined, 'no injected code may run');
+  // A script inserted through innerHTML never runs and jsdom loads no
+  // image, so "did the payload run" cannot fail here: the markup itself
+  // must come out without any inline handler.
+  assert.strictEqual(
+    desc.querySelector('[onerror]'),
+    null,
+    'onerror handlers must be stripped by the sanitizer',
+  );
   win.close();
   console.log('  ok - summary description HTML is sanitized');
 }

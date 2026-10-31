@@ -307,7 +307,10 @@ def test_codex_circular_composer_controls() -> None:
     assert "background: var(--send-bg)" in send, (
         "send button must be themed via var(--send-bg)"
     )
-    assert "border-radius: 50%" in send
+    # The circle is main.css's #send-btn radius, which the remote rule keeps.
+    main_css = inline_design_tokens((MEDIA_DIR / "main.css").read_text(encoding="utf-8"))
+    main_send = re.search(r"(?m)^#send-btn \{([^}]*)\}", main_css)
+    assert main_send and "border-radius: 50%" in main_send.group(1)
     assert "width: 36px" in send and "height: 36px" in send, (
         "36px circular send button size missing"
     )

@@ -22,36 +22,29 @@
 // xterm.js is not fetched from jsDelivr: the page gets a `fetch` that
 // answers from a script (resolve / reject per URL), and the bundle text
 // it returns defines Terminal / FitAddon on the page when evaluated,
-// exactly as the real UMD bundles do.
+// exactly as the real UMD bundles do (simplify2_harness's
+// installXtermStub stand-ins, held back until then).
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {sleep, queueRaf} = require('./simplify2_harness');
+const {sleep, queueRaf, installXtermStub} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
 // A stand-in for the two UMD bundles: evaluated by terminalTab's
-// evalUmd, it installs the globals ensureXterm checks for.
+// evalUmd, it installs the globals ensureXterm checks for, the
+// stand-ins makeTerminalPage holds back in `heldXterm`.
 const FAKE_XTERM_BUNDLE =
-  'this.Terminal = class {' +
-  '  constructor() { this.cols = 80; this.rows = 24; this.options = {};' +
-  '    this.written = ""; this.focused = 0; this.disposed = false;' +
-  '    this.constructor.instances.push(this); }' +
-  '  open() {} loadAddon() {} attachCustomKeyEventHandler() {}' +
-  '  write(t) { this.written += t; } onData() {} onResize() {}' +
-  '  focus() { this.focused++; } getSelection() { return ""; }' +
-  '  dispose() { this.disposed = true; }' +
-  '};' +
-  'this.Terminal.instances = [];' +
-  'this.FitAddon = {FitAddon: class { fit() {} }};';
+  'this.Terminal = heldXterm.Terminal; this.FitAddon = heldXterm.FitAddon;';
 const FAKE_FIT_BUNDLE = '';
 
 /**
  * A page running terminalTab.js whose xterm.js download is scripted:
  * `fetches` collects {url, resolve, reject} per request so a test
- * decides when (and whether) each download completes.
+ * decides when (and whether) each download completes; `terminals` is
+ * every Terminal built once the bundle defined it.
  */
 function makeTerminalPage() {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
@@ -59,10 +52,9 @@ function makeTerminalPage() {
   });
   const win = dom.window;
   const fetches = [];
-  win.ResizeObserver = class {
-    observe() {}
-    disconnect() {}
-  };
+  win.heldXterm = {};
+  const {terminals} = installXtermStub(win.heldXterm);
+  win.ResizeObserver = win.heldXterm.ResizeObserver;
   queueRaf(win); // no frame ever runs
   win.AbortController = class {
     constructor() {
@@ -79,7 +71,7 @@ function makeTerminalPage() {
       });
     });
   win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
-  return {win, fetches};
+  return {win, fetches, terminals};
 }
 
 function bundleFor(url) {
@@ -119,14 +111,14 @@ async function testDisposeWhileXtermLoads() {
   view.data('late output');
   view.dispose();
   await completeDownloads(page);
-  assert.strictEqual(page.win.Terminal.instances.length, 0, 'no Terminal');
+  assert.strictEqual(page.terminals.length, 0, 'no Terminal');
   assert.deepStrictEqual(sent, [], 'no shell asked for a disposed tab');
   // A second create on the same page reuses the loaded bundle at once.
   const sent2 = [];
   const again = createTerminalView(page, sent2);
   again.setVisible(true);
   await completeDownloads(page);
-  assert.strictEqual(page.win.Terminal.instances.length, 1);
+  assert.strictEqual(page.terminals.length, 1);
   assert.strictEqual(sent2.length, 1);
   assert.strictEqual(sent2[0].type, 'terminalOpen');
 }
@@ -151,8 +143,8 @@ async function testFailedLoadThenRetry() {
   assert.strictEqual(page.fetches.length, 3, 'one download per retry');
   await completeDownloads(page);
   assert.strictEqual(view.el.querySelector('.terminal-load-error'), null);
-  assert.strictEqual(page.win.Terminal.instances.length, 1);
-  const term = page.win.Terminal.instances[0];
+  assert.strictEqual(page.terminals.length, 1);
+  const term = page.terminals[0];
   assert.ok(term.written.startsWith('queued while loading'));
   assert.strictEqual(term.focused, 1);
   assert.deepStrictEqual(sent, [
@@ -167,7 +159,7 @@ async function testHiddenBeforeXtermArrives() {
   view.setVisible(true);
   view.setVisible(false);
   await completeDownloads(page);
-  const term = page.win.Terminal.instances[0];
+  const term = page.terminals[0];
   assert.ok(term, 'the terminal is built for the hidden tab');
   assert.strictEqual(term.focused, 0, 'a hidden tab is not focused');
   assert.strictEqual(sent.length, 1);

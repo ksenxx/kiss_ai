@@ -121,7 +121,7 @@ class TestMachineLinkIdleHeartbeats(TestCase):
         # and the link's keepalive never gave up on it.
         self.assertEqual(self.link.request({"type": "ping"}, "pong")["type"], "pong")
         self.assertIs(self.link._ws, socket_before)
-        self.assertEqual(self.link._retry_at, 0.0)
+        self.assertEqual(self.link._health.retry_at, 0.0)
 
     def test_request_replaces_a_socket_the_daemon_closed(self) -> None:
         """A kept socket the daemon closed is replaced, with no back-off."""
@@ -140,9 +140,9 @@ class TestMachineLinkIdleHeartbeats(TestCase):
         # stayed open under a running tab's stream.
         self.assertEqual(self.link.request({"type": "ping"}, "pong")["type"], "pong")
         self.assertIsNot(self.link._ws, socket_before)
-        self.assertEqual(self.link._retry_at, 0.0)
+        self.assertEqual(self.link._health.retry_at, 0.0)
         # A daemon that is really gone still counts as down.
         asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop).result(60)
         with self.assertRaises(mach.MachineError):
             self.link.request({"type": "ping"}, "pong", timeout=3)
-        self.assertGreater(self.link._retry_at, 0.0)
+        self.assertGreater(self.link._health.retry_at, 0.0)

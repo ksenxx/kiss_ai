@@ -25,13 +25,14 @@ const {
   fakeIntervals,
   waitFor,
   fakeMatchMedia,
+  click,
+  byId,
 } = require('./simplify2_harness');
 
 const POLL_MS = 5000;
 
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
-  click,
   drawerOpen,
   overlayOpen,
   pollCount,
@@ -86,7 +87,7 @@ async function main() {
   await test('switching to the desktop layout closes the drawer', () => {
     const wv = makePage();
     const win = wv.win;
-    click(win, 'meta-drawer-btn');
+    click(win, byId(win, 'meta-drawer-btn'));
     assert.ok(drawerOpen(win) && overlayOpen(win));
     wv.setDesktop(true);
     assert.ok(

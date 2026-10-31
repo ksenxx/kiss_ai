@@ -34,7 +34,12 @@ from kiss.core.kiss_error import (
     KISSError,
     ModelRefusalError,
 )
-from kiss.core.models.model import Attachment, strip_system_cache_break
+from kiss.core.models.model import (
+    Attachment,
+    hand_off_conversation,
+    render_tool_call,
+    strip_system_cache_break,
+)
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
@@ -238,12 +243,6 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     return raw_args if isinstance(raw_args, dict) else {}
 
 
-def _call_repr(function_call: dict[str, Any]) -> str:
-    """Render a tool call as the Python-style invocation the trajectory records."""
-    args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(function_call).items())
-    return f"```python\n{function_call['name']}({args_str})\n```"
-
-
 def unknown_argument_hint(
     sig: inspect.Signature | None,
     args: dict[str, Any],
@@ -404,12 +403,20 @@ class KISSAgent(Base):
         The ``(budget_used, total_tokens_used, step_count)`` triple is
         replaced with ONE store, so a concurrent :meth:`usage_snapshot`
         reads either the previous totals or all zeros, never a mix.
-        Called by :meth:`_reset` and by the task runner before a run
-        (``task_runner._zero_usage_counters``).
+        Called at construction, by :meth:`_reset` and by the task runner
+        before a run (``task_runner._zero_usage_counters``).
         """
         self._usage_totals = _ZERO_USAGE
         self.tool_calls_made = 0
+        """Tool calls other than ``finish`` the model issued during the
+        current run (blocked ones included: the model still acted).
+        ``RelentlessAgent`` reads it after a sub-session ends — a
+        continuation session that only called ``finish`` made no
+        progress."""
         self._refused_call: str | None = None
+        """The name of the latest refused tool call, until the model
+        calls that tool again or reads the re-issue reminder
+        (:meth:`_guarded_execute_tool`); ``None`` when nothing is owed."""
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -417,16 +424,7 @@ class KISSAgent(Base):
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
-        self.tool_calls_made = 0
-        """Tool calls other than ``finish`` the model issued during the
-        current run (blocked ones included: the model still acted).
-        ``RelentlessAgent`` reads it after a sub-session ends — a
-        continuation session that only called ``finish`` made no
-        progress."""
-        self._refused_call = None
-        """The name of the latest refused tool call, until the model
-        calls that tool again or reads the re-issue reminder
-        (:meth:`_guarded_execute_tool`); ``None`` when nothing is owed."""
+        self.reset_usage()
         self.budget_check_hook: Callable[[], None] | None = None
         self.budget_status_hook: Callable[[], tuple[float, float]] | None = None
         """Returns ``(spent, max)`` in USD of the task this agent runs a
@@ -779,7 +777,6 @@ class KISSAgent(Base):
             fallback_config = {
                 k: v for k, v in fallback_config.items() if k not in _ENDPOINT_CONFIG_KEYS
             } or None
-        old_conversation = list(self.model.conversation)
         token_cb = self.printer.token_callback if self.printer else None
         thinking_cb = self.printer.thinking_callback if self.printer else None
         new_model = model(
@@ -789,8 +786,7 @@ class KISSAgent(Base):
             thinking_callback=thinking_cb,
         )
         new_model.initialize("")
-        new_model.conversation = old_conversation
-        new_model.usage_info_for_messages = self.model.usage_info_for_messages
+        hand_off_conversation(self.model, new_model)
         self.model = new_model
         old_name = self.model_name
         self.model_name = new_name
@@ -951,6 +947,7 @@ class KISSAgent(Base):
                 self.model.add_message_to_conversation("user", NATIVE_TOOLS_CONTINUE_MSG)
                 return None
             self._consecutive_no_tool_calls += 1
+            refusal: str | None = None
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
                 if not response_text or not response_text.strip():
                     raise _EmptyModelResponseError(
@@ -963,7 +960,12 @@ class KISSAgent(Base):
                         f"the model adapter. Try a different model or "
                         f"restart the task."
                     )
-                if self._implicit_finish_allowed():
+                # The implicit finish stands in for a ``finish`` call the
+                # model never made, so it faces the same vetoes; a refusal
+                # is what the model reads next, since a one-shot veto
+                # (Sorcar's unmerged-worktree gate) is spent on it.
+                refusal = self._tool_call_refusal("finish", {})
+                if refusal is None:
                     logger.info(
                         "Implicit finish: agent=%s step=%d text-only response "
                         "for %d consecutive turns",
@@ -976,7 +978,7 @@ class KISSAgent(Base):
                         f"{self._consecutive_no_tool_calls} consecutive turns "
                         f"without calling finish."
                     )
-            retry_msg = (
+            retry_msg = refusal or (
                 "**Your response MUST have at least one function call. "
                 "Your response has 0 function calls. If you have completed "
                 "the task, call the `finish` tool now with your final "
@@ -1003,12 +1005,12 @@ class KISSAgent(Base):
                 # The tool itself overran the budget (a sub-agent's
                 # spend): the step still happened, so it is recorded
                 # like a limit hit after the tool ran.
-                call_reprs.append(_call_repr(fc))
+                call_reprs.append(render_tool_call(fc["name"], _call_args(fc)))
                 function_results.append((fc["name"], {"result": str(e)}))
                 limit_error = e
                 break
             self._mark_routine_turn(fc, response_str, blocked is not None)
-            call_reprs.append(_call_repr(fc))
+            call_reprs.append(render_tool_call(fc["name"], _call_args(fc)))
             function_results.append((name, {"result": response_str}))
             if name == "finish" and blocked is None:
                 finish_result = response_str
@@ -1116,13 +1118,7 @@ class KISSAgent(Base):
         args = _call_args(function_call)
         if name != "finish":
             self.tool_calls_made += 1
-        blocked: str | None = None
-        hook = self.tool_call_hook
-        if hook is not None:
-            verdict = hook(name, args)
-            blocked = None if verdict.allowed else verdict.text
-        if blocked is None and self.tool_call_guard is not None:
-            blocked = self.tool_call_guard(name, args)
+        blocked = self._tool_call_refusal(name, args)
         if blocked is not None:
             self._refused_call = name
             return (*self._execute_tool(function_call, blocked=blocked), blocked)
@@ -1212,7 +1208,9 @@ class KISSAgent(Base):
                 return name, response
             self._mark_routine_turn(function_call, response, blocked is not None)
             turn.calls += 1
-            self._add_message("model", _call_repr(function_call))
+            self._add_message(
+                "model", render_tool_call(function_call["name"], _call_args(function_call))
+            )
             self._add_message("user", f"[{name}]: {response}")
             self._check_limits()
         except Exception as e:
@@ -1342,25 +1340,27 @@ class KISSAgent(Base):
         if self.context_reset_hook is not None:
             self.context_reset_hook()
 
-    def _implicit_finish_allowed(self) -> bool:
-        """Return whether an implicit finish may end the run right now.
+    def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> str | None:
+        """Return the refusal text of the vetoes on calling *name* with *args*, or ``None``.
 
-        The text-only-turn implicit finish stands in for a ``finish`` call
-        the model never made, so it faces the same two vetoes a real
-        ``finish`` call would: the
-        framework's :attr:`tool_call_guard` (Sorcar blocks ``finish``
-        while a user follow-up is queued, so finishing anyway would drop
-        the follow-up) and the caller's :attr:`tool_call_hook` (a
-        refusal suppresses the finish).  Both are consulted with
-        ``("finish", {})`` in the order a real call uses: the hook runs
-        first and, when it rejects, the guard is not consulted at all.
+        The caller's :attr:`tool_call_hook` is consulted first (it sees
+        every call); only when it allows does the framework's
+        :attr:`tool_call_guard` get its say (Sorcar blocks ``finish``
+        while a user follow-up is queued or a worktree is unmerged).
+
+        Args:
+            name: The tool's name.
+            args: The call's arguments.
 
         Returns:
-            bool: ``True`` when neither the hook nor the guard objects.
+            str | None: The hook's or the guard's refusal text, or
+            ``None`` when neither objects.
         """
-        if self.tool_call_hook is not None and not self.tool_call_hook("finish", {}).allowed:
-            return False
-        return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
+        if self.tool_call_hook is not None:
+            verdict = self.tool_call_hook(name, args)
+            if not verdict.allowed:
+                return verdict.text
+        return None if self.tool_call_guard is None else self.tool_call_guard(name, args)
 
     def _implicit_finish_result(self, explanation: str) -> str:
         """Build the result for an implicit finish.
@@ -1732,8 +1732,15 @@ class KISSAgent(Base):
                 + audio_output
                 + image_output
             )
-            if call_tokens > 0:
-                self.context_tokens_used = call_tokens
+            # A CLI turn of several API requests bills their sum, but the
+            # context the model works in is one request's size: the CLI
+            # adapters report it; any other model's call is one request.
+            context_of = getattr(self.model, "context_tokens_from_response", None)
+            context_tokens = context_of(response) if callable(context_of) else None
+            if not isinstance(context_tokens, int):
+                context_tokens = call_tokens
+            if context_tokens > 0:
+                self.context_tokens_used = context_tokens
             # A provider that states what it charged for the call
             # (OpenRouter's ``usage.cost``) is authoritative: the catalog
             # rate is only an estimate of the routed upstream's price.

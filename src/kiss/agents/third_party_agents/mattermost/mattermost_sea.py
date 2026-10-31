@@ -10,7 +10,7 @@ Stores config in ``$KISS_HOME/third_party_agents/mattermost/config.json``.
 Usage::
 
     agent = MattermostAgent()
-    agent.run(prompt_template="List all third_party_agents in the team")
+    agent.run(prompt_template="List all channels in the team")
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    enroll_credential,
+    probe_credential,
     save_json_config,
 )
 from kiss.core.brand import HOME_DIR
@@ -498,8 +500,8 @@ class MattermostChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_third_party_agents(self, team_id: str, page: int = 0, per_page: int = 60) -> str:
-        """List third_party_agents in a Mattermost team.
+    def list_channels(self, team_id: str, page: int = 0, per_page: int = 60) -> str:
+        """List channels in a Mattermost team.
 
         Args:
             team_id: Team ID.
@@ -511,7 +513,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            third_party_agents = self._driver.channels.get_channels_for_user(
+            channels = self._driver.channels.get_channels_for_user(
                 "me", team_id, params={"page": page, "per_page": per_page}
             )
             result = [
@@ -521,9 +523,9 @@ class MattermostChannelBackend(ToolMethodBackend):
                     "display_name": c.get("display_name", ""),
                     "type": c.get("type", ""),
                 }
-                for c in third_party_agents
+                for c in channels
             ]
-            return json.dumps({"ok": True, "third_party_agents": result}, indent=2)[:8000]
+            return json.dumps({"ok": True, "channels": result}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -720,15 +722,21 @@ class MattermostChannelBackend(ToolMethodBackend):
 def _muse_authenticate(
     backend: MattermostChannelBackend, url: str, token: str, port: int, scheme: str
 ) -> str:
-    """Enroll a Mattermost token into the Muse vault and validate it.
+    """Enroll a Mattermost token into the Muse vault once the server accepts it.
 
-    The plaintext token goes straight into the vault as a bearer
-    credential bound to the configured server origin, and is never
-    written to ``config.json`` (only the non-secret ``url``/``port``/
-    ``scheme`` metadata is; it is written first, so a failed enrollment
-    leaves no token on disk).  Validation runs ``/users/me`` through
-    the daemon boundary, so it is audited; an invalid token leaves the
-    vault empty.
+    A direct ``GET /users/me`` (:func:`probe_credential`) checks the
+    token BEFORE anything is stored, so a token the server rejects
+    leaves the previous enrollment and ``config.json`` untouched.  Only
+    then does :func:`enroll_credential` store the token as a bearer
+    credential bound to the server origin (atomically replacing any
+    previous vault entry; the token never reaches ``config.json``)
+    together with the non-secret ``url``/``port``/``scheme`` metadata,
+    under the config lock: a failed metadata write leaves the vault
+    untouched, and a refused store puts the old metadata back, so the
+    old token stays paired with the old server.  A
+    daemon failure after the probe is reported without clearing the
+    vault: whichever credential it holds (the old one or the
+    just-validated new one) is worth keeping.
 
     Args:
         backend: The agent's Mattermost backend to (re)wire.
@@ -740,16 +748,10 @@ def _muse_authenticate(
     Returns:
         JSON string with the validation result.
     """
-    import contextlib
-
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
         valid_http_url,
-    )
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
     )
 
     base = f"{scheme}://{url}:{port}"
@@ -757,38 +759,31 @@ def _muse_authenticate(
         return json.dumps(
             {"ok": False, "error": f"{base!r} is not a valid http(s):// server URL."}
         )
-    try:
-        save_json_config(
-            _config.path, {"url": url, "port": str(port), "scheme": scheme}
+    me, detail = probe_credential(f"{base}/api/v4/users/me", {"Authorization": f"Bearer {token}"})
+    if not isinstance(me, dict):
+        return json.dumps(
+            {"ok": False, "error": f"Mattermost rejected the token: {detail or 'not a user'}"}
         )
-        store_credentials(
+    try:
+        enroll_credential(
+            _config.path,
+            {"url": url, "port": str(port), "scheme": scheme},
             "mattermost",
             {"kind": "bearer", "token": token},
-            [],
             hosts=origin_hosts(base),
             insecure_hosts=insecure_origin_hosts(base),
         )
-        if backend._wire_muse():
-            me = backend._driver.users.get_user("me")
-            return json.dumps(
-                {
-                    "ok": True,
-                    "message": "Mattermost credentials saved (Muse-auth).",
-                    "username": me.get("username", ""),
-                }
-            )
-        else:  # pragma: no cover - defense in depth, credential was just stored
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+        if not backend._wire_muse():  # pragma: no cover - credential was just stored
+            return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so a bad token is not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("mattermost")
-    backend._driver = None
-    backend._token = ""
-    backend._http = requests
-    backend._muse = False
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps(
+        {
+            "ok": True,
+            "message": "Mattermost credentials saved (Muse-auth).",
+            "username": me.get("username", ""),
+        }
+    )
 
 
 class MattermostAgent(BaseChannelAgent):

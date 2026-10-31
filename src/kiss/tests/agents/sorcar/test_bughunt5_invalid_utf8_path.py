@@ -16,8 +16,8 @@ whose output mentions such a path raised ``UnicodeDecodeError``:
 that ``_try_setup_worktree`` guards against) propagated out of
 ``ChatSorcarAgent.run()`` and killed the whole task.
 
-This was also internally inconsistent: ``_unquote_git_path`` already
-decodes quoted paths with ``errors="surrogateescape"``.
+This was also internally inconsistent: the porcelain parser of the
+time already decoded quoted paths with ``errors="surrogateescape"``.
 
 The tests build a real repo and inject an invalid-UTF-8 path into the
 index with ``git update-index --cacheinfo`` (bytes argv) — no on-disk

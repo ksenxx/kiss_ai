@@ -20,7 +20,11 @@ const os = require('os');
 const path = require('path');
 const harness = require('./simplify2_harness');
 const {send, click: clickEl, answerCheckPaths} = harness;
-const {findLinks, checkPathsOnRealFs} = require('./file_link_helpers');
+const {
+  findLinks,
+  checkPathsOnRealFs,
+  pendingCounts,
+} = require('./file_link_helpers');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-rescode-'));
 const realFile = path.join(tmpDir, 'API.md');
@@ -85,8 +89,8 @@ function testLiveResultCodeBlockPathsClickable() {
   console.log('  ok - live result code-block paths are clickable');
 }
 
-function testReplayedResultCodeBlockPathsClickable() {
-  const {win, posted} = makePage();
+// Replay a finished task whose result is summaryHtml().
+function replayResult(win) {
   send(win, {
     type: 'task_events',
     task: 'replayed task',
@@ -101,6 +105,11 @@ function testReplayedResultCodeBlockPathsClickable() {
       },
     ],
   });
+}
+
+function testReplayedResultCodeBlockPathsClickable() {
+  const {win, posted} = makePage();
+  replayResult(win);
   assert.strictEqual(
     findLinks(win, realFile).length,
     2,
@@ -116,6 +125,17 @@ function testReplayedResultCodeBlockPathsClickable() {
     0,
     'replay: missing path must NOT become clickable',
   );
+  // Once every reply arrived, nothing is pending.
+  assert.deepStrictEqual(
+    pendingCounts(win),
+    {spans: 0, checks: 0},
+    'no file-link span or path check may stay pending after the replies',
+  );
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path-candidate]').length,
+    0,
+    'no unresolved candidate spans may remain after replies arrive',
+  );
   const inCode = findLinks(win, realFile2)[0];
   assert.ok(inCode.closest('pre'), 'link must live inside the code block');
   clickEl(win, inCode);
@@ -126,41 +146,37 @@ function testReplayedResultCodeBlockPathsClickable() {
   console.log('  ok - replayed result code-block paths are clickable');
 }
 
+// Re-highlighting a replayed code block destroys its candidate spans
+// while their checkPaths replies are still out.  The destroyed spans
+// must leave the pending registry then, not linger until a reply
+// sweeps them: with no reply at all (this page never answers), the
+// registry must hold exactly the candidate spans still on the page.
+function testRehighlightDropsDestroyedSpansFromRegistry() {
+  const {win} = harness.makePage({
+    extraScripts: ['highlight.min.js', 'marked.min.js'],
+  });
+  replayResult(win);
+  const live = win.document.querySelectorAll(
+    '#output [data-path-candidate]',
+  ).length;
+  assert.ok(live > 0, 'the replay leaves candidate spans awaiting replies');
+  assert.strictEqual(
+    pendingCounts(win).spans,
+    live,
+    'BUG: spans destroyed by re-highlighting linger in the pending registry',
+  );
+  win.close();
+  console.log('  ok - re-highlighting drops destroyed spans from the registry');
+}
+
 // Code blocks inside collapsed panels are highlighted lazily on expand
 // (highlightPending): highlightSplitPathFileLinks.test.js's
 // testCollapsedTextPanelExpandLinksWholePaths covers that path.
 
-function testNoStaleSpansLeakInRegistryAfterRehighlight() {
-  // The spans destroyed by re-highlighting must not linger in the
-  // pending registry: after replay + replies, no candidates remain.
-  const {win} = makePage();
-  send(win, {
-    type: 'task_events',
-    task: 'replayed task',
-    extra: JSON.stringify({work_dir: tmpDir}),
-    events: [
-      {
-        type: 'result',
-        summary: summaryHtml(),
-        success: true,
-        total_tokens: 1,
-        cost: '$0.01',
-      },
-    ],
-  });
-  assert.strictEqual(
-    win.document.querySelectorAll('#output [data-path-candidate]').length,
-    0,
-    'no unresolved candidate spans may remain after replies arrive',
-  );
-  win.close();
-  console.log('  ok - no stale candidate spans after re-highlighting');
-}
-
 function runTests() {
   testLiveResultCodeBlockPathsClickable();
   testReplayedResultCodeBlockPathsClickable();
-  testNoStaleSpansLeakInRegistryAfterRehighlight();
+  testRehighlightDropsDestroyedSpansFromRegistry();
 }
 
 try {

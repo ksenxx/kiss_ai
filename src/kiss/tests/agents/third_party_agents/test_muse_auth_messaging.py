@@ -19,10 +19,6 @@ credentials (BlueBubbles' ``password=`` and Synology's webhook
 Branch-coverage notes (unreachable without test doubles, so documented
 instead of mocked):
 
-* The connectors' ``_muse_authenticate`` ``except Exception`` rollback
-  paths that are not driven by an invalid-credential response need the
-  daemon to die between the enrollment and the validation call (a
-  cross-process race); the invalid-credential rollback IS covered.
 * The ``# pragma: no cover`` defense-in-depth branches after
   ``store_credentials`` + ``_wire_muse`` (wire failing although the
   credential was just stored) need the vault cleared between the store
@@ -30,7 +26,8 @@ instead of mocked):
 * ``BlueBubblesChannelBackend.connect``'s Muse branch and the
   BlueBubbles tool methods are macOS-gated (``sys.platform``); on this
   Linux CI they are unreachable without faking the platform, so the
-  Muse plumbing is exercised through ``_wire_muse`` + the ungated
+  Muse plumbing is exercised through ``_muse_authenticate`` (its
+  direct probe is ungated), ``_wire_muse`` and the ungated
   ``poll_messages``/``send_message`` paths instead.  This includes
   ``get_server_info``'s strict HTTP-status + ``status == 200`` envelope
   check (an HTTP 401 body no longer reads as success), which sits
@@ -422,7 +419,7 @@ def test_mattermost_write_needs_grant_and_typing_is_read(
 def test_mattermost_muse_authenticate_rotation_rollback_clear(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
-    """The authenticate tool enrolls/rotates/rolls back; clear empties the vault."""
+    """The authenticate tool enrolls; a rejected rotation keeps the old token; clear empties."""
 
     agent = MattermostAgent()
     tools = auth_tools(agent)
@@ -438,14 +435,29 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     stored = json.loads(mm_config.path.read_text())
     assert "token" not in stored
     assert json.loads(tools["check_mattermost_auth"]())["ok"] is True
-    # A bad rotation rolls the vault back to empty.
+    # A rejected rotation is probed before anything is stored: the
+    # working token stays enrolled and the connection keeps using it.
     result = json.loads(
         tools["authenticate_mattermost"](
             "127.0.0.1", "mm-rotated-invalid", port=api_server.server_address[1], scheme="http"
         )
     )
     assert result["ok"] is False
-    assert not vault_has_credentials("mattermost")
+    assert "rejected the token" in result["error"]
+    assert vault_has_credentials("mattermost")
+    assert json.loads(tools["check_mattermost_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == f"Bearer {_REAL_MM_TOKEN}"
+    # A token the server accepts but the vault refuses (doubled space)
+    # fails at the store; the working token stays enrolled and in use.
+    result = json.loads(
+        tools["authenticate_mattermost"](
+            "127.0.0.1", "mm  spaced", port=api_server.server_address[1], scheme="http"
+        )
+    )
+    assert result["ok"] is False
+    assert "invalid credential token value" in result["error"]
+    assert json.loads(tools["check_mattermost_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == f"Bearer {_REAL_MM_TOKEN}"
     # A malformed server URL is rejected before any state change.
     result = json.loads(
         tools["authenticate_mattermost"](
@@ -610,7 +622,7 @@ def test_zalo_write_grant_and_multipart_upload(
 def test_zalo_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """authenticate_zalo enrolls into the vault and rolls back bad tokens."""
+    """authenticate_zalo enrolls into the vault; a rejected token changes nothing."""
 
     monkeypatch.setenv("ZALO_API_BASE", api_server.base_url + "/v2.0/oa")
     agent = ZaloAgent()
@@ -622,8 +634,19 @@ def test_zalo_muse_authenticate_rollback_and_clear(
     assert json.loads(tools["check_zalo_auth"]())["ok"] is True
     result = json.loads(tools["authenticate_zalo"]("zalo-rotated-invalid"))
     assert result["ok"] is False
-    assert not vault_has_credentials("zalo")
-    assert "Not authenticated" in tools["check_zalo_auth"]()
+    # Probed before anything is stored: the working token, its oa_id
+    # metadata and the live connection all survive the rejected rotation.
+    assert vault_has_credentials("zalo")
+    assert json.loads(zalo_config.path.read_text()) == {"oa_id": "OA1"}
+    assert json.loads(tools["check_zalo_auth"]())["ok"] is True
+    assert api_server.header("access_token") == _REAL_ZALO_TOKEN
+    # Zalo accepts it but the vault refuses it (doubled space): the
+    # store fails and the working token stays enrolled and in use.
+    result = json.loads(tools["authenticate_zalo"]("zalo  spaced", oa_id="OA1"))
+    assert result["ok"] is False
+    assert "invalid credential token value" in result["error"]
+    assert json.loads(tools["check_zalo_auth"]())["ok"] is True
+    assert api_server.header("access_token") == _REAL_ZALO_TOKEN
     assert json.loads(tools["authenticate_zalo"](_REAL_ZALO_TOKEN))["ok"] is True
     assert "cleared" in tools["clear_zalo_auth"]()
     assert not vault_has_credentials("zalo")
@@ -669,7 +692,7 @@ def test_line_muse_adapter_reads_and_writes(
 def test_line_muse_authenticate_rollback_and_clear(
     muse_env: Path, api_server: _MessagingApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """authenticate_line enrolls into the vault and rolls back bad tokens."""
+    """authenticate_line enrolls into the vault; a rejected token changes nothing."""
 
     monkeypatch.setenv("LINE_API_BASE", api_server.base_url)
     agent = LineAgent()
@@ -681,8 +704,20 @@ def test_line_muse_authenticate_rollback_and_clear(
     assert json.loads(tools["check_line_auth"]())["ok"] is True
     result = json.loads(tools["authenticate_line"]("line-rotated-invalid"))
     assert result["ok"] is False
-    assert not vault_has_credentials("line")
-    assert agent._backend._api is None
+    assert "rejected the token" in result["error"]
+    # Probed before anything is stored: the working token, the webhook
+    # secret and the live adapter all survive the rejected rotation.
+    assert vault_has_credentials("line")
+    assert json.loads(line_config.path.read_text()) == {"channel_secret": "cs1"}
+    assert json.loads(tools["check_line_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == f"Bearer {_REAL_LINE_TOKEN}"
+    # LINE accepts it but the vault refuses it (doubled space): the
+    # store fails and the working token stays enrolled and in use.
+    result = json.loads(tools["authenticate_line"]("line  spaced", "cs1"))
+    assert result["ok"] is False
+    assert "invalid credential token value" in result["error"]
+    assert json.loads(tools["check_line_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == f"Bearer {_REAL_LINE_TOKEN}"
     assert json.loads(tools["authenticate_line"](_REAL_LINE_TOKEN))["ok"] is True
     assert "cleared" in tools["clear_line_auth"]()
     assert not vault_has_credentials("line")
@@ -1363,13 +1398,12 @@ def test_line_legacy_sdk_missing(isolated_kiss_home: Path, api_server: _Messagin
 def test_bluebubbles_muse_authenticate_rollbacks(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
-    """_muse_authenticate validates the URL and rolls back on failure.
+    """_muse_authenticate validates the URL, then probes before storing.
 
-    The emulator answers 401 to a ``password=`` ending in ``-invalid``,
-    so the validating ``get_server_info`` read fails on every platform
-    (off macOS it is platform-gated and fails even earlier); either way
-    the enrollment is rolled back, which is the path under test.  The
-    macOS-only success return is documented in the module docstring.
+    The emulator answers 401 to a ``password=`` ending in ``-invalid``.
+    The direct probe is not platform-gated, so enrollment succeeds off
+    macOS too, and a rejected rotation leaves the working password
+    enrolled, ``config.json`` unchanged and the backend wired.
     """
 
     backend = BlueBubblesChannelBackend()
@@ -1379,8 +1413,27 @@ def test_bluebubbles_muse_authenticate_rollbacks(
     result = json.loads(_muse_authenticate(backend, api_server.base_url, "bb-invalid"))
     assert result["ok"] is False
     assert not vault_has_credentials("bluebubbles")
+    assert not bb_config.path.exists()
     assert backend._muse is False
     assert backend._http is requests
+    result = json.loads(_muse_authenticate(backend, api_server.base_url, _REAL_BB_PASSWORD))
+    assert result["ok"] is True
+    assert vault_has_credentials("bluebubbles")
+    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base_url}
+    assert backend._muse is True
+    surrogate = backend._surrogate
+    result = json.loads(_muse_authenticate(backend, api_server.base_url, "bb-rotated-invalid"))
+    assert result["ok"] is False
+    assert vault_has_credentials("bluebubbles")
+    assert json.loads(bb_config.path.read_text()) == {"server_url": api_server.base_url}
+    assert backend._muse is True and backend._surrogate == surrogate
+    # Accepted by the server but refused by the vault (doubled space).
+    result = json.loads(_muse_authenticate(backend, api_server.base_url, "bb  spaced"))
+    assert result["ok"] is False
+    assert "invalid credential token value" in result["error"]
+    assert backend._surrogate == surrogate
+    backend.poll_messages("chat1", "")
+    assert api_server.query().get("password") == [_REAL_BB_PASSWORD]
 
 
 def test_bluebubbles_agent_init_and_clear_tool(

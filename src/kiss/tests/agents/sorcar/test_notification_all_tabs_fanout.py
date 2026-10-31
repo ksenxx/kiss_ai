@@ -148,7 +148,7 @@ class TestPrimitiveLessPrinterDegradation:
             agent._last_task_id = "7171"
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = [
                 e for e in printer.events if e.get("type") == "notification"

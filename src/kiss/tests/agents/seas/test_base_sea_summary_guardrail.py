@@ -109,30 +109,26 @@ def test_a_second_run_on_the_same_hooks_starts_its_count_afresh(tmp_path: Path) 
     assert "step-1" in results[1][0] and "step-2" in results[1][1], results[1]
 
 
-def test_hooks_directly_a_parallel_step_with_summary_first_passes() -> None:
-    """Within one 10th step, a summary call clears the debt for the calls after it."""
+def summary(description: str) -> str:
+    """Stand-in ``summary`` tool for the hooks, which find it by name."""
+    return description
+
+
+def test_the_summary_comes_due_again_at_step_twenty() -> None:
+    """The debt recurs at every multiple of 10: after step 10's summary, step 20 owes one.
+
+    Driven through the hooks :func:`evaluate_sea` stages; the first ten
+    steps (no summary tool, steps 1-9, ``finish`` exempt) are pinned by
+    ``tests/server/test_base_sea_root_layer.py``.
+    """
     run = evaluate_sea([BaseSea()], "t")
-    run.tools_hook([_bash, _run])  # no summary tool: never due
+    run.tools_hook([_bash, summary])
     for _ in range(SUMMARY_EVERY_STEPS):
         run.llm_call_hook([])
-    assert run.tool_call_hook("Bash", {}).allowed
-
-    run = evaluate_sea([BaseSea()], "t")
-
-    def summary(description: str) -> str:
-        return description
-
-    run.tools_hook([_bash, summary])
-    for step in range(1, SUMMARY_EVERY_STEPS):
-        run.llm_call_hook([])
-        assert run.tool_call_hook("Bash", {}).allowed, step
-    run.llm_call_hook([])
     assert run.tool_call_hook("summary", {"description": "x"}).allowed
-    assert run.tool_call_hook("Bash", {}).allowed
     for _ in range(SUMMARY_EVERY_STEPS):
         run.llm_call_hook([])
     refused = run.tool_call_hook("Read", {"file_path": "/x"})
     assert not refused.allowed and "re-issue this exact Read call" in refused.text
-    assert run.tool_call_hook("finish", {}).allowed
     assert run.tool_call_hook("summary", {"description": "y"}).allowed
     assert run.tool_call_hook("Read", {"file_path": "/x"}).allowed

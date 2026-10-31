@@ -5,9 +5,9 @@
 
 // I-R2: one hidden-textarea execCommand('copy') fallback, exported as
 // PanelCopy.fallbackCopyText, backs every same-page copy control. This
-// exercises the helper directly and through the copy button of the
-// task panel that opens a transcript when the async clipboard API is
-// unavailable.
+// exercises the helper's failure path directly (panelCopy.test.js pins
+// its successful copy) and the copy button of the task panel that opens
+// a transcript when the async clipboard API is unavailable.
 
 'use strict';
 
@@ -24,26 +24,6 @@ function newDom() {
   });
   dom.window.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   return dom.window;
-}
-
-function testHelperCopiesAndCleansUp() {
-  const win = newDom();
-  const calls = [];
-  win.document.execCommand = cmd => {
-    const area = win.document.querySelector('textarea');
-    calls.push({cmd, value: area ? area.value : null});
-    return true;
-  };
-  const before = win.document.body.childElementCount;
-  const ok = win.PanelCopy.fallbackCopyText('hello clipboard');
-  assert.strictEqual(ok, true, 'helper must report execCommand success');
-  assert.deepStrictEqual(calls, [{cmd: 'copy', value: 'hello clipboard'}]);
-  assert.strictEqual(
-    win.document.body.childElementCount,
-    before,
-    'hidden textarea must be removed again',
-  );
-  console.log('  ok - fallbackCopyText copies via execCommand and cleans up');
 }
 
 function testHelperReportsFailure() {
@@ -96,7 +76,6 @@ function testMainTaskPanelUsesSharedFallback() {
   console.log('  ok - main.js task-panel copy uses the shared fallback');
 }
 
-testHelperCopiesAndCleansUp();
 testHelperReportsFailure();
 testMainTaskPanelUsesSharedFallback();
 console.log('rr_area_hi_copy_fallback: all tests passed');

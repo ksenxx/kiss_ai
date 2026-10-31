@@ -13,21 +13,15 @@
 // Runs with: node test/historyRenameSurvivesRebuild.test.js
 
 const assert = require('assert');
+const {send, ofType, settle: tick} = require('./simplify2_harness');
 const {
-  makePage: buildPage,
-  send,
-  ofType,
-  settle: tick,
-} = require('./simplify2_harness');
-const {sendHistory, makeRow} = require('./history_helpers');
+  sendHistory,
+  makeRow,
+  openChatsPage: makePage,
+  chatHeader,
+} = require('./history_helpers');
 
-function makePage() {
-  const {win, posted} = buildPage({bodyClass: 'remote-chat'});
-  win.document.getElementById('sidebar').classList.add('open');
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  return {win, posted};
-}
-
+/** Chat `chatId`'s panel in the Chats list, or null. */
 function group(win, chatId) {
   return win.document.querySelector(
     '#history-list .history-chat-group[data-chat-id="' + chatId + '"]',
@@ -35,11 +29,7 @@ function group(win, chatId) {
 }
 
 function title(win, chatId) {
-  const g = group(win, chatId);
-  assert.ok(g, 'chat panel for ' + chatId);
-  return g
-    .querySelector(':scope > .history-chat-header')
-    .querySelector(':scope > .history-chat-title');
+  return chatHeader(win, chatId).querySelector(':scope > .history-chat-title');
 }
 
 function key(win, el, k) {

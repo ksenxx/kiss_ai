@@ -45,7 +45,7 @@
   // Accepts numbers or server strings like "$0.4123"; non-numeric
   // values (e.g. "N/A") pass through untouched.
   function fmtCost(c) {
-    const n = Number(String(c).replace(/[$,\s]/g, ''));
+    const n = parseCost(c);
     if (!Number.isFinite(n)) return String(c);
     if (n > 0 && n < 0.005)
       return n < 0.00005 ? '<$0.0001' : '$' + n.toFixed(4);
@@ -61,8 +61,14 @@
     if (typeof ev.cost_usd === 'number' && Number.isFinite(ev.cost_usd))
       return ev.cost_usd;
     if (ev.cost == null || ev.cost === '') return null;
-    const n = Number(String(ev.cost).replace(/[$,\s]/g, ''));
+    const n = parseCost(ev.cost);
     return Number.isFinite(n) ? n : null;
+  }
+
+  /** A daemon cost (a number or a string like "$1,234.5") as a number;
+   *  NaN when it is not one. */
+  function parseCost(c) {
+    return Number(String(c).replace(/[$,\s]/g, ''));
   }
 
   function fmtElapsedMs(ms) {
@@ -357,18 +363,25 @@
     if (el.parentNode) el.parentNode.removeChild(el);
   }
 
+  // Lower-case local names: an SVG element's tagName keeps the case it
+  // was written in, so `<svg><script>` must not slip past an upper-case
+  // HTML name.  SVG <animate> and <set> rewrite any attribute (a link's
+  // href, say) at run time from values/to, which the URL check below
+  // never sees.
   const SANITIZE_BAD_TAGS = new Set([
-    'SCRIPT',
-    'IFRAME',
-    'OBJECT',
-    'EMBED',
-    'FORM',
-    'META',
-    'LINK',
-    'STYLE',
-    'BASE',
-    'FRAME',
-    'FRAMESET',
+    'script',
+    'iframe',
+    'object',
+    'embed',
+    'form',
+    'meta',
+    'link',
+    'style',
+    'base',
+    'frame',
+    'frameset',
+    'animate',
+    'set',
   ]);
   const SANITIZE_URL_ATTRS = new Set([
     'href',
@@ -384,7 +397,7 @@
     const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
-        if (SANITIZE_BAD_TAGS.has(el.tagName)) {
+        if (SANITIZE_BAD_TAGS.has(el.localName.toLowerCase())) {
           el.remove();
           continue;
         }
@@ -802,9 +815,10 @@
     if (fallback) fallback.focus();
   }
 
-  /** Escape inside a confirm / prompt toast presses its cancel button. */
+  /** Escape inside a confirm / prompt toast presses its cancel button
+   *  (not the Escape that drops an IME candidate). */
   function onDialogToastKey(e) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
     const cancel = e.currentTarget.querySelector('[data-dialog-cancel]');
     if (!cancel) return;
     e.preventDefault();
@@ -819,9 +833,10 @@
   // the sheet's Escape handler, so one Escape folds the question back
   // into its button instead of closing the whole sheet.
 
-  /** Escape inside an inline confirm presses its Keep / Cancel button. */
+  /** Escape inside an inline confirm presses its Keep / Cancel button
+   *  (not the Escape that drops an IME candidate). */
   function onInlineConfirmKey(e) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
     const cancel = e.currentTarget.querySelector('[data-inline-cancel]');
     if (!cancel) return;
     e.preventDefault();
@@ -934,7 +949,7 @@
   }
 
   function onPromptToastInputKey(e) {
-    if (e.key !== 'Enter' || e.isComposing) return;
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     e.stopPropagation();
     submitPromptToast(e.currentTarget.closest('.kiss-notification'));
@@ -1012,6 +1027,18 @@
   let selectedModel = '';
   let agentModel = '';
   let allModels = [];
+  // The picker is the picker of the machine the chat header's drop-down
+  // shows (see syncModelPickerMachine): every machine's last `models`
+  // reply as {models, selected, pickedAt} ('' = this daemon, seeded
+  // with the template's model), and the machine whose list `allModels`
+  // is.  Every getModels (and every saveConfig of this daemon, which
+  // the daemon answers with its list too) carries the next
+  // `modelsAsked` as its `generation`, which the reply echoes;
+  // `pickedAt` is the count when the user last picked on that machine
+  // (noteMachineModels).
+  const machineModels = new Map();
+  let modelsMachine = '';
+  let modelsAsked = 0;
   let modelDDIdx = -1;
   let attachments = [];
   // Human-readable reasons why a picked file could not be attached (an
@@ -1238,12 +1265,13 @@
       // currentTaskSettings on switch (see saveCurrentTab).
       taskSettings: null,
       statusTextContent: 'Ready',
-      statusTextColor: 'var(--dim)',
       statusTokensText: '',
       statusBudgetText: '',
       statusStepsText: '',
       welcomeVisible: true,
       selectedModel: selectedModel,
+      // The machine whose model selectedModel is (syncModelPickerMachine).
+      modelMachine: modelsMachine,
       agentModel: '',
       attachments: [],
       attachErrors: [],
@@ -1308,6 +1336,10 @@
       lastTaskFailed: false,
       hasRunTask: false,
       askPendingQuestion: null,
+      // The daemon's id of that question ('' when it sent none): the
+      // answer names it so the daemon can tell two asks of the same
+      // text apart.
+      askQuestionId: '',
       // The prompt the user was composing when the question arrived:
       // parked while the composer is the answer box, back afterwards.
       promptDraft: '',
@@ -1339,11 +1371,16 @@
    *               task lasts without touching the user's own pick.
    *   'restore' - the task ended: drop the override and show the pick
    *               the user made in that tab again.
+   *
+   * Either is a model of the machine the tab's task runs on (its
+   * binding): a tab whose picker shows another machine -- the chat
+   * header's drop-down moved while the task ran -- keeps its model.
    */
   function applyModelPick(tabId, model, source) {
     if (!model || !tabId) return;
     const isAgent = source === 'agent';
     const t = getTab(tabId);
+    if (t && tabMachine(tabId) !== tabBoundMachine(tabId)) return;
     if (t) {
       if (isAgent) {
         t.agentModel = model;
@@ -1515,7 +1552,6 @@
     // showing a neighbour's, but that is a viewing position too.
     tab.taskSettings = currentTaskSettings;
     tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
-    tab.statusTextColor = statusText ? statusText.style.color : 'var(--dim)';
     tab.statusTokensText = neighbour
       ? currentTaskMetrics.tokens
       : statusTokens
@@ -1660,10 +1696,9 @@
     // to the history list, not the previous tab's.
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     updateMetaTaskDetails(currentTaskSettings);
-    if (statusText) {
-      statusText.textContent = tab.statusTextContent || 'Ready';
-      statusText.style.color = tab.statusTextColor || 'var(--dim)';
-    }
+    // Its colour is the running state's (startTimer / stopTimer): both
+    // callers set that next.
+    if (statusText) statusText.textContent = tab.statusTextContent || 'Ready';
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
     if (statusSteps) statusSteps.textContent = tab.statusStepsText;
@@ -1709,7 +1744,7 @@
     if (tab.worktreeBarEl) {
       worktreeBar = tab.worktreeBarEl;
       tab.worktreeBarEl = null;
-      inputAreaEl.insertBefore(worktreeBar, inputAreaEl.firstChild);
+      attachActionBar(worktreeBar);
     }
     const hideInput = worktreeBar || (tab.isSubagentTab && !tab.isRunning);
     if (inputContainer) inputContainer.style.display = hideInput ? 'none' : '';
@@ -1825,11 +1860,10 @@
   function updateThemeButton(btn) {
     const light = document.body.classList.contains('light-theme');
     const label = light ? 'Dark mode' : 'Light mode';
-    const icon = btn.querySelector('.more-item-icon');
-    const text = btn.querySelector('.more-item-label');
-    if (icon) icon.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
-    else btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
-    if (text) text.textContent = label;
+    btn.querySelector('.more-item-icon').innerHTML = light
+      ? THEME_MOON_SVG
+      : THEME_SUN_SVG;
+    btn.querySelector('.more-item-label').textContent = label;
     btn.title = label;
     btn.setAttribute('aria-label', label);
   }
@@ -1837,8 +1871,7 @@
   function updateContrastButton(btn) {
     const high = document.body.classList.contains('high-contrast');
     const label = high ? 'Low contrast' : 'High contrast';
-    const text = btn.querySelector('.more-item-label');
-    if (text) text.textContent = label;
+    btn.querySelector('.more-item-label').textContent = label;
     btn.title = label;
     btn.setAttribute('aria-label', label);
   }
@@ -2073,7 +2106,7 @@
    * @param {{title: string, providers: Array<{id: string, label: string}>}} ev
    */
   function showSigninWindow(ev) {
-    if (!signinModal || signinWindowOpen() || signinProvider) return;
+    if (!signinModal || signinWindowOpen()) return;
     document.getElementById('signin-modal-title').textContent =
       ev.title || 'Sign in';
     signinButtons.replaceChildren();
@@ -2218,10 +2251,10 @@
       .getElementById('signin-modal-paste-btn')
       .addEventListener('click', sendSigninPaste);
     signinPasteInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        sendSigninPaste();
-      }
+      // The Enter that commits an IME candidate is not a submit.
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      sendSigninPaste();
     });
   }
 
@@ -2617,11 +2650,11 @@
   // break the "no tab switch unless finished" rule.  For those closes
   // prefer the closed tab's parent chat tab, then the nearest surviving
   // chat tab, falling back to adjacency only if no chat tab is left.
-  // A sub-agent tab the user closed hands over inside its own chat's
-  // group (the nearest surviving member, the chat itself included):
-  // without a row of chat tabs, landing on an unrelated chat would be
-  // a surprise.  In the split layout the chat pane never shows a
-  // content tab, so only chat tabs are candidates there.  Returns null
+  // A sub-agent tab or a file the user closed hands over inside its own
+  // chat's group (the nearest surviving member, the chat itself
+  // included): without a row of chat tabs, landing on an unrelated chat
+  // would be a surprise.  In the split layout the chat pane never shows
+  // a content tab, so only chat tabs are candidates there.  Returns null
   // when no tab is left (the caller opens a fresh chat tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
     const isChat = t => !t.isContentTab;
@@ -2631,8 +2664,9 @@
       if (parent && isChat(parent)) return parent;
       return nearestTab(origIdx, isChat) || nearestTab(origIdx, ok);
     }
-    if (parent) {
-      const root = rootTabOf(parent);
+    const owner = parent || tabOwner(closed);
+    if (owner) {
+      const root = rootTabOf(owner);
       const inGroup = nearestTab(origIdx, t => ok(t) && rootTabOf(t) === root);
       if (inGroup) return inGroup;
     }
@@ -3096,9 +3130,8 @@
           ? active
           : getTab(activeContentTabId) || getTab(lastViewedContentTabId);
       if (active && active.isContentTab) {
-        const chat =
-          getTab(chatTargetTabId()) || tabs.find(t => !t.isContentTab) || null;
-        if (chat && !chat.isContentTab) {
+        const chat = getTab(chatTabIdForHost());
+        if (chat) {
           activateAdjacentTab(chat);
           persistTabState();
         } else {
@@ -3502,7 +3535,8 @@
     removeRemoteChatLoader(getTab(activeTabId));
     const loader = mkEl('div', 'adjacent-loader');
     loader.id = 'remote-chat-loader';
-    loader.textContent = 'Loading the chat from ' + machine + '\u2026';
+    loader.textContent =
+      'Loading the chat from ' + machineLabel(machine) + '\u2026';
     O.appendChild(loader);
   }
 
@@ -3726,7 +3760,9 @@
   function languageFromPath(lowerName) {
     const dot = lowerName.lastIndexOf('.');
     const ext = dot >= 0 ? lowerName.slice(dot + 1) : '';
+    // No prototype: a file named `constructor` or `x.tostring` is no key.
     const map = {
+      __proto__: null,
       py: 'python',
       js: 'javascript',
       mjs: 'javascript',
@@ -3766,7 +3802,8 @@
       dockerfile: 'dockerfile',
       tex: 'latex',
     };
-    return map[ext] || 'plaintext';
+    // A name with no extension (Dockerfile) is its own key.
+    return map[ext] || map[lowerName] || 'plaintext';
   }
 
   function ensureMonaco() {
@@ -5647,6 +5684,18 @@
     closeTab(outermost);
   }
 
+  /**
+   * Whether tab *id* or one of its sub-agent descendants is running: a
+   * user's close takes the descendants along, so such a tab is not
+   * inactive.
+   * @param {string} id A tab id.
+   * @returns {boolean} True when a tab of that subtree runs.
+   */
+  function subtreeRunning(id) {
+    const subtree = addDescendantTabs(new Set([id]));
+    return tabs.some(t => t.isRunning && subtree.has(t.id));
+  }
+
   function showTabContextMenu(x, y, tabId, anchorEl) {
     tabCtxMenu.innerHTML = '';
     tabCtxMenuAnchor = anchorEl || null;
@@ -5671,7 +5720,7 @@
           }
           const ids = tabs.filter(t => !keep.has(t.id)).map(t => t.id);
           if (tabId !== activeTabId) switchToTab(tabId);
-          ids.forEach(id => closeTab(id));
+          closeTabsActiveLast(ids);
         },
       },
       {
@@ -5683,7 +5732,9 @@
       {
         label: 'Close Inactive',
         action: function () {
-          closeTabsActiveLast(tabs.filter(t => !t.isRunning).map(t => t.id));
+          closeTabsActiveLast(
+            tabs.filter(t => !subtreeRunning(t.id)).map(t => t.id),
+          );
         },
       },
     ];
@@ -6328,6 +6379,9 @@
       // text between them.
       selectedModel = _initialModelEl.textContent.replace(/\u200e/g, '');
     }
+    // This daemon's default when the page was served: the first
+    // `models` reply moves the tabs still showing it to the new one.
+    machineModels.set('', {models: [], selected: selectedModel, pickedAt: 0});
   }
 
   // Tabs come from the server's shared registry (`tabs_state`), never
@@ -7076,17 +7130,6 @@
   }
 
   /**
-   * Whether the page polls for the task update at all: the docked
-   * desktop panel always, the mobile drawer only while it is open.
-   */
-  function metaInfoPollWanted() {
-    if (document.body.classList.contains('remote-desktop')) return true;
-    // An OPEN task-info drawer polls; a hidden one must not poll the
-    // phone's network.
-    return !!metaPanel && metaPanel.classList.contains('open');
-  }
-
-  /**
    * Ask the daemon for the visible tab's task update.
    *
    * @param {boolean} [refresh] Make the daemon run the agent now (the
@@ -7104,7 +7147,10 @@
     // running:false` is not the active tab's).
     const pollTab = getTab(metaInfoChatTabId());
     if (pollTab ? !pollTab.isRunning : !isRunning) return;
-    if (!metaInfoPollWanted()) return;
+    // Each poll may run the daemon's paid update agent: only a panel on
+    // screen polls (not the closed phone drawer, nor the desktop panel
+    // slid off behind a file).
+    if (!metaPanelIsOpen()) return;
     if (document.visibilityState === 'hidden') return;
     // A tab switch that reached neither updateMetaTaskDetails nor a
     // running-state flip (two running tabs in one workdir) is caught
@@ -7211,16 +7257,17 @@
   let metaInfoTimer = null;
 
   /**
-   * Start or stop the task-update poll to match metaInfoPollWanted:
-   * desktop mode or an open mobile task-info drawer.  Called by
-   * applyRemoteDesktop, the drawer toggle and syncMetaInfoRunning
-   * whenever the answer may have changed.  A timer that ran
-   * unconditionally would tick forever in a page that never shows the
-   * panel — and would keep every jsdom-hosted page's node process
-   * alive after its tests finish.
+   * Start or stop the task-update poll to match metaPanelIsOpen: the
+   * docked desktop panel while not slid off, or an open mobile
+   * task-info drawer.  Called by applyRemoteDesktop, the drawer toggle,
+   * the desktop panel's slide (setMetaPanelHidden) and
+   * syncMetaInfoRunning whenever the answer may have changed.  A timer
+   * that ran unconditionally would tick forever in a page that never
+   * shows the panel — and would keep every jsdom-hosted page's node
+   * process alive after its tests finish.
    */
   function syncMetaInfoPolling() {
-    const want = metaInfoPollWanted();
+    const want = metaPanelIsOpen();
     if (want && metaInfoTimer === null) {
       metaInfoTimer = setInterval(requestTaskUpdate, META_INFO_POLL_MS);
       requestTaskUpdate();
@@ -7315,6 +7362,7 @@
       if (hidden && ae && metaPanel.contains(ae)) drawer.focus();
       else if (!hidden && ae === drawer && metaCloseBtn) metaCloseBtn.focus();
     }
+    syncMetaInfoPolling();
     if (!hidden) refreshSidebarDataViews(false);
   }
 
@@ -7385,15 +7433,16 @@
   const appsAwaitingAuth = new Map();
   const APP_AUTH_WAIT_MS = 30 * 60000;
   let sidebarPanelsTimer = 0;
-  // The registered machine the Schedule, Apps, Spend and
+  // The registered machine the Schedule, Machines, Apps, Spend and
   // Recommendations subpanels show ('' for this daemon): the one the
   // chat header's drop-down has picked for the active chat (a content
   // tab keeps its owner chat's, like the Explorer: sidebarMachine).
   // Set by each request, compared by syncSidebarPanelsMachine at every
   // point the pick can change; a reply for another machine (a poll
-  // answered after the pick moved, this daemon's own cronJobs push
-  // while a machine is shown) is dropped (panelReplyShown).  The
-  // Machines subpanel is this daemon's registry and never follows.
+  // answered after the pick moved, this daemon's own cronJobs or
+  // machines push while a machine is shown) is dropped
+  // (panelReplyShown).  The drop-down itself always lists this
+  // daemon's registry (noteMachines).
   let panelsMachine = '';
 
   /**
@@ -7437,18 +7486,19 @@
    * @returns {boolean} Whether to render it.
    */
   function panelReplyShown(ev) {
-    const from = ev.forwarded ? String(ev.machine || '') : '';
+    const from = ev.forwarded ? String(ev.machine) : '';
     return from === panelsMachine;
   }
 
   /**
    * Ask the daemon for the Schedule, Machines, Apps, Spend and
-   * Recommendations data, the first four for the machine the chat
-   * header shows.  When that is not the machine the subpanels show
+   * Recommendations data of the machine the chat header shows, and
+   * for this daemon's registry (the drop-down's list) when that is
+   * another machine.  When it is not the machine the subpanels show
    * (however the change came: a pick, a tab switch, the daemon's
    * binding, the owner chat of a content tab closed elsewhere), they
-   * are emptied first, so the previous machine's jobs, apps, spend
-   * and tips are never taken (or acted on) for the new one's.
+   * are emptied first, so the previous machine's jobs, machines, apps,
+   * spend and tips are never taken (or acted on) for the new one's.
    *
    * @param {boolean} refreshApps Re-probe the apps' authentication
    *     state instead of accepting the daemon's cached answer.
@@ -7456,11 +7506,21 @@
   function requestSidebarPanels(refreshApps) {
     retargetSidebarPanels();
     api.getCronJobs(panelCommand());
-    api.getMachines();
+    requestMachines();
     api.getAppsStatus(panelCommand(refreshApps ? {refresh: true} : undefined));
     api.getSpendReport(panelCommand());
     api.getRecommendations(panelCommand());
     if (refreshApps) setRefreshSpin(appsRefreshBtn, true);
+  }
+
+  /**
+   * Ask for this daemon's machine registry (the chat header's machine
+   * drop-down) and, when the Machines subpanel shows a registered
+   * machine, that machine's own registry, which is what it paints.
+   */
+  function requestMachines() {
+    api.getMachines();
+    if (panelsMachine) api.getMachines(panelCommand());
   }
 
   /**
@@ -7473,8 +7533,8 @@
    */
   function syncSidebarPanelsMachine() {
     if (sidebarMachine() === panelsMachine) return;
-    retargetSidebarPanels();
     if (daemonConnected) requestSidebarPanels(false);
+    else retargetSidebarPanels();
   }
 
   /** Point the subpanels at the chat header's machine, emptied if it changed. */
@@ -7485,12 +7545,12 @@
   }
 
   /**
-   * Empty the four subpanels while the machine they now show answers.
-   * A job being added keeps its typed values: the add form reopens
-   * with them when the new machine's jobs arrive (a create in flight
-   * went to the machine left behind, whose reply is dropped, so Save
-   * works again).  A row's editor is closed: it edits a job of the
-   * machine left behind.
+   * Empty the five subpanels while the machine they now show answers.
+   * A job or machine being added keeps its typed values: the add form
+   * reopens with them when the new machine's jobs or machines arrive
+   * (an add in flight went to the machine left behind, whose reply is
+   * dropped, so Save works again).  A row's editor is closed: it edits
+   * a job of the machine left behind.
    */
   function clearSidebarPanels() {
     const draft =
@@ -7500,6 +7560,15 @@
     scheduleList.textContent = '';
     scheduleStatus.textContent = 'Loading\u2026';
     scheduleStatus.classList.remove('is-error');
+    const machineDraft =
+      machineAdd && (openFormValues(machinesList) || machineAdd.values);
+    if (machineDraft) machineAdd = {values: machineDraft, saving: false};
+    machinesList.textContent = '';
+    machinesStatusLine.textContent = 'Checking\u2026';
+    machinesStatusLine.classList.remove('is-error');
+    // The next machine's list is its first: no machine of it is new.
+    knownMachineNames = null;
+    lastMachinesEvent = null;
     appsList.textContent = '';
     appsStatusLine.textContent = 'Checking\u2026';
     appsStatusLine.classList.remove('is-error');
@@ -7536,10 +7605,10 @@
     setRefreshSpin(recommendationsRefreshBtn, true);
   }
 
-  /** Ask the daemon to ping every machine again (the Machines refresh button). */
+  /** Ask the shown machine to ping its machines again (the Machines refresh button). */
   function requestMachinesRefresh() {
     if (!daemonConnected) return;
-    api.getMachines({refresh: true});
+    api.getMachines(panelCommand({refresh: true}));
     setRefreshSpin(machinesRefreshBtn, true);
   }
 
@@ -7636,13 +7705,12 @@
   }
 
   /**
-   * "in 5m" / "3h ago" for an epoch-millisecond time; '' when unset.
+   * "in 5m" / "3h ago" for an epoch-millisecond time.
    *
    * @param {number} t The time.
    * @returns {string} The relative text.
    */
   function sidebarPanelTimeText(t) {
-    if (!t) return '';
     const delta = Math.round((t - Date.now()) / 60000);
     const abs = Math.abs(delta);
     let amount;
@@ -7767,6 +7835,8 @@
       input.setAttribute('aria-label', field.label);
       if (field.multiline) input.rows = 3;
       input.addEventListener('keydown', e => {
+        // The Enter that picks an IME candidate is not a submit.
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter' && (!field.multiline || e.ctrlKey || e.metaKey)) {
           e.preventDefault();
           form.dispatchEvent(new Event('submit', {cancelable: true}));
@@ -7877,7 +7947,6 @@
   function openFormFocus(list) {
     const active = document.activeElement;
     if (!active || !active.name || !list.contains(active)) return null;
-    if (!active.closest('form.sidebar-inline-form')) return null;
     return {
       name: active.name,
       start: active.selectionStart,
@@ -7910,9 +7979,10 @@
    * of silently withdrawing a question the user is about to answer.
    *
    * @param {HTMLElement} list The Schedule or Machines list.
-   * @returns {{key: string, focused: string}|null} The row's
-   *     data-row-key and the class of the focused button ('' when the
-   *     keyboard is elsewhere), or null when no confirmation is open.
+   * @returns {{key: string, focused: string, spent: boolean}|null} The
+   *     row's data-row-key, the class of the focused button ('' when
+   *     the keyboard is elsewhere) and whether its Delete was answered
+   *     (the removal is in flight), or null when no confirmation is open.
    */
   function openDeleteConfirm(list) {
     for (const wrap of list.querySelectorAll('.sidebar-item-confirm')) {
@@ -7921,6 +7991,7 @@
       return {
         key: wrap.closest('.sidebar-panel-row').dataset.rowKey,
         focused: active && wrap.contains(active) ? active.className : '',
+        spent: wrap.querySelector('.sidebar-confirm-yes').disabled,
       };
     }
     return null;
@@ -7933,10 +8004,17 @@
    * to restore.
    *
    * @param {HTMLElement} list The Schedule or Machines list.
-   * @param {{key: string, focused: string}|null} confirm The record,
-   *     or null for nothing to restore.
+   * @param {{key: string, focused: string, spent: boolean}|null} confirm
+   *     The record, or null for nothing to restore.
+   * @param {string|undefined} removed The row key whose `remove` the
+   *     rebuilding reply answers, as the daemon echoes it (undefined
+   *     for any other reply).  A spent Delete stays spent until the
+   *     reply to its own removal (a refusal) re-arms it: a second click
+   *     must not post the removal again, and the reply to another
+   *     row's removal, or one that names no row, says nothing about
+   *     this one.  Cancel, then the trash icon, asks afresh.
    */
-  function restoreDeleteConfirm(list, confirm) {
+  function restoreDeleteConfirm(list, confirm, removed) {
     if (!confirm) return;
     const row = Array.from(list.querySelectorAll('.sidebar-panel-row')).find(
       r => r.dataset.rowKey === confirm.key,
@@ -7946,6 +8024,8 @@
       row.querySelector('.sidebar-item-delete'),
       row.querySelector('.sidebar-item-confirm'),
     );
+    if (confirm.spent && removed !== confirm.key)
+      row.querySelector('.sidebar-confirm-yes').disabled = true;
     if (confirm.focused)
       row.querySelector('.' + confirm.focused).focus({preventScroll: true});
   }
@@ -8115,10 +8195,11 @@
    * a job (openScheduleAddForm, an in-place form at the top of the
    * list that survives a re-render with what was typed).  The reply
    * to an action carries the `action` and, when the daemon refused
-   * it, `error`: shown on the status line.
+   * it, `error`: shown on the status line; the reply to a `remove`
+   * names its job (`jobId`).
    *
-   * @param {{jobs: Array<Object>, action?: string, error?: string}} ev
-   *     The reply.
+   * @param {{jobs: Array<Object>, action?: string, error?: string,
+   *     jobId?: string}} ev The reply.
    */
   function renderCronJobs(ev) {
     ensureSidebarPanelsPoll();
@@ -8240,7 +8321,11 @@
     }
     if (scheduleAdd) openScheduleAddForm(scheduleAdd);
     restoreOpenFormFocus(scheduleList, focus);
-    restoreDeleteConfirm(scheduleList, confirm);
+    restoreDeleteConfirm(
+      scheduleList,
+      confirm,
+      ev.action === 'remove' ? ev.jobId : undefined,
+    );
     applyMetaSectionLayout();
   }
 
@@ -8277,14 +8362,16 @@
       saved => {
         if (sidebarFormOffline(machinesStatusLine)) return false;
         machineAdd = {values: saved, saving: true};
-        api.machineAction({
-          action: 'add',
-          name: saved.name,
-          address: saved.address,
-          // Not ``password``: that field is this daemon's own
-          // credential, added to every frame by transport.js.
-          machinePassword: saved.password,
-        });
+        api.machineAction(
+          panelCommand({
+            action: 'add',
+            name: saved.name,
+            address: saved.address,
+            // Not ``password``: that field is this daemon's own
+            // credential, added to every frame by transport.js.
+            machinePassword: saved.password,
+          }),
+        );
       },
       () => {
         machineAdd = null;
@@ -8299,11 +8386,14 @@
   }
 
   /**
-   * Render the daemon's `machines` reply into the Machines subpanel:
-   * the local machine first, then every registered one.  A row shows
+   * Render the `machines` reply of the machine the subpanels show (this
+   * daemon's, or a registered machine's own registry) into the Machines
+   * subpanel: that machine first (`local`), then every machine it
+   * registered.  A row shows
    * a reachability dot, the machine's label (its own host name when
    * it was registered by its address, else the name it was registered
-   * by; see machineLabel), a `local` badge, and
+   * by; see machineLabel -- a registered machine's rows carry their
+   * own), a `local` badge, and
    * buttons to copy the machine's address to the clipboard and delete
    * it (after an inline confirmation; the local machine cannot be
    * deleted); the header's `+` adds a machine (openMachineAddForm, an
@@ -8314,22 +8404,28 @@
    * and, when unreachable, the reason.  A machine added since the
    * last reply -- by this surface's form, another surface, or a
    * `/machine add` task -- brings the subpanel on screen
-   * (revealMachinesSection).
+   * (revealMachinesSection).  The reply to a `remove` names its
+   * machine (`name`).
    *
-   * @param {{machines: Array<Object>, action?: string, error?: string}} ev
-   *     The reply.
+   * @param {{machines: Array<Object>, action?: string, error?: string,
+   *     name?: string, forwarded?: boolean}} ev The reply.
    */
   function renderMachines(ev) {
     ensureSidebarPanelsPoll();
     setRefreshSpin(machinesRefreshBtn, false);
     const rows = Array.isArray(ev.machines) ? ev.machines : [];
     const error = String(ev.error || '');
-    const names = rows.filter(m => m && !m.local).map(m => String(m.name));
-    const added =
-      knownMachineNames !== null &&
-      names.some(name => !knownMachineNames.includes(name));
-    knownMachineNames = names;
-    if (added) revealMachinesSection();
+    // A refused reply (a forwarded machine that is down, say) carries no
+    // list to compare with: as a baseline it would make the machine's
+    // next answer report every machine as added.
+    if (!error) {
+      const names = rows.filter(m => m && !m.local).map(m => String(m.name));
+      const added =
+        knownMachineNames !== null &&
+        names.some(name => !knownMachineNames.includes(name));
+      knownMachineNames = names;
+      if (added) revealMachinesSection();
+    }
     const draft = openFormValues(machinesList);
     if (draft && machineAdd) machineAdd.values = draft;
     const focus = openFormFocus(machinesList);
@@ -8358,7 +8454,10 @@
       dot.setAttribute('aria-label', m.status);
       top.appendChild(dot);
       top.appendChild(
-        sidebarPanelSpan('sidebar-panel-name', machineLabel(m.name)),
+        sidebarPanelSpan(
+          'sidebar-panel-name',
+          ev.forwarded ? String(m.label || m.name) : machineLabel(m.name),
+        ),
       );
       if (m.local)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'local'));
@@ -8372,7 +8471,8 @@
       );
       const del = makeSidebarDeleteConfirm({
         ariaLabel: 'Delete the machine',
-        onConfirm: () => api.machineAction({action: 'remove', name: m.name}),
+        onConfirm: () =>
+          api.machineAction(panelCommand({action: 'remove', name: m.name})),
       });
       if (m.local) {
         del.delBtn.disabled = true;
@@ -8396,13 +8496,17 @@
     }
     if (machineAdd) openMachineAddForm(machineAdd);
     restoreOpenFormFocus(machinesList, focus);
-    restoreDeleteConfirm(machinesList, confirm);
+    restoreDeleteConfirm(
+      machinesList,
+      confirm,
+      ev.action === 'remove' ? ev.name : undefined,
+    );
     applyMetaSectionLayout();
   }
 
-  // The registered machines of the last `machines` reply (names, the
-  // local one left out), null before the first: a later reply naming
-  // a machine not among them reports an addition.
+  // The registered machines of the last `machines` reply without an
+  // error (names, the local one left out), null before the first: a
+  // later reply naming a machine not among them reports an addition.
   let knownMachineNames = null;
 
   /**
@@ -8412,7 +8516,6 @@
    */
   function revealMachinesSection() {
     const section = document.getElementById('meta-machines');
-    if (!section) return;
     setMetaSectionCollapsed(section, false);
     setMetaPanelHidden(false);
     if (!document.body.classList.contains('remote-desktop')) {
@@ -8440,8 +8543,9 @@
   let localMachineName = '';
   let reachableMachines = null;
   const machineLabels = new Map();
-  // The daemon's last `machines` reply, repainted into the Machines
-  // subpanel when a `history` reply relabels a machine. Cached without
+  // The last `machines` reply the Machines subpanel shows (of the
+  // machine it shows; null after a move to another), repainted when a
+  // `history` reply relabels a machine. Cached without
   // its `action`: a repaint is not a reply, so it must not acknowledge
   // the add form's action a second time (a refused add, retried, would
   // otherwise take the replay of the refusal for the retry's answer).
@@ -8528,7 +8632,6 @@
    * the side panels).
    */
   function syncChatMachine() {
-    if (!chatMachineSelect) return;
     const machine = activeMachine();
     if (chatMachineSelect.value === machine) return;
     renderChatMachine();
@@ -8570,7 +8673,6 @@
    * submit goes.  Empty (hidden) until a name is known.
    */
   function renderChatMachine() {
-    if (!chatMachineSelect) return;
     const chosen = activeMachine();
     const reachable = reachableMachines || [];
     chatMachineSelect.textContent = '';
@@ -8626,8 +8728,8 @@
    */
   function noteMachineLabels(labels) {
     let changed = false;
-    for (const name of Object.keys(labels || {})) {
-      const label = String(labels[name] || name);
+    for (const name of Object.keys(labels)) {
+      const label = String(labels[name]);
       if (!name || machineLabel(name) === label) continue;
       machineLabels.set(name, label);
       changed = true;
@@ -8635,31 +8737,30 @@
     return changed;
   }
 
-  if (chatMachineSelect) {
-    chatMachineSelect.addEventListener('change', () => {
-      const tab = getTab(activeTabId);
-      if (!tab || tab.isContentTab) return;
-      const picked = chatMachineSelect.value;
-      // The pick is the global setting (where every surface's new
-      // chats run; the daemon persists and broadcasts it).  On a chat
-      // that shows a task it is also where THAT chat's next task goes:
-      // kept until the submit, the daemon's binding standing meanwhile.
-      const own = tabChatMachine(tab);
-      if (own !== null && picked !== own) tabMachinePicks.set(tab.id, picked);
-      else tabMachinePicks.delete(tab.id);
-      globalMachine = picked;
-      api.setMachine({machine: picked});
-      persistTabState();
-      renderChatMachine();
-      showMachineWorkDirs(picked);
-    });
-    // The list is as fresh as the daemon's last ping: ask again when
-    // the user reaches for the drop-down (a surface without the
-    // Machines subpanel has no poll of its own).
-    chatMachineSelect.addEventListener('focus', () => {
-      if (daemonConnected) api.getMachines();
-    });
-  }
+  // A change comes from a chat tab: the header (and so the drop-down)
+  // is hidden while a content tab is shown.
+  chatMachineSelect.addEventListener('change', () => {
+    const tab = getTab(activeTabId);
+    const picked = chatMachineSelect.value;
+    // The pick is the global setting (where every surface's new
+    // chats run; the daemon persists and broadcasts it).  On a chat
+    // that shows a task it is also where THAT chat's next task goes:
+    // kept until the submit, the daemon's binding standing meanwhile.
+    const own = tabChatMachine(tab);
+    if (own !== null && picked !== own) tabMachinePicks.set(tab.id, picked);
+    else tabMachinePicks.delete(tab.id);
+    globalMachine = picked;
+    api.setMachine({machine: picked});
+    persistTabState();
+    renderChatMachine();
+    showMachineWorkDirs(picked);
+  });
+  // The list is as fresh as the daemon's last ping: ask again when
+  // the user reaches for the drop-down (a surface without the
+  // Machines subpanel has no poll of its own).
+  chatMachineSelect.addEventListener('focus', () => {
+    if (daemonConnected) api.getMachines();
+  });
 
   /**
    * Render the daemon's `appsStatus` reply into the Apps subpanel:
@@ -9481,14 +9582,17 @@
    * Only a view on screen reloads right away.  Task news marks BOTH
    * views dirty first, so a view out of sight (its section collapsed,
    * the panel hidden) reloads the moment it shows instead of staying
-   * stale.  The Schedule, Apps, Spend and Recommendations subpanels
-   * follow the same machine as the views, from here too
-   * (syncSidebarPanelsMachine).
+   * stale.  The Schedule, Machines, Apps, Spend and Recommendations
+   * subpanels follow the same machine as the views, from here too
+   * (syncSidebarPanelsMachine), as do the model picker and an open
+   * settings sheet (syncModelPickerMachine, syncSettingsMachine).
    *
    * @param {boolean} force Reload even if the workspace is unchanged.
    */
   function refreshSidebarDataViews(force) {
     syncSidebarPanelsMachine();
+    syncModelPickerMachine();
+    syncSettingsMachine();
     if (force) {
       explorerDirty = true;
       scmDirty = true;
@@ -9841,7 +9945,7 @@
     setBtn.appendChild(svgIcon(ICON_CHECK));
     setBtn.addEventListener('click', e => {
       e.stopPropagation();
-      setExplorerWorkDir(dir);
+      setExplorerWorkDir(dir, explorerMachine);
     });
     actions.appendChild(setBtn);
     const removeBtn = document.createElement('button');
@@ -9951,8 +10055,9 @@
       ? explorerTree.querySelector('.explorer-row[tabindex="0"]')
       : null;
     if (!stop) return;
-    // A workspace switch may have activated another tab, whose deferred
-    // composer focus would take the keyboard back a moment later.
+    // A composer focus retry still pending from a recent tab
+    // activation (focusInputWithRetry) would take the keyboard back a
+    // moment later.
     cancelInputFocusRetry();
     stop.focus({preventScroll: true});
   }
@@ -9976,14 +10081,18 @@
    * notification.
    * The folder that was the working directory stays in the Explorer as
    * an added folder, so switching never makes a tree disappear.
+   * *machine* is the one the folder is on ('' for this one), taken
+   * when the menu or row offering the pick was built.
    */
-  function setExplorerWorkDir(dir) {
+  function setExplorerWorkDir(dir, machine) {
     if (!dir || isRootDir(dir)) return;
     const seqBefore = workDirCheckSeq;
-    openWorkDir(dir, explorerMachine);
+    openWorkDir(dir, machine);
     if (workDirCheckSeq === seqBefore) return;
     explorerWorkDirCheckSeq = workDirCheckSeq;
-    explorerWorkDirCheckPrev = explorerMachine ? '' : explorerRoot;
+    // Only this machine's tree has added folders; a menu left open while
+    // the tree turned to a machine's has no local folder to keep.
+    explorerWorkDirCheckPrev = machine || explorerMachine ? '' : explorerRoot;
   }
 
   /**
@@ -11833,9 +11942,10 @@
     const machine = String(request.machine || '');
     const compareOnMachine =
       explorerCompareWith && explorerCompareWith.machine === machine;
-    if (request.action === 'rename' && ev.path) {
-      // An editor showing the renamed file (or one inside a renamed
-      // folder) follows the new path, as VS Code's editors do.
+    if ((request.action === 'rename' || request.action === 'move') && ev.path) {
+      // An editor showing the renamed or moved (Cut + Paste) file, or
+      // one inside such a folder, follows the new path, as VS Code's
+      // editors do.
       const from = String(request.path);
       const to = String(ev.path);
       contentTabsOnMachine(machine).forEach(t => {
@@ -11956,17 +12066,17 @@
       if (accept && value) commit(value);
     }
     input.addEventListener('keydown', e => {
+      // The tree's own key handling (arrows, Enter) must not run.
+      e.stopPropagation();
+      // The Enter or Escape of an IME composition picks or drops a
+      // candidate; it neither commits nor drops the name.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
         e.preventDefault();
-        e.stopPropagation();
         finish(true);
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        e.stopPropagation();
         finish(false);
-      } else {
-        // The tree's own key handling (arrows, Enter) must not run.
-        e.stopPropagation();
       }
     });
     input.addEventListener('blur', () => {
@@ -11996,6 +12106,9 @@
   function explorerCutCopyItems(rows) {
     const paths = rows.map(r => r.dataset.explorerPath);
     const enabled = !rows.some(explorerRowIsRoot);
+    // Captured now: the tree may show another machine by the time an
+    // item of a menu left open runs.
+    const machine = explorerMachine;
     return [
       {
         id: 'cut',
@@ -12003,11 +12116,7 @@
         key: keyLabel('Ctrl+X', '\u2318X'),
         enabled: enabled,
         run: () => {
-          explorerClipboard = {
-            paths: paths,
-            cut: true,
-            machine: explorerMachine,
-          };
+          explorerClipboard = {paths: paths, cut: true, machine: machine};
         },
       },
       {
@@ -12016,11 +12125,7 @@
         key: keyLabel('Ctrl+C', '\u2318C'),
         enabled: enabled,
         run: () => {
-          explorerClipboard = {
-            paths: paths,
-            cut: false,
-            machine: explorerMachine,
-          };
+          explorerClipboard = {paths: paths, cut: false, machine: machine};
         },
       },
     ];
@@ -12319,7 +12424,7 @@
         id: 'set-work-dir',
         label: 'Set as Working Directory',
         enabled: !isWorkDir,
-        run: () => setExplorerWorkDir(path),
+        run: () => setExplorerWorkDir(path, machine),
       });
       items.push({
         id: 'remove-folder',
@@ -12340,7 +12445,9 @@
             machine: machine,
             action: 'rename',
             path: path,
-            dest: joinPath(parent, value),
+            // A sibling name: `parent` is the folder itself on a
+            // folder row (where New File and Paste land).
+            dest: joinPath(explorerParentPath(row), value),
             root: root,
           });
         });
@@ -12852,10 +12959,10 @@
       folderPickerNavigate(parentFolderPath(folderPickerDir));
     });
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        folderPickerNavigate(pickerPathValue(input));
-      }
+      // The Enter that commits an IME candidate is not a submit.
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      folderPickerNavigate(pickerPathValue(input));
     });
     // Like a file dialog: a click highlights a folder (and puts its
     // path in the box, so "Select Folder" picks it), a double-click
@@ -12947,17 +13054,11 @@
    */
   function selectPickedFolder(dir) {
     if (!dir || !folderPickerEl) return;
-    if (isRootDir(dir)) {
-      // The daemon never pins a file-system root as a workspace
-      // (ServerApi.dispatch blanks it); say so instead of half-applying.
-      folderPickerEl.querySelector('.folder-picker-note').textContent =
-        WORK_DIR_ROOT_REFUSED;
-      return;
-    }
     const listedChild = folderPickerEl.querySelector(
       '.folder-picker-item[data-path="' + cssEscape(dir) + '"]',
     );
-    if (dir === folderPickerListed || listedChild) {
+    // A typed root is refused at once, with no listing.
+    if (isRootDir(dir) || dir === folderPickerListed || listedChild) {
       applyPickedFolder(dir);
       return;
     }
@@ -12965,14 +13066,27 @@
     folderPickerSelectPending = folderPickerSeq;
   }
 
-  /** Hand a verified pick to the action the dialog was opened for. */
+  /**
+   * Hand a verified pick to the action the dialog was opened for.  A
+   * file-system root is refused however it was typed (the daemon lists
+   * "/tmp/.." as "/"): the daemon never pins one as a workspace
+   * (ServerApi.dispatch blanks it), so say so instead of half-applying.
+   * @param {string} dir The folder.
+   * @returns {boolean} Whether the pick was taken.
+   */
   function applyPickedFolder(dir) {
+    if (isRootDir(dir)) {
+      folderPickerEl.querySelector('.folder-picker-note').textContent =
+        WORK_DIR_ROOT_REFUSED;
+      return false;
+    }
     if (folderPickerMode === 'add') {
       closeFolderPicker();
       addExplorerRoot(dir);
-      return;
+    } else {
+      applyPickedWorkDir(dir, folderPickerMachine);
     }
-    applyPickedWorkDir(dir, folderPickerMachine);
+    return true;
   }
 
   function cssEscape(value) {
@@ -13080,10 +13194,9 @@
     if (folderPickerSelectPending === folderPickerSeq) {
       // A "Select Folder" on a typed path: the daemon listed THAT
       // path, so it is a real folder -- pick it (its canonical
-      // spelling) now.
+      // spelling) now; a refused root stays listed with the reason.
       folderPickerSelectPending = 0;
-      applyPickedFolder(folderPickerDir);
-      return;
+      if (applyPickedFolder(folderPickerDir)) return;
     }
     const dirs = (Array.isArray(ev.entries) ? ev.entries : []).filter(en => {
       return en && en.isDir && typeof en.name === 'string';
@@ -13245,6 +13358,11 @@
     if (machine && daemonConnected) api.getMachineWorkDirs({machine: machine});
   }
 
+  // The machines a repaint asked for and whose reply has not come yet
+  // (forgotten on an outage, which swallows the reply): the repaints
+  // before the reply ask nothing more.
+  const machineWorkDirsAsked = new Set();
+
   /**
    * The active tab's machine changed to *machine*: repaint the
    * drop-down with its directories, the Explorer and Source Control
@@ -13279,6 +13397,7 @@
   function handleMachineWorkDirs(ev) {
     const machine = String(ev.machine || '');
     if (!machine) return;
+    machineWorkDirsAsked.delete(machine);
     if (ev.error) {
       if (ev.set) setWorkDirError(String(ev.error));
       if (!machineWorkDirs.has(machine))
@@ -13377,8 +13496,15 @@
   function renderChatWorkDir() {
     if (!chatWorkDirSelect) return;
     const machine = activeMachine();
-    if (machine && !machineWorkDirs.has(machine))
+    if (
+      machine &&
+      daemonConnected &&
+      !machineWorkDirs.has(machine) &&
+      !machineWorkDirsAsked.has(machine)
+    ) {
+      machineWorkDirsAsked.add(machine);
       requestMachineWorkDirs(machine);
+    }
     const current = chatWorkDir(machine);
     chatWorkDirSelect.textContent = '';
     const dirs = chatWorkDirList(machine);
@@ -13416,7 +13542,7 @@
   function renderChatHeaderSeparator() {
     const sep = document.getElementById('chat-header-sep');
     if (!sep) return;
-    sep.hidden = !(chatMachineSelect && chatMachineSelect.options.length);
+    sep.hidden = !chatMachineSelect.options.length;
   }
 
   /**
@@ -15018,10 +15144,12 @@
   const _pendingFileLinkSpans = new Set();
 
   // Raised while a share export replays persisted tasks into detached
-  // containers: their file-path spans can never be clicked, so
+  // containers that are serialized at once: their file-path spans can
+  // never be clicked and their pictures would arrive too late, so
   // registering them would leak detached nodes into
-  // _pendingFileLinkSpans and post needless checkPaths commands.
-  let _suppressFileLinkChecks = false;
+  // _pendingFileLinkSpans and post needless checkPaths and openFile
+  // commands.
+  let _shareExportReplay = false;
 
   // tableak-coverage:start
   // Keyed by tab as well as workDir: a check in flight for one tab must
@@ -15107,7 +15235,7 @@
   }
 
   function verifyFileLinkCandidates(root, workDir, ownerTabId) {
-    if (_suppressFileLinkChecks) return;
+    if (_shareExportReplay) return;
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
     // tableak-coverage:start
@@ -15120,22 +15248,16 @@
     // the same identity whatever the drop-down says by then.
     const machine = tabBoundMachine(owner);
     const wd = transcriptFileWorkDir(machine, workDir);
-    const toCheck = [];
     for (const span of spans) {
-      const p = _stripLineSuffix(span.getAttribute('data-path-candidate'));
       span.setAttribute('data-path-wd', wd);
       // tableak-coverage:start
       span.setAttribute('data-path-tab', String(owner));
       // tableak-coverage:end
       if (machine) span.setAttribute('data-path-machine', machine);
+      else span.removeAttribute('data-path-machine');
       _pendingFileLinkSpans.add(span);
-      const key = _fileLinkCacheKey(owner, wd, p, machine);
-      if (!_pendingPathChecks.has(key)) {
-        _pendingPathChecks.add(key);
-        toCheck.push(p);
-      }
     }
-    if (toCheck.length) sendCheckPaths(owner, wd, machine, toCheck);
+    queueFileLinkChecks(owner, spans, true);
   }
 
   /**
@@ -15747,6 +15869,9 @@
       } else {
         panelEl.classList.add('user-pinned');
         highlightPending(panelEl);
+        // Expanding a fan-out is the way back to it: the sub-agents
+        // the user closed open again too (syncRunParallelPanel).
+        for (const en of panelEl._rpSubagents || []) en.userClosed = false;
       }
       collapsePreview(panelEl);
       syncRunParallelPanel(panelEl);
@@ -15832,11 +15957,6 @@
     return Array.from(root.querySelectorAll('.tc-run-parallel')).filter(
       p => !(p.closest && p.closest('.adjacent-task')),
     );
-  }
-
-  function runParallelPanelForParent(parentId) {
-    const panels = rpDirectPanelsForParent(parentId);
-    return panels.length ? panels[panels.length - 1] : null;
   }
 
   /**
@@ -15995,8 +16115,8 @@
   /**
    * True when the user closed sub-agent task *taskId*'s tab by hand.
    *
-   * Such a sub-agent stays closed until its run_parallel panel is
-   * collapsed and expanded again, so no later announcement from the
+   * Such a sub-agent stays closed until the user expands its
+   * run_parallel panel again, so no later announcement from the
    * daemon -- under any of the tab ids it addresses that sub-agent by
    * -- may reopen it.
    *
@@ -16013,6 +16133,34 @@
         en.userClosed &&
         !getTab(en.tabId),
     );
+  }
+
+  /**
+   * Undo what keeps sub-agent *taskId*'s tab closed on this surface,
+   * for an announcement marked `reopened`: a user expanded its fan-out
+   * panel on some surface and asked for it again, so every surface
+   * shows it, whatever closed it here -- a hand-close mirrored from
+   * another surface, its finish, or this surface's folded panel.  A
+   * finished child's folded panel unfolds (and is pinned open) as the
+   * reopening one did: a folded panel's sync would close the finished
+   * tab again, and that close would reach every surface.
+   *
+   * @param {Element|null} panelEl The owning run_parallel panel.
+   * @param {string} taskId Sub-agent task id.
+   * @param {string} tabId The tab id the announcement names.
+   * @param {boolean} finished Whether the sub-agent has finished.
+   */
+  function rpReopenSubagent(panelEl, taskId, tabId, finished) {
+    _rpClosedSubagentTabs.delete(tabId);
+    if (!panelEl) return;
+    for (const en of panelEl._rpSubagents || []) {
+      if (String(en.taskId) === String(taskId)) en.userClosed = false;
+    }
+    if (finished && panelEl.classList.contains('collapsed')) {
+      panelEl.classList.remove('collapsed');
+      panelEl.classList.add('user-pinned');
+      collapsePreview(panelEl);
+    }
   }
 
   /**
@@ -16107,9 +16255,10 @@
 
   function rpAdoptOpenSubagents(panelEl, parentId) {
     if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
-    const livePanels = new Set(rpDirectPanelsForParent(parentId));
+    const panels = rpDirectPanelsForParent(parentId);
+    const livePanels = new Set(panels);
     if (!livePanels.has(panelEl)) return;
-    const newest = runParallelPanelForParent(parentId);
+    const newest = panels[panels.length - 1];
     const openChildren = tabs.filter(
       tab => tab.isSubagentTab && tab.parentTabId === parentId,
     );
@@ -16228,9 +16377,12 @@
           // close is still queued must keep looking owned so another
           // panel's adoption pass cannot claim it as unowned.
           if (!openTab.isRunning) rpCloseSubagentTab(en.tabId);
-        } else if (collapsed) {
-          en.userClosed = false;
-        } else if (!openTab && en.taskId !== '' && !en.userClosed) {
+        } else if (
+          !collapsed &&
+          !openTab &&
+          en.taskId !== '' &&
+          !en.userClosed
+        ) {
           // This sub-agent may already have a tab under another id
           // (the daemon renames sub-agent tabs across replays); adopt
           // it rather than opening a second tab for one sub-agent.
@@ -16249,11 +16401,15 @@
           _rpTabPanel.set(subTab.id, panelEl);
           // The parent names the stream a sub-agent of a chat shown
           // from a remote machine is fetched over (the daemon never
-          // saw that finished sub-agent's new_tab).
+          // saw that finished sub-agent's new_tab).  Only the user's
+          // expanding of the panel gets here, so the daemon is told
+          // this is a reopening: it announces the tab `reopened`, and
+          // every surface opens it (see rpReopenSubagent).
           requestReplay({
             taskId: en.taskId,
             tabId: subTab.id,
             parentTabId: panelEl._rpParentTabId,
+            reopen: true,
           });
         }
       }
@@ -16284,11 +16440,10 @@
         for (const en of p._rpSubagents || []) {
           if (en.tabId === id) {
             en.tabId = '';
-            // Only a close the user asked for keeps this sub-agent shut
-            // while its panel stays expanded; collapsing the panel
-            // reopens every sub-agent when it is expanded again — so
-            // does a close made while the panel is already collapsed.
-            en.userClosed = !_rpSyncing && !p.classList.contains('collapsed');
+            // A close the user asked for (not a collapse folding a
+            // finished child) keeps this sub-agent shut until the user
+            // expands its panel again, which reopens the whole fan-out.
+            en.userClosed = !_rpSyncing;
           }
         }
         panels.add(p);
@@ -16992,6 +17147,8 @@
       if (!bySrc.has(src)) bySrc.set(src, []);
       bySrc.get(src).push(img);
     }
+    // An exported copy keeps the alt text: no picture is fetched for it.
+    if (_shareExportReplay) return;
     bySrc.forEach((sharing, src) => {
       requestInlineImage(imageFilePath(src, ''), wd, owner, machine, uri => {
         sharing.forEach(img => {
@@ -17342,6 +17499,41 @@
   }
 
   /**
+   * Write out the text *tState*'s pending frames hold (thinking, words
+   * and Bash output, as those frames would) and cancel the frames.  A
+   * replay ends with this: its container may be serialized (a share
+   * export) before any frame runs, and a transcript cut short (a run
+   * stopped or crashed mid-call) has no closing event to flush it.
+   *
+   * @param {object} tState A stream state (see mkS).
+   * @param {string|undefined} workDir The owning task's work dir.
+   * @param {string|undefined} ownerTabId The tab owning the transcript.
+   */
+  function flushStreamFrames(tState, workDir, ownerTabId) {
+    if (tState.thinkRaf) {
+      cancelAnimationFrame(tState.thinkRaf);
+      tState.thinkRaf = 0;
+      if (tState.thinkEl) appendThinkText(tState);
+      tState.thinkBuf = '';
+    }
+    if (tState.txtRaf) {
+      cancelAnimationFrame(tState.txtRaf);
+      tState.txtRaf = 0;
+      if (tState.txtNode) tState.txtNode.appendData(tState.txtPending);
+      tState.txtPending = '';
+    }
+    if (tState.bashRaf) {
+      cancelAnimationFrame(tState.bashRaf);
+      tState.bashRaf = 0;
+      if (tState.bashPanel) {
+        appendStreamedText(tState.bashPanel, tState.bashBuf);
+        linkifyFilePaths(tState.bashPanel, workDir, ownerTabId);
+      }
+      tState.bashBuf = '';
+    }
+  }
+
+  /**
    * End the streamed Bash output of *tState*: flush the text still
    * buffered for the frame, linkify it, forget the panel and cancel the
    * pending flush frame.  The frame must be cancelled, not just
@@ -17585,7 +17777,11 @@
               esc(ev.command) +
               '</code></pre>';
           if (ev.content) {
-            const lc = ev.lang ? 'language-' + esc(ev.lang) : '';
+            // The lang is the file's extension when the printer has no
+            // name for it, so the model controls it: escape the quote too.
+            const lc = ev.lang
+              ? 'language-' + esc(ev.lang).replace(/"/g, '&quot;')
+              : '';
             b +=
               '<pre><code class="' +
               lc +
@@ -18101,13 +18297,15 @@
   }
 
   /**
-   * Close the open thoughts panel of *ctx* against the local clock (the
-   * task ended); the next stream event opens a fresh one.
+   * Close the open thoughts panel of *ctx* at *ts* (a tool call's time;
+   * absent, the local clock: the task ended); the next stream event
+   * opens a fresh one.  A provisional panel nothing was said into is
+   * withdrawn.
    */
-  function streamSealPanel(ctx) {
+  function streamSealPanel(ctx, ts) {
     if (ctx.llmPanel && ctx.llmPanel._provisional)
       discardProvisionalPanel(ctx.llmPanel);
-    else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+    else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ts);
     ctx.llmPanel = null;
     ctx.pendingPanel = true;
   }
@@ -18146,12 +18344,8 @@
     const t = ev.type;
     if (t === 'tool_call') {
       ctx.lastToolName = ev.name || '';
-      if (ctx.llmPanel && ctx.llmPanel._provisional)
-        discardProvisionalPanel(ctx.llmPanel);
-      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel, ev.ts);
-      ctx.llmPanel = null;
+      streamSealPanel(ctx, ev.ts);
       ctx.llmPanelState = mkS();
-      ctx.pendingPanel = true;
     }
     if (t === 'tool_result' && ctx.lastToolName !== 'finish') {
       ctx.pendingPanel = true;
@@ -19733,6 +19927,7 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           forgetInFlightInlineImages();
+          machineWorkDirsAsked.clear();
           stopSidebarRefreshSpins();
           releaseSidebarFormSaves();
           abandonExplorerListings();
@@ -19833,6 +20028,10 @@
           relistFolderPicker();
           refreshHistory();
           if (cameUp) requestSidebarPanels(false);
+          // machinescope-coverage:start
+          // The `ready` fan-out brings this daemon's model list only.
+          if (cameUp && modelsMachine) requestPickerModels();
+          // machinescope-coverage:end
         }
         return;
       case 'notification':
@@ -20051,17 +20250,24 @@
           activeIsContent &&
           evTab !== null &&
           metaInfoChatTabId() === evTab.id;
-        if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
-          if (evTab) {
-            evTab.t0 = ev.startTs;
+        // A run's status clears the end of the task before it, or the
+        // timer would read the new run as finished at once.  One with
+        // no start (the daemon's submit broadcast) starts the clock now,
+        // until a later status carries the real start.
+        if (ev.running) {
+          const start =
+            typeof ev.startTs === 'number' && ev.startTs > 0 ? ev.startTs : 0;
+          if (evTab && (start || evTab.endTs)) {
+            evTab.t0 = start || Date.now();
             evTab.endTs = 0;
           }
           if (
-            ev.tabId === undefined ||
-            ev.tabId === activeTabId ||
-            mirrorsActive
+            (ev.tabId === undefined ||
+              ev.tabId === activeTabId ||
+              mirrorsActive) &&
+            (start || endTs)
           ) {
-            t0 = ev.startTs;
+            t0 = start || Date.now();
             endTs = 0;
           }
         }
@@ -20101,24 +20307,7 @@
         break;
       }
       case 'models':
-        allModels = ev.models || [];
-        if (ev.selected) {
-          // `selected` is the daemon-wide default, so it may only adopt
-          // tabs that were still tracking it -- a tab the user gave its
-          // own model keeps it. It must also not blank the override of
-          // a tab whose agent is still running, hence refreshModelLabel
-          // rather than writing the label directly.
-          const _prevSelected = selectedModel;
-          tabs.forEach(t => {
-            const cur = t.selectedModel || '';
-            if (cur === '' || cur === 'No model' || cur === _prevSelected) {
-              t.selectedModel = ev.selected;
-            }
-          });
-          selectedModel = ev.selected;
-          refreshModelLabel();
-        }
-        renderModelList('');
+        noteMachineModels(ev);
         break;
       case 'tool_interrupt_ack': {
         // A rejected interrupt (no running tool call owned the tab)
@@ -20268,6 +20457,7 @@
             tips: Array.isArray(ev.tips) ? ev.tips : [],
             show: ev.show === true,
             version: typeof ev.version === 'string' ? ev.version : '',
+            optOut: ev.optOut === true,
           });
         }
         break;
@@ -20298,11 +20488,21 @@
         if (panelReplyShown(ev)) renderCronJobs(ev);
         break;
       case 'machines':
-        noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
-        lastMachinesEvent = {machines: ev.machines, error: ev.error};
+        // This daemon's registry is the drop-down's list whichever
+        // machine the Machines subpanel shows; the subpanel paints the
+        // registry of the machine it shows.
+        if (!ev.forwarded) {
+          noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
+          // The reply may relabel the machine the Machine row names.
+          updateMetaTaskDetails(metaShownSettings);
+        }
+        if (!panelReplyShown(ev)) break;
+        lastMachinesEvent = {
+          machines: ev.machines,
+          error: ev.error,
+          forwarded: ev.forwarded,
+        };
         renderMachines(ev);
-        // The reply may relabel the machine the Machine row names.
-        updateMetaTaskDetails(metaShownSettings);
         break;
       case 'machineWorkDirs':
         handleMachineWorkDirs(ev);
@@ -20343,7 +20543,7 @@
         // The labels first: the rows' machine chips are built with
         // them (and the chat header's drop-down and the Machines
         // subpanel follow).
-        if (noteMachineLabels(ev.machineLabels)) {
+        if (noteMachineLabels(ev.machineLabels || {})) {
           renderChatMachine();
           if (lastMachinesEvent) renderMachines(lastMachinesEvent);
           // The Task Info panel's Machine row carries the label too.
@@ -20373,6 +20573,9 @@
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end
+        // A list from another machine than the tab's (asked before its
+        // machine pick changed) does not answer the mention typed now.
+        if ((ev.machine || '') !== tabMachine(activeTabId)) break;
         const filesCtx = getAtCtx();
         if (!filesCtx) {
           // A stale ``files`` reply from a prior ``@`` query must not
@@ -20383,6 +20586,13 @@
           break;
         }
         if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
+          break;
+        }
+        if (ev.loading && ev.machine) {
+          // The machine was still indexing its folder when the daemon
+          // stopped waiting for its list (a minute): ask again.  This
+          // daemon's own list follows its ``loading`` reply unasked.
+          checkAutocomplete();
           break;
         }
         renderAutocomplete(ev.files || []);
@@ -20412,6 +20622,10 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         const askQuestion = ev.question || '';
+        // Before the duplicate check: a new ask of the same text must
+        // still take its own id (a replay re-sends the same one).
+        askTab.askQuestionId =
+          typeof ev.questionId === 'string' ? ev.questionId : '';
         // Duplicate delivery of the SAME pending question (the server
         // re-emits it on every session replay so clients that connect
         // mid-question also show the modal). Re-initializing would
@@ -20782,13 +20996,14 @@
                 teTab.workDir = bgExtra.work_dir;
               if (typeof bgExtra.startTs === 'number' && bgExtra.startTs > 0)
                 teTab.t0 = bgExtra.startTs;
-              if (typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0) {
-                teTab.endTs = bgExtra.endTs;
-                if (teTab.t0) {
-                  teTab.statusTextContent = doneLabelFor(teTab.t0, teTab.endTs);
-                  teTab.statusTextColor = 'var(--dim)';
-                }
-              }
+              // The replayed task's own end: 0 while it runs, never the
+              // end of the task the tab showed before.
+              teTab.endTs =
+                typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0
+                  ? bgExtra.endTs
+                  : 0;
+              if (teTab.endTs && teTab.t0)
+                teTab.statusTextContent = doneLabelFor(teTab.t0, teTab.endTs);
             } catch (_e) {}
           }
           const frag = document.createDocumentFragment();
@@ -20908,9 +21123,12 @@
             if (typeof extra.startTs === 'number' && extra.startTs > 0) {
               t0 = extra.startTs;
             }
-            if (typeof extra.endTs === 'number' && extra.endTs > 0) {
-              endTs = extra.endTs;
-            }
+            // The replayed task's own end: 0 while it runs, never the
+            // end of the task the tab showed before.
+            endTs =
+              typeof extra.endTs === 'number' && extra.endTs > 0
+                ? extra.endTs
+                : 0;
             if (extra.work_dir && !isRootDir(extra.work_dir)) {
               const wdTab = getTab(activeTabId);
               if (wdTab) wdTab.workDir = extra.work_dir;
@@ -21101,11 +21319,11 @@
             : doneLabelFor(doneT0 || doneNow, doneNow);
         // donelabel-coverage:end
         finishTabTask(ev, doneLabel, ev.success === false);
-        // The task may have registered a machine (`/machine add`):
-        // the daemon's report is cached unless the registry changed,
-        // and a new machine brings the Machines subpanel on screen
-        // (renderMachines).
-        if (daemonConnected) api.getMachines();
+        // The task may have registered a machine (`/machine add`, on
+        // this daemon or on the machine the chat runs on): the report
+        // is cached unless the registry changed, and a new machine
+        // brings the Machines subpanel on screen (renderMachines).
+        if (daemonConnected) requestMachines();
         break;
       }
       case 'task_error':
@@ -21164,6 +21382,9 @@
           const rpPanel = rpPanelForNewSubagent(spawnParent, ev.task_id, {
             live: true,
           });
+          // A re-delivered spawn of a sub-agent whose tab the user
+          // closed keeps it closed; its panel still lists it.
+          if (rpSubagentHandClosed(rpPanel, ev.task_id)) break;
           // A live spawn must open even when its transcript panel is folded.
           const subTab = createBackgroundSubagentTab(
             spawnParent,
@@ -21189,9 +21410,11 @@
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         // A live announcement for a sub-agent this page already saw
         // finish lost the race with its subagentDone: drop it (see
-        // _finishedSubagentTasks).  A deliberate reopening of finished
-        // history (a history click, a panel expanded again) always
-        // says isDone, so it is unaffected.
+        // _finishedSubagentTasks).  Finished history always says
+        // isDone, so it is unaffected: a deliberate reopening (a
+        // history click, a panel expanded again) opens its tab, and a
+        // page's own replay (a reload, another window) says
+        // closedHistory too and leaves the tab closed (below).
         const subDone = !!ev.isDone;
         if (
           !subDone &&
@@ -21221,9 +21444,11 @@
           });
         }
         let subTab = getTab(ev.tab_id);
-        // Closed history tabs stay closed; an active task must always
-        // have a tab, regardless of this surface's prior panel state.
-        if (subDone && !subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
+        if (ev.reopened)
+          rpReopenSubagent(rpPanel, subTaskId, ev.tab_id, subDone);
+        // A tab the user closed stays closed, running or finished;
+        // finished history closed any other way stays closed too.
+        if (!subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
           _rpClosedSubagentTabs.add(ev.tab_id);
           break;
         }
@@ -21241,6 +21466,14 @@
             retagSubagentTab(openForTask, ev.tab_id);
             subTab = openForTask;
           }
+        }
+        // A finished sub-agent's tab closed when it finished on the
+        // live surface, so a page's own replay keeps it closed too: the
+        // child joins its fan-out panel, which can still reopen it.
+        if (subDone && !subTab && ev.closedHistory) {
+          if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
+          _rpClosedSubagentTabs.add(ev.tab_id);
+          break;
         }
         // The daemon's terminal state wins over a tab that missed its
         // subagentDone, or the panel sync below could not close it.
@@ -21618,7 +21851,6 @@
         if (hasStart) doneTab.t0 = doneStartTs;
         doneTab.endTs = hasEnd ? doneEndTs : Date.now();
         doneTab.statusTextContent = label || 'Ready';
-        doneTab.statusTextColor = 'var(--dim)';
       }
     }
     if (tabId === undefined || tabId === activeTabId) {
@@ -22044,7 +22276,7 @@
     // The hidden sub-agent sections all land AFTER the chat's own task
     // sections, so the visible chat reads top to bottom uninterrupted.
     const subSections = [];
-    _suppressFileLinkChecks = true;
+    _shareExportReplay = true;
     try {
       for (let i = 0; i < list.length; i++) {
         const t = list[i] || {};
@@ -22077,7 +22309,7 @@
         }
       }
     } finally {
-      _suppressFileLinkChecks = false;
+      _shareExportReplay = false;
     }
     if (!liveUsed) {
       const live = shareLiveTranscript();
@@ -22539,6 +22771,8 @@
         handleOutputEvent(ev, where.target, where.state, rWorkDir, ownerTabId);
         streamEnd(ctx, ev, where.target);
       });
+      flushStreamFrames(ctx.state, rWorkDir, ownerTabId);
+      flushStreamFrames(ctx.llmPanelState, rWorkDir, ownerTabId);
     } finally {
       _deferHighlight = prevDefer;
       _replaying = prevReplaying;
@@ -22741,8 +22975,7 @@
 
   function attachActionBar(bar) {
     if (inputContainer) inputContainer.style.display = 'none';
-    const area = document.getElementById('input-area');
-    area.insertBefore(bar, area.firstChild);
+    inputAreaEl.insertBefore(bar, inputAreaEl.firstChild);
   }
 
   /**
@@ -23390,8 +23623,6 @@
     });
     modelSearch.addEventListener('input', function () {
       renderModelList(this.value);
-      if (modelSearchClear)
-        modelSearchClear.style.display = this.value ? '' : 'none';
     });
     wireSearchClear(modelSearch, modelSearchClear);
     modelSearch.addEventListener('keydown', e => {
@@ -24050,8 +24281,6 @@
     }
     if (tricksSearch) {
       tricksSearch.addEventListener('input', () => {
-        if (tricksSearchClear)
-          tricksSearchClear.style.display = tricksSearch.value ? '' : 'none';
         renderTricks(window.__TRICKS__ || []);
       });
     }
@@ -24082,7 +24311,8 @@
     }
     if (settingsPanel) {
       const noteSettingsEdit = e => {
-        if (e.target && e.target.id) markSettingsFieldEdited(e.target.id);
+        // The field now holds the user's own value.
+        if (e.target && e.target.id) settingsEditedFields.add(e.target.id);
         if (e.target && e.target.id === 'cfg-max-budget') syncMaxBudgetNote();
       };
       settingsPanel.addEventListener('input', noteSettingsEdit);
@@ -24119,8 +24349,6 @@
       // the identical-refresh fast path, which rebuilds nothing).
       reapplyAllHistoryGroupCollapse(true);
       requestHistory();
-      if (historySearchClear)
-        historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
     wireSearchClear(historySearch, historySearchClear);
     // The Chats row's refresh button reloads the whole app page: the
@@ -24231,8 +24459,7 @@
         e.stopPropagation();
         if (hfFrom) hfFrom.value = '';
         if (hfTo) hfTo.value = '';
-        historyDateRangeUserSet = true;
-        applyHistoryFilterVisibility();
+        onHistoryDateRangeChange();
       });
     }
     const hfFromBtn = document.getElementById('hf-from-btn');
@@ -24486,9 +24713,10 @@
     return HEIF_BRANDS.indexOf(brand.slice(4).toLowerCase()) >= 0;
   }
 
-  async function isHeifFile(file) {
-    if (attachMimeOf(file).indexOf('heic') >= 0) return true;
-    if (attachMimeOf(file).indexOf('heif') >= 0) return true;
+  /** Whether *file* (of type *mime*) is a HEIF/HEIC picture: by its type,
+   *  else by its header. */
+  async function isHeifFile(file, mime) {
+    if (/hei[cf]/.test(mime)) return true;
     if (typeof file.slice !== 'function') return false;
     try {
       const head = await file.slice(0, 12).arrayBuffer();
@@ -24598,7 +24826,7 @@
   async function prepareAttachment(file) {
     const mime = attachMimeOf(file);
     const heif =
-      mime.startsWith('image/') || !mime ? await isHeifFile(file) : false;
+      mime.startsWith('image/') || !mime ? await isHeifFile(file, mime) : false;
     const reencode =
       heif ||
       (mime.startsWith('image/') &&
@@ -24817,7 +25045,6 @@
       setComposerTextOf(tab, '');
       clearGhost();
       submitAskForTab(tab, prompt);
-      updateInputDisabled();
       return;
     }
 
@@ -24894,8 +25121,10 @@
     };
     // Only a KNOWN toggle state becomes a per-run override; otherwise
     // the field stays absent and the daemon falls back to the
-    // persisted "Use web tools" setting (see webToolsStateKnown).
-    if (webToolsToggleBtn && webToolsStateKnown) {
+    // persisted "Use web tools" setting (see webToolsStateKnown).  The
+    // toggle is this daemon's setting: a task for a registered machine
+    // runs with that machine's own.
+    if (webToolsToggleBtn && webToolsStateKnown && !msg.machine) {
       msg.useWebTools = !!webToolsToggleBtn.checked;
     }
     // No workDir: the daemon runs every task in its one global working
@@ -25036,6 +25265,7 @@
   // too, above it, so nothing the user wrote is lost.
   function retireAskForTab(tab) {
     tab.askPendingQuestion = null;
+    tab.askQuestionId = '';
     const panel = lastQuestionPanel(tab);
     if (panel) setQuestionPanelPending(panel, false);
     if (tab.promptDraft) {
@@ -25074,7 +25304,13 @@
 
   function submitAskForTab(tab, answer) {
     const question = tab.askPendingQuestion;
-    api.userAnswer({answer: answer, tabId: tab.id});
+    // Naming the question lets the daemon drop this answer when another
+    // surface answered that question first and the agent has asked its
+    // next one meanwhile (_cmd_user_answer); its id tells apart two
+    // asks of the same text.
+    const frame = {answer: answer, question: question, tabId: tab.id};
+    if (tab.askQuestionId) frame.questionId = tab.askQuestionId;
+    api.userAnswer(frame);
     clearAskForMatchingChatTabs(tab);
     tab.unackedAnswer = answer;
     tab.unackedQuestion = question;
@@ -25214,6 +25450,126 @@
     if (modelDropdown.classList.contains('open')) positionModelDD();
   });
 
+  // machinescope-coverage:start
+  /**
+   * Note a `models` reply: this daemon's list, or a registered
+   * machine's (`forwarded`, stamped `machine`; the daemon forwards the
+   * picker's getModels there).  Its `selected` is that machine's
+   * default model, so it only moves the tabs on that machine still
+   * showing its previous default (or none): a tab the user gave its
+   * own model keeps it, and an agent's override stays on show
+   * (refreshModelLabel).  A reply to a getModels or settings save
+   * sent before the user's latest pick on that machine (its echoed
+   * `generation` not past `pickedAt`) still names the old default:
+   * only its list counts.  The picker repaints when it shows that
+   * machine.  A machine that did not answer is reported instead.
+   *
+   * @param {{models?: Array<Object>, selected?: string, error?: string,
+   *     forwarded?: boolean, machine?: string, generation?: number}} ev
+   *     The reply.
+   */
+  function noteMachineModels(ev) {
+    const machine = ev.forwarded ? String(ev.machine || '') : '';
+    if (ev.error) {
+      updateNotification({
+        id: 'model-machine-error',
+        message: machineLabel(machine) + ': ' + ev.error,
+        severity: 'error',
+      });
+      return;
+    }
+    const models = ev.models || [];
+    const previous = machineModels.get(machine);
+    const before = previous ? previous.selected : '';
+    const pickedAt = previous ? previous.pickedAt : 0;
+    const stale = ev.generation > 0 && ev.generation <= pickedAt;
+    const selected = stale ? '' : String(ev.selected || '');
+    machineModels.set(machine, {
+      models: models,
+      selected: selected || before,
+      pickedAt: pickedAt,
+    });
+    tabs.forEach(t => {
+      if (t.id === activeTabId || (t.modelMachine || '') !== machine) return;
+      if (followsDefault(t.selectedModel || '', before, selected))
+        t.selectedModel = selected;
+    });
+    if (machine !== modelsMachine) return;
+    if (followsDefault(selectedModel, before, selected)) {
+      selectedModel = selected;
+      const active = getTab(activeTabId);
+      if (active) active.selectedModel = selected;
+    }
+    allModels = models;
+    refreshModelLabel();
+    // An open picker keeps the user's filter (a closed one's is '').
+    renderModelList(modelSearch ? modelSearch.value : '');
+  }
+
+  /**
+   * Whether a tab showing *model* moves with its machine's default from
+   * *before* to *selected*: it shows no model, or still the old default.
+   *
+   * @param {string} model The tab's model.
+   * @param {string} before The machine's previous default.
+   * @param {string} selected The machine's new default ('' = none said).
+   * @returns {boolean}
+   */
+  function followsDefault(model, before, selected) {
+    return (
+      !!selected && (model === '' || model === 'No model' || model === before)
+    );
+  }
+
+  /** Ask the daemon for the model list of the machine the picker shows. */
+  function requestPickerModels() {
+    modelsAsked += 1;
+    const ask = {generation: modelsAsked};
+    if (modelsMachine) ask.machine = modelsMachine;
+    api.getModels(ask);
+  }
+
+  /**
+   * Point the model picker at the machine the chat header's drop-down
+   * shows, the one the side panels show (sidebarMachine): a move to
+   * another machine shows that machine's list (the last one known,
+   * asked anew), and a tab whose model is another machine's takes this
+   * one's default -- none until the machine's list has come, so a
+   * submit meanwhile leaves the model to that machine.  An agent's
+   * override stays only on the machine its task runs on.  Called
+   * wherever the drop-down's machine can change
+   * (refreshSidebarDataViews).
+   */
+  function syncModelPickerMachine() {
+    const machine = sidebarMachine();
+    const moved = machine !== modelsMachine;
+    const known = machineModels.get(machine);
+    if (moved) {
+      modelsMachine = machine;
+      allModels = known ? known.models : [];
+      if (daemonConnected) requestPickerModels();
+    }
+    const tab = getTab(activeTabId);
+    if (tab && (tab.modelMachine || '') !== machine) {
+      tab.modelMachine = machine;
+      selectedModel = tab.selectedModel = known ? known.selected : '';
+      if (tabBoundMachine(tab.id) !== machine) agentModel = tab.agentModel = '';
+    } else if (!moved) {
+      return;
+    }
+    refreshModelLabel();
+    if (modelDropdown.classList.contains('open'))
+      renderModelList(modelSearch.value);
+  }
+
+  /**
+   * The user picked *name* in the picker: the tab's model from now on
+   * and the new default of the machine the picker shows -- the
+   * daemon forwards the pick to a registered machine, whose daemon
+   * records it; this daemon's default is left alone.
+   *
+   * @param {string} name The model.
+   */
   function selectModel(name) {
     selectedModel = name;
     agentModel = '';
@@ -25225,10 +25581,18 @@
       picked.selectedModel = name;
       picked.agentModel = '';
     }
+    machineModels.set(modelsMachine, {
+      models: allModels,
+      selected: name,
+      pickedAt: modelsAsked,
+    });
     refreshModelLabel();
     closeModelDD();
-    api.selectModel({model: name, tabId: activeTabId});
+    const pick = {model: name, tabId: activeTabId};
+    if (modelsMachine) pick.machine = modelsMachine;
+    api.selectModel(pick);
   }
+  // machinescope-coverage:end
 
   /**
    * Make the × button of a search box clear it.
@@ -25242,6 +25606,10 @@
    */
   function wireSearchClear(search, clearBtn) {
     if (!search || !clearBtn) return;
+    // The × shows while there is a query to clear.
+    search.addEventListener('input', () => {
+      clearBtn.style.display = search.value ? '' : 'none';
+    });
     clearBtn.addEventListener('click', () => {
       search.value = '';
       search.dispatchEvent(new Event('input', {bubbles: true}));
@@ -25739,11 +26107,6 @@
     return d.toLocaleDateString(undefined, opts);
   }
 
-  /**
-   * The block a history row belongs to: the existing block of its chat,
-   * else a new one appended at the end (after a new day separator when
-   * the chat's latest task falls on an earlier day than the last block).
-   */
   // A user's explicit expand/collapse choices, by chat id, so the
   // choice survives the constant backend-driven re-renders. Groups of
   // rows WITHOUT a chat id remember their choice on the element only.
@@ -26124,13 +26487,14 @@
     if (pencil) pencil.style.display = remote ? 'none' : '';
     // The delete button too: the chat's rows live in the remote
     // machine's history.db, which a deleteChat here cannot reach.
+    // A local chat's trash icon stays hidden while its Delete / Cancel
+    // question is open (a later history page re-syncs the header).
     const del = actions.querySelector(':scope > .sidebar-item-delete');
     if (del) {
-      del.style.display = remote ? 'none' : '';
-      if (remote) {
-        const confirm = actions.querySelector(':scope > .sidebar-item-confirm');
-        if (confirm) confirm.style.display = 'none';
-      }
+      const confirm = actions.querySelector(':scope > .sidebar-item-confirm');
+      if (remote && confirm) confirm.style.display = 'none';
+      const asking = !!confirm && confirm.style.display !== 'none';
+      del.style.display = remote || asking ? 'none' : '';
     }
     if (
       chip &&
@@ -26373,6 +26737,11 @@
     return header;
   }
 
+  /**
+   * The block a history row belongs to: the existing block of its chat
+   * (its header updated for the row), else a new one appended at the
+   * end of the list.
+   */
   function historyGroupFor(session) {
     const chatId = typeof session.id === 'string' ? session.id : '';
     const existing = chatId ? historyChatGroups.get(chatId) : null;
@@ -27686,7 +28055,17 @@
    */
   function saveSettingsIfPopulated() {
     if (settingsEditedFields.size === 0) return;
-    api.saveConfig(settingsCommand(collectConfigForm(settingsEditedFields)));
+    const save = settingsCommand(collectConfigForm());
+    // This daemon answers a save with its model list too (new keys or
+    // endpoints change it) and echoes the save's `generation` the way
+    // a getModels reply does, so a pick made before that reply comes
+    // is not undone by the default the save read (noteMachineModels).
+    // A registered machine's list is asked anew: the forwarded save
+    // brings back only its configData.
+    if (!settingsMachine) save.generation = ++modelsAsked;
+    api.saveConfig(save);
+    if (settingsMachine && settingsMachine === modelsMachine)
+      requestPickerModels();
   }
 
   // The registered machine whose settings the open settings sheet
@@ -27942,25 +28321,44 @@
       true,
       document.getElementById('settings-btn'),
     );
-    settingsEditedFields.clear();
     // The API Keys / Custom Models / Bedrock subpanels START collapsed
     // on every open; only an explicit click on their header expands them.
     collapseConfigSubpanels();
-    // The sheet is for the machine the chat header shows.  Another
-    // machine's values must not stay on show as this machine's until
-    // its reply arrives: the form would present the other machine's
-    // password and API keys under this machine's heading, and an Edit
-    // of one of its custom-model rows would post that model's endpoint
-    // and key to this machine.
-    const previousMachine = settingsMachine;
-    settingsMachine = activeMachine();
-    renderSettingsMachine();
-    if (previousMachine !== settingsMachine) {
+    loadSettingsSheet();
+  }
+
+  // machinescope-coverage:start
+  /**
+   * The chat header's machine may have changed while the settings
+   * sheet is open (a tab switch, the daemon's binding, another
+   * surface's global pick): the sheet follows it.  The edits made so
+   * far are saved to the machine they were made for (an unsaved
+   * custom-model edit is dropped first, as on a close), then the
+   * sheet loads the new machine's settings.
+   */
+  function syncSettingsMachine() {
+    if (!settingsPanel || !settingsPanel.classList.contains('open')) return;
+    if (sidebarMachine() === settingsMachine) return;
+    cancelCustomModelEdit();
+    saveSettingsIfPopulated();
+    setSettingsUpdateStatus('', false);
+    loadSettingsSheet();
+  }
+  // machinescope-coverage:end
+
+  /**
+   * Point the open settings sheet at the machine the chat header shows
+   * and ask that machine's daemon for its settings, custom models and
+   * sign-in states.
+   */
+  function loadSettingsSheet() {
+    settingsEditedFields.clear();
+    const machine = sidebarMachine();
+    if (machine !== settingsMachine) {
       cancelCustomModelEdit();
-      clearConfigForm();
-      myModels = [];
-      renderCustomModels();
+      switchSettingsMachine(machine);
     }
+    renderSettingsMachine();
     api.getConfig(settingsCommand({}));
     api.getMyModels(settingsCommand({}));
     renderClaudeCodeStatus(null);
@@ -28227,21 +28625,37 @@
     setPanelOpen(settingsPanel, settingsOverlay, false);
     if (settingsMachine) {
       // The form and the custom-model list showed another machine's
-      // values: paint this daemon's back.  The run toggles come back
-      // at once (a submit before the reply must carry this daemon's
-      // settings, not the other machine's), the rest with the reply;
-      // until then the form is blank, so a quick reopen for this
-      // daemon does not show the other machine's values as its own.
-      settingsMachine = '';
+      // values: paint this daemon's back, the run toggles at once and
+      // the rest with the reply.
+      switchSettingsMachine('');
       renderSettingsMachine();
-      clearConfigForm();
-      myModels = [];
-      renderCustomModels();
-      if (webToolsToggleBtn) webToolsToggleBtn.checked = localUseWebBrowser;
-      if (memoryToggleBtn) memoryToggleBtn.checked = localUseMemory;
       api.getConfig();
       api.getMyModels();
     }
+  }
+
+  /**
+   * Turn the settings sheet to *machine* ('' for this daemon) from the
+   * other machine it showed.  That machine's values must not stay on
+   * show as the new one's until its reply arrives: the form would
+   * present its password and API keys under the new heading, and an
+   * Edit of one of its custom-model rows would post that model's
+   * endpoint and key to the new machine.  So the form is blanked (a
+   * quick reopen does not show them either) and the custom models
+   * dropped.  Back on this daemon, its run toggles return at once: a
+   * submit before the reply must carry this daemon's settings, not the
+   * other machine's.
+   *
+   * @param {string} machine The machine the sheet now shows.
+   */
+  function switchSettingsMachine(machine) {
+    settingsMachine = machine;
+    clearConfigForm();
+    myModels = [];
+    renderCustomModels();
+    if (machine) return;
+    if (webToolsToggleBtn) webToolsToggleBtn.checked = localUseWebBrowser;
+    if (memoryToggleBtn) memoryToggleBtn.checked = localUseMemory;
   }
 
   function openTricksPanel() {
@@ -28310,7 +28724,9 @@
   function submitNewTrick() {
     if (!tricksAddInput) return;
     const text = tricksAddInput.value.trim();
-    if (!text) return;
+    // The same add already in flight (a double click): a second one
+    // would come back as a duplicate error for an add that worked.
+    if (!text || text === pendingTrickAdd) return;
     pendingTrickAdd = text;
     setTricksAddError('');
     api.addTrick({text});
@@ -28567,12 +28983,14 @@
         const injected = leadPad + text + trailPad;
         inp.value = before + injected + after;
         const caret = start + injected.length;
-        syncClearBtn();
-        autosizeComposer();
         inp.focus();
         try {
           inp.setSelectionRange(caret, caret);
         } catch (_e) {}
+        // As if typed: the box resizes, the clear button and the ghost
+        // text follow, and Up/Down stop cycling the prompt history (a
+        // history entry left selected would replace the composed text).
+        inp.dispatchEvent(new Event('input'));
         closeTricksPanel();
       });
       tricksList.appendChild(div);
@@ -29052,15 +29470,6 @@
   // touched instead of dropping it.
   const settingsEditedFields = new Set();
 
-  /**
-   * Remember that a settings field now holds the user's own value.
-   *
-   * @param {string} id The element id of the edited field.
-   */
-  function markSettingsFieldEdited(id) {
-    if (id) settingsEditedFields.add(id);
-  }
-
   // The one first-party API-key inventory: it drives the settings form's
   // LOAD loop (populateConfigForm), SAVE loop (collectConfigForm) and the
   // cfg-key-* secret-input listeners.  It was previously declared verbatim
@@ -29234,20 +29643,19 @@
   }
 
   /**
-   * Read the settings form into a `saveConfig` payload.
+   * Read the fields the user edited (settingsEditedFields) into a
+   * `saveConfig` payload.  The daemon MERGES what it is sent (see
+   * ``user_config.save_config``), so a partial payload updates just
+   * those fields and leaves the rest of config.json alone -- which is
+   * what lets a panel closed before its `configData` reply arrived save
+   * the edit instead of flushing a form full of blanks over the stored
+   * settings.
    *
-   * @param {Set<string>} [onlyIds] When given, only these field ids are
-   *   read. The daemon MERGES what it is sent (see
-   *   ``user_config.save_config``), so a partial payload updates just
-   *   those fields and leaves the rest of config.json alone -- which is
-   *   what lets a panel closed before its `configData` reply arrived
-   *   save the edit instead of flushing a form full of blanks over the
-   *   stored settings.
    * @returns {{config: object, apiKeys: object}} The payload.
    */
-  function collectConfigForm(onlyIds) {
+  function collectConfigForm() {
     const el = id => document.getElementById(id);
-    const want = id => !onlyIds || onlyIds.has(id);
+    const want = id => settingsEditedFields.has(id);
     const cfg = {};
     if (want('cfg-max-budget')) {
       // An unparseable box -- cleared by the user, or never filled
@@ -29258,7 +29666,7 @@
       // on a 250 budget silently ended up back on 100.
       const budget = parseFloat(el('cfg-max-budget').value);
       if (Number.isFinite(budget)) cfg.max_budget = budget;
-      else if (settingsEditedFields.has('cfg-max-budget')) syncMaxBudgetNote();
+      else syncMaxBudgetNote();
     }
     if (want('cfg-use-web-tools')) {
       cfg.use_web_browser = !!(webToolsToggleBtn && webToolsToggleBtn.checked);
@@ -29296,15 +29704,13 @@
     const apiKeys = {};
     FIRST_PARTY_KEY_IDS.forEach(k => {
       const id = 'cfg-key-' + k;
-      if (!want(id)) return;
-      const v = el(id).value.trim();
-      // An empty box is a DELETION only when the user explicitly
-      // cleared it (the field is in settingsEditedFields): the daemon
-      // removes a key sent with an empty value from the canonical key
-      // store (see ``save_api_key``). Untouched empty boxes stay omitted
-      // so this merge-style payload never wipes keys that were never
-      // shown here or were just saved by another window.
-      if (v || settingsEditedFields.has(id)) apiKeys[k] = v;
+      // An empty box is a DELETION, sent only because the user cleared
+      // it (the field was edited): the daemon removes a key sent with
+      // an empty value from the canonical key store (see
+      // ``save_api_key``).  Untouched boxes stay omitted, so this
+      // merge-style payload never wipes keys that were never shown here
+      // or were just saved by another window.
+      if (want(id)) apiKeys[k] = el(id).value.trim();
     });
     return {config: cfg, apiKeys};
   }
@@ -29396,13 +29802,22 @@
     }
     const atCtx = getAtCtx();
     if (atCtx) {
-      api.getFiles({
-        prefix: atCtx.query,
-        workDir: workDirForTab(activeTabId),
-        // Stamp the owning tab so a reply can never render over a sibling
-        // tab whose input happens to hold the same half-typed mention.
-        tabId: activeTabId || undefined,
-      });
+      // The mention is for the machine the tab's next task runs on: a
+      // tab picked onto a registered machine lists that machine's files
+      // (the daemon forwards the request there), any other this
+      // daemon's.
+      api.getFiles(
+        onMachine(
+          {
+            prefix: atCtx.query,
+            workDir: tabBrowseWorkDir(activeTabId),
+            // Stamp the owning tab so a reply can never render over a
+            // sibling tab whose input holds the same half-typed mention.
+            tabId: activeTabId || undefined,
+          },
+          tabMachine(activeTabId),
+        ),
+      );
     } else {
       hideAC();
     }
@@ -29549,7 +29964,12 @@
     const sep = /^\s/.test(inp.value.substring(cursor)) ? '' : ' ';
     // The daemon already prefixed the mention ("./" or "~/").
     replaceComposerSpan(atCtx.start, cursor, file + sep);
-    api.recordFileUsage({path: file, workDir: workDirForTab(activeTabId)});
+    api.recordFileUsage(
+      onMachine(
+        {path: file, workDir: tabBrowseWorkDir(activeTabId)},
+        tabMachine(activeTabId),
+      ),
+    );
   }
 
   function acceptCompletion(full) {

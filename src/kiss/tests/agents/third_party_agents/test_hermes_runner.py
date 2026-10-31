@@ -1031,10 +1031,12 @@ class TestContinuationFailureCursor:
             cursor="99",
             thread_replies={"100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]},
         )
-        _point_launcher_at(monkeypatch, tmp_path / "no-daemon.json")
-        assert _make_runner(failing, state_path).run_once() == 0
+        # A scoped patch: leaving the block points the launcher back at
+        # launch_daemon, whose teardown then restores the original value.
+        with monkeypatch.context() as patch:
+            _point_launcher_at(patch, tmp_path / "no-daemon.json")
+            assert _make_runner(failing, state_path).run_once() == 0
         assert launch_daemon.run_commands == []
-        _point_launcher_at(monkeypatch, launch_daemon.endpoint_file)
         retry_backend = ThreadBackend(
             cursor="99",
             thread_replies={

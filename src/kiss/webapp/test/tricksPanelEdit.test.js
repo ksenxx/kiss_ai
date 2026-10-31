@@ -6,7 +6,7 @@
 
 // End-to-end (JSDOM) tests for the Inject promptlet panel's edit
 // (pencil) button: the first `window.__MY_TRICKS_COUNT__` rows (the
-// user's own, from ~/.kiss/MY_INJECTION.md) carry it between the copy
+// user's own, from the brand home's MY_INJECTION.md) carry it between the copy
 // and delete buttons; pressing it turns the row into a textarea with
 // Save / Cancel, and saving posts `editTrick` {text, newText} while
 // showing the new text at once.  Also covers the keyboard (Enter saves,

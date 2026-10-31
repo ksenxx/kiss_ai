@@ -45,6 +45,14 @@ const LAPTOP_CONFIG = {
   machine: 'laptop',
 };
 
+// This daemon's reply once it has persisted the pick of gpu-box (a
+// reply naming another pick moves the chat header, and the open sheet
+// with it: machineScopedPicker.test.js).
+const LAPTOP_CONFIG_GPU_PICKED = {
+  ...LAPTOP_CONFIG,
+  config: {...LAPTOP_CONFIG.config, last_machine: 'gpu-box'},
+};
+
 const GPU_CONFIG = {
   type: 'configData',
   forwarded: true,
@@ -104,7 +112,7 @@ function testRemoteSheetStartsBlankAndErrorKeepsItBlank() {
 
   // This daemon's own late reply and a stray forwarded error for
   // another machine leave the form alone...
-  send(win, LAPTOP_CONFIG);
+  send(win, LAPTOP_CONFIG_GPU_PICKED);
   send(win, {
     type: 'configData',
     forwarded: true,
@@ -191,8 +199,10 @@ function testReopenForThisDaemonDoesNotShowTheRemoteValues() {
   assert.deepStrictEqual(formValues(win), GPU);
   click(win, byId(win, 'settings-overlay'));
 
-  // Reopened for laptop before laptop's configData came back.
-  pickMachine(win, 'laptop');
+  // Reopened for laptop (this daemon: the drop-down's '' option)
+  // before laptop's configData came back.
+  pickMachine(win, '');
+  assert.strictEqual(byId(win, 'chat-machine').selectedIndex, 0);
   click(win, byId(win, 'settings-btn'));
   assert.strictEqual(byId(win, 'settings-machine').hidden, true);
   assert.deepStrictEqual(

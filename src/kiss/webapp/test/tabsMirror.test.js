@@ -19,16 +19,13 @@ const {
   ofType: msgsOf,
   snapshotEntry,
 } = require('./simplify2_harness');
+const {trackWindow, runTests} = require('./workdir_helpers');
 
-// Windows opened by the running test, closed by the runner once the test
-// returns: a `daemonStatus connected:true` arms main.js's SCM badge poll
-// (`setInterval`), which keeps the node process alive for ever otherwise.
-const openWindows = [];
-
+// The runner closes every window once its test returns: a `daemonStatus
+// connected:true` arms main.js's SCM badge poll (`setInterval`), which
+// keeps the node process alive for ever otherwise.
 function makePage(initialState) {
-  const page = buildPage({initialState});
-  openWindows.push(page.win);
-  return page;
+  return buildPage({initialState, beforeScripts: trackWindow});
 }
 
 // Every open tab in tab order.  No row renders the chat tabs any more
@@ -261,17 +258,27 @@ function testSubagentAndContentTabsSurviveReconcile() {
     isDone: false,
   });
   assert.deepStrictEqual(tabBarIds(win), ['t1', 'sub-1']);
-  // Reconcile with a snapshot that (of course) does not list the
-  // sub-agent tab: it must survive, anchored after its parent.
+  // A file opened from the chat creates a client-local content tab.
+  send(win, {
+    type: 'fileContent',
+    path: '/w/a.txt',
+    name: 'a.txt',
+    content: 'x',
+    tabId: 't1',
+  });
+  const file = win._testApi.openTabs().find(t => t.isContentTab).id;
+  assert.deepStrictEqual(tabBarIds(win), ['t1', 'sub-1', file]);
+  // Reconcile with a snapshot that (of course) lists neither local
+  // tab: both survive, the sub-agent tab anchored after its parent.
   send(win, {
     type: 'tabs_state',
     tabs: [snapshotEntry('t2', 'other'), snapshotEntry('t1', 'parent')],
   });
-  assert.deepStrictEqual(tabBarIds(win), ['t2', 't1', 'sub-1']);
+  assert.deepStrictEqual(tabBarIds(win), ['t2', 't1', 'sub-1', file]);
   // Closing the parent on ANOTHER client cascades to the local
-  // sub-agent tab.
+  // sub-agent tab; the file tab is no child of the chat and stays.
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('t2', 'other')]});
-  assert.deepStrictEqual(tabBarIds(win), ['t2']);
+  assert.deepStrictEqual(tabBarIds(win), ['t2', file]);
 }
 
 function testSiblingSubagentTabsKeepTheirOrderAcrossSnapshots() {
@@ -432,20 +439,4 @@ const tests = [
   testCloseTabStillAnnouncedToDaemon,
 ];
 
-let failures = 0;
-for (const t of tests) {
-  try {
-    t();
-    console.log('PASS', t.name);
-  } catch (err) {
-    failures += 1;
-    console.error('FAIL', t.name);
-    console.error(err && err.stack ? err.stack : err);
-  }
-  openWindows.splice(0).forEach(w => w.close());
-}
-if (failures > 0) {
-  console.error(`${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log(`All ${tests.length} tabsMirror tests passed`);
+runTests(tests.map(fn => [fn.name, fn]));

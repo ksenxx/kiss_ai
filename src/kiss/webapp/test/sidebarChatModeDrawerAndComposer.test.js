@@ -27,8 +27,6 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
 
 const POLL_MS = 5000;
 
@@ -38,11 +36,12 @@ const {
   loadMainCss,
   fakeIntervals,
   fakeMatchMedia,
-  MEDIA,
+  click,
+  byId,
 } = require('./simplify2_harness');
+const {installTokenisedCss} = require('./designTokens');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {
-  click,
   drawerOpen,
   overlayOpen,
   pollCount,
@@ -51,16 +50,17 @@ const {
 
 const {test, report} = makeRunner();
 
-function makePage() {
+function makePage(desktop = false) {
   let timers;
   const {win, posted} = makeChatPage({
     bodyClass: 'remote-chat',
     extraScripts: ['marked.min.js'],
     sourceUrl: 'remote-mobile-main.js',
     beforeScripts(win) {
-      // A phone-sized window: no media query matches, so the task-info
-      // panel is a drawer and the history sidebar slides in from the burger.
-      fakeMatchMedia(win, false);
+      // A phone-sized window (no media query matches, so the task-info
+      // panel is a drawer and the history sidebar slides in from the
+      // burger), or a desktop-sized one when *desktop* is true.
+      fakeMatchMedia(win, desktop);
       timers = fakeIntervals(win);
     },
   });
@@ -99,12 +99,6 @@ function chatTabs(win) {
   );
 }
 
-function activeTabLabel(win) {
-  const tab = win.document.querySelector('#tab-list .chat-tab.active');
-  const label = tab && tab.querySelector('.chat-tab-label');
-  return label ? label.textContent : '';
-}
-
 function display(win, id) {
   return win.getComputedStyle(win.document.getElementById(id)).display;
 }
@@ -114,7 +108,7 @@ function display(win, id) {
  * *sessions* and return the rendered task rows.
  */
 function showHistory(win, posted, sessions) {
-  click(win, 'menu-btn');
+  click(win, byId(win, 'menu-btn'));
   const req = posted.filter(m => m.type === 'getHistory').pop();
   assert.ok(req, 'opening the sidebar asks for the history');
   send(win, {
@@ -130,6 +124,24 @@ function showHistory(win, posted, sessions) {
   return rows;
 }
 
+/**
+ * The computed `display` of the burger and the task-info drawer toggle
+ * on a desktop- or phone-sized window styled by main.css and
+ * remote-codex.css.  jsdom never matches a width media feature, so the
+ * desktop window installs remote-codex.css's `(width >= 900px)` block
+ * as `@media screen`.
+ */
+function burgerAndToggleDisplay(desktop) {
+  const {win} = makePage(desktop);
+  loadMainCss(win);
+  installTokenisedCss(win, 'remote-codex.css', {
+    applyMedia: desktop ? /\(width >= 900px\)/ : null,
+  });
+  const shown = [display(win, 'menu-btn'), display(win, 'meta-drawer-btn')];
+  win.close();
+  return shown;
+}
+
 function taskPanelText(win) {
   return win.document.querySelector('#output .task-panel-text').textContent;
 }
@@ -139,20 +151,13 @@ async function main() {
     'a desktop-sized window hides the burger and the drawer toggle ' +
       '(remote-codex.css): the sidebar and the task-info panel are docked',
     () => {
-      const css = fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8');
-      const rule = css
-        .split('}')
-        .find(
-          block =>
-            block.includes('body.remote-chat.remote-desktop #menu-btn') &&
-            block.includes('body.remote-chat.remote-desktop #meta-drawer-btn'),
-        );
-      assert.ok(rule, 'one rule covers the burger and the drawer toggle');
-      assert.match(
-        rule.split('{').pop(),
-        /display:\s*none/,
+      assert.deepStrictEqual(
+        burgerAndToggleDisplay(true),
+        ['none', 'none'],
         'the docked panels need neither button',
       );
+      const phone = burgerAndToggleDisplay(false);
+      assert.ok(!phone.includes('none'), 'a phone keeps both buttons: ' + phone);
     },
   );
 
@@ -181,12 +186,12 @@ async function main() {
         'the drawer starts inert: its off-screen close button must not ' +
           'sit in the tab order before the drawer was ever opened',
       );
-      click(win, 'meta-drawer-btn');
+      click(win, byId(win, 'meta-drawer-btn'));
       assert.ok(drawerOpen(win), 'button opens the drawer');
       assert.ok(overlayOpen(win), 'the backdrop opens with the drawer');
       assert.strictEqual(btn.getAttribute('aria-expanded'), 'true');
       assert.ok(!panel.hasAttribute('inert'), 'an open drawer is usable');
-      click(win, 'meta-close');
+      click(win, byId(win, 'meta-close'));
       assert.ok(!drawerOpen(win), 'the close button dismisses the drawer');
       assert.ok(!overlayOpen(win));
       assert.strictEqual(btn.getAttribute('aria-expanded'), 'false');
@@ -194,12 +199,12 @@ async function main() {
         panel.hasAttribute('inert'),
         'the closed drawer leaves the keyboard tab order',
       );
-      click(win, 'meta-drawer-btn');
+      click(win, byId(win, 'meta-drawer-btn'));
       assert.ok(drawerOpen(win));
-      click(win, 'meta-overlay');
+      click(win, byId(win, 'meta-overlay'));
       assert.ok(!drawerOpen(win), 'the backdrop dismisses the drawer');
       assert.ok(!overlayOpen(win));
-      click(win, 'meta-drawer-btn');
+      click(win, byId(win, 'meta-drawer-btn'));
       win.document.dispatchEvent(
         new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
       );
@@ -223,7 +228,7 @@ async function main() {
       send(win, {type: 'status', running: true});
       wv.tick(POLL_MS * 2);
       assert.strictEqual(pollCount(wv), 0, 'a closed drawer must not poll');
-      click(win, 'meta-drawer-btn');
+      click(win, byId(win, 'meta-drawer-btn'));
       assert.strictEqual(pollCount(wv), 1, 'opening the drawer polls at once');
       assert.ok(
         wv.intervals.some(iv => iv.ms === POLL_MS),
@@ -253,7 +258,7 @@ async function main() {
         'the report renders in the drawer',
       );
 
-      click(win, 'meta-close');
+      click(win, byId(win, 'meta-close'));
       const count = pollCount(wv);
       wv.tick(POLL_MS * 3);
       assert.strictEqual(
@@ -269,7 +274,7 @@ async function main() {
     const wv = makePage();
     const win = wv.win;
     send(win, {type: 'status', running: true});
-    click(win, 'meta-drawer-btn');
+    click(win, byId(win, 'meta-drawer-btn'));
     const btn = win.document.getElementById('meta-info-refresh');
     assert.ok(btn, 'the refresh button sits in the subpanel header');
     assert.strictEqual(
@@ -278,7 +283,7 @@ async function main() {
       'the button belongs to the task-update subpanel',
     );
     const before = pollCount(wv);
-    click(win, 'meta-info-refresh');
+    click(win, byId(win, 'meta-info-refresh'));
     assert.strictEqual(pollCount(wv), before + 1, 'the click polls at once');
     assert.strictEqual(lastPoll(wv).refresh, true, 'the click asks for a run');
   });
@@ -440,7 +445,7 @@ async function main() {
         'Stop shows on the file tab while the owner chat runs',
       );
       posted.length = 0;
-      click(win, 'stop-btn');
+      click(win, byId(win, 'stop-btn'));
       const stop = posted.find(m => m.type === 'stop');
       assert.ok(stop, 'the click posts a stop');
       assert.strictEqual(
@@ -499,7 +504,7 @@ async function main() {
         'Stop shows two hops away from the running chat',
       );
       posted.length = 0;
-      click(win, 'stop-btn');
+      click(win, byId(win, 'stop-btn'));
       const stopMsg = posted.find(m => m.type === 'stop');
       assert.ok(stopMsg, 'the click posts a stop');
       assert.strictEqual(
@@ -531,7 +536,7 @@ async function main() {
       });
       assert.notStrictEqual(api.getActiveTabId(), chatId);
       posted.length = 0;
-      click(win, 'share-btn');
+      click(win, byId(win, 'share-btn'));
       assert.strictEqual(
         api.getActiveTabId(),
         chatId,

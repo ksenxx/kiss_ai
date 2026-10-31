@@ -119,7 +119,7 @@ def test_finalize_worktree_no_spurious_hook_warning(
         with caplog.at_level(  # type: ignore[attr-defined]
             logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
-            ok = agent._finalize_worktree()
+            ok = agent._finalize_worktree(agent.worktrees[0])
 
         assert ok is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, (
             "_finalize_worktree should succeed: the race-write must "
@@ -194,7 +194,7 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
         with caplog.at_level(  # type: ignore[attr-defined]
             logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
-            ok = agent._finalize_worktree()
+            ok = agent._finalize_worktree(agent.worktrees[0])
 
         assert ok is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
         assert wt_dir.exists(), "Stuck worktree must be preserved."

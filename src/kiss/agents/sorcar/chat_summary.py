@@ -54,6 +54,19 @@ NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
 LISTABLE = f"chat_id = ? AND {NOT_SUBAGENT}"
 
 
+def _text(value: object) -> str:
+    """Return a ``task_history`` TEXT column value as ``str``.
+
+    SQLite's dynamic typing lets a hand-edited or third-party database
+    store a BLOB in a TEXT column; it is decoded as UTF-8 with
+    replacement, as ``persistence._safe_str`` does (this module stays
+    stdlib-only), so one such row cannot abort a task's finish save.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value or "")
+
+
 def _summary_word(token: str) -> str:
     """Normalise one whitespace-delimited token: URLs become their host, long tokens are cut."""
     url = _URL.match(token)
@@ -190,7 +203,7 @@ def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
         "last_launched = excluded.last_launched, last_finished = excluded.last_finished",
         (
             chat_id,
-            summarize_chat([r[0] or "" for r in first]),
+            summarize_chat([_text(r[0]) for r in first]),
             launch_ms(start_ts, timestamp),
             end_ms(end_ts),
         ),

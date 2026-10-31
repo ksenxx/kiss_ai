@@ -12,19 +12,20 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, readyTabId} = require('./simplify2_harness');
-
-function fakeGeometry(el) {
-  Object.defineProperty(el, 'scrollHeight', {value: 3000, configurable: true});
-  Object.defineProperty(el, 'clientHeight', {value: 500, configurable: true});
-}
+const {
+  makePage,
+  send,
+  readyTabId,
+  fakeGeometry,
+  getAdjacent,
+} = require('./simplify2_harness');
 
 function setup() {
   const {win, posted} = makePage();
   const tabId = readyTabId(posted);
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
-  fakeGeometry(O);
+  fakeGeometry(O, {sh: 3000, ch: 500});
   send(win, {
     type: 'task_events',
     tabId,
@@ -36,10 +37,6 @@ function setup() {
     ],
   });
   return {win, posted, tabId, O};
-}
-
-function getAdjacent(posted) {
-  return posted.filter(m => m.type === 'getAdjacentTask');
 }
 
 function touchEvent(win, type, y) {

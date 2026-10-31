@@ -5,8 +5,8 @@
 """End-to-end checks of the shared test helpers fixed in the 2026-10-13 audit.
 
 * ``recording_http.serving`` / ``start_serving`` poll the shutdown flag
-  every 50 ms, so a fixture teardown no longer waits up to the stdlib's
-  0.5 s default.
+  every 50 ms, so a fixture teardown no longer waits a whole 0.5 s
+  stdlib poll.
 * ``recording_http.raw_post_status`` sends header lines as latin-1, the
   encoding ``http.server`` decodes them with.
 * ``RecordingDaemon.close`` is idempotent.
@@ -55,15 +55,16 @@ class _HeaderRecorder(RecordingHandler):
 
 
 def test_serving_teardown_does_not_wait_for_the_default_poll() -> None:
-    """Ten idle teardowns finish well inside ten of the stdlib's 0.5 s polls.
+    """Ten immediate teardowns finish well inside ten of the stdlib's 0.5 s polls.
 
-    With the stdlib default an idle teardown waits up to a whole 0.5 s
-    poll (0.25 s on average), so ten of them take about 2.5 s; with the
-    helper's 50 ms poll they take about 0.25 s.  Only the ``stop`` half
-    of each cycle is timed (binding a port and starting a thread is the
-    same either way), and the 4 s bound sits well above the stdlib
-    average (2.5 s) so a loaded machine has ~16x headroom while the
-    default's worst case (5 s) still fails.
+    A teardown right after the start waits one whole poll: the serving
+    thread is already blocked in ``select(poll_interval)`` when
+    ``shutdown()`` raises its flag, and sees the flag only once that
+    select times out.  Measured over ten cycles: 5.0 s with the stdlib's
+    0.5 s poll, 0.5 s with the helper's 50 ms poll.  Only the ``stop``
+    half of each cycle is timed (binding a port and starting a thread is
+    the same either way); the 4 s bound gives the helper 8x headroom on
+    a loaded machine and still fails the stdlib poll by a second.
     """
     stopping = 0.0
     for _ in range(10):
@@ -222,7 +223,10 @@ def test_phone_api_handler_routes_and_records() -> None:
         assert polled == {"messages": _OneMessagePhone.messages}
         assert requests.get(f"{base}/api/nope", timeout=10).status_code == 404
     assert server.requests == [
-        {"method": "GET", "path": "/api/device/info", "query": {}},
-        {"method": "GET", "path": "/api/sms/messages", "query": {"since": ["7"], "q": [""]}},
-        {"method": "GET", "path": "/api/nope", "query": {}},
+        {"method": "GET", "path": path, "query": query, "authorization": "", "body": None}
+        for path, query in [
+            ("/api/device/info", {}),
+            ("/api/sms/messages", {"since": ["7"], "q": [""]}),
+            ("/api/nope", {}),
+        ]
     ]

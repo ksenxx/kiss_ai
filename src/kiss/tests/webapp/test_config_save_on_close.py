@@ -63,7 +63,10 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
         )
 
     def test_open_settings_panel_posts_get_config(self) -> None:
-        body = self._extract_fn("openSettingsPanel")
+        # The open sheet loads the settings of the machine the chat
+        # header shows (loadSettingsSheet, run again when it changes).
+        assert "loadSettingsSheet()" in self._extract_fn("openSettingsPanel")
+        body = self._extract_fn("loadSettingsSheet")
         assert "getConfig" in body
         assert "settingsEditedFields.clear()" in body
 
@@ -72,5 +75,6 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
         # fields alone and stays silent when nothing was edited.
         helper = self._extract_fn("saveSettingsIfPopulated")
         assert "settingsEditedFields.size === 0" in helper
-        assert "collectConfigForm(settingsEditedFields)" in helper
+        assert "collectConfigForm()" in helper
+        assert "settingsEditedFields.has(id)" in self._extract_fn("collectConfigForm")
         assert "saveConfig" in helper

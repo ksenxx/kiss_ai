@@ -130,10 +130,7 @@ function testWorktreeCreatedRechecksToo() {
     fs.mkdirSync(path.dirname(wtCopy), {recursive: true});
     fs.writeFileSync(wtCopy, 'plan\n');
     // The demoted span is stamped with its owning tab id.
-    const missingSpans = Array.from(
-      win.document.querySelectorAll('#output [data-path-missing]'),
-    ).filter(el => el.getAttribute('data-path-missing') === rel);
-    tabId = missingSpans[0].getAttribute('data-path-tab');
+    tabId = findMissing(win, rel)[0].getAttribute('data-path-tab');
     fallbackDirs[String(tabId)] = wtDir;
     const checksBefore = posted.filter(m => m.type === 'checkPaths').length;
     send(win, {

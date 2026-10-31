@@ -46,6 +46,9 @@ _HEREDOC_REWRITE = (
     "open(p, 'w').write(s)\n"
     "EOF"
 )
+# A cat here-document over the existing file: the heredoc guard asks the
+# container whether its target exists (``/`` is the default workdir).
+_CAT_HEREDOC_REWRITE = "cd / && cat > tmp/some_file.txt <<'EOF'\nb\nEOF"
 
 
 @pytest.fixture(scope="module")
@@ -103,7 +106,7 @@ def test_failed_edit_batch_still_reports_the_failing_edit(env: DockerManager) ->
     assert env.Bash("cat /tmp/batch_fail.txt", "cat").startswith("uno\ntwo")
 
 
-@pytest.mark.parametrize("command", [_SED_REWRITE, _HEREDOC_REWRITE])
+@pytest.mark.parametrize("command", [_SED_REWRITE, _HEREDOC_REWRITE, _CAT_HEREDOC_REWRITE])
 def test_docker_bash_refuses_shell_rewrites(env: DockerManager, command: str) -> None:
     """The container ``Bash`` refuses the same rewrites as the host ``Bash``."""
     env.Bash("printf 'a\\n' > /tmp/some_file.txt", "seed")
@@ -116,7 +119,19 @@ def test_docker_bash_refuses_shell_rewrites(env: DockerManager, command: str) ->
 def test_docker_run_commands_parallel_refuses_shell_rewrites(env: DockerManager) -> None:
     """The fan-out refuses a rewrite per command and still runs the others."""
     env.Bash("printf 'a\\n' > /tmp/some_file.txt", "seed")
-    report = env.run_commands_parallel(json.dumps([_SED_REWRITE, "echo fine"]))
-    assert "REFUSED:" in report, report
+    report = env.run_commands_parallel(
+        json.dumps([_SED_REWRITE, _CAT_HEREDOC_REWRITE, "echo fine"]))
+    assert report.count("REFUSED:") == 2, report
     assert "fine" in report, report
     assert env.Bash("cat /tmp/some_file.txt", "cat").startswith("a\n")
+
+
+def test_docker_bash_heredoc_may_create_a_new_file(env: DockerManager) -> None:
+    """A here-document into a file the container lacks creates it; the next write is refused."""
+    env.Bash("rm -f /tmp/heredoc_new.txt", "clean")
+    created = env.Bash("cat > /tmp/heredoc_new.txt <<'EOF'\nnew\nEOF", "create")
+    assert "REFUSED" not in created, created
+    again = env.Bash("cat >> /tmp/heredoc_new.txt <<'EOF'\nmore\nEOF", "append")
+    assert again.startswith("REFUSED:") and "/tmp/heredoc_new.txt" in again, again
+    content = env.Bash("cat /tmp/heredoc_new.txt", "cat")
+    assert content.startswith("new\n") and "more" not in content, content

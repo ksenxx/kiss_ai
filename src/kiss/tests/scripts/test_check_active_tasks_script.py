@@ -164,6 +164,7 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             f"stderr={result.stderr}\nstdout={result.stdout}",
         )
         self.assertIn("idle (count=0)", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     async def test_active_task_exits_one(self) -> None:
         """Helper exits 1 when an active task is present.
@@ -193,6 +194,26 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         self.assertIn(fake_tab_id, result.stderr)
         self.assertIn("task=3233", result.stderr)
         self.assertIn("KISS_FORCE_RESTART", result.stderr)
+        # The busy daemon names the file install.sh records its deferred
+        # restart in: next to its remote-url.json.
+        self.assertEqual(
+            result.stdout, str(Path(self.tmpdir) / ".kiss-web.restart-pending") + "\n",
+        )
+
+    async def test_busy_daemon_that_names_no_record_file_prints_nothing(self) -> None:
+        """A daemon from before deferred restarts: exit 1, empty stdout."""
+        scratch = Path(tempfile.mkdtemp())
+        handler = _one_shot_handler(
+            [b'{"type":"activeTasksResponse","count":1,"tabs":["t"]}\n'],
+        )
+        try:
+            async with fake_daemon(scratch, handler) as endpoint_file:
+                result = await asyncio.to_thread(_run_helper, endpoint_file, 5.0, True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("1 in-flight task", result.stderr)
+            self.assertEqual(result.stdout, "")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def test_missing_endpoint_file_exits_zero(self) -> None:
         """Helper exits 0 when the endpoint file is absent (daemon dead)."""

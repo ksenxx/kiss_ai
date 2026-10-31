@@ -78,9 +78,10 @@ from kiss.agents.seas.coding.quoted_evidence import (
     quotes_report,
     unsupported_quotes,
 )
+from kiss.agents.sorcar.checkpoints import CHECKPOINT_NAME
 from kiss.agents.sorcar.container_jobs import KILL_ALL_SCRIPT
 from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, kill_tagged_tree_script
-from kiss.agents.sorcar.edit_guards import rewrite_guard
+from kiss.agents.sorcar.edit_guards import heredoc_guard, heredoc_targets, rewrite_guard
 from kiss.agents.sorcar.evidence_gate import EDIT_TOOLS, SHELL_TOOLS, EvidenceGate
 from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX, bridge_alive, bridge_exec
 from kiss.agents.sorcar.shell_guards import (
@@ -271,25 +272,6 @@ VERIFIER_TIMEOUT_VERDICT = (
     "Not finished: your own verifier {path} did not finish within {seconds:.0f} seconds. "
     "Make it fast enough to run at the end (or run its slow part yourself and keep the "
     "quick checks in it), then call finish again."
-)
-
-#: A here-document that writes a file: ``<<`` and a redirection or ``tee``
-#: on the same line.  Such writes skip the read-before-modify rule, are not
-#: logged as file changes and are not reviewable; ``Write`` and ``Edit`` are.
-#: A heredoc that creates a NEW file is allowed (most heredocs create one,
-#: and a blanket refusal costs a retried step for each); one that rewrites
-#: an existing file is refused.
-HEREDOC_WRITE = re.compile(
-    r"^(?=.*<<)(?=.*(?:(?<![<>&\d])>{1,2}(?!&)\s*(?!/dev/null)\S|\btee\b)).*$", re.M)
-#: The target paths of a writing line: a redirection target or ``tee``'s file arguments.
-HEREDOC_TARGETS = re.compile(
-    r"(?<![<>&\d])>{1,2}(?!&)\s*(?!/dev/null)(?P<redirect>[^\s;|&<>]+)"
-    r"|\btee\b(?:\s+-[a-zA-Z]+)*\s+(?P<tee>[^\s;|&<>]+)")
-HEREDOC_VERDICT = (
-    "REFUSED: the command did not run: it rewrites the existing file {path} through a "
-    "here-document. Use Edit(file_path, old_string, new_string) for a change (Read the "
-    "region first) or Write(file_path, content) for the whole file: they are logged and "
-    "reviewable, a heredoc is not. A here-document may create a new file."
 )
 
 #: Largest total size of changed files shown to the reviewer.
@@ -828,10 +810,14 @@ class ContainerHarness:
         owed summary and the refused call before it), so it is dropped too
         (the generated SEA clears ``has_summary_tool`` with it).
 
+        The trial's own ``checkpoint``/``rollback`` (container archives)
+        replace any host built-ins of those names.
+
         Args:
             tools: The built-in tools of the run.
         """
-        kept = [t for t in tools if getattr(t, "__name__", "") not in ("decide", "summary")]
+        dropped = ("decide", "summary", "checkpoint", "rollback")
+        kept = [t for t in tools if getattr(t, "__name__", "") not in dropped]
         return kept + [self.checkpoint, self.rollback]
 
     def settings(self) -> dict[str, Any]:
@@ -2004,15 +1990,13 @@ class ContainerHarness:
             for match in SLEEP_POLL.finditer(SHELL_QUOTED.sub("", command)) if foreground else ():
                 if float(match.group(1)) >= SLEEP_POLL_SECONDS:
                     return SLEEP_VERDICT.format(seconds=match.group(1))
-            existing = self.heredoc_rewrite(command)
-            if existing is not None:
-                return HEREDOC_VERDICT.format(path=existing)
-            refusal = rewrite_guard(command)
+            refusal = (heredoc_guard(command, self.workdir, self.container_path_exists)
+                       or rewrite_guard(command))
             if refusal is not None:
                 return refusal
             if self.finish_gate:  # a heredoc creating a file is an edit: same ledger gate
-                for target in self.heredoc_targets(command):
-                    verdict = self.ledger_verdict({"file_path": target.strip("\"'")})
+                for target in heredoc_targets(command):
+                    verdict = self.ledger_verdict({"file_path": target})
                     if verdict is not None:
                         return verdict
         if any(INSTALL_COMMANDS.search(c) for c in commands):
@@ -2024,40 +2008,13 @@ class ContainerHarness:
                 args["timeout_seconds"] = INSTALL_TIMEOUT_SECONDS
         return None
 
-    def heredoc_rewrite(self, command: str) -> str | None:
-        """The existing file a here-document line of *command* would overwrite, if any.
-
-        A heredoc line (:data:`HEREDOC_WRITE`) whose redirection or ``tee``
-        targets all name files that do not exist yet in the container is a
-        plain file creation and is allowed; a target that exists is a
-        rewrite the ``Edit``/``Write`` tools must do.  Append redirections
-        (``>>``, ``tee -a``) to an existing file count as rewrites too.
+    def container_path_exists(self, path: str) -> bool:
+        """Whether *path* exists in the trial container (the heredoc guard's probe).
 
         Args:
-            command: The shell command.
-
-        Returns:
-            The first existing target path, or ``None`` when the command may run.
+            path: An absolute path in the container.
         """
-        for target in self.heredoc_targets(command):
-            if target.startswith(("$", "`", "\"$", "'$")):
-                return target  # unresolvable: treat as a rewrite
-            path = posixpath.normpath(posixpath.join(self.workdir, target.strip("\"'")))
-            if self.container_exec(["test", "-e", path]) is not None:
-                return path
-        return None
-
-    @staticmethod
-    def heredoc_targets(command: str) -> list[str]:
-        """The files the here-document lines of *command* redirect or ``tee`` into, as written.
-
-        Args:
-            command: The shell command.
-        """
-        joined = command.replace("\\\n", " ")  # a line continuation is one line
-        return [m.group("redirect") or m.group("tee")
-                for line in HEREDOC_WRITE.findall(joined)
-                for m in HEREDOC_TARGETS.finditer(line)]
+        return self.container_exec(["test", "-e", path]) is not None
 
     def landed_edits(self) -> list[tuple[str, str, str]]:
         """``(path, before, after)`` of the edits since the last model call that changed their file.
@@ -2143,8 +2100,6 @@ class ContainerHarness:
 
 #: The reviewer's verdict line.
 REVIEW_VERDICT_LINE = re.compile(r"VERDICT:\s*(OK|NOT DONE)\b", re.I)
-#: A checkpoint label.
-CHECKPOINT_NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
 #: The failure marker of the container ``Bash`` tools.
 EXIT_CODE_MARKER = re.compile(r"\[exit code: (-?\d+)\]")
 #: Entries of the restart inventory.

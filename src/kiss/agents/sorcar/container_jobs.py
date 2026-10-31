@@ -50,9 +50,11 @@ BashFn = Callable[[str, str, int, int], str]
 #: dir, ``{id}`` the job id.  The inner shell records its own pid (``$$``:
 #: the session leader, whatever ``setsid`` did), runs the command with bash
 #: (``sh`` when the image has no bash) and writes the exit code when it ends.
+#: Only the launch is backgrounded (the braces): a backgrounded ``a && b && c &``
+#: list is a subshell that keeps the exec's stdout open until the job ends.
 START_SCRIPT = (
     "mkdir -p {d} && printf '%s' {cmd} > {d}/{id}.cmd && "
-    "env -u {token} setsid nohup sh -c {inner} > /dev/null 2>&1 < /dev/null & "
+    "{{ env -u {token} setsid nohup sh -c {inner} > /dev/null 2>&1 < /dev/null & }}; "
     "for i in $(seq 1 50); do [ -s {d}/{id}.pid ] && break; sleep 0.1; done; cat {d}/{id}.pid"
 )
 INNER_SCRIPT = (

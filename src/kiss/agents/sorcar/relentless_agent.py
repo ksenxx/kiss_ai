@@ -120,7 +120,7 @@ class _SeenMap:
     published map without locks.
     """
 
-    __slots__ = ("levels", "size")
+    __slots__ = ("levels",)
 
     def __init__(self, levels: tuple[dict[str, int], ...] = ()) -> None:
         """Wrap *levels* (newest last); each dict is owned exclusively.
@@ -130,7 +130,6 @@ class _SeenMap:
                 ownership: the dicts are never mutated afterwards.
         """
         self.levels = levels
-        self.size = sum(len(level) for level in levels)
 
     def get(self, source: str) -> int | None:
         """Return the highest folded seq for *source*, or ``None``.
@@ -804,13 +803,12 @@ class RelentlessAgent(Base):
         # commit.
         #
         # The ledger exists from construction, not only after
-        # ``_reset``: the classifier-usage fold in ``SorcarAgent.run``'s
-        # ``finally`` (and any other pre-``_reset`` failure path) may
-        # touch the cumulative counters before the first session
-        # starts.  ``Base.__init__`` above already zeroed the counters
-        # through the property setters (zero deltas append nothing);
-        # this swap just pins the canonical empty ledger.
-        self.reset_usage()
+        # ``_reset``: ``Base.__init__`` above created it, empty, by
+        # zeroing the counters through the property setters (zero
+        # deltas append nothing), so the classifier-usage fold in
+        # ``SorcarAgent.run``'s ``finally`` (and any other pre-``_reset``
+        # failure path) can touch the counters before the first session.
+        #
         # Per-run state, (re)assigned by :meth:`_reset`; the defaults
         # are what a reader (a server-thread usage poller, a test)
         # sees on an agent that never ran.
@@ -893,23 +891,9 @@ class RelentlessAgent(Base):
         self,
         value: float,
     ) -> None:
-        # Overrides Base's plain attribute with a property on purpose:
-        # the counter is DERIVED from the append-only ledger, so an
-        # absolute overwrite appends the delta that makes the derived
-        # total equal *value*.  A concurrent attribution's append
-        # linearizes AFTER the overwrite (set-then-add) — never a torn
-        # or lost state.  Concurrent absolute overwrites of the SAME
-        # field are not serialized against each other; the production
-        # writers (Base.__init__, the server's pre-run zeroing for
-        # plain agents) are single-threaded, and multi-field zeroing
-        # goes through the atomic reset_usage instead.
-        ledger = self._usage_ledger_object()
-        delta = float(value) - _ledger_totals(ledger)[0]
-        if delta:
-            self._commit_usage_event(
-                ledger,
-                _UsageEvent(None, 0, delta, 0, 0),
-            )
+        # Overrides Base's plain attribute with a property on purpose;
+        # see _overwrite_usage.
+        self._overwrite_usage(0, float(value))
 
     @property
     def total_tokens_used(self) -> int:
@@ -922,13 +906,7 @@ class RelentlessAgent(Base):
         value: int,
     ) -> None:
         # Deliberate property-over-attribute override; see budget_used.
-        ledger = self._usage_ledger_object()
-        delta = int(value) - _ledger_totals(ledger)[1]
-        if delta:
-            self._commit_usage_event(
-                ledger,
-                _UsageEvent(None, 0, 0.0, delta, 0),
-            )
+        self._overwrite_usage(1, int(value))
 
     @property
     def total_steps(self) -> int:
@@ -938,13 +916,32 @@ class RelentlessAgent(Base):
     @total_steps.setter
     def total_steps(self, value: int) -> None:
         # Deliberate property-over-attribute override; see budget_used.
+        self._overwrite_usage(2, int(value))
+
+    def _overwrite_usage(self, field: int, value: float) -> None:
+        """Append the delta that makes usage counter *field* equal *value*.
+
+        The counters are DERIVED from the append-only ledger, so an
+        absolute overwrite appends the delta that makes the derived
+        total equal *value*.  A concurrent attribution's append
+        linearizes AFTER the overwrite (set-then-add) — never a torn
+        or lost state.  Concurrent absolute overwrites of the SAME
+        field are not serialized against each other; the production
+        writers (Base.__init__, the server's pre-run zeroing for plain
+        agents) are single-threaded, and multi-field zeroing goes
+        through the atomic reset_usage instead.
+
+        Args:
+            field: The counter's index in :func:`_ledger_totals`: 0
+                (budget), 1 (tokens) or 2 (steps).
+            value: The counter's new absolute value.
+        """
         ledger = self._usage_ledger_object()
-        delta = int(value) - _ledger_totals(ledger)[2]
+        delta = value - _ledger_totals(ledger)[field]
         if delta:
-            self._commit_usage_event(
-                ledger,
-                _UsageEvent(None, 0, 0.0, 0, delta),
-            )
+            deltas = [0.0, 0, 0]
+            deltas[field] = delta
+            self._commit_usage_event(ledger, _UsageEvent._make((None, 0, *deltas)))
 
     def _usage_ledger_object(self) -> _UsageLedger:
         """Return the current ledger epoch, creating it lazily.
@@ -1289,13 +1286,15 @@ class RelentlessAgent(Base):
         Returns:
             Ordered mapping of setting labels to display values.
         """
+        now = datetime.now(UTC)
         return {
             "Model name": self.model_name,
             "Max budget (USD)": f"${self.max_budget:.2f}",
-            # Local and UTC, so a run never spends a turn on ``date``.
+            # Local and UTC of ONE clock read, so a run never spends a
+            # turn on ``date`` and the two halves name the same instant.
             "Starting time": (
-                datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-                + " (" + datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC") + ")"
+                now.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+                + " (" + now.strftime("%Y-%m-%d %H:%M:%S UTC") + ")"
             ),
             **_host_settings(),
         }

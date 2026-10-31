@@ -195,7 +195,7 @@ def test_overview_of_a_running_task_with_children() -> None:
     assert "[12] CUSTOM_NOTE: a note" in tail
     # Whitespace-only streamed text and a text-less event leave no entry.
     assert len(entries) == 13
-    assert tail.rstrip().endswith("task_step(task_id, index) returns one entry in full.")
+    assert tail.rstrip().endswith("run_entry(task_id, index) returns one entry in full.")
 
 
 def test_overview_of_a_finished_task_without_children_or_summaries() -> None:
@@ -247,7 +247,7 @@ def test_overview_omits_middle_summaries_and_keeps_last_three_asks() -> None:
     lines = [ln for ln in section.strip().splitlines()]
     assert lines[0] == "[0] SUMMARY: summary 0"
     assert lines[1] == "[1] SUMMARY: summary 1"
-    assert lines[2] == "... 3 earlier summaries omitted (see task_transcript) ..."
+    assert lines[2] == "... 3 earlier summaries omitted (see run_transcript) ..."
     assert lines[3] == "[5] SUMMARY: summary 5"
     assert lines[-1] == "[14] SUMMARY: summary 14"
     asks = text.partition("== Previous /ask answers (3 of 5) ==")[2].partition("== Progress")[0]
@@ -289,8 +289,37 @@ def test_transcript_pages_filters_and_reports_errors() -> None:
     assert empty.endswith("(no transcript entries yet)")
 
 
+def test_transcript_of_a_finished_subagent_merges_extras_and_clips_per_kind() -> None:
+    """A finished sub-agent's header names its parent and elapsed time; a tool call's
+    ``extras`` join its top-level arguments (``lang`` is not one); a RESULT clips at
+    500 chars while a 1500-char SUMMARY is kept whole (its limit is 4000)."""
+    start = int(time.time() * 1000) - 125_000
+    parent_id = _persist("Parent prompt", [])
+    long_summary = "step " * 300
+    task_id = _persist(
+        "Sub task prompt",
+        [
+            {"type": "tool_call", "name": "Read", "path": "/work/dir/a.py",
+             "lang": "python", "extras": {"max_lines": 40}},
+            {"type": "tool_result", "content": "x" * 700, "is_error": True},
+            {"type": "tool_call", "name": "summary", "description": long_summary},
+        ],
+        extra={"startTs": start, "endTs": start + 65_000,
+               "subagent": {"parent_task_id": parent_id}},
+    )
+    page = task_digest.transcript_page(task_id)
+    assert f"Sub-agent of task: {parent_id}" in page
+    assert "Elapsed: 1 min 5 s" in page
+    assert _entries(page) == [
+        '[0] TOOL CALL Read({"path": "/work/dir/a.py", "max_lines": 40})',
+        "[1] RESULT (error): " + "x" * 500 + " …[200 more chars]",
+        f"[2] SUMMARY: {long_summary}",
+    ]
+
+
 def test_step_returns_one_entry_in_full() -> None:
-    """``task_step`` returns the unclipped entry and rejects bad indices."""
+    """``entry_detail`` (rsi7d's ``run_entry``) returns the unclipped entry and rejects bad
+    indices."""
     task_id = _persist("Run the benchmark", _running_task_events())
     full = task_digest.entry_detail(task_id, 3)
     assert full == "[3] OUTPUT: trial 1 done\ntrial 2 done\n" + "x" * 900
@@ -333,13 +362,19 @@ def _write(path: Path, text: str) -> None:
 
 def test_context_of_a_running_task_with_children_and_progress_log(tmp_path: Path) -> None:
     """``task_context`` is the header, the worker sub-agents, the tail of the
-    freshest progress log on disk and the whole transcript, oldest first."""
+    progress log the task wrote and the whole transcript, oldest first."""
+    # Logs in the work dir the task never wrote: not shown.
     _write(tmp_path / "PROGRESS.md", "# stale root log\nroot line\n")
-    _write(tmp_path / "PROGRESS_LOG.md", "   \n")  # blank: skipped
-    time.sleep(0.01)
-    _write(tmp_path / "tmp" / "PROGRESS.md", "# live log\nstep one\nstep two\n")
+    _write(tmp_path / "PROGRESS_LOG.md", "   \n")
+    live_log = "# live log\nstep one\nstep two\n"
+    _write(tmp_path / "tmp" / "PROGRESS.md", live_log)
+    write_log = [
+        {"type": "tool_call", "name": "Write", "path": str(tmp_path / "tmp" / "PROGRESS.md"),
+         "content": live_log},
+        {"type": "tool_result", "content": "Successfully wrote the log"},
+    ]
     task_id = _persist(
-        "Run the benchmark", _running_task_events(), extra={"work_dir": str(tmp_path)},
+        "Run the benchmark", _running_task_events() + write_log, extra={"work_dir": str(tmp_path)},
     )
     worker = _persist(
         "Run the tests", [], extra={"subagent": {"parent_task_id": task_id}},
@@ -357,15 +392,17 @@ def test_context_of_a_running_task_with_children_and_progress_log(tmp_path: Path
     children, _, rest = rest.partition("== Progress log written by the task (newest entries) ==\n")
     assert children.startswith(f"[{worker}] steps=0, cost=$0.00, started ")
     assert side not in children
-    log, _, transcript = rest.partition("== Transcript (13 entries, oldest first) ==\n")
+    log, _, transcript = rest.partition("== Transcript (15 entries, oldest first) ==\n")
     assert log == "# live log\nstep one\nstep two\n\n"
     assert "root line" not in text
     entries = _entries(transcript)
-    assert len(entries) == 13
+    assert len(entries) == 15
     assert entries[0] == "[0] THOUGHT: Plan: run it."
     assert entries[7] == "[7] ASK ANSWER: Q: how many trials are done?"
     assert "[11] RESULT (error): Edit failed" in transcript
-    assert transcript.endswith("[12] CUSTOM_NOTE: a note")
+    assert entries[12] == "[12] CUSTOM_NOTE: a note"
+    assert entries[13].startswith("[13] TOOL CALL Write(")
+    assert transcript.endswith("[14] RESULT: Successfully wrote the log")
     assert "elided" not in text
 
 
@@ -373,17 +410,28 @@ def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> N
     """Over budget, whole transcript entries go oldest first (marked, multi-line
     entries never split) and the progress log keeps its newest lines within its
     own limit; an unknown task or no work dir is handled."""
-    _write(tmp_path / "PROGRESS.md", "\n".join(f"log line {i}" for i in range(2000)))
+    log_text = "\n".join(f"log line {i}" for i in range(2000))
+    _write(tmp_path / "PROGRESS.md", log_text)
     events: list[dict[str, Any]] = [{"type": "prompt", "text": "p"}]
     for i in range(400):
         events.append({"type": "tool_result", "content": f"result {i}\n" + "y" * 300})
-    task_id = _persist("p", events, extra={"work_dir": str(tmp_path)})
+    write_log = [
+        {"type": "tool_call", "name": "Write", "path": str(tmp_path / "PROGRESS.md"),
+         "content": log_text},
+        {"type": "tool_result", "content": "Successfully wrote the log"},
+    ]
+    writer = _persist("p", events[:1] + write_log + events[1:], extra={"work_dir": str(tmp_path)})
 
-    text = task_digest.context(task_id)
+    text = task_digest.context(writer)
     assert len(text) <= task_digest.MAX_CONTEXT_CHARS
     log = text.partition("(newest entries) ==\n")[2].partition("\n\n== Transcript")[0]
     assert log.startswith("[older progress-log entries elided]\nlog line ")
     assert log.endswith("log line 1999") and len(log) <= 8_000
+    # A task that never wrote the work dir's log is shown none.
+    task_id = _persist("p", events, extra={"work_dir": str(tmp_path)})
+    text = task_digest.context(task_id)
+    assert len(text) <= task_digest.MAX_CONTEXT_CHARS
+    assert "Progress log" not in text
     transcript = text.partition("(400 entries, oldest first) ==\n")[2]
     marker, _, kept = transcript.partition("\n")
     elided = int(marker.removeprefix("[... ").removesuffix(" older entries elided ...]"))
@@ -441,16 +489,21 @@ def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> N
     bare = task_digest.context(_persist("Nothing yet", [], extra={"work_dir": ""}))
     assert "Progress log" not in bare
     assert bare.endswith("oldest first) ==\n(no transcript entries yet)")
-    assert task_digest.progress_log_tail("") == ""
-    assert task_digest.progress_log_tail(str(tmp_path / "missing")) == ""
+    assert task_digest.progress_log_tail({"events": [], "work_dir": ""}) == ""
+    # The log is rebuilt from the task's own calls: a file gone since does not matter.
+    missing = [{**write_log[0], "path": str(tmp_path / "missing" / "PROGRESS.md")}, write_log[1]]
+    assert task_digest.progress_log_tail({"events": missing, "work_dir": ""}).endswith(
+        "\nlog line 1999")
     # The log tail, marker included, never exceeds its limit: the cut moves to
     # the next line start, or into the last line when no line start fits.
+    logged = task_digest.load_task(writer)
+    assert logged is not None
     marker = "[older progress-log entries elided]\n"
-    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 5) == marker + " 1999"
-    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 20) == (
+    assert task_digest.progress_log_tail(logged, limit=len(marker) + 5) == marker + " 1999"
+    assert task_digest.progress_log_tail(logged, limit=len(marker) + 20) == (
         marker + "log line 1999"
     )
-    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 28) == (
+    assert task_digest.progress_log_tail(logged, limit=len(marker) + 28) == (
         marker + "log line 1998\nlog line 1999"
     )
     assert task_digest._tail("aaa\nbb", 5, "M") == "M\nbb"

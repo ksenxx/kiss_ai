@@ -59,6 +59,11 @@ function speakRound(page) {
   );
 }
 
+// The tag of the round posted last, which the daemon echoes in its reply.
+function lastRoundTag(page) {
+  return page.posted.filter(m => m.type === 'voiceTranscribe').pop().round;
+}
+
 async function main() {
   await test(
     'speech after a lost terminal event must not leave the yellow ' +
@@ -83,7 +88,11 @@ async function main() {
       );
 
       speakRound(page); // round B
-      send(win, {type: 'voiceSpeech', text: 'hello world'});
+      send(win, {
+        type: 'voiceSpeech',
+        text: 'hello world',
+        round: lastRoundTag(page),
+      });
 
       assert.ok(
         !btn.classList.contains('voice-transcribing'),
@@ -105,7 +114,11 @@ async function main() {
 
     for (let round = 1; round <= 3; round++) {
       speakRound(page);
-      send(win, {type: 'voiceSpeech', text: `part${round}`});
+      send(win, {
+        type: 'voiceSpeech',
+        text: `part${round}`,
+        round: lastRoundTag(page),
+      });
       assert.ok(
         !btn.classList.contains('voice-transcribing'),
         `round ${round} must clear the yellow flash`,

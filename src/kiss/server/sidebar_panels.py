@@ -29,6 +29,10 @@ the per-task ones:
 The Schedule subpanel's edit / run / pause / delete buttons send
 ``cronAction``, applied by :func:`kiss.agents.sorcar.cron_agent.apply_job_action`.
 
+Every subpanel shows the machine the chat header's drop-down has
+picked: a command carrying ``machine`` is answered by that machine's
+daemon instead (:data:`MACHINE_FORWARDERS`).
+
 Probing the apps imports every channel module and builds its agent, so
 it runs in a short-lived subprocess
 (``python -m kiss.agents.third_party_agents.auth_status``) and the
@@ -74,6 +78,18 @@ DNS_TIMEOUT_SECONDS = 2.0
 # (:func:`kiss.core.models.codex_model.codex_device_login`'s default
 # *timeout*): a forwarded ``startCodexLogin`` is waited for that long.
 _CODEX_LOGIN_TIMEOUT_SECONDS = 60.0
+# Seconds ``codex login status`` may take
+# (:func:`kiss.core.models.codex_model.codex_auth_status`'s default
+# *timeout*; ``claude auth status`` gets 20): a forwarded
+# ``getCodexStatus`` / ``getClaudeCodeStatus`` is waited for that long.
+_CLI_STATUS_TIMEOUT_SECONDS = 30.0
+# Seconds a machine may take, beyond a request's usual budget, before
+# its ``machines`` reply: it pings the machines it registered (an SSH
+# one opens its port-forward first, every host name is looked up) and
+# an ``add`` first enrolls the new machine.
+_MACHINES_REPLY_SECONDS = (
+    machines.SSH_TIMEOUT + machines.ENROLL_TIMEOUT + DNS_TIMEOUT_SECONDS
+)
 
 _apps_lock = threading.Lock()
 _apps_cache: list[dict[str, Any]] = []
@@ -401,18 +417,14 @@ def machine_work_dirs(name: str, work_dir: str = "") -> dict[str, Any]:
     reply: dict[str, Any] = {
         "machine": name, "workDir": "", "recentWorkDirs": [], "maxBudget": None, "error": "",
     }
-    machine = machines.find_machine(name)
-    if machine is None:
-        reply["error"] = f"no machine named {name!r}"
-        return reply
     cmd: dict[str, Any] = {"type": "getConfig"}
     if work_dir:
         cmd = {"type": "setWorkDir", "workDir": work_dir, "reply": True}
-    try:
-        config = machines.link_for(machine).request(cmd, "configData").get("config") or {}
-    except machines.MachineError as exc:
-        reply["error"] = str(exc)
+    answer = _machine_reply(name, cmd, "configData", {})
+    if "error" in answer:
+        reply["error"] = answer["error"]
         return reply
+    config = answer.get("config") or {}
     reply["workDir"] = str(config.get("work_dir") or "")
     reply["recentWorkDirs"] = [
         row for row in config.get("recent_work_dirs") or []
@@ -465,7 +477,18 @@ def machine_workspace_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     refused: dict[str, Any] = {k: cmd[k] for k in ("path", "token", "tabId") if k in cmd}
     if reply_type == "dirListing":
         refused["entries"] = []
-    return _machine_reply(name, cmd, reply_type, refused)
+    # A Git action waits there for the repository's lock (an auto-commit
+    # may hold it for minutes) and then runs git and its hooks, and a
+    # file action pastes, deletes or searches as much as the folder
+    # holds: their replies are waited for MACHINE_COMMIT_TIMEOUT (a
+    # timed-out reply would be lost, the page told "did not answer" while
+    # the action completes there, and the machine backed off as down), on
+    # a link lane of their own so the Explorer's other requests (and a
+    # submit to the machine) do not queue behind them.
+    timeout, lane = machines.REQUEST_TIMEOUT, ""
+    if reply_type in ("gitActionResult", "fsResult"):
+        timeout, lane = MACHINE_COMMIT_TIMEOUT, "actions"
+    return _machine_reply(name, cmd, reply_type, refused, timeout=timeout, lane=lane)
 
 
 MACHINE_SETTINGS_REPLIES: dict[str, str] = {
@@ -505,12 +528,16 @@ def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     """
     reply_type = MACHINE_SETTINGS_REPLIES[str(cmd["type"])]
     # The machine's device login answers once its CLI printed the code,
-    # up to _CODEX_LOGIN_TIMEOUT_SECONDS later: its reply is waited for
-    # that long, on a link lane of its own so the sheet's other requests
-    # (and a submit to the machine) do not queue behind it.
+    # up to _CODEX_LOGIN_TIMEOUT_SECONDS later, and its CLI status probes
+    # once the CLI answered, up to _CLI_STATUS_TIMEOUT_SECONDS later:
+    # their replies are waited for that long, each kind on a link lane of
+    # its own so the sheet's other requests (and a submit to the machine)
+    # do not queue behind them.
     timeout, lane = machines.REQUEST_TIMEOUT, ""
     if reply_type == "codexLogin":
         timeout, lane = timeout + _CODEX_LOGIN_TIMEOUT_SECONDS, "login"
+    elif reply_type in ("claudeCodeStatus", "codexStatus"):
+        timeout, lane = timeout + _CLI_STATUS_TIMEOUT_SECONDS, "status"
     return _machine_reply(
         name, cmd, reply_type, {}, errors=True, timeout=timeout, lane=lane, forwarded=True,
     )
@@ -519,23 +546,26 @@ def machine_settings_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
 MACHINE_PANEL_REPLIES: dict[str, str] = {
     "getCronJobs": "cronJobs",
     "cronAction": "cronJobs",
+    "getMachines": "machines",
+    "machineAction": "machines",
     "getAppsStatus": "appsStatus",
     "getSpendReport": "spendReport",
     "getRecommendations": "recommendations",
 }
 """The sidebar subpanel commands a registered machine answers, by reply type.
 
-The remote webapp's Schedule, Apps, Spend and Recommendations
-subpanels show the machine the chat header's drop-down has picked:
-each of these commands, when it carries ``machine``, is forwarded to
-that machine's daemon (:func:`machine_panel_reply`), so the subpanels
-list (and the Schedule one edits) that machine's cron jobs, app
-sign-ins, spend and recommendations instead of this daemon's.  The
-Machines subpanel is this daemon's registry and is never forwarded.
+The remote webapp's Schedule, Machines, Apps, Spend and
+Recommendations subpanels show the machine the chat header's
+drop-down has picked: each of these commands, when it carries
+``machine``, is forwarded to that machine's daemon
+(:func:`machine_panel_reply`), so the subpanels list (and the Schedule
+and Machines ones edit) that machine's cron jobs, registered machines,
+app sign-ins, spend and recommendations instead of this daemon's.
 """
 
 _PANEL_EMPTY_FIELDS: dict[str, dict[str, Any]] = {
     "cronJobs": {"jobs": []},
+    "machines": {"machines": [], "checkedAt": 0},
     "appsStatus": {"apps": [], "checkedAt": 0},
     "spendReport": {},
     "recommendations": {"generatedAt": 0, "tasks": []},
@@ -553,27 +583,42 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         The machine's reply, or an empty one of the expected type
-        (no jobs, apps or tasks; a ``cronAction``'s ``action`` kept)
-        carrying the ``error`` when the machine is not registered,
-        unreachable, or refused the command with an ``error`` frame.
+        (no jobs, machines, apps or tasks) carrying the ``error`` when
+        the machine is not registered, unreachable, or refused the
+        command with an ``error`` frame.  Either names a
+        ``cronAction``'s ``action`` and ``jobId``, or a
+        ``machineAction``'s ``action`` and ``name``, as this daemon's
+        own replies do.
     """
     reply_type = MACHINE_PANEL_REPLIES[str(cmd["type"])]
-    refused = dict(_PANEL_EMPTY_FIELDS[reply_type])
+    echo: dict[str, str] = {}
     if cmd["type"] == "cronAction":
-        refused["action"] = str(cmd.get("action") or "")
+        echo = {"action": str(cmd.get("action") or ""), "jobId": str(cmd.get("jobId") or "")}
+    elif cmd["type"] == "machineAction":
+        echo = {"action": str(cmd.get("action") or ""), "name": str(cmd.get("name") or "")}
+    refused = {**_PANEL_EMPTY_FIELDS[reply_type], **echo}
     # The machine's app probe is a subprocess of up to
-    # PROBE_PROCESS_TIMEOUT_SECONDS: its reply is waited for that long,
-    # not the link's usual few seconds (a timed-out reply would be lost,
-    # and the panel shown "did not answer" for a probe that succeeded).
-    # The subpanels' polls travel on a link lane of their own, so that
-    # wait holds up no submit, settings or Explorer request.
+    # PROBE_PROCESS_TIMEOUT_SECONDS, and its machines reply waits for its
+    # own pings: the reply is waited for that long, not the link's usual
+    # few seconds (a timed-out reply would be lost, the panel shown "did
+    # not answer" and the machine backed off as down).  The subpanels'
+    # polls travel on a link lane of their own, so that wait holds up no
+    # submit, settings or Explorer request.
     timeout = machines.REQUEST_TIMEOUT
     if reply_type == "appsStatus":
         timeout += PROBE_PROCESS_TIMEOUT_SECONDS
-    return _machine_reply(
+    elif reply_type == "machines":
+        timeout += _MACHINES_REPLY_SECONDS
+    reply = _machine_reply(
         name, cmd, reply_type, refused,
         errors=True, timeout=timeout, lane="panels", forwarded=True,
     )
+    # The machine's reply may not name them: an older daemon's, or the
+    # changed registry a machine pushes to every connection after a
+    # ``machineAction`` (this link's too), which may come before the
+    # action's own reply and is the action's outcome all the same.
+    reply.update(echo)
+    return reply
 
 
 def machine_task_update_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
@@ -601,20 +646,112 @@ def machine_task_update_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     return _machine_reply(name, cmd, "taskUpdate", refused, lane="panels")
 
 
-MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
+FILES_INDEX_WAIT = 60.0
+"""Seconds a forwarded ``getFiles`` keeps asking while the machine indexes the folder."""
+
+_FILES_POLL_INTERVALS = (0.2, 2.0)
+"""First and longest pause between two asks of a forwarded ``getFiles`` (doubling)."""
+
+
+def machine_files_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the ``@``-mention picker's ``getFiles`` to registered machine *name*.
+
+    A tab whose tasks run on a machine mentions that machine's files,
+    so its picker lists them, not this daemon's.  The machine answers a
+    folder it has never indexed with an empty ``loading`` list at once
+    and sends the real list when its scan is done; a link request reads
+    one reply, so the command is asked again, at growing intervals,
+    until the list is ready or :data:`FILES_INDEX_WAIT` seconds have
+    passed (the page asks again on the ``loading`` reply it then
+    gets).  A list echoing another ``prefix`` or ``tabId`` is asked
+    past as well: it answers an earlier request on the shared link
+    (the list its scan sent after the request had returned
+    ``loading``), and the page would drop it.
+
+    Returns:
+        The machine's ``files`` reply stamped ``machine``, or an empty
+        one carrying the ``error`` (and the command's ``prefix`` and
+        ``tabId``, which the page matches the reply with) when the
+        machine is not registered or unreachable.
+    """
+    refused: dict[str, Any] = {k: cmd[k] for k in ("prefix", "tabId") if k in cmd}
+    refused["files"] = []
+    deadline = time.monotonic() + FILES_INDEX_WAIT
+    pause, longest = _FILES_POLL_INTERVALS
+    while True:
+        reply = _machine_reply(name, cmd, "files", refused)
+        late = any(k in reply and reply[k] != cmd.get(k) for k in ("prefix", "tabId"))
+        if not (reply.get("loading") or late) or time.monotonic() >= deadline:
+            return reply
+        time.sleep(pause)
+        pause = min(pause * 2, longest)
+
+
+def machine_file_usage(name: str, cmd: dict[str, Any]) -> None:
+    """Forward ``recordFileUsage`` to registered machine *name*.
+
+    The machine counts the mention picked for it, so its picker ranks
+    the file ``frequent``.  The command has no reply; the count is lost
+    when the machine is not registered or unreachable.
+    """
+    reply = _machine_reply(name, cmd, "", {})
+    if "error" in reply:
+        logger.info("mention usage not counted on %s: %s", name, reply["error"])
+
+
+def machine_models_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any] | None:
+    """Forward the model picker's ``getModels`` / ``selectModel`` *cmd* to machine *name*.
+
+    The chat input's model picker is the picker of the machine the chat
+    header's drop-down has picked: ``getModels`` brings that machine's
+    own model list and default model, and ``selectModel`` makes the
+    model the machine's default (and the tab's there), leaving this
+    daemon's default alone.  The command is sent minus ``machine`` and
+    this daemon's ``connId``.
+
+    Returns:
+        The machine's ``models`` reply for ``getModels``, ``None`` for
+        ``selectModel`` (it has no reply), or an empty ``models`` reply
+        carrying the ``error`` when the machine is not registered or
+        unreachable; a reply is stamped ``machine`` and ``forwarded``
+        and echoes the command's ``generation`` (0 when it had none).
+    """
+    reply_type = "models" if cmd["type"] == "getModels" else ""
+    reply = _machine_reply(
+        name, cmd, reply_type, {"models": [], "selected": ""}, errors=True, forwarded=True,
+    )
+    if not reply_type and "error" not in reply:
+        return None
+    reply["type"] = "models"
+    # The link stamped the command with a generation of its own, which
+    # the machine echoed: the page is answered with the one it sent.
+    reply["generation"] = cmd.get("generation", 0)
+    return reply
+
+
+MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | None]] = {
     **dict.fromkeys(MACHINE_WORKSPACE_REPLIES, machine_workspace_reply),
     **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
     "getTaskUpdate": machine_task_update_reply,
+    "getFiles": machine_files_reply,
+    "recordFileUsage": machine_file_usage,
+    "getModels": machine_models_reply,
+    "selectModel": machine_models_reply,
 }
-"""Every command a registered machine answers when it carries ``machine``, by its forwarder."""
+"""Every command a registered machine answers when it carries ``machine``, by its forwarder.
+
+A forwarder returning ``None`` (``recordFileUsage``, a delivered
+``selectModel``) sends no reply."""
 
 MACHINE_COMMIT_TIMEOUT = 900.0
 """Seconds a machine gets to stage, write a commit message with an LLM and commit.
 
 Beyond what one ``git`` call may take there (300 s), the LLM call and
 a wait for the repository's lock: a timeout reports a failure here
-while the machine may still commit, so it must not come first.
+while the machine may still commit, so it must not come first.  A
+forwarded Git or file action (:func:`machine_workspace_reply`), which
+may wait for that lock or copy a whole folder, gets as long.
 """
 
 

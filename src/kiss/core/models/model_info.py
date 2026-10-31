@@ -32,6 +32,12 @@ from kiss.core.utils import atomic_write_text, seed_file_atomically
 
 logger = logging.getLogger(__name__)
 
+# One long-prompt price tier: ``(min_prompt_tokens, {price field: USD per
+# 1M tokens})``.  It applies to a request whose prompt (input, cache-read
+# and cache-write tokens) is strictly longer than ``min_prompt_tokens``;
+# see :func:`calculate_cost`.
+PromptTier = tuple[int, dict[str, float]]
+
 
 class ModelInfo:
     """Container for model metadata including pricing and capabilities."""
@@ -57,6 +63,7 @@ class ModelInfo:
         alias_of: str | None = None,
         use_responses_api: bool | None = None,
         is_decisions_supported: bool = False,
+        prompt_tiers: tuple[PromptTier, ...] = (),
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -79,6 +86,9 @@ class ModelInfo:
         self.adaptive_thinking = adaptive_thinking
         self.alias_of = alias_of
         self.use_responses_api = use_responses_api
+        # Long-prompt price tiers (OpenRouter ``pricing.overrides``); see
+        # _parse_prompt_tiers and calculate_cost.
+        self.prompt_tiers = prompt_tiers
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -401,6 +411,10 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     # field would bill audio/image tokens at the text rates.
     entry: dict[str, Any] = {"context_length": info.context_length}
     entry.update({field: getattr(info, field) for field in _PER_1M_PRICE_FIELDS})
+    if info.prompt_tiers:
+        entry["prompt_tiers"] = [
+            {"min_prompt_tokens": threshold, **prices} for threshold, prices in info.prompt_tiers
+        ]
     return {key: value for key, value in entry.items() if value is not None}
 
 
@@ -564,6 +578,30 @@ def custom_model_config(model_name: str) -> dict[str, Any] | None:
     return result
 
 
+_PER_1M_PRICE_FIELDS = (
+    "input_price_per_1M",
+    "output_price_per_1M",
+    "cache_read_price_per_1M",
+    "cache_write_price_per_1M",
+    "cache_write_1h_price_per_1M",
+    "audio_input_price_per_1M",
+    "audio_output_price_per_1M",
+    "image_output_price_per_1M",
+)
+"""Every per-1M-token price of an entry (JSON key and :class:`ModelInfo` attribute)."""
+
+
+def _require_number(key: str, value: Any) -> None:
+    """Raise ``TypeError`` unless *value* is a JSON number (a boolean is not).
+
+    Args:
+        key: The entry field, named in the error.
+        value: The field's value.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{key} must be a number, got {value!r}")
+
+
 def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
     """Build a :class:`ModelInfo` from one JSON object.
 
@@ -587,6 +625,8 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       ``cache_write_1h_price_per_1M`` — explicit cache pricing
       overrides (default ``None``; otherwise reconstructed from
       ``_apply_cache_pricing``).
+    * ``prompt_tiers`` — long-prompt price tiers (default none); see
+      :func:`_parse_prompt_tiers`.
     * ``comment`` — free-form annotation, ignored by the loader (kept so
       ``update_models.py`` can persist ``"NEW"`` markers).
     * ``extended_thinking`` — tri-state override for whether the
@@ -609,7 +649,21 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       transport, live-verified by ``scripts/update_responses_api_support``),
       ``False`` or ``None`` keeps the Chat Completions v1 transport.  A
       caller's ``model_config["use_responses_api"]`` always overrides it.
+
+    The context length and every price must be JSON numbers (an optional
+    price may also be absent or ``null``): a string price would otherwise
+    pass here and raise later in arithmetic, at import for the whole
+    catalog or in every cost lookup of the entry.
+
+    Raises:
+        KeyError: When a required key is missing.
+        TypeError: When the context length or a price is not a number.
     """
+    for key in _CUSTOM_MODEL_DEFAULTS:
+        _require_number(key, entry[key])
+    for key in _PER_1M_PRICE_FIELDS:
+        if entry.get(key) is not None:
+            _require_number(key, entry[key])
     return ModelInfo(
         context_length=entry["context_length"],
         input_price_per_million=entry["input_price_per_1M"],
@@ -630,7 +684,75 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         alias_of=entry.get("alias_of"),
         use_responses_api=entry.get("use_responses_api"),
         is_decisions_supported=entry.get("dec", False),
+        prompt_tiers=_parse_prompt_tiers(entry.get("prompt_tiers")),
     )
+
+
+# Catalog prices a ``prompt_tiers`` entry may replace (USD per 1M tokens).
+PROMPT_TIER_PRICE_FIELDS = (
+    "input_price_per_1M",
+    "output_price_per_1M",
+    "cache_read_price_per_1M",
+    "cache_write_price_per_1M",
+    "cache_write_1h_price_per_1M",
+)
+
+
+def _is_price(value: Any) -> bool:
+    """Return True when *value* is a JSON number that converts to a finite, non-negative float."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        price = float(value)
+    except OverflowError:  # a JSON integer such as 10**400
+        return False
+    return 0.0 <= price < float("inf")
+
+
+def _parse_prompt_tiers(raw: Any) -> tuple[PromptTier, ...]:
+    """Return the valid long-prompt price tiers of a catalog entry, in order.
+
+    ``prompt_tiers`` mirrors OpenRouter's ``pricing.overrides``
+    (imported by ``update_models.py``): a list of objects, each with an
+    integer ``min_prompt_tokens`` and any of
+    :data:`PROMPT_TIER_PRICE_FIELDS`.  A tier applies when a request's
+    prompt is strictly longer than ``min_prompt_tokens``; when several
+    apply, later tiers win per field, and a field no applying tier sets
+    keeps the entry's own price.  A malformed tier (unknown key, missing
+    or non-positive threshold, negative or non-numeric price) is skipped
+    with a warning rather than failing the whole catalog, which is read
+    at import time.
+
+    Args:
+        raw: The entry's ``prompt_tiers`` value (``None`` when absent).
+
+    Returns:
+        ``(min_prompt_tokens, {field: price})`` pairs in catalog order.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        logger.warning("Ignoring non-list prompt_tiers %r", raw)
+        return ()
+    tiers: list[PromptTier] = []
+    for tier in raw:
+        threshold = tier.get("min_prompt_tokens") if isinstance(tier, dict) else None
+        prices = (
+            {k: v for k, v in tier.items() if k != "min_prompt_tokens"}
+            if isinstance(tier, dict)
+            else {}
+        )
+        if (
+            not isinstance(threshold, int)
+            or isinstance(threshold, bool)
+            or threshold <= 0
+            or not prices
+            or any(k not in PROMPT_TIER_PRICE_FIELDS or not _is_price(v) for k, v in prices.items())
+        ):
+            logger.warning("Ignoring malformed prompt tier %r", tier)
+            continue
+        tiers.append((threshold, {k: float(v) for k, v in prices.items()}))
+    return tuple(tiers)
 
 
 _CATALOG_READ_ATTEMPTS = 5
@@ -691,6 +813,7 @@ _ALIAS_MIRRORED_FIELDS = (
     "audio_input_price_per_1M",
     "audio_output_price_per_1M",
     "image_output_price_per_1M",
+    "prompt_tiers",
 )
 
 
@@ -864,6 +987,14 @@ class OpenAICompatibleProvider:
         delegate_tools_to_responses: Whether tool-bearing requests carrying
             ``reasoning_effort`` should be transported via the vendor's
             ``/v1/responses`` endpoint instead of Chat Completions.
+        responses_item_id_prefixes: ``(item type, id prefix)`` pairs the
+            vendor's ``/v1/responses`` endpoint enforces on replayed input
+            items (verified live for OpenAI: ``Invalid 'input[N].id':
+            ... Expected an ID that begins with 'fc'``).  An item without
+            its prefix was issued by another vendor before a model
+            hand-off: a ``reasoning`` item is dropped, since only the
+            vendor that issued it can replay it, and any other item loses
+            its ``id``.  Empty = the vendor accepts foreign ids.
     """
 
     name: str
@@ -875,6 +1006,7 @@ class OpenAICompatibleProvider:
     api_key_name: str
     tools_accept_reasoning_effort: bool | None
     delegate_tools_to_responses: bool
+    responses_item_id_prefixes: tuple[tuple[str, str], ...] = ()
 
 
 OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
@@ -899,6 +1031,11 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         api_key_name="OPENAI_API_KEY",
         tools_accept_reasoning_effort=False,
         delegate_tools_to_responses=True,
+        responses_item_id_prefixes=(
+            ("reasoning", "rs"),
+            ("function_call", "fc"),
+            ("message", "msg"),
+        ),
     ),
     OpenAICompatibleProvider(
         name="together",
@@ -944,7 +1081,7 @@ def openai_compatible_provider_for_base_url(
     Substring matching (rather than exact URL equality) lets wire tests
     point a model at a local capture server whose URL embeds the vendor
     host as a path segment, and tolerates trailing slashes or versioned
-    path variants.
+    path variants.  Host names are case-insensitive, so the match is too.
 
     Args:
         base_url: The model's API root URL.
@@ -953,8 +1090,9 @@ def openai_compatible_provider_for_base_url(
         The matching :class:`OpenAICompatibleProvider`, or None when the
         endpoint is unknown (custom gateway).
     """
+    url = base_url.lower()
     for provider in OPENAI_COMPATIBLE_PROVIDERS:
-        if provider.host in base_url:
+        if provider.host in url:
             return provider
     return None
 
@@ -973,9 +1111,26 @@ vendors the :func:`model` factory routes with their own SDK or CLI.  A
 ``None`` key means the credential is not a single API key: a local
 executable for the CLIs, the AWS credentials of
 :func:`bedrock_credentials_configured` for Bedrock.  Together the two
-tables are the complete routing table, and :func:`get_model_provider` is
-the only place either is consulted.
+tables are the complete routing table: :func:`model` dispatches and
+:func:`get_model_provider` labels by this one through
+:func:`_native_provider`.
 """
+
+
+def _native_provider(model_name: str) -> str | None:
+    """Return the label of the :data:`_NATIVE_PROVIDERS` row that routes *model_name*.
+
+    Args:
+        model_name: A model name without a harbor-style provider prefix.
+
+    Returns:
+        The provider label (e.g. ``"Gemini"``), or ``None`` when no
+        native prefix matches.
+    """
+    for prefix, label, _api_key_name in _NATIVE_PROVIDERS:
+        if model_name.startswith(prefix):
+            return label
+    return None
 
 
 def bedrock_credentials_configured() -> bool:
@@ -1271,16 +1426,27 @@ _ANTHROPIC_CACHE_READ_MULTIPLIERS = (
     (("claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"), 0.025),
     (("claude-opus-5-5", "claude-opus-5.5", "claude-sonnet-5-5", "claude-sonnet-5.5"), 0.05),
 )
-# Claude Haiku 5.5 is the one Claude model priced by prompt length: prompts
-# over 100K tokens (input + cache read + cache write) bill the whole request
-# at 5x every rate ($0.10/$0.50 -> $0.50/$2.50; 5m write $0.125 -> $0.625;
-# 1h write $0.20 -> $1; read $0.01 -> $0.05).  Every other 1M-context Claude
-# model bills long prompts at standard rates:
+# Claude Haiku 5.5 is priced by prompt length: prompts over 100K tokens
+# (input + cache read + cache write) bill the whole request at 5x every rate
+# ($0.10/$0.50 -> $0.50/$2.50; 5m write $0.125 -> $0.625; 1h write $0.20 ->
+# $1; read $0.01 -> $0.05):
 # https://platform.claude.com/docs/en/models/haiku-5-5/overview
 _ANTHROPIC_LONG_CONTEXT_FAMILIES = (
     "claude-haiku-5-5",
     "claude-haiku-5.5",
     "claude-haiku-latest",
+)
+# Claude Sonnet 4.5 bills a prompt over 200K tokens (input + cache read +
+# cache write) at 2x the input and cache rates and 1.5x the output rate for
+# the whole request ($3/$15 -> $6/$22.50; read $0.30 -> $0.60; 5m write
+# $3.75 -> $7.50; 1h write $6 -> $12), as OpenRouter's
+# ``anthropic/claude-sonnet-4.5`` listing publishes (``min_prompt_tokens:
+# 200000`` override; the 500K OpenRouter entry is the catalog route that can
+# reach it, the direct and Bedrock entries stop at 200K).  Every other
+# 1M-context Claude model bills long prompts at standard rates.
+_ANTHROPIC_SONNET_LONG_CONTEXT_FAMILIES = (
+    "claude-sonnet-4-5",
+    "claude-sonnet-4.5",
 )
 _OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
 _GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
@@ -1640,16 +1806,6 @@ def bedrock_model_id(model_name: str) -> str:
 # the same on every profile.
 _BEDROCK_GEO_PRICE_FACTOR = 1.1
 _BEDROCK_GEO_MIN_GENERATION = (4, 5)
-_PER_1M_PRICE_FIELDS = (
-    "input_price_per_1M",
-    "output_price_per_1M",
-    "cache_read_price_per_1M",
-    "cache_write_price_per_1M",
-    "cache_write_1h_price_per_1M",
-    "audio_input_price_per_1M",
-    "audio_output_price_per_1M",
-    "image_output_price_per_1M",
-)
 
 
 def _claude_generation(claude: str) -> tuple[int, int]:
@@ -1692,9 +1848,9 @@ def _scaled_prices(info: ModelInfo, factor: float) -> ModelInfo:
     """Return *info* with every per-1M price multiplied by *factor*.
 
     *info* itself when *factor* is 1; otherwise a shallow copy with the
-    registered (non-None) prices scaled (rounded past float noise, so
-    $6.25 x 1.1 is stored as 6.875, not 6.875000000000001), so the
-    catalog entry is never mutated.
+    registered (non-None) prices and its prompt-tier prices scaled
+    (rounded past float noise, so $6.25 x 1.1 is stored as 6.875, not
+    6.875000000000001), so the catalog entry is never mutated.
     """
     if factor == 1.0:
         return info
@@ -1703,6 +1859,10 @@ def _scaled_prices(info: ModelInfo, factor: float) -> ModelInfo:
         price = getattr(info, field)
         if price is not None:
             setattr(scaled, field, round(price * factor, 9))
+    scaled.prompt_tiers = tuple(
+        (threshold, {field: round(price * factor, 9) for field, price in prices.items()})
+        for threshold, prices in info.prompt_tiers
+    )
     return scaled
 
 
@@ -1786,6 +1946,13 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     ``calculate_cost`` falls back to the full input price (a conservative
     over-estimate).
 
+    A price derived here also gets derived for each ``prompt_tiers`` tier
+    that sets its own input price but not that price (OpenRouter
+    publishes no 12-hour OpenAI write rate, so a long-prompt tier never
+    lists one): the rule applies to the tier's input price, as it does
+    to the base input price.  A published price a tier omits keeps the
+    base value, which is OpenRouter's rule.
+
     Args:
         name: The MODEL_INFO key.
         info: The ModelInfo to mutate in place.
@@ -1797,12 +1964,55 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         return
     read, write, write_1h = defaults
     published = info.cache_read_price_per_1M is not None
+    derived: list[int] = []
     if not published:
         info.cache_read_price_per_1M = read
+        derived.append(0)
     if info.cache_write_price_per_1M is None and not (published and name.startswith("openrouter/")):
         info.cache_write_price_per_1M = write
-    if info.cache_write_1h_price_per_1M is None:
+        derived.append(1)
+    if info.cache_write_1h_price_per_1M is None and write_1h is not None:
         info.cache_write_1h_price_per_1M = write_1h
+        derived.append(2)
+    if derived and info.prompt_tiers:
+        info.prompt_tiers = _with_derived_tier_prices(name, info.prompt_tiers, derived)
+
+
+_CACHE_PRICE_FIELDS = (
+    "cache_read_price_per_1M",
+    "cache_write_price_per_1M",
+    "cache_write_1h_price_per_1M",
+)
+
+
+def _with_derived_tier_prices(
+    name: str, tiers: tuple[PromptTier, ...], derived: list[int]
+) -> tuple[PromptTier, ...]:
+    """Add the rule-derived cache prices to each tier that sets an input price.
+
+    Args:
+        name: The MODEL_INFO key.
+        tiers: The entry's prompt tiers.
+        derived: Indexes into :data:`_CACHE_PRICE_FIELDS` (and into
+            :func:`_provider_cache_defaults`'s result) of the prices
+            :func:`_apply_cache_pricing` derived for the base entry.
+
+    Returns:
+        The tiers, each one that sets ``input_price_per_1M`` completed
+        with the derived prices it does not set itself.
+    """
+    completed: list[PromptTier] = []
+    for threshold, prices in tiers:
+        tier_input = prices.get("input_price_per_1M")
+        rule = _provider_cache_defaults(name, tier_input) if tier_input is not None else None
+        if rule is not None:
+            prices = dict(prices)
+            for index in derived:
+                field, price = _CACHE_PRICE_FIELDS[index], rule[index]
+                if field not in prices and price is not None:
+                    prices[field] = price
+        completed.append((threshold, prices))
+    return tuple(completed)
 
 
 def _apply_bedrock_premium(name: str, info: ModelInfo) -> None:
@@ -1838,6 +2048,7 @@ def _apply_bedrock_premium(name: str, info: ModelInfo) -> None:
     scaled = _scaled_prices(info, factor)
     for field in _PER_1M_PRICE_FIELDS:
         setattr(info, field, getattr(scaled, field))
+    info.prompt_tiers = scaled.prompt_tiers
 
 
 def _normalize_entry(name: str, info: ModelInfo) -> None:
@@ -2042,7 +2253,10 @@ def model(
         model_name: The name of the model (with provider prefix if applicable).
             Accepts harbor-style ``provider/model`` names (e.g.
             ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``) — the
-            redundant provider prefix is stripped automatically.
+            redundant provider prefix is stripped automatically, unless
+            the full name is a registered model (a ``MY_MODELS.json``
+            custom model such as ``openai/gpt-5-custom``) and the
+            stripped one is not.
             ``bedrock/<Bedrock model or inference-profile id>`` (e.g.
             ``bedrock/us.anthropic.claude-opus-4-6-v1:0``) runs the
             Claude model through Amazon Bedrock.
@@ -2074,7 +2288,9 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
-    model_name = _strip_provider_prefix(model_name)
+    bare = _strip_provider_prefix(model_name)
+    if bare != model_name and (is_known_model(bare) or not is_known_model(model_name)):
+        model_name = bare
     info = _lookup_model_info(model_name)
     if info is not None and info.is_decisions_supported:
         # Typed-decision models (``"dec": true``) speak a different
@@ -2122,7 +2338,8 @@ def model(
             thinking_callback,
             use_responses_api=_wants_responses_api(info, model_config),
         )
-    if model_name.startswith("gemini-"):
+    native = _native_provider(model_name)
+    if native == "Gemini":
         cls = _load_model_class(
             "GeminiModel",
             "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models.",
@@ -2134,12 +2351,12 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith(("claude-", BEDROCK_PREFIX)):
+    if native in ("Anthropic", "Bedrock"):
         # ``bedrock/<id>`` is the same Claude adapter over the Anthropic
         # SDK's Bedrock client: a bearer token (``AWS_BEARER_TOKEN_BEDROCK``)
         # takes the api_key slot; without one the adapter signs with the
         # AWS access key pair (or the ambient boto3 credential chain).
-        bedrock = model_name.startswith(BEDROCK_PREFIX)
+        bedrock = native == "Bedrock"
         cls = _load_model_class(
             "AnthropicModel",
             "Anthropic SDK not installed. Install 'anthropic' to use Claude models.",
@@ -2152,10 +2369,10 @@ def model(
             thinking_callback=thinking_callback,
             bedrock=bedrock,
         )
-    if model_name.startswith(("cc/", "codex/")):
+    if native in ("Claude Code CLI", "Codex CLI"):
         # The CLI-backed models: KISS drives both as plain models with
         # their native tools switched off (see their modules).
-        class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
+        class_name = "CodexModel" if native == "Codex CLI" else "ClaudeCodeModel"
         cls = _load_model_class(class_name, f"{class_name} could not be loaded.")
         return cls(  # type: ignore[no-any-return]
             model_name=model_name,
@@ -2233,10 +2450,7 @@ def get_model_provider(model_name: str) -> str:
     provider = _match_openai_compatible_provider(model_name)
     if provider is not None:
         return provider.label
-    for prefix, label, _api_key_name in _NATIVE_PROVIDERS:
-        if model_name.startswith(prefix):
-            return label
-    return "Unknown"
+    return _native_provider(model_name) or "Unknown"
 
 
 def _output_price(model_name: str) -> float:
@@ -2395,12 +2609,16 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
     tier.
 
-    Anthropic prices only Claude Haiku 5.5 by prompt length
+    Two Claude models are priced by prompt length.  Claude Haiku 5.5
     (:data:`_ANTHROPIC_LONG_CONTEXT_FAMILIES`): prompts over 100K tokens
     bill at 5x every rate, $0.10/$0.50 -> $0.50/$2.50 with cache
     read/write scaled the same way (OpenRouter publishes the same
-    ``min_prompt_tokens: 100000`` override).  Every other 1M-context
-    Claude model bills long prompts at its standard rates.
+    ``min_prompt_tokens: 100000`` override).  Claude Sonnet 4.5
+    (:data:`_ANTHROPIC_SONNET_LONG_CONTEXT_FAMILIES`): prompts over 200K
+    tokens bill at 2x the input and cache rates and 1.5x the output
+    rate, $3/$15 -> $6/$22.50 (OpenRouter's ``min_prompt_tokens:
+    200000`` override).  Every other 1M-context Claude model bills long
+    prompts at its standard rates.
 
     Multipliers (not absolute prices) are returned so OpenRouter
     passthrough entries, whose base prices follow OpenRouter's own
@@ -2425,6 +2643,8 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         bare = bare.split("/", 2)[2]
     if bare.startswith(_ANTHROPIC_LONG_CONTEXT_FAMILIES):
         return 100_000, 5.0, 5.0
+    if bare.startswith(_ANTHROPIC_SONNET_LONG_CONTEXT_FAMILIES):
+        return 200_000, 2.0, 1.5
     if bare.startswith(
         ("gpt-6-", "gpt-6.1-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
         + _OPENAI_ROLLING_LATEST
@@ -2482,10 +2702,15 @@ def calculate_cost(
         single_request: ``False`` when the counts are the sum over
             several API requests (a CLI turn that ran its tools
             natively).  The long-context tier is a per-request rule
-            (:func:`_long_context_uplift`); a sum cannot tell one
+            (the entry's ``prompt_tiers``, else
+            :func:`_long_context_uplift`); a sum cannot tell one
             300K-token request from thirty 10K-token ones, so no tier is
             applied to it and every token bills at the short-context
             rates.
+
+    A catalog entry with ``prompt_tiers`` (OpenRouter's published
+    long-prompt prices, see :func:`_parse_prompt_tiers`) is priced by
+    them alone; :func:`_long_context_uplift` covers the entries without.
 
     Returns:
         float: Cost in USD.
@@ -2512,27 +2737,28 @@ def calculate_cost(
                 "Add the model to MODEL_INFO or configure explicit pricing."
             )
         return 0.0
-    cr_price = (
-        info.cache_read_price_per_1M
-        if info.cache_read_price_per_1M is not None
-        else info.input_price_per_1M
-    )
-    cw_price = (
-        info.cache_write_price_per_1M
-        if info.cache_write_price_per_1M is not None
-        else info.input_price_per_1M
-    )
-    cw1h_price = (
-        info.cache_write_1h_price_per_1M
-        if info.cache_write_1h_price_per_1M is not None
-        else cw_price
-    )
-    input_price = info.input_price_per_1M
-    output_price = info.output_price_per_1M
-    uplift = _long_context_uplift(model_name) if single_request else None
     prompt_tokens = (
         total_tokens - num_output_tokens - num_audio_output_tokens - num_image_output_tokens
     )
+    prices: dict[str, float | None] = {
+        field: getattr(info, field) for field in PROMPT_TIER_PRICE_FIELDS
+    }
+    if single_request:
+        for threshold, tier_prices in info.prompt_tiers:
+            if prompt_tokens > threshold:
+                prices.update(tier_prices)
+    input_price = prices["input_price_per_1M"] or 0.0
+    output_price = prices["output_price_per_1M"] or 0.0
+    cr_price = prices["cache_read_price_per_1M"]
+    if cr_price is None:
+        cr_price = input_price
+    cw_price = prices["cache_write_price_per_1M"]
+    if cw_price is None:
+        cw_price = input_price
+    cw1h_price = prices["cache_write_1h_price_per_1M"]
+    if cw1h_price is None:
+        cw1h_price = cw_price
+    uplift = _long_context_uplift(model_name) if single_request and not info.prompt_tiers else None
     if uplift is not None and prompt_tokens > uplift[0]:
         _, input_mult, output_mult = uplift
         input_price *= input_mult
@@ -2635,8 +2861,9 @@ def openrouter_twin(model_name: str) -> str | None:
     A generated ``-{level}`` effort alias (``claude-opus-5-5-medium``,
     ``gpt-6.1-sol-medium``) is matched by its base id; the twin keeps the
     same level when OpenRouter's side has a matching generated alias
-    (``openrouter/openai/gpt-6.1-sol-medium``) and falls back to the bare
-    twin otherwise (``openrouter/anthropic/claude-opus-5.5``).
+    (``openrouter/openai/gpt-6.1-sol-medium``,
+    ``openrouter/anthropic/claude-opus-5.5-max``) and falls back to the
+    bare twin when OpenRouter's side has none at that level.
 
     Args:
         model_name: A model name from the catalog.

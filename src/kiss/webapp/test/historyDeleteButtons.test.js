@@ -13,19 +13,12 @@
 'use strict';
 
 const assert = require('assert');
+const {send, click, ofType} = require('./simplify2_harness');
 const {
-  makePage: makeChatPage,
-  send,
-  click,
-  ofType,
-} = require('./simplify2_harness');
-const {makeSession, loadHistory} = require('./history_helpers');
-
-function makePage() {
-  const {win, posted} = makeChatPage({bodyClass: 'remote-chat'});
-  send(win, {type: 'daemonStatus', connected: true});
-  return {win, posted};
-}
+  makeSession,
+  loadHistory,
+  makeConnectedRemotePage: makePage,
+} = require('./history_helpers');
 
 function testTaskRowDelete() {
   const {win, posted} = makePage();

@@ -366,12 +366,10 @@ def test_cli_status_grant_import_audit(muse_env: Path, capsys: pytest.CaptureFix
     assert muse_cli.main(["import", "unknown_service"]) == 1
 
 
-def test_legacy_mode_untouched(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With KISS_MUSE_AUTH=0, the legacy paths are fully preserved."""
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    assert not muse_auth_enabled()
-    assert action_class("get") == "read"
-    assert action_class("Post") == "write"
+def test_action_class_ignores_method_case() -> None:
+    """GET/HEAD/OPTIONS in any case classify as read; every other method as write."""
+    assert [action_class(m) for m in ("get", "Head", "OPTIONS")] == ["read"] * 3
+    assert [action_class(m) for m in ("Post", "put", "DELETE", "patch")] == ["write"] * 4
 
 
 def test_muse_auth_enabled_by_default(

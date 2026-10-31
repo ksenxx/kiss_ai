@@ -6,15 +6,13 @@
 'use strict';
 // Settings > Remote password (main.js against the real chat.html):
 //   * the box is an editable input, masked until its eye toggle reveals
-//     the password `configData` carries; there is no daemon-side Rotate
-//     button (the refresh button that fills in a random password is
-//     covered by remotePasswordRefresh.test.js);
+//     the password `configData` carries (the refresh button that fills
+//     in a random password is covered by remotePasswordRefresh.test.js);
 //   * a typed password is saved with the rest of the form when Settings
 //     closes (`saveConfig` with `config.remote_password`, trimmed), and
 //     a `configData` arriving mid-edit does not overwrite what was typed;
 //   * clearing the box saves an empty password (remote access off);
-//   * the `configData` after the save repaints the box;
-//   * nothing posts the retired `rotateRemotePassword`.
+//   * the `configData` after the save repaints the box.
 // The transport's adoption of the new password for its own frames is
 // covered by transportFramePassword.test.js; the daemon side by
 // src/kiss/tests/server/test_save_config_remote_password.py.
@@ -52,11 +50,6 @@ function testEyeToggleRevealsAndHides() {
     box.value,
     'Old-Password-1',
     'the box shows the stored password',
-  );
-  assert.strictEqual(
-    wv.win.document.getElementById('cfg-rotate-password-btn'),
-    null,
-    'there is no daemon-side Rotate button',
   );
   const toggle = byId(wv.win, 'cfg-remote-password-toggle');
   assert.strictEqual(toggle.getAttribute('aria-label'), 'Show password');
@@ -102,10 +95,6 @@ function testTypedPasswordIsSavedAndKeptOverALateConfigData() {
     byId(wv.win, 'cfg-remote-password').value,
     'New-Password-2',
     'the box shows the saved password',
-  );
-  assert.ok(
-    !wv.posted.some(m => m.type === 'rotateRemotePassword'),
-    'nothing posts the retired rotateRemotePassword',
   );
   wv.close();
   console.log('  ok - a typed remote password is saved with the form');

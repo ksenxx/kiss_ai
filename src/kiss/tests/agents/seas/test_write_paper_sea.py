@@ -400,19 +400,10 @@ def test_build_paper_reports_a_missing_file_and_a_missing_tex_install(tmp_path: 
     assert write_paper_sea._run(["", "x"], tmp_path) == (127, "program: not found")
 
 
-def _tex_bin() -> str:
-    """Return the directory of the installed ``pdflatex`` or skip the test."""
-    pdflatex = write_paper_sea._find_tex_binary("pdflatex", "")
-    if not pdflatex or not Path(pdflatex).is_file():
-        pytest.skip("pdflatex is not installed")
-    return str(Path(pdflatex).parent)
-
-
 def test_build_paper_builds_a_clean_paper_with_bibtex(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tex_bin: str
 ) -> None:
     """pdflatex, bibtex, pdflatex, pdflatex produce a PDF with no errors, refs or overfull boxes."""
-    tex_bin = _tex_bin()
     path = _write(tmp_path, _CLEAN_TEX, _CLEAN_BIB)
     report = write_paper_sea.build_paper(str(path), tex_bin=tex_bin)
     lines = report.splitlines()
@@ -456,9 +447,8 @@ Short last page.
 """
 
 
-def test_build_paper_reports_last_page_fill_and_float_pages(tmp_path: Path) -> None:
+def test_build_paper_reports_last_page_fill_and_float_pages(tmp_path: Path, tex_bin: str) -> None:
     """The layout numbers the SEA treats as the gate: page count, last-page fill, float pages."""
-    tex_bin = _tex_bin()
     if not shutil.which("pdftotext"):
         pytest.skip("pdftotext is not installed")
     path = _write(tmp_path, _FLOATS_TEX, None)
@@ -476,9 +466,10 @@ def test_build_paper_reports_last_page_fill_and_float_pages(tmp_path: Path) -> N
     assert write_paper_sea.last_page_fill(tmp_path / "nope.pdf") == "?"
 
 
-def test_build_paper_summarizes_errors_undefined_refs_and_overfull_boxes(tmp_path: Path) -> None:
+def test_build_paper_summarizes_errors_undefined_refs_and_overfull_boxes(
+    tmp_path: Path, tex_bin: str
+) -> None:
     """The log summary names the error, the dangling reference and the wide box with its lines."""
-    tex_bin = _tex_bin()
     path = _write(tmp_path, _BROKEN_BUILD_TEX, None)
     report = write_paper_sea.build_paper(str(path), tex_bin=tex_bin)
     assert gate(report, "errors").endswith(" FAIL")

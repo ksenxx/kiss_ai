@@ -397,6 +397,26 @@ def vault_has_credentials(service: str) -> bool:
     return (muse_auth_dir() / "vault" / f"{service}.json").is_file()
 
 
+def credential_generation(service: str) -> str:
+    """Return the generation nonce of *service*'s vault credential.
+
+    Every store starts a new generation and token refreshes keep it, so
+    two readings that differ prove a store landed in between, even one
+    whose reply the caller never saw.  The secret stays in the daemon.
+
+    Args:
+        service: Connector service name.
+
+    Returns:
+        The nonce, or ``""`` when the service is not enrolled (or was
+        enrolled before generations existed).
+
+    Raises:
+        MuseAuthError: When the daemon cannot be reached.
+    """
+    return str(_checked({"op": "generation", "service": service})["generation"])
+
+
 def enrolled_services() -> list[str]:
     """Return every service enrolled in the daemon vault.
 

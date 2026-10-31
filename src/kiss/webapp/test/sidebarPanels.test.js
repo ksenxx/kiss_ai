@@ -3,10 +3,10 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end tests for the right sidebar's Schedule, Apps, Spend and Recommendations
-// subpanels (the sidebarpanels block of media/main.js):
+// End-to-end tests for the right sidebar's Schedule, Machines, Apps, Spend and
+// Recommendations subpanels (the sidebarpanels block of media/main.js):
 //
-// * boot and a daemon (re)connect request getCronJobs + getMachines +
+// * a daemon (re)connect requests getCronJobs + getMachines +
 //   getAppsStatus + getSpendReport + getRecommendations; the poll
 //   timer starts on the first reply, once,
 //   and skips hidden pages;
@@ -506,11 +506,14 @@ async function main() {
     assert.ok(confirm.querySelector('.sidebar-confirm-yes').disabled);
     confirm.querySelector('.sidebar-confirm-yes').click();
     eq(posted, [{type: 'cronAction', action: 'remove', jobId: 'a'}]);
-    // The reply to an action carries an error when the daemon refused
-    // it: shown on the status line, cleared by the next clean reply.
+    // The reply to an action carries the action (a removal's names its
+    // job), and an error when the daemon refused it: shown on the status
+    // line, cleared by the next clean reply.
     send(win, {
       type: 'cronJobs',
       jobs: [job({id: 'a'})],
+      action: 'remove',
+      jobId: 'a',
       error: 'job is already running',
     });
     const status = el(win, 'meta-schedule-status');
@@ -557,6 +560,19 @@ async function main() {
       win.document.activeElement,
       rebuilt.querySelector('.sidebar-confirm-yes'),
     );
+    // With the keyboard gone elsewhere meanwhile (the composer), the
+    // question is asked again and the keyboard stays where it went.
+    el(win, 'task-input').focus();
+    send(win, {type: 'cronJobs', jobs: [job({id: 'a'})]});
+    const again = el(win, 'meta-schedule-list').querySelector(
+      '.sidebar-panel-row',
+    );
+    assert.notStrictEqual(again, rebuilt, 'the reply rebuilt the row');
+    assert.strictEqual(
+      again.querySelector('.sidebar-item-confirm').style.display,
+      '',
+    );
+    assert.strictEqual(win.document.activeElement, el(win, 'task-input'));
     // A row gone from the reply has nothing to restore.
     send(win, {type: 'cronJobs', jobs: []});
     assert.strictEqual(
@@ -827,6 +843,31 @@ async function main() {
     assert.strictEqual(list.querySelectorAll('form').length, 0);
     assert.strictEqual(list.children.length, 2);
     assert.strictEqual(win.document.activeElement, addBtn);
+    // The Enter or Escape that picks or drops an IME candidate (a
+    // keydown with `isComposing`, or keyCode 229 alone in Safari)
+    // neither saves nor cancels; a plain Escape cancels.
+    addBtn.click();
+    form = topForm();
+    form.elements.name.value = 'よる';
+    posted.length = 0;
+    for (const ime of [{isComposing: true}, {keyCode: 229}]) {
+      for (const key of ['Enter', 'Escape']) {
+        form.elements.name.dispatchEvent(
+          new win.KeyboardEvent('keydown', {
+            key,
+            bubbles: true,
+            cancelable: true,
+            ...ime,
+          }),
+        );
+      }
+    }
+    eq(posted, []);
+    assert.ok(form.isConnected, 'the form is still open');
+    form.elements.name.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+    );
+    assert.ok(!form.isConnected, 'a plain Escape cancels');
     // Save posts a create with the kind; Enter in an input saves too.
     addBtn.click();
     form = topForm();
@@ -1181,16 +1222,34 @@ async function main() {
     button(rows[1], 'Delete the machine').click();
     rows[1].querySelector('.sidebar-confirm-yes').click();
     eq(posted, [{type: 'machineAction', action: 'remove', name: 'gpu-box'}]);
+    const gpuRow = () =>
+      Array.from(
+        el(win, 'meta-machines-list').querySelectorAll('.sidebar-panel-row'),
+      ).find(r => r.dataset.rowKey === 'gpu-box');
+    const confirmShown = () =>
+      gpuRow().querySelector('.sidebar-item-confirm').style.display === '';
+    const deleteSpent = () =>
+      gpuRow().querySelector('.sidebar-confirm-yes').disabled;
+    // A poll's reply landing first rebuilds the row with the question
+    // still answered: Delete stays spent until the removal's reply.
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 2});
+    assert.notStrictEqual(gpuRow(), rows[1], 'the reply rebuilt the row');
+    assert.ok(confirmShown() && deleteSpent());
+    // Like the daemon's, the removal's reply names it: the refused
+    // removal's row asks again, with a live Delete.
     send(win, {
       type: 'machines',
       machines: MACHINES,
-      checkedAt: 2,
+      checkedAt: 3,
+      action: 'remove',
+      name: 'gpu-box',
       error: "no machine named 'gpu-box'",
     });
+    assert.ok(confirmShown() && !deleteSpent());
     const status = el(win, 'meta-machines-status');
     assert.strictEqual(status.textContent, "no machine named 'gpu-box'");
     assert.ok(status.classList.contains('is-error'));
-    send(win, {type: 'machines', machines: MACHINES, checkedAt: 3});
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 4});
     assert.strictEqual(status.textContent, '');
     assert.ok(!status.classList.contains('is-error'));
   });
@@ -1303,6 +1362,61 @@ async function main() {
     assert.strictEqual(list.querySelectorAll('form').length, 0);
   });
 
+  await test('Schedule and Machines: a dropped daemon re-arms an add form in flight; a save while away is refused', () => {
+    const {win, posted} = makePage();
+    send(win, {type: 'cronJobs', jobs: []});
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    const panels = [
+      {
+        list: el(win, 'meta-schedule-list'),
+        add: el(win, 'meta-schedule-add'),
+        status: el(win, 'meta-schedule-status'),
+        values: {name: 'Nightly', schedule: 'every 1d', what: 'echo night'},
+      },
+      {
+        list: el(win, 'meta-machines-list'),
+        add: el(win, 'meta-machines-add'),
+        status: el(win, 'meta-machines-status'),
+        values: {name: 'lab', address: 'https://lab:8787'},
+      },
+    ];
+    const form = p => p.list.querySelector('form.sidebar-inline-form');
+    const save = p => form(p).querySelector('.sidebar-inline-form-save');
+    posted.length = 0;
+    for (const p of panels) {
+      p.add.click();
+      for (const [key, value] of Object.entries(p.values)) {
+        form(p).elements[key].value = value;
+      }
+      save(p).click();
+      assert.ok(save(p).disabled, 'the save is in flight');
+    }
+    eq(types(posted), ['cronAction', 'machineAction']);
+    // The daemon drops: no reply is coming, so each Save works again.
+    send(win, {type: 'daemonStatus', connected: false});
+    for (const p of panels) assert.ok(!save(p).disabled);
+    // A save while away is refused with a note; the draft stays.
+    posted.length = 0;
+    for (const p of panels) save(p).click();
+    eq(posted, []);
+    for (const p of panels) {
+      assert.strictEqual(
+        p.status.textContent,
+        'Not connected: try again when reconnected',
+      );
+      assert.ok(p.status.classList.contains('is-error'));
+      assert.strictEqual(form(p).elements.name.value, p.values.name);
+    }
+    // The reconnect's replies rebuild the forms: no longer in flight.
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'cronJobs', jobs: []});
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 2});
+    for (const p of panels) {
+      assert.strictEqual(form(p).elements.name.value, p.values.name);
+      assert.ok(!save(p).disabled, 'Save works after the reconnect');
+    }
+  });
+
   await test('Machines: a machine added since the last reply brings the subpanel on screen', () => {
     // Desktop: the section expands and the docked panel slides back
     // (it is slid off while a content tab holds the pane).
@@ -1351,7 +1465,11 @@ async function main() {
     );
   });
 
-  await test('Machines: the chat header lists the reachable ones and a pick is per tab', () => {
+  // The drop-down's own behaviour is pinned by chatMachineSelect.test.js;
+  // this case keeps its code (the focus refresh and a chat's own pick
+  // included) under the sidebarPanels.coverage.js gate, which runs this
+  // file alone.
+  await test('Machines: the chat header drop-down lists the reachable ones, marks a remote pick, and a focus refreshes the list', () => {
     const {win, posted} = makePage();
     const select = el(win, 'chat-machine');
     send(win, {type: 'configData', config: {}, machine: 'laptop'});
@@ -1369,6 +1487,13 @@ async function main() {
     assert.ok(select.classList.contains('remote'));
     pick('');
     assert.ok(!select.classList.contains('remote'));
+    // On a chat that shows a task the pick is also where THAT chat's
+    // next task goes: it stands when another surface moves the global
+    // pick.
+    send(win, {type: 'task_events', task: 'Old task', task_id: 7, events: []});
+    pick('gpu-box');
+    send(win, {type: 'machineChanged', machine: ''});
+    assert.strictEqual(select.value, 'gpu-box');
     posted.length = 0;
     select.dispatchEvent(new win.Event('focus'));
     eq(
@@ -1805,6 +1930,10 @@ async function main() {
     eq(tipText(win), [
       'gpt-6-astra \u00b7 $37.92 \u00b7 235K tok \u00b7 1 task \u00b7 2%',
     ]);
+    hover(win, rows[2].querySelector('.spend-model-name'));
+    eq(tipText(win), [
+      'unknown \u00b7 $0.00 \u00b7 12 tok \u00b7 1 task \u00b7 0%',
+    ]);
     el(win, 'meta-spend-graph').dispatchEvent(new win.MouseEvent('mouseleave'));
     assert.strictEqual(tipText(win), null);
 
@@ -2169,8 +2298,8 @@ async function main() {
     assert.strictEqual(home[0].tabId, 'home1');
   });
 
-  // ---- The Schedule, Apps, Spend and Recommendations subpanels show
-  // the machine the chat header's drop-down has picked ----
+  // ---- The Schedule, Machines, Apps, Spend and Recommendations
+  // subpanels show the machine the chat header's drop-down has picked ----
 
   /** The subpanel commands posted since *from*, as {type, machine}. */
   function panelRequests(posted, from) {
@@ -2212,15 +2341,21 @@ async function main() {
       ),
     ).map(n => n.textContent);
 
-  await test('Machines: picking a machine empties the four subpanels and asks for its data', () => {
+  await test('Machines: picking a machine empties the five subpanels and asks for its data', () => {
     const {win, posted, pick} = pageShowingThisMachine();
     eq(jobNames(win), ['Home job']);
+    assert.strictEqual(el(win, 'meta-machines-list').children.length, 3);
     assert.strictEqual(appRows(win).length, APPS.length);
     assert.strictEqual(recommendationRows(win).length, FIVE_TASKS.length);
     const from = posted.length;
     pick('gpu-box');
     // The previous machine's rows are gone while gpu-box answers.
     eq(jobNames(win), []);
+    assert.strictEqual(el(win, 'meta-machines-list').children.length, 0);
+    assert.strictEqual(
+      el(win, 'meta-machines-status').textContent,
+      'Checking\u2026',
+    );
     assert.strictEqual(appRows(win).length, 0);
     assert.strictEqual(recommendationRows(win).length, 0);
     assert.strictEqual(el(win, 'meta-spend-graph').childElementCount, 0);
@@ -2240,11 +2375,12 @@ async function main() {
       el(win, 'meta-recommendations-status').textContent,
       'Loading\u2026',
     );
-    // Four commands stamped with the machine; the Machines list is
-    // this daemon's registry and is not.
+    // Every subpanel's command stamped with the machine, and this
+    // daemon's registry asked too: it is the drop-down's list.
     eq(panelRequests(posted, from), [
       {type: 'getCronJobs', machine: 'gpu-box'},
       {type: 'getMachines'},
+      {type: 'getMachines', machine: 'gpu-box'},
       {type: 'getAppsStatus', machine: 'gpu-box'},
       {type: 'getSpendReport', machine: 'gpu-box'},
       {type: 'getRecommendations', machine: 'gpu-box'},
@@ -2359,6 +2495,7 @@ async function main() {
       {type: 'getCronJobs', machine: 'gpu-box'},
       {type: 'getCronJobs', machine: 'gpu-box'},
       {type: 'getMachines'},
+      {type: 'getMachines', machine: 'gpu-box'},
       {type: 'getAppsStatus', machine: 'gpu-box'},
       {type: 'getSpendReport', machine: 'gpu-box'},
       {type: 'getRecommendations', machine: 'gpu-box'},
@@ -2366,11 +2503,17 @@ async function main() {
       {type: 'getRecommendations', machine: 'gpu-box'},
     ]);
     from = posted.length;
-    intervals[0].cb();
-    assert.ok(
-      panelRequests(posted, from).every(
-        m => m.type === 'getMachines' || m.machine === 'gpu-box',
-      ),
+    intervals.find(i => i.ms === 30000).cb();
+    eq(
+      panelRequests(posted, from),
+      [
+        {type: 'getCronJobs', machine: 'gpu-box'},
+        {type: 'getMachines'},
+        {type: 'getMachines', machine: 'gpu-box'},
+        {type: 'getAppsStatus', machine: 'gpu-box'},
+        {type: 'getSpendReport', machine: 'gpu-box'},
+        {type: 'getRecommendations', machine: 'gpu-box'},
+      ],
       'the poll asks gpu-box',
     );
     from = posted.length;
@@ -2915,6 +3058,237 @@ async function main() {
       jobs: [job({id: 'g1', name: 'GPU job'})],
     });
     eq(jobNames(win), ['GPU job']);
+  });
+
+  await test('Machines: a file tab shown in place of its chat has no machine of its own', () => {
+    // The stacked layout, where a content tab replaces the chat (and
+    // its hidden header).  The drop-down reads this machine while the
+    // file is shown; once its chat is closed elsewhere, the file's Task
+    // Info describes where a new chat would run: the global pick.
+    const {win, pick} = pageShowingThisMachine({desktop: false});
+    const home = win._testApi.getActiveTabId();
+    send(win, {
+      type: 'tabs_state',
+      tabs: [{tabId: home, chatId: 'c-home', title: 'home', workDir: '/ws'}],
+    });
+    pick('gpu-box');
+    send(win, {
+      type: 'fileContent',
+      tabId: home,
+      path: '/ws/notes.txt',
+      name: 'notes.txt',
+      content: 'hi\n',
+      version: 'v1',
+    });
+    const file = win._testApi.openTabs().find(t => t.isContentTab);
+    win._testApi.switchToTab(file.id);
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 2});
+    assert.strictEqual(el(win, 'chat-machine').value, '');
+    assert.strictEqual(el(win, 'meta-machine').textContent, 'gpu-box');
+    send(win, {type: 'tabs_state', tabs: []});
+    assert.strictEqual(win._testApi.getActiveTabId(), file.id);
+    send(win, {
+      type: 'configData',
+      config: {last_machine: 'office'},
+      machine: 'laptop',
+    });
+    // The new global pick, by its label.
+    assert.strictEqual(el(win, 'meta-machine').textContent, 'office-pc');
+    assert.strictEqual(el(win, 'chat-machine').value, '');
+  });
+
+  // ---- The Machines subpanel shows the picked machine's own registry ----
+
+  // gpu-box's registry: gpu-box itself (its daemon's host name) and the
+  // machine it registered, labelled by its host name.
+  const GPU_REGISTRY = [
+    {
+      name: 'gpu-host',
+      address: 'https://10.0.0.9:8787',
+      ip: '10.0.0.9',
+      port: 8787,
+      local: true,
+      status: 'reachable',
+      error: '',
+    },
+    {
+      name: 'lab',
+      label: 'lab-pc',
+      address: 'ssh me@lab',
+      ip: 'lab',
+      port: 0,
+      local: false,
+      status: 'reachable',
+      error: '',
+    },
+  ];
+
+  const machineNames = win =>
+    Array.from(
+      win.document.querySelectorAll(
+        '#meta-machines-list .machine-row .sidebar-panel-name',
+      ),
+    ).map(n => n.textContent);
+
+  const dropDownOptions = win =>
+    Array.from(el(win, 'chat-machine').options).map(o => o.textContent);
+
+  /** gpu-box's forwarded `machines` reply. */
+  function gpuMachines(fields) {
+    return Object.assign(
+      {
+        type: 'machines',
+        forwarded: true,
+        machine: 'gpu-box',
+        machines: GPU_REGISTRY,
+        checkedAt: 2,
+        action: '',
+        error: '',
+      },
+      fields,
+    );
+  }
+
+  await test("Machines: the subpanel lists the picked machine's own registry; the drop-down keeps this daemon's", () => {
+    const {win, posted, pick} = pageShowingThisMachine();
+    eq(machineNames(win), ['laptop', 'gpu-box', 'office-pc']);
+    const options = dropDownOptions(win);
+    eq(options, ['laptop', 'gpu-box']);
+    const section = el(win, 'meta-machines');
+    section.querySelector('.meta-section-toggle').click();
+    assert.ok(section.classList.contains('collapsed'), 'folded by the user');
+    pick('gpu-box');
+    send(win, gpuMachines());
+    eq(machineNames(win), ['gpu-host', 'lab-pc']);
+    assert.ok(
+      section.classList.contains('collapsed'),
+      "gpu-box's machines are not additions: the move is not revealed",
+    );
+    const rows = Array.from(el(win, 'meta-machines-list').children);
+    assert.ok(
+      rows[0].querySelector('.sidebar-panel-badge'),
+      "gpu-host is gpu-box's local machine",
+    );
+    assert.ok(
+      rows[0].querySelector('[aria-label="Delete the machine"]').disabled,
+      'which cannot be deleted',
+    );
+    eq(dropDownOptions(win), options, "the drop-down is this daemon's list");
+    // This daemon's own push while gpu-box is shown feeds the drop-down
+    // only.
+    const newBox = {
+      name: 'new-box',
+      address: 'ssh me@new',
+      ip: 'new',
+      port: 1,
+      local: false,
+      status: 'reachable',
+      error: '',
+    };
+    send(win, {
+      type: 'machines',
+      machines: MACHINES.concat([newBox]),
+      checkedAt: 3,
+      action: '',
+      error: '',
+    });
+    eq(machineNames(win), ['gpu-host', 'lab-pc']);
+    eq(dropDownOptions(win), ['laptop', 'gpu-box', 'new-box']);
+    // Another machine's list is not gpu-box's.
+    send(win, gpuMachines({machine: 'office', machines: MACHINES}));
+    eq(machineNames(win), ['gpu-host', 'lab-pc']);
+    // The refresh button and a delete act on gpu-box's registry.
+    let from = posted.length;
+    el(win, 'meta-machines-refresh').click();
+    assert.ok(el(win, 'meta-machines-refresh').disabled, 'the refresh spins');
+    rows[1].querySelector('[aria-label="Delete the machine"]').click();
+    rows[1].querySelector('.sidebar-confirm-yes').click();
+    eq(
+      posted
+        .slice(from)
+        .filter(m => m.type === 'getMachines' || m.type === 'machineAction'),
+      [
+        {type: 'getMachines', refresh: true, machine: 'gpu-box'},
+        {type: 'machineAction', action: 'remove', name: 'lab', machine: 'gpu-box'},
+      ],
+    );
+    send(win, gpuMachines({machines: GPU_REGISTRY.slice(0, 1)}));
+    eq(machineNames(win), ['gpu-host']);
+    assert.ok(!el(win, 'meta-machines-refresh').disabled, 'the reply stops it');
+    // Back on this machine: its own registry, asked once, unstamped.
+    from = posted.length;
+    pick('');
+    eq(machineNames(win), []);
+    assert.strictEqual(
+      el(win, 'meta-machines-status').textContent,
+      'Checking\u2026',
+    );
+    eq(
+      panelRequests(posted, from).filter(m => m.type === 'getMachines'),
+      [{type: 'getMachines'}],
+    );
+    send(win, gpuMachines());
+    eq(machineNames(win), [], "gpu-box's late reply is not this machine's");
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 4});
+    eq(machineNames(win), ['laptop', 'gpu-box', 'office-pc']);
+  });
+
+  await test("Machines: a machine added from the subpanel is added to the picked machine's registry", () => {
+    const {win, posted, pick} = pageShowingThisMachine();
+    pick('gpu-box');
+    send(win, gpuMachines());
+    const list = el(win, 'meta-machines-list');
+    el(win, 'meta-machines-add').click();
+    let form = list.querySelector('form.sidebar-inline-form');
+    form.elements.name.value = 'lab2';
+    form.elements.address.value = 'https://lab2:8787';
+    form.elements.password.value = 'pw';
+    const from = posted.length;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted.slice(from).filter(m => m.type === 'machineAction'), [
+      {
+        type: 'machineAction',
+        action: 'add',
+        name: 'lab2',
+        address: 'https://lab2:8787',
+        machinePassword: 'pw',
+        machine: 'gpu-box',
+      },
+    ]);
+    // gpu-box's answer (the daemon names the action even when the
+    // machine's registry push came first) closes the form.
+    send(
+      win,
+      gpuMachines({
+        machines: GPU_REGISTRY.concat([
+          Object.assign({}, GPU_REGISTRY[1], {name: 'lab2', label: ''}),
+        ]),
+        action: 'add',
+      }),
+    );
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    eq(machineNames(win), ['gpu-host', 'lab-pc', 'lab2']);
+    // A draft typed for gpu-box survives a move to this machine: the
+    // form comes back with it (not saving) once this machine's list is
+    // in.
+    el(win, 'meta-machines-add').click();
+    form = list.querySelector('form.sidebar-inline-form');
+    form.elements.name.value = 'draft';
+    form.querySelector('.sidebar-inline-form-save').click();
+    assert.ok(form.querySelector('.sidebar-inline-form-save').disabled);
+    pick('');
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    // A second move before any reply (to gpu-box and back) keeps it too.
+    pick('gpu-box');
+    pick('');
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 5});
+    form = list.querySelector('form.sidebar-inline-form');
+    assert.ok(form, 'the add form is back');
+    assert.strictEqual(form.elements.name.value, 'draft');
+    assert.ok(
+      !form.querySelector('.sidebar-inline-form-save').disabled,
+      'the add in flight went to gpu-box: Save works again',
+    );
   });
 
   report('sidebarPanels');

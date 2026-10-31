@@ -5,28 +5,31 @@
 """End-to-end test: "Update when idle" Cancel leaves a poller that already
 owns the run-admission barrier alone.
 
-:meth:`RemoteAccessServer._arm_update_barrier_if_idle` (an executor
-thread) raises ``AgentServer._update_installing`` under ``STATE_LOCK``
-the moment it finds no active task.  The poller then used to clear
-``_update_when_idle_armed`` only on its next event-loop step.  A
-Cancel that ran between those two instants read the flag as still
-armed and cancelled the poller although it was already launching the
-installer: the cancel landed inside ``_handle_run_update`` — at the
-spawn ``await`` it left a started installer with the barrier lowered
-and no exit watcher (findings I2-F1).
+:meth:`RemoteAccessServer._arm_update_barrier_if_idle` raises
+``AgentServer._update_installing`` under ``STATE_LOCK`` the moment it
+finds no active task.  The poller then used to clear
+``_update_when_idle_armed`` only later.  A Cancel that ran in between
+read the flag as still armed and cancelled the poller although it was
+already launching the installer: the cancel landed inside
+``_handle_run_update`` — at the spawn ``await`` it left a started
+installer with the barrier lowered and no exit watcher (findings
+I2-F1).
 
 The fix consumes the armed flag inside the same critical section that
 raises the barrier, so the later disarm sees ``False`` and stands down,
 exactly as :meth:`_cancel_update_when_idle` documents.
 
 Driven through the real daemon (local WSS transport, fake PyPI
-endpoint).  The test gates the executor thread at the exact handoff:
-the real idle check has raised the barrier and consumed the flag, and
-its result has not yet resumed the poller.  The Cancel is sent and
-fully processed (its ``update_available`` rebroadcast arrives) inside
-that window; it must find nothing to cancel.  Then the gate opens and
-the installer (a script that records its launch and sleeps) must run
-exactly once with the barrier up until its exit watcher lowers it.
+endpoint).  The test gates the installer spawn's executor thread: the
+real idle check has raised the barrier and consumed the flag, and the
+poller waits at the spawn ``await`` of :meth:`_handle_run_update`.
+(The idle check itself runs on the event loop, in the step that enters
+:meth:`_handle_run_update`, so this await is where a Cancel can land.)
+The Cancel is sent and fully processed (its ``update_available``
+rebroadcast arrives) inside that window; it must find nothing to
+cancel.  Then the gate opens and the installer (a script that records
+its launch and sleeps) must run exactly once with the barrier up until
+its exit watcher lowers it.
 """
 
 from __future__ import annotations
@@ -75,8 +78,8 @@ class TestUpdateIdleCancelLeavesBarrierOwnerAlone(_UpdateCheckTestBase):
         self._writers: list[LocalWriter] = []
         self.verdict_reached = threading.Event()
         self.release_verdict = threading.Event()
-        self._real_arm = self.server._arm_update_barrier_if_idle
-        self.server._arm_update_barrier_if_idle = self._gated_arm  # type: ignore[method-assign]
+        self._real_spawn = self.server._spawn_update_script
+        self.server._spawn_update_script = self._gated_spawn  # type: ignore[method-assign]
 
     async def asyncTearDown(self) -> None:
         self.release_verdict.set()
@@ -94,18 +97,18 @@ class TestUpdateIdleCancelLeavesBarrierOwnerAlone(_UpdateCheckTestBase):
         await super().asyncTearDown()
         ws._IDLE_UPDATE_POLL_S = self._orig_poll
 
-    def _gated_arm(self, gen: int) -> bool:
-        """Executor thread: the real idle check, parked once it owns the launch.
+    def _gated_spawn(
+        self, script: Path | None, conn_id: str = "",
+    ) -> tuple[Any, int] | None:
+        """Executor thread: park, then run the real installer spawn.
 
-        The park sits after the critical section that raised the
-        barrier and consumed the armed generation, and before the
-        result resumes the poller: the window the Cancel must land in.
+        The park sits after the idle check raised the barrier and
+        consumed the armed generation, while the poller waits at the
+        spawn ``await``: the window the Cancel must land in.
         """
-        armed = self._real_arm(gen)
-        if armed:
-            self.verdict_reached.set()
-            self.release_verdict.wait(timeout=30)
-        return armed
+        self.verdict_reached.set()
+        self.release_verdict.wait(timeout=30)
+        return self._real_spawn(script, conn_id)
 
     async def _send(self, writer: LocalWriter, cmd: dict[str, object]) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -144,8 +147,7 @@ class TestUpdateIdleCancelLeavesBarrierOwnerAlone(_UpdateCheckTestBase):
         self.assertFalse(self.verdict_reached.is_set())
 
         # Retire the busy task: the next idle check raises the barrier,
-        # consumes the flag and parks before its verdict reaches the
-        # poller.
+        # consumes the flag, and the poller parks at the spawn await.
         self.busy.is_task_active = False
         await self._wait_until(
             self.verdict_reached.is_set,
@@ -168,7 +170,7 @@ class TestUpdateIdleCancelLeavesBarrierOwnerAlone(_UpdateCheckTestBase):
         self.assertTrue(self._barrier_up(), "the Cancel lowered the barrier")
         self.assertFalse(self.marker.exists())
 
-        # Let the verdict reach the poller: it launches the installer.
+        # Open the gate: the spawn launches the installer.
         self.release_verdict.set()
         await self._wait_until(self.marker.exists, "the installer to be launched")
         await self._wait_until(

@@ -408,7 +408,11 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     ).fetchall()
     if not children:
         return {}
-    child_keys = [(row[0], _dispatch_key(row[1] or ""), row[2] or "") for row in children]
+    from kiss.agents.sorcar.persistence import _safe_str
+
+    # ``_safe_str``: a BLOB task text (a hand-edited or third-party
+    # database) is decoded, not split as ``bytes``.
+    child_keys = [(row[0], _dispatch_key(_safe_str(row[1])), row[2] or "") for row in children]
     matched: set[str] = set()
     inferred: dict[str, str] = {}
     for (event_json,) in calls:
@@ -463,30 +467,63 @@ def trajectory_has_secret(
     return has_secret_value(chain((str(task or ""), str(result or "")), texts))
 
 
-def write_task_tags(db: sqlite3.Connection, task_id: str, row: sqlite3.Row) -> None:
+def write_task_tags(
+    db: sqlite3.Connection, task_id: str, row: sqlite3.Row, has_secret: bool | None = None,
+) -> None:
     """Classify a task row and store its ``tags`` column.
 
     The result decides the ``failed`` tag and the persisted events
     whether the trajectory holds a secret.  Runs inside the caller's
-    transaction; nothing is committed here.
+    transaction; nothing is committed here.  The secret scan reads
+    every event of the task, so a caller about to take a write lock
+    runs :func:`trajectory_has_secret` first and passes its verdict.
 
     Args:
         db: Connection to ``history.db``.
         task_id: The ``task_history`` row id.
         row: The row's ``task``, ``result``, ``success`` and
             ``parent_task_id`` columns.
+        has_secret: The verdict of :func:`trajectory_has_secret` for the
+            row; ``None`` scans the trajectory here.
+    """
+    if has_secret is None:
+        has_secret = trajectory_has_secret(db, task_id, row["task"], row["result"])
+    db.execute(
+        "UPDATE task_history SET tags = ? WHERE id = ?", (_task_tags(row, has_secret), task_id),
+    )
+
+
+def _task_tags(row: sqlite3.Row, has_secret: bool) -> str:
+    """Return the ``tags`` column of a task row: :func:`classify_task_tags`, comma-joined.
+
+    Args:
+        row: The row's ``task``, ``result``, ``success`` and
+            ``parent_task_id`` columns.
+        has_secret: The :func:`trajectory_has_secret` verdict for the row.
     """
     from kiss.agents.sorcar.persistence import _is_failed_result, _safe_str
 
     # ``_safe_str``: a BLOB in a TEXT column (a hand-edited or
     # third-party database) is decoded, not rendered as ``b'...'``.
-    tags = classify_task_tags(
+    return ",".join(classify_task_tags(
         _safe_str(row["task"]),
         is_subagent=bool(row["parent_task_id"]),
         failed=_is_failed_result(_safe_str(row["result"]), row["success"]),
-        has_secret=trajectory_has_secret(db, task_id, row["task"], row["result"]),
-    )
-    db.execute("UPDATE task_history SET tags = ? WHERE id = ?", (",".join(tags), task_id))
+        has_secret=has_secret,
+    ))
+
+
+def _scan_for_backfill(db: sqlite3.Connection, row: sqlite3.Row) -> tuple[int, bool]:
+    """Return a task row's last event id and :func:`trajectory_has_secret` verdict.
+
+    The id is read before the scan: an event committed after it makes
+    :func:`backfill_task_metadata` skip the row, so no verdict it writes
+    missed an event.
+    """
+    (last_event,) = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (row["id"],)
+    ).fetchone()
+    return last_event, trajectory_has_secret(db, row["id"], row["task"], row["result"])
 
 
 def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
@@ -497,14 +534,18 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     and a ``chat_summaries`` row is written for every chat that has
     none or whose derived ``summary`` is empty (a ``--refresh`` blanks
     it; the user's ``user_summary`` is never touched).  Writes are
-    committed in short batches so a live daemon
-    sharing the database is never locked out for long.
+    committed in short batches, and the trajectory scans run outside
+    them, so a live daemon sharing the database is never locked out
+    for long.  A row's tags are written only while it is still
+    untagged and has no event newer than its scan: a task that
+    finished meanwhile wrote its own, and one still running is tagged
+    when it finishes (or by the next backfill).
 
     Args:
         db: Open connection to ``history.db`` with the current schema.
 
     Returns:
-        Counts: ``{"tags": n, "sea": n, "chats": n}``.
+        Counts of rows written: ``{"tags": n, "sea": n, "chats": n}``.
     """
     counts = {"tags": 0, "sea": 0, "chats": 0}
     # A cursor with its own row factory: the caller's connection keeps
@@ -516,10 +557,17 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
         "WHERE tags IS NULL OR tags = ''"
     ).fetchall()
     for start in range(0, len(rows), _BACKFILL_BATCH):
+        batch = rows[start : start + _BACKFILL_BATCH]
+        # The scans read every event of a task: they run before the
+        # batch's first UPDATE opens its write transaction.
+        scans = [_scan_for_backfill(db, row) for row in batch]
         with db:
-            for row in rows[start : start + _BACKFILL_BATCH]:
-                write_task_tags(db, row["id"], row)
-    counts["tags"] = len(rows)
+            for row, (last_event, has_secret) in zip(batch, scans, strict=True):
+                counts["tags"] += db.execute(
+                    "UPDATE task_history SET tags = ? WHERE id = ? AND (tags IS NULL OR tags = '') "
+                    "AND (SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?) = ?",
+                    (_task_tags(row, has_secret), row["id"], row["id"], last_event),
+                ).rowcount
     parents = db.execute(
         "SELECT DISTINCT parent_task_id FROM task_history "
         "WHERE parent_task_id IS NOT NULL AND parent_task_id != '' "

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kiss.agents.sorcar._concurrency import _race_delay, interruptible_locked_call
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_error import KISSError
@@ -513,7 +513,8 @@ def _git(
     cannot start at all (``OSError``, e.g. an argument over the
     kernel's single-argument limit; ``ValueError`` for a NUL byte in
     an argument) is likewise returned as a failed ``CompletedProcess``
-    (returncode 1) instead of raising.
+    (returncode 1) instead of raising.  Output is decoded by
+    :func:`_git_text`: the paths of a ``-z`` command byte for byte.
 
     An exception raised while waiting (the runner's Stop delivers
     ``KeyboardInterrupt`` to the task thread at any bytecode) stops git
@@ -537,39 +538,42 @@ def _git(
     cmd, full_env = _git_command(args, cwd)
     if env:
         full_env.update(env)
+    nul_separated = "-z" in args
+    # Before git starts: text that cannot be encoded (a lone surrogate)
+    # or a Stop landing here must not leave git waiting for its stdin.
+    given = None if input is None else input.encode("utf-8", "surrogateescape")
     try:
         proc = popen_process_group(
             cmd,
             stdin=None if input is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="surrogateescape",
             env=full_env,
         )
     except (OSError, ValueError) as exc:
         logger.warning("git %s could not start: %s", args[:1], exc)
         return subprocess.CompletedProcess(cmd, 1, "", f"git could not start: {exc}")
     try:
-        stdout, stderr = proc.communicate(input=input, timeout=_GIT_TIMEOUT_SECONDS)
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        out, err = proc.communicate(input=given, timeout=_GIT_TIMEOUT_SECONDS)
+        return subprocess.CompletedProcess(
+            cmd, proc.returncode, _git_text(out, nul_separated), _git_text(err, nul_separated),
+        )
     except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
         kill_process_tree(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=5)
+            out, err = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
             # Only a descendant that left the process group (its own
             # setsid) can still hold the pipes; git itself is dead, so
             # reap it and give up on its output.
-            stdout, stderr = "", ""
+            out, err = b"", b""
             proc.wait()
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=stdout or "",
-            stderr=stderr
+            stdout=_git_text(out, nul_separated),
+            stderr=_git_text(err, nul_separated)
             or f"git {args[0] if args else ''} timed out"
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
@@ -580,6 +584,18 @@ def _git(
         if proc.poll() is None:
             terminate_process_group(proc)  # SIGTERM first: git removes its .lock files
         raise
+
+
+def _git_text(data: bytes, nul_separated: bool) -> str:
+    """Return git output *data* as text: UTF-8, other bytes as surrogate escapes.
+
+    Line ends are translated as text mode would (``\\r\\n`` and ``\\r`` to
+    ``\\n``), except in the output of a *nul_separated* (``-z``)
+    command: it lists paths verbatim, and a carriage return in one is
+    part of the name (translated, ``a\\rb.txt`` would name ``a\\nb.txt``).
+    """
+    text = data.decode("utf-8", "surrogateescape")
+    return text if nul_separated else text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _git_stdout_head(
@@ -814,134 +830,36 @@ def _worktree_parts(path: str) -> tuple[list[str], int]:
     return parts, -1
 
 
-def _unquote_git_path(path: str) -> str:
-    """Unquote a C-style quoted filename from ``git status --porcelain``.
-
-    Git quotes filenames containing non-ASCII bytes (>0x7F), control
-    characters, double-quotes, or backslashes.  The quoted form is
-    surrounded by double-quotes with C-style escape sequences
-    (``\\n``, ``\\t``, ``\\\\``, ``\\"``, ``\\NNN`` octal).
-
-    When the path is not quoted (no surrounding double-quotes), it is
-    returned unchanged.
-
-    Args:
-        path: Raw filename string from ``git status --porcelain`` output.
-
-    Returns:
-        The unquoted filename.
-    """
-    if not (path.startswith('"') and path.endswith('"')):
-        return path
-    inner = path[1:-1]
-    raw = bytearray()
-    i = 0
-    _esc = {
-        "n": 0x0A,
-        "t": 0x09,
-        "\\": 0x5C,
-        '"': 0x22,
-        "a": 0x07,
-        "b": 0x08,
-        "f": 0x0C,
-        "r": 0x0D,
-        "v": 0x0B,
-    }
-    while i < len(inner):
-        if inner[i] == "\\" and i + 1 < len(inner):
-            nxt = inner[i + 1]
-            if nxt in _esc:
-                raw.append(_esc[nxt])
-                i += 2
-            elif (
-                nxt.isdigit()
-                and i + 3 < len(inner)
-                and inner[i + 2].isdigit()
-                and inner[i + 3].isdigit()
-            ):
-                raw.append(int(inner[i + 1 : i + 4], 8))
-                i += 4
-            else:
-                raw.append(ord("\\"))
-                i += 1
-        else:
-            raw.extend(inner[i].encode("utf-8"))
-            i += 1
-    return raw.decode("utf-8", errors="surrogateescape")
-
-
-def _split_rename_tail(tail: str) -> tuple[str, str]:
-    """Split a porcelain rename/copy tail ``old -> new`` into raw sides.
-
-    Each side may independently be C-style quoted (git quotes a path
-    when it contains control characters, double-quotes, or
-    backslashes), so the split must respect quoting and happen BEFORE
-    any unquoting.  The returned sides are still raw (possibly quoted)
-    and must each be passed through :func:`_unquote_git_path` exactly
-    once.
-
-    Args:
-        tail: The raw status-line tail after the two status characters
-            and the separating space (e.g. ``"a\\tb" -> "c\\td"``).
-
-    Returns:
-        ``(old_raw, new_raw)`` — the two sides of the rename, unsplit
-        quoting intact.
-    """
-    if tail.startswith('"'):
-        i = 1
-        while i < len(tail):
-            if tail[i] == "\\":
-                i += 2
-            elif tail[i] == '"':
-                rest = tail[i + 1 :]
-                if rest.startswith(" -> "):
-                    return tail[: i + 1], rest[4:]
-                break
-            else:
-                i += 1
-    idx = tail.index(" -> ")
-    return tail[:idx], tail[idx + 4 :]
-
-
 def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
-    """Parse ``git status --porcelain`` output into unquoted entries.
+    """Parse ``git status --porcelain -z`` output into entries.
 
-    The single shared porcelain parser — used by
-    :meth:`GitWorktreeOps.copy_dirty_state` and (via
-    ``merge_flow._porcelain_paths``) by the merge flow — so
-    the parsers cannot drift apart.
-
-    The output is split on ``\\n`` only (NOT ``splitlines()``, which
-    would also split on a raw unicode line/paragraph-separator byte
-    sequence inside an unquoted filename) and the path tail
-    (``line[3:]``) is never ``strip()``-ed: space-adjacent filenames
-    are legal and git leaves them unquoted.  Rename/copy entries are
-    split on the `` -> `` boundary (respecting quoting) BEFORE each
-    side is unquoted exactly once.
+    The one porcelain parser, shared by
+    :meth:`GitWorktreeOps.copy_dirty_state` and the merge flow's
+    changed-files fallback.  Each entry is ``XY path`` ended by a NUL;
+    a rename or copy (``R`` or ``C`` in ``XY``) is ``XY new``, NUL,
+    ``old``, NUL.  With ``-z`` git neither quotes nor escapes a path,
+    so names with spaces at either end, newlines, quotes, backslashes
+    or a `` -> `` come back exactly as on disk (bytes that are not
+    UTF-8 as the ``surrogateescape`` characters :func:`_git` decodes
+    them to).
 
     Args:
-        output: Raw stdout from a ``git status --porcelain`` command.
+        output: Raw stdout of ``git status --porcelain -z``.
 
     Returns:
-        List of ``(code, old_name, new_name)`` tuples in output order:
-        ``code`` is the two-character status code, ``old_name`` is the
-        rename/copy source path (``None`` for non-rename entries), and
-        ``new_name`` is the entry's (current) path.
+        ``(code, old_name, new_name)`` tuples in output order: ``code``
+        is the two-character status code, ``old_name`` the rename or
+        copy source (``None`` for any other entry) and ``new_name`` the
+        entry's current path.
     """
     entries: list[tuple[str, str | None, str]] = []
-    for line in output.split("\n"):
-        if len(line) < 4:
+    fields = iter(output.split("\0"))
+    for field in fields:
+        if len(field) < 4:
             continue
-        code = line[:2]
-        tail = line[3:]
-        if ("R" in code or "C" in code) and " -> " in tail:
-            old_raw, new_raw = _split_rename_tail(tail)
-            entries.append(
-                (code, _unquote_git_path(old_raw), _unquote_git_path(new_raw))
-            )
-        else:
-            entries.append((code, None, _unquote_git_path(tail)))
+        code = field[:2]
+        old_name = next(fields, None) if "R" in code or "C" in code else None
+        entries.append((code, old_name, field[3:]))
     return entries
 
 
@@ -1023,20 +941,13 @@ class GitWorktreeOps:
         """
         # ``repo_lock`` first, flock second — the file-wide order (see
         # ``_reclaim_process_lock``).  The failed-stamp path below calls
-        # ``cleanup_partial`` -> ``remove``, which takes ``repo_lock``;
-        # taking only the flock here would invert the order against
-        # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
-        # ``repo_lock`` is an RLock, so callers already holding it are
-        # unaffected.
-        return interruptible_locked_call(
-            repo_lock(repo), GitWorktreeOps._create_locked, repo, branch, wt_dir,
-        )
-
-    @staticmethod
-    def _create_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
-        """:meth:`create`'s body, run under ``repo_lock``."""
-        return GitWorktreeOps._add_worktree_locked(
-            repo, branch, wt_dir, ("-b", branch, str(wt_dir)), GitWorktreeOps.cleanup_partial,
+        # ``remove``, which takes ``repo_lock``; taking only the flock
+        # here would invert the order against ``sweep_orphaned_state``
+        # (repo_lock -> flock) and deadlock.  ``repo_lock`` is an RLock,
+        # so callers already holding it are unaffected.
+        return locked_call(
+            repo_lock(repo), GitWorktreeOps._add_worktree_locked,
+            repo, branch, wt_dir, ("-b", branch, str(wt_dir)), True,
         )
 
     @staticmethod
@@ -1045,14 +956,14 @@ class GitWorktreeOps:
         branch: str,
         wt_dir: Path,
         add_args: tuple[str, ...],
-        teardown: Callable[[Path, str, Path], None],
+        new_branch: bool,
     ) -> bool:
         """``git worktree add`` + owner stamp under the reclaim lock.
 
-        Shared body of :meth:`_create_locked` and
-        :meth:`_reattach_locked`: *add_args* follow ``git worktree add``
-        and *teardown*``(repo, branch, wt_dir)`` undoes the add when the
-        owner stamp fails.
+        Shared body of :meth:`create` and :meth:`reattach`, run under
+        ``repo_lock``: *add_args* follow ``git worktree add``.  When the
+        owner stamp fails the add is undone: the worktree is removed,
+        and so is the branch when the add created it (*new_branch*).
         """
         with _reclaim_process_lock(repo):
             result = _git("worktree", "add", *add_args, cwd=repo)
@@ -1066,7 +977,9 @@ class GitWorktreeOps:
                     "would delete it under this one",
                     wt_dir,
                 )
-                teardown(repo, branch, wt_dir)
+                GitWorktreeOps.remove(repo, wt_dir)
+                if new_branch:
+                    GitWorktreeOps.delete_branch(repo, branch)
                 return False
         return True
 
@@ -1089,21 +1002,10 @@ class GitWorktreeOps:
             True when the worktree exists and is stamped, False
             otherwise (nothing is left on disk).
         """
-        return interruptible_locked_call(
-            repo_lock(repo), GitWorktreeOps._reattach_locked, repo, branch, wt_dir,
+        return locked_call(
+            repo_lock(repo), GitWorktreeOps._add_worktree_locked,
+            repo, branch, wt_dir, (str(wt_dir), branch), False,
         )
-
-    @staticmethod
-    def _reattach_locked(repo: Path, branch: str, wt_dir: Path) -> bool:
-        """:meth:`reattach`'s body, run under ``repo_lock``."""
-        return GitWorktreeOps._add_worktree_locked(
-            repo, branch, wt_dir, (str(wt_dir), branch), GitWorktreeOps._remove_keeping_branch,
-        )
-
-    @staticmethod
-    def _remove_keeping_branch(repo: Path, branch: str, wt_dir: Path) -> None:
-        """:meth:`remove` with the ``(repo, branch, wt_dir)`` teardown signature."""
-        GitWorktreeOps.remove(repo, wt_dir)
 
     @staticmethod
     def remove(repo: Path, wt_dir: Path) -> None:
@@ -1133,7 +1035,7 @@ class GitWorktreeOps:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        interruptible_locked_call(repo_lock(repo), GitWorktreeOps._remove_locked, repo, wt_dir)
+        locked_call(repo_lock(repo), GitWorktreeOps._remove_locked, repo, wt_dir)
 
     @staticmethod
     def _remove_locked(repo: Path, wt_dir: Path) -> None:
@@ -1199,7 +1101,7 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        interruptible_locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
+        locked_call(repo_lock(repo), GitWorktreeOps._prune_locked, repo)
 
     @staticmethod
     def _prune_locked(repo: Path) -> None:
@@ -1263,7 +1165,11 @@ class GitWorktreeOps:
         """:meth:`commit_staged` without the index check, for callers that just did it."""
         # The message goes on stdin: an argv string is capped at the
         # kernel's single-argument limit (128 KiB on Linux).
-        cmd = ["commit", "-F", "-"]
+        # ``--cleanup=whitespace`` is git's default for a message that
+        # is not edited; pinning it keeps a user's ``commit.cleanup=strip``
+        # from deleting the message's ``#`` lines (Markdown headings,
+        # ``#123`` references) or rejecting an all-``#`` message as empty.
+        cmd = ["commit", "--cleanup=whitespace", "-F", "-"]
         if no_verify:
             cmd.append("--no-verify")
         result = _git(*cmd, cwd=wt_dir, input=message)
@@ -1312,7 +1218,7 @@ class GitWorktreeOps:
             line naming the failure, so every caller reads the tree
             as dirty and unverifiable rather than clean.
         """
-        status = _git("status", "--porcelain", cwd=wt_dir)
+        status = GitWorktreeOps._status(wt_dir)
         if status.returncode != 0:
             logger.warning(
                 "git status failed in %s (rc=%s): %s; treating as dirty",
@@ -1320,6 +1226,20 @@ class GitWorktreeOps:
             )
             return f"git status failed (rc={status.returncode}): {status.stderr.strip()}"
         return status.stdout.strip()
+
+    @staticmethod
+    def _status(wt_dir: Path) -> subprocess.CompletedProcess[str]:
+        """Run ``git status --porcelain``, listing untracked files whatever the config says.
+
+        ``--untracked-files=normal`` overrides a user's
+        ``status.showUntrackedFiles=no`` (common in dotfile repos and
+        large monorepos).  Callers decide from this output whether a
+        tree is clean, and the ``stash push --include-untracked`` and
+        ``git clean -fd`` that follow act on untracked files whatever
+        that setting says: hidden files were left out of the stash,
+        then deleted by the clean.
+        """
+        return _git("status", "--porcelain", "--untracked-files=normal", cwd=wt_dir)
 
     @staticmethod
     def has_staged_changes(wt_dir: Path) -> bool:
@@ -1470,11 +1390,11 @@ class GitWorktreeOps:
         Returns:
             True if the pop succeeded, False on conflict or error.
         """
-        before = _git("status", "--porcelain", cwd=repo)
+        before = GitWorktreeOps._status(repo)
         result = _git("stash", "pop", "--index", cwd=repo)
         if result.returncode == 0:
             return True
-        after = _git("status", "--porcelain", cwd=repo)
+        after = GitWorktreeOps._status(repo)
         if before.returncode != 0 or after.returncode != 0 or after.stdout != before.stdout:
             # The tree changed, or a status failed so nothing proves it
             # did not (two identical failure reports are not proof):
@@ -1776,7 +1696,7 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        interruptible_locked_call(
+        locked_call(
             repo_lock(repo), GitWorktreeOps._append_info_line_locked, repo, filename, entry,
         )
 
@@ -2223,7 +2143,7 @@ class GitWorktreeOps:
         has handed its pid to a stranger (routine on Windows, where pids
         are recycled within seconds), so the owner's
         :func:`process_identity` (start time + executable) is stored
-        beside it when available and :meth:`_owner_alive` compares both.
+        beside it when available and :meth:`_live_peer_owner` compares both.
 
         Args:
             repo: Git repo root path.
@@ -2260,31 +2180,35 @@ class GitWorktreeOps:
             return None
 
     @staticmethod
-    def _owner_alive(repo: Path, branch: str, owner_pid: int) -> bool:
-        """Whether the process that stamped *branch* (:meth:`save_owner_pid`) still runs.
+    def _live_peer_owner(repo: Path, branch: str) -> int | None:
+        """Return the pid of another live process that stamped *branch*, else ``None``.
 
-        A live pid is not enough: the owner may have exited and the OS
-        may have recycled its pid.  When the stamp also recorded the
-        owner's :func:`process_identity` (prefixed with the pid it
-        describes), the current holder of the pid must match it; a stamp
-        without a matching identity (legacy, ``ps`` unavailable, or the
-        pid re-stamped by hand) falls back to the pid probe alone.
+        The stamp is :meth:`save_owner_pid`'s.  This process's own pid
+        never counts: within one process the callers' exclusion sets
+        say which branches are live.  A live pid is not enough either:
+        the owner may have exited and the OS may have recycled its pid.
+        When the stamp also recorded the owner's
+        :func:`process_identity` (prefixed with the pid it describes),
+        the current holder of the pid must match it; a stamp without a
+        matching identity (legacy, ``ps`` unavailable, or the pid
+        re-stamped by hand) falls back to the pid probe alone.
 
         Args:
             repo: Git repo root path.
             branch: The worktree branch name.
-            owner_pid: The stamped owner pid.
 
         Returns:
-            True when the stamping process is still alive.
+            The owner's pid while that other process still runs;
+            ``None`` for no stamp, this process's stamp, or a gone owner.
         """
-        if not pid_alive(owner_pid):
-            return False
+        owner_pid = GitWorktreeOps.load_owner_pid(repo, branch)
+        if owner_pid is None or owner_pid == os.getpid() or not pid_alive(owner_pid):
+            return None
         stamped = GitWorktreeOps._load_branch_config(repo, branch, "kiss-owner-identity")
         prefix = f"{owner_pid}:"
         if stamped is None or not stamped.startswith(prefix):
-            return True
-        return process_identity(owner_pid) == stamped[len(prefix):]
+            return owner_pid
+        return owner_pid if process_identity(owner_pid) == stamped[len(prefix):] else None
 
     @staticmethod
     def load_spare_marker(repo: Path, branch: str) -> bool:
@@ -2780,7 +2704,7 @@ class GitWorktreeOps:
     def copy_dirty_state(repo: Path, wt_dir: Path) -> bool:
         """Copy uncommitted/staged/untracked files from main worktree.
 
-        Reads ``git status --porcelain`` in *repo* and mirrors every
+        Reads ``git status --porcelain -z`` in *repo* and mirrors every
         dirty file into *wt_dir*.  Files that exist in the main
         worktree are copied; files that were deleted are removed from
         *wt_dir*.  The caller is expected to stage and commit the
@@ -2800,7 +2724,7 @@ class GitWorktreeOps:
                 execution instead of silently running without the
                 user's dirty state.
         """
-        status = _git("status", "--porcelain", "-uall", cwd=repo)
+        status = _git("status", "--porcelain", "-z", "-uall", cwd=repo)
         if status.returncode != 0:
             raise OSError(
                 f"git status failed in {repo} (rc={status.returncode}): "
@@ -3387,7 +3311,7 @@ class GitWorktreeOps:
         return result.stdout.strip() == "0"
 
     @staticmethod
-    def sweep_orphaned_state(repo: Path) -> int:
+    def sweep_orphaned_state(repo: Path, *, exclude_branches: set[str] | None = None) -> int:
         """Delete leftover ``kiss/wt-*`` branches and config sections.
 
         A crashed, killed, or refused cleanup leaves three kinds of
@@ -3398,9 +3322,16 @@ class GitWorktreeOps:
         notices as a swelling ``git branch`` listing.
 
         Only debris is removed.  A branch is kept when it is checked
-        out by a live worktree (the task may still be running) or when
+        out by a live worktree (the task may still be running), when
         it holds commits no other ref can reach (unmerged work the user
-        could still want).  Config sections are only purged once their
+        could still want), or when a live agent owns it: it is in
+        *exclude_branches*, or another process that is still alive
+        stamped it (:meth:`_live_peer_owner`).  The last two keep the
+        branch of a task that removed its worktree directory and has
+        not merged yet (``_finalize_worktree`` runs before
+        ``_do_merge``): no worktree lists it for that moment, and
+        deleting it turned a task that changed nothing into a bogus
+        merge conflict.  Config sections are only purged once their
         branch is gone.
 
         A fourth kind of debris is a *husk*: a ``kiss_wt-*`` directory
@@ -3411,16 +3342,19 @@ class GitWorktreeOps:
 
         Args:
             repo: Git repo root path.
+            exclude_branches: Branches owned by a still-live agent in
+                this process, kept whatever their state.
 
         Returns:
             The number of branches deleted.
         """
-        return interruptible_locked_call(
-            repo_lock(repo), GitWorktreeOps._sweep_orphaned_state_locked, repo,
+        return locked_call(
+            repo_lock(repo), GitWorktreeOps._sweep_orphaned_state_locked,
+            repo, exclude_branches or set(),
         )
 
     @staticmethod
-    def _sweep_orphaned_state_locked(repo: Path) -> int:
+    def _sweep_orphaned_state_locked(repo: Path, excluded: set[str]) -> int:
         """:meth:`sweep_orphaned_state`'s body, run under ``repo_lock``."""
         with _reclaim_process_lock(repo):
             GitWorktreeOps.prune(repo)
@@ -3439,10 +3373,12 @@ class GitWorktreeOps:
                 return 0
             existing = set(result.stdout.split())
             deleted = 0
-            for branch in sorted(existing):
+            for branch in sorted(existing - excluded):
                 if branch in in_use:
                     continue
                 if not GitWorktreeOps._branch_is_expendable(repo, branch):
+                    continue
+                if GitWorktreeOps._live_peer_owner(repo, branch) is not None:
                     continue
                 # git refuses to delete a branch some worktree has
                 # checked out; the in_use guard skips those first so
@@ -3601,7 +3537,7 @@ class GitWorktreeOps:
             removed — or, for never-consumed pool spares, simply
             removed).
         """
-        return interruptible_locked_call(
+        return locked_call(
             repo_lock(repo), GitWorktreeOps._reclaim_orphaned_worktrees_locked,
             repo, exclude_branches or set(),
         )
@@ -3649,12 +3585,8 @@ class GitWorktreeOps:
                     # so this branch is only reachable on an rm-vs-
                     # iteration race with an external process.
                     continue
-                owner_pid = GitWorktreeOps.load_owner_pid(repo, branch)
-                if (
-                    owner_pid is not None
-                    and owner_pid != os.getpid()
-                    and GitWorktreeOps._owner_alive(repo, branch, owner_pid)
-                ):
+                owner_pid = GitWorktreeOps._live_peer_owner(repo, branch)
+                if owner_pid is not None:
                     # Another Sorcar process (daemon vs. CLI) owns this
                     # worktree and is still alive: its task may be
                     # running right now — or its pool is holding this

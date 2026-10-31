@@ -4,9 +4,10 @@
 # add your name here
 """End-to-end tests for the ``/ask`` SEA and its wiring.
 
-Four surfaces are pinned here, and only these — the tests use no
-mocks, just the real registry, the real slash-command resolver, the
-real daemon-side loader and the real dispatch code:
+Three surfaces are pinned here, and only these — the tests use no
+mocks, just the real registry, the real daemon-side loader and the
+real dispatch code (``/ask <question>`` resolving to ``ask_sea.py`` is
+pinned for every public SEA by ``test_bundled_seas.py``):
 
 1. The ``AskSea`` class itself: ``system_prompt`` MUST replace the
    assembled prompt with the bundled SYSTEM_LITE ablation prompt
@@ -16,18 +17,14 @@ real daemon-side loader and the real dispatch code:
    ``WorkerSea`` with the ``none`` tool profile (so there is no built-in
    tool besides ``finish``), and ``prompt()`` MUST append the fixed
    sentence carrying the ``{task_id}`` placeholder.
-2. The slash-command resolver ``slash_command_task`` MUST recognise
-   ``/ask <question>`` and hand back the question verbatim with the
-   registered ``ask_sea.py`` path: the daemon runs the SEA directly on
-   it (no relay directive, no nested sub-agent).
-3. The daemon-side loader ``apply_sea`` MUST apply the
+2. The daemon-side loader ``apply_sea`` MUST apply the
    settings to the wire fields, substitute ``{task_id}`` in what
    ``prompt()`` returns with the command's ``parentTaskId`` (empty
    string when absent) and stage the ``system_prompt`` and ``tools``
    methods as the daemon-side ``systemPromptHook`` / ``toolsHook``.
-4. The dispatch layer ``_dispatch`` MUST thread the calling task's
+3. The dispatch layer ``dispatch_result`` MUST thread the calling task's
    ``last_task_id`` to the daemon as ``parentTaskId`` and pass the
-   caller's ``append_to_prompt`` through verbatim: the substitution is
+   caller's ``add_to_prompt`` through verbatim: the substitution is
    the daemon's job now, so no dispatch-side rewrite touches the text.
    The ``run`` command is read off a local daemon stand-in
    (``RecordingDaemon``) the real ``daemon_client.run`` connects to.
@@ -49,7 +46,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.tool_verdict import ALLOW
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, assert_worker_contract
+from kiss.tests.agents.seas.sea_contract import assert_worker_contract
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 # The placeholder the daemon substitutes with the calling task's id.
@@ -139,18 +136,17 @@ def test_settings_follow_the_contract() -> None:
     )
 
 
-def test_tools_adds_task_context_alone_and_legacy_getters_are_gone() -> None:
-    """``tools`` MUST add ``task_context`` alone; no per-field getter remains.
+def test_tools_adds_task_context_alone() -> None:
+    """``tools`` MUST add ``task_context`` alone.
 
     The ``none`` tool profile (not the removed ``tools()`` getter) is
     what removes the built-in toolset; ``tools`` keeps whatever the run
-    hands it and appends.  Nothing reads the old module-level getters
-    any more, so a SEA defining one would ship dead code that silently
-    does nothing; none may exist.
+    hands it and appends.  The prompt suffix is ``ADD_TO_PROMPT``; its
+    old name ``APPEND_TO_PROMPT`` must not linger beside it (the removed
+    getters are checked by ``test_settings_follow_the_contract``).
     """
     assert [t.__name__ for t in AskSea().tools([])] == ["task_context"]
     assert [t.__name__ for t in AskSea().tools([print])] == ["print", "task_context"]
-    assert_no_removed_getters(ask_sea)
     assert not hasattr(ask_sea, "APPEND_TO_PROMPT")
 
 
@@ -380,13 +376,13 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``_dispatch`` MUST send the caller's id as ``parentTaskId`` and not rewrite text.
+    """``dispatch_result`` MUST send the caller's id as ``parentTaskId`` and not rewrite text.
 
     The daemon substitutes ``{task_id}`` from that ``parentTaskId``
-    (section 3), so the dispatcher no longer touches
-    ``append_to_prompt``: a caller's text with the placeholder, a
+    (section 2), so the dispatcher no longer touches
+    ``add_to_prompt``: a caller's text with the placeholder, a
     caller's text without it, and the empty default all reach the
-    daemon verbatim, as does ``append_to_system_prompt``.
+    daemon verbatim, as does ``add_to_system_prompt``.
     """
     for text in ("literal {task_id} stays here", "no placeholder at all", ""):
         options = dataclasses.replace(

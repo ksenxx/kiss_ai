@@ -80,17 +80,17 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def _make_repo(path: Path) -> Path:
     """Create a git repo with a seed commit and a committed .gitignore."""
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "test@test.com")
-    _git(path, "config", "user.name", "Test")
-    _git(path, "config", "commit.gpgsign", "false")
+    _git(path, "init", "-q").check_returncode()
+    _git(path, "config", "user.email", "test@test.com").check_returncode()
+    _git(path, "config", "user.name", "Test").check_returncode()
+    _git(path, "config", "commit.gpgsign", "false").check_returncode()
     (path / "README.md").write_text("# Test\n")
     (path / ".gitignore").write_text(
         "data/\n.env\n__pycache__/\n.venv/\n*.log\n"
         ".coverage*\n*.pyc\n*.pyo\n"
     )
-    _git(path, "add", ".")
-    _git(path, "commit", "-q", "-m", "initial")
+    _git(path, "add", ".").check_returncode()
+    _git(path, "commit", "-q", "-m", "initial").check_returncode()
     return path
 
 

@@ -76,15 +76,19 @@ def tips_data(version: str) -> dict[str, object]:
 
     ``show`` allows the auto-open unless the user opted out; the client
     (``tips.js``) then opens the window once per *version* per browser
-    profile, i.e. on first use and again after every update.
+    profile, i.e. on first use and again after every update.  ``optOut``
+    is the persisted "don't show tips again" choice itself, which the
+    window's checkbox shows and every browser honours.
 
     Args:
         version: The running version, sent so the client can key its
             once-per-version guard.
     """
     tips = read_tips()
+    opt_out = tips_disabled()
     return {
         "tips": tips,
-        "show": bool(tips) and not tips_disabled(),
+        "show": bool(tips) and not opt_out,
+        "optOut": opt_out,
         "version": version,
     }

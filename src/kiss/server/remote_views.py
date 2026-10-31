@@ -125,6 +125,16 @@ def split_tab_id(tab_id: str) -> tuple[str, str]:
     return remote_id, machine_name
 
 
+def registered_machine(name: str) -> Machine | None:
+    """The registered machine called *name* (None when none is).
+
+    By name only, unlike :func:`~kiss.agents.sorcar.machines.find_machine`,
+    which also matches a host: the view streams here and the bound tabs
+    of :mod:`kiss.server.remote_tabs` are keyed by the machine's name.
+    """
+    return next((m for m in load_machines() if m.name == name), None)
+
+
 class RemoteViewStream(MachineStream):
     """One machine's stream: its terminals and browser pages shown here.
 
@@ -539,7 +549,7 @@ class RemoteViews:
             return stream
         if closing:
             raise MachineError(f"{machine_name}: this daemon is stopping")
-        machine = next((m for m in load_machines() if m.name == machine_name), None)
+        machine = registered_machine(machine_name)
         if machine is None:
             raise MachineError(f"{machine_name} is not a registered machine")
         stream = RemoteViewStream(machine, self)

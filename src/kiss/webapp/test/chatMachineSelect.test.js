@@ -33,19 +33,12 @@
 
 const assert = require('assert');
 const {
-  makePage: makeHarnessPage,
+  makeRemoteChatPage: makePage,
+  persistedPicks,
   send,
   pickMachine: pick,
 } = require('./simplify2_harness');
 const {lastGetHistory, makeRow} = require('./history_helpers');
-
-function makePage(state) {
-  const {win, posted, getState} = makeHarnessPage({
-    bodyClass: 'remote-chat',
-    initialState: state || undefined,
-  });
-  return {win, posted, state: getState};
-}
 
 const MACHINES = [
   {
@@ -78,13 +71,6 @@ function options(win) {
 function submit(win, text) {
   win.document.getElementById('task-input').value = text;
   win.document.getElementById('send-btn').click();
-}
-
-// The persisted unsent picks, as a plain object of this realm (the
-// page's objects have the page's prototypes, which deepStrictEqual
-// compares).
-function persistedPicks(state) {
-  return JSON.parse(JSON.stringify(state().tabMachinePicks));
 }
 
 function lastSubmit(posted) {

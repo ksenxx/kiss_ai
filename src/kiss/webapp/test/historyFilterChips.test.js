@@ -7,14 +7,7 @@
 
 const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
-const {visibleTitles, makeRow} = require('./history_helpers');
-
-// One row per status chip: running, errored, succeeded.
-const SESSIONS_FIXTURE = [
-  makeRow({id: 'chatR', task_id: 1, title: 'running task', is_running: true, endTs: 0}),
-  makeRow({id: 'chatE', task_id: 2, title: 'errored task', failed: true}),
-  makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
-];
+const {visibleTitles, STATUS_CHIP_SESSIONS} = require('./history_helpers');
 
 const CHIP_SPEC = [
   {id: 'hf-running', label: 'Running', checked: true, lead: '.hf-chip-dot'},
@@ -109,7 +102,7 @@ function testChipMarkup() {
 
 function testChipTogglingFiltersRows() {
   const {win} = makePage();
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  send(win, {type: 'history', sessions: STATUS_CHIP_SESSIONS, offset: 0});
 
   assert.deepStrictEqual(
     visibleTitles(win).sort(),
@@ -156,6 +149,11 @@ function testChipCss() {
   const chips = Array.from(doc.querySelectorAll('.hf-chip'));
   assert.ok(chips.length >= 2, 'the filter bar renders status chips');
   const [first, second] = chips;
+  // Both selected states are set before ANY style is read: jsdom caches
+  // computed styles, and a `checked` change is no DOM mutation, so it
+  // would not refresh a style computed earlier.
+  first.querySelector('input').checked = true;
+  second.querySelector('input').checked = false;
   const chip = win.getComputedStyle(first);
   assert.ok(
     chip.borderRadius && chip.borderRadius !== '0px',
@@ -172,8 +170,6 @@ function testChipCss() {
     'the chip checkbox must be visually hidden (opacity: 0)',
   );
 
-  first.querySelector('input').checked = true;
-  second.querySelector('input').checked = false;
   assert.notStrictEqual(
     win.getComputedStyle(first).background,
     win.getComputedStyle(second).background,

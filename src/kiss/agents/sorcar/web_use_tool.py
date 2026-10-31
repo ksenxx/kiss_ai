@@ -361,6 +361,30 @@ def _driver_is_dead(playwright: Any) -> bool:
     return proc is not None and proc.returncode is not None
 
 
+def _kill_driver(playwright: Any, deadline_secs: float) -> None:
+    """Watchdog timer body: kill the Node driver whose raw input to an attached Chrome hung.
+
+    The browser is the user's own Chrome, which is never signalled.  The
+    driver's exit fails the blocked call instead (its request dies with
+    the driver's pipe), and :func:`_driver_is_dead` lets the next call
+    discard the driver and say how to reconnect.  ``Process.kill`` polls
+    the child first and skips one already reaped (Popen's guard against
+    signalling a recycled pid).
+
+    Args:
+        playwright: The sync Playwright whose driver to kill.
+        deadline_secs: The deadline that expired, for the log.
+    """
+    logger.warning(
+        "Raw input to the attached Chrome is hung after %.0fs; killing the Playwright driver",
+        deadline_secs,
+    )
+    try:
+        playwright._impl_obj._connection._transport._proc.kill()
+    except (AttributeError, ProcessLookupError):  # already gone, or another Playwright layout
+        logger.debug("Could not kill the Playwright driver", exc_info=True)
+
+
 class _TimerGuard:
     """Context manager that starts a ``threading.Timer`` on enter and cancels it on exit."""
 
@@ -429,6 +453,29 @@ class _Session:
     local_storage: list[list[str]] = field(default_factory=list)
 
 
+class _PageRecord:
+    """What the tool keeps for one open page (:meth:`WebUseTool._record`).
+
+    The DevTools buffers are bounded deques: a page logging in a loop or
+    beaconing every second must not grow memory forever.
+    """
+
+    def __init__(self) -> None:
+        # Console messages and uncaught errors (``list_console_messages``).
+        self.console: deque[dict[str, str]] = deque(maxlen=_CONSOLE_LOG_LIMIT)
+        # Requests and their outcome (``list_network_requests``).
+        self.network: deque[dict[str, Any]] = deque(maxlen=_NETWORK_LOG_LIMIT)
+        # Request object -> its entry in ``network``, until the response
+        # or the failure arrives to complete it.
+        self.pending: dict[Any, dict[str, Any]] = {}
+        # The page's one CDP session (:meth:`WebUseTool._page_session`).
+        self.session: Any = None
+        # ``Runtime.enable`` was answered on ``session``: console capture runs.
+        self.console_on = False
+        # The network listeners are registered (:meth:`WebUseTool._observe_page`).
+        self.observed = False
+
+
 # Writes *items* and drops *removed* in the page's localStorage, unless
 # the page landed on another origin (a redirect): a token must never be
 # handed to a site it was not set by.  Returns ``[written]`` (a list, as
@@ -444,6 +491,42 @@ _RESTORE_STORAGE_JS = """([origin, items, removed]) => {
 def _cookie_key(cookie: dict[str, Any]) -> tuple[str, str, str]:
     """The identity of a cookie: name, domain and path."""
     return (cookie["name"], cookie["domain"], cookie["path"])
+
+
+def _is_browser_ui(page: Any) -> bool:
+    """Whether *page* is part of Chrome's own UI rather than a web page.
+
+    The new-tab page and other ``chrome://`` pages, DevTools windows and
+    extension pages of a Chrome the user started are never the tab an
+    agent drives there (``attach_to_chrome``).
+    """
+    return str(page.url).startswith(("chrome://", "devtools://", "chrome-extension://"))
+
+
+# use_my_chrome's actions and the arguments each one needs, in the order
+# they are checked.
+_BRIDGE_ACTIONS: dict[str, tuple[str, ...]] = {
+    "list_tabs": (),
+    "open_tab": ("url",),
+    "navigate": ("tab_id", "url"),
+    "activate_tab": ("tab_id",),
+    "close_tab": ("tab_id",),
+    "evaluate": ("tab_id", "script"),
+    "screenshot": ("tab_id",),
+    "snapshot": ("tab_id",),
+    "click": ("tab_id", "uid"),
+    "type_text": ("tab_id", "uid", "text"),
+}
+
+# Each use_my_chrome argument: its name in the extension's protocol, and
+# what the error asks for when it is missing.
+_BRIDGE_ARGS: dict[str, tuple[str, str]] = {
+    "tab_id": ("tabId", "tab_id (from list_tabs or open_tab)"),
+    "url": ("url", "a url"),
+    "script": ("script", "a script"),
+    "uid": ("uid", "a uid (from a snapshot)"),
+    "text": ("text", "text"),
+}
 
 
 def _format_bridge_result(action: str, result: Any) -> str:
@@ -715,9 +798,6 @@ class WebUseTool:
         # The DevTools endpoint _browser is connected to in the Browser
         # tab; a relaunched browser listens on a new one (see _attach_live).
         self._live_cdp_url: str | None = None
-        # Page -> its CDP session, kept open for the page's lifetime (see
-        # _target_id); dropped with the connection in _detach_live.
-        self._cdp_sessions: dict[Any, Any] = {}
         # What the last switch of browser carried in: cookies, and the
         # localStorage keys of one origin.  Those that have died by the
         # next switch are deleted on the other side too.
@@ -753,19 +833,9 @@ class WebUseTool:
         # Last pointer position the tool moved to; curved mouse paths
         # start here.  ``None`` until the first move after a launch.
         self._mouse_xy: tuple[float, float] | None = None
-        # Per-page DevTools observation, attached once per page by
-        # ``_observe_page`` and keyed by page so background tabs keep
-        # their own buffers.  Bounded deques: a page logging in a loop
-        # or beaconing every second must not grow memory forever.
-        self._console_logs: dict[Any, deque[dict[str, str]]] = {}
-        self._network_logs: dict[Any, deque[dict[str, Any]]] = {}
-        # Request object -> its entry in _network_logs, until the
-        # response or failure arrives to complete it.
-        self._network_pending: dict[Any, dict[Any, dict[str, Any]]] = {}
-        # Raw CDP session per page carrying the Runtime-domain console
-        # capture (see _observe_page).  Distinct from _cdp_sessions,
-        # which tracks the live Browser-tab sessions.
-        self._console_sessions: dict[Any, Any] = {}
+        # Page -> its CDP session and DevTools buffers (see _record), so
+        # background tabs keep their own.
+        self._page_records: dict[Any, _PageRecord] = {}
         # The CDP endpoint of a browser the user launched and this tool
         # attached to (``attach_to_chrome``); ``None`` while driving the
         # tool's own stealth Chromium.
@@ -887,78 +957,102 @@ class WebUseTool:
         self._observe_page(page)
 
     def _observe_page(self, page: Any) -> None:
-        """Attach console/network capture to *page* once, for the DevTools tools.
+        """Attach network capture to *page* once, for the DevTools tools.
 
         Every adopted page (including background tabs followed later)
-        gets bounded ring buffers for its console messages, uncaught
-        errors and network traffic, so ``list_console_messages`` and
-        ``list_network_requests`` can answer what a bare accessibility
-        tree never shows: why a click did nothing (a TypeError, a 500).
-        Buffers of pages that closed since the last adoption are pruned
-        here.  Handlers are bound with :func:`functools.partial` so a
-        page's events land in its own deque; they must never raise into
-        the driver loop.
-
-        Console capture goes through a raw CDP session, not Playwright's
-        ``console``/``pageerror`` events: the stealth driver (patchright)
-        does not surface those (it tracks execution contexts in its own
-        utility world), but it does enable the Runtime domain on its own
-        session, so enabling it on one more session of the same target
-        adds no page-observable signal.  Both session creation and the
-        ``Runtime.enable`` round trip go through :func:`_cdp_call`:
-        neither has a timeout of its own, and a page whose renderer is
-        wedged must not pin the adoption of a tab (see :meth:`_target_id`
-        for why the sessions are never explicitly detached).
+        gets bounded ring buffers for its network traffic and console
+        messages (:class:`_PageRecord`), so ``list_network_requests`` and
+        ``list_console_messages`` can answer what a bare accessibility
+        tree never shows: why a click did nothing (a 500, a TypeError).
+        Handlers are bound to the page's record with
+        :func:`functools.partial` so a page's events land in its own
+        buffers; they must never raise into the driver loop.  Console
+        capture starts here only in the Browser tab
+        (:meth:`_capture_console`).
         """
-        self._console_logs = {p: log for p, log in self._console_logs.items() if not p.is_closed()}
-        self._network_logs = {p: log for p, log in self._network_logs.items() if not p.is_closed()}
-        self._network_pending = {
-            p: pend for p, pend in self._network_pending.items() if not p.is_closed()
-        }
-        self._console_sessions = {
-            p: s for p, s in self._console_sessions.items() if not p.is_closed()
-        }
-        if page not in self._console_logs:
-            self._console_logs[page] = deque(maxlen=_CONSOLE_LOG_LIMIT)
-            self._network_logs[page] = deque(maxlen=_NETWORK_LOG_LIMIT)
-            self._network_pending[page] = {}
-            page.on("request", partial(self._on_request, page))
-            page.on("response", partial(self._on_response, page))
-            page.on("requestfinished", partial(self._on_request_finished, page))
-            page.on("requestfailed", partial(self._on_request_failed, page))
-        if page in self._console_sessions:
+        record = self._record(page)
+        if not record.observed:
+            record.observed = True
+            page.on("request", partial(self._on_request, record))
+            page.on("response", partial(self._on_response, record))
+            page.on("requestfinished", partial(self._on_request_finished, record))
+            page.on("requestfailed", partial(self._on_request_failed, record))
+        if self._live:
+            self._capture_console(page)
+
+    def _record(self, page: Any) -> _PageRecord:
+        """Return what the tool keeps for *page*, creating it on first use.
+
+        The records of pages that closed since are pruned whenever one is
+        created; all of them go with the browser (:meth:`_on_browser_lost`).
+        """
+        record = self._page_records.get(page)
+        if record is None:
+            self._page_records = {p: r for p, r in self._page_records.items() if not p.is_closed()}
+            record = self._page_records[page] = _PageRecord()
+        return record
+
+    def _page_session(self, page: Any) -> Any:
+        """Return *page*'s CDP session, attaching it on first use.
+
+        One bare session per page serves every raw CDP need: the target
+        id (:meth:`_target_id`), ``evaluate_script`` and, once enabled,
+        console capture (:meth:`_capture_console`), whose listeners are
+        registered here, once.  Attaching answers at once even when a
+        script has wedged the renderer, but ``detach()`` waits for the
+        renderer and would hang forever, so the session is never
+        detached: it lives as long as the page.  The attach has no
+        timeout of its own and the driver never fails it when the
+        browser stops answering or exits under it, so it goes through
+        :func:`_cdp_call`; a failed attach stores nothing and the next
+        caller tries again.
+
+        Raises:
+            TimeoutError: The browser did not answer within
+                :data:`_CDP_CALL_TIMEOUT_SECS`.
+        """
+        record = self._record(page)
+        if record.session is None:
+            context = page.context
+            session = _cdp_call(context, context._impl_obj.new_cdp_session(page))
+            session.on("Runtime.consoleAPICalled", partial(self._on_console_api, record))
+            session.on("Runtime.exceptionThrown", partial(self._on_exception_thrown, record))
+            record.session = session
+        return record.session
+
+    def _capture_console(self, page: Any) -> None:
+        """Start *page*'s console capture: enable the Runtime domain on its session, once.
+
+        Capture goes through the page's raw CDP session, not Playwright's
+        ``console``/``pageerror`` events, which the stealth driver
+        (patchright) does not surface: it never enables the Runtime
+        domain, because a page can tell when a DevTools client has (V8
+        then formats every logged object once more, so a getter on a
+        logged error's ``name`` runs twice).  So on the stealth Chromium
+        and in an attached Chrome, capture starts only when
+        ``list_console_messages`` asks for it; ``Runtime.enable`` replays
+        what the current document has logged so far, so only messages of
+        documents already navigated away from are missed.  In the Browser
+        tab it starts at adoption: the daemon's own client (upstream
+        Playwright) has Runtime enabled there anyway.  A
+        ``Runtime.enable`` that times out (a busy renderer) still
+        completes later on the same session, so the next call sends it
+        again there (a repeated enable is a no-op) instead of attaching
+        another session whose listeners would record every message
+        twice.  Best effort: browsing works without capture.
+        """
+        record = self._record(page)
+        if record.console_on:
             return
-        # Retried on every observation until it succeeds: a session that
-        # failed at adoption (renderer still starting) would otherwise
-        # leave the page without console capture for its whole life.
         try:
-            session = _cdp_call(page.context, page.context._impl_obj.new_cdp_session(page))
-            session.on("Runtime.consoleAPICalled", partial(self._on_console_api, page))
-            session.on("Runtime.exceptionThrown", partial(self._on_exception_thrown, page))
-            _cdp_call(page, session.send("Runtime.enable"))
-            self._console_sessions[page] = session
+            _cdp_call(page, self._page_session(page).send("Runtime.enable"))
         except Exception:  # noqa: BLE001 - capture is best-effort, browsing still works
             logger.debug("Could not start console capture for a page", exc_info=True)
+            return
+        record.console_on = True
 
-    def _console_session(self) -> Any:
-        """Return the current page's CDP console session, creating it if missing.
-
-        :meth:`_adopt_page` returns at once for the page that is already
-        current, so a session that could not be created at adoption (a
-        renderer still starting) is retried here, from the tools that
-        need it, rather than only when the agent switches tabs.
-
-        Returns:
-            The session, or ``None`` when it still cannot be created.
-        """
-        session = self._console_sessions.get(self._page)
-        if session is None:
-            self._observe_page(self._page)
-            session = self._console_sessions.get(self._page)
-        return session
-
-    def _on_console_api(self, page: Any, event: dict[str, Any]) -> None:
-        """Record one Runtime.consoleAPICalled event of *page* in its buffer."""
+    def _on_console_api(self, record: _PageRecord, event: dict[str, Any]) -> None:
+        """Record one Runtime.consoleAPICalled event in its page's buffer."""
         try:
             parts = []
             for arg in event.get("args", []):
@@ -972,20 +1066,18 @@ class WebUseTool:
             frames = (event.get("stackTrace") or {}).get("callFrames") or []
             if frames and frames[0].get("url"):
                 where = f"{frames[0]['url']}:{frames[0].get('lineNumber', 0)}"
-            self._console_logs[page].append(
+            record.console.append(
                 {
                     "level": str(event.get("type", "log")),
                     "text": " ".join(parts)[:_MESSAGE_TEXT_MAX],
                     "where": where[:_URL_TEXT_MAX],
                 }
             )
-        except KeyError:  # the page's buffer was pruned after the event was queued
-            pass
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not record a console message", exc_info=True)
 
-    def _on_exception_thrown(self, page: Any, event: dict[str, Any]) -> None:
-        """Record one Runtime.exceptionThrown event of *page* as a pageerror entry."""
+    def _on_exception_thrown(self, record: _PageRecord, event: dict[str, Any]) -> None:
+        """Record one Runtime.exceptionThrown event as a pageerror entry of its page."""
         try:
             details = event.get("exceptionDetails", {})
             exception = details.get("exception") or {}
@@ -996,20 +1088,18 @@ class WebUseTool:
             where = ""
             if details.get("url"):
                 where = f"{details['url']}:{details.get('lineNumber', 0)}"
-            self._console_logs[page].append(
+            record.console.append(
                 {
                     "level": "pageerror",
                     "text": text[:_MESSAGE_TEXT_MAX],
                     "where": where[:_URL_TEXT_MAX],
                 }
             )
-        except KeyError:  # the page's buffer was pruned after the event was queued
-            pass
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not record a page error", exc_info=True)
 
-    def _on_request(self, page: Any, request: Any) -> None:
-        """Record an outgoing request of *page*; completed by finished/failed events."""
+    def _on_request(self, record: _PageRecord, request: Any) -> None:
+        """Record an outgoing request of a page; completed by finished/failed events."""
         try:
             entry: dict[str, Any] = {
                 "method": str(request.method),
@@ -1018,42 +1108,37 @@ class WebUseTool:
                 "status": None,
                 "error": "",
             }
-            self._network_logs[page].append(entry)
-            pending = self._network_pending[page]
-            pending[request] = entry
+            record.network.append(entry)
+            record.pending[request] = entry
             # The ring buffer drops old entries; the pending index must
             # not keep them (and their request objects) alive forever.
-            while len(pending) > _NETWORK_LOG_LIMIT:
-                pending.pop(next(iter(pending)))
+            while len(record.pending) > _NETWORK_LOG_LIMIT:
+                record.pending.pop(next(iter(record.pending)))
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not record a network request", exc_info=True)
 
-    def _on_response(self, page: Any, response: Any) -> None:
+    def _on_response(self, record: _PageRecord, response: Any) -> None:
         """Record the response's status; the request may still fail mid-body."""
         try:
-            entry = self._network_pending.get(page, {}).get(response.request)
+            entry = record.pending.get(response.request)
             if entry is not None:
                 entry["status"] = response.status
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not record a network response", exc_info=True)
 
-    def _on_request_finished(self, page: Any, request: Any) -> None:
-        """Retire the request entry of *page*: it completed, body included."""
+    def _on_request_finished(self, record: _PageRecord, request: Any) -> None:
+        """Retire the request's entry: it completed, body included."""
         try:
-            self._network_pending.get(page, {}).pop(request, None)
+            record.pending.pop(request, None)
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not retire a network request", exc_info=True)
 
-    def _on_request_failed(self, page: Any, request: Any) -> None:
-        """Complete the request entry of *page* with its failure reason."""
+    def _on_request_failed(self, record: _PageRecord, request: Any) -> None:
+        """Complete the request's entry with its failure reason."""
         try:
-            entry = self._network_pending.get(page, {}).pop(request, None)
+            entry = record.pending.pop(request, None)
             if entry is not None:
-                failure = request.failure
-                if isinstance(failure, str):  # patchright's Python API: plain error text
-                    entry["error"] = failure
-                else:  # upstream playwright's API: {"errorText": ...}
-                    entry["error"] = str((failure or {}).get("errorText", "failed"))
+                entry["error"] = request.failure or "failed"
         except Exception:  # a driver event must never break the driver loop
             logger.debug("Could not record a network failure", exc_info=True)
 
@@ -1098,12 +1183,9 @@ class WebUseTool:
         self._context = None
         self._browser = None
         self._elements = []
-        # The pages these buffers belonged to are gone with the browser
-        # (its console-capture sessions die with it; no detach needed).
-        self._console_logs = {}
-        self._network_logs = {}
-        self._network_pending = {}
-        self._console_sessions = {}
+        # The pages these records belonged to are gone with the browser
+        # (their CDP sessions die with it; no detach needed).
+        self._page_records = {}
 
     def _attach_live(self) -> None:
         """Open a tab in the Browser tab's browser and adopt its page over CDP.
@@ -1112,13 +1194,19 @@ class WebUseTool:
         and returns the page's target id; this tool connects a second
         Playwright client to the same browser and picks that page.  A tab
         the user closed, or a browser that exited, is replaced by a fresh
-        tab on the next call.  A tab this client fails to pick up is
-        closed again so it does not linger blank in front of the user.
+        tab on the next call.  A tab this client fails to pick up and
+        adopt as its own, or stops picking up because a Stop landed (the
+        connect can take seconds), is closed again so it does not linger
+        blank in front of the user, and a page adopted halfway is
+        dropped with it.  The tab is taken inside that clean-up: once
+        ``open_for_agent`` has returned, the service's own clean-up no
+        longer runs.
         """
         if self._playwright is None:
             self._playwright = web_stealth.playwright_api().sync_playwright().start()
-        tab = self._live_browser.open_for_agent()
+        tab = page = None
         try:
+            tab = self._live_browser.open_for_agent()
             if not self._live_connected(tab.cdp_url):
                 self._disconnect_live()
                 self._browser = self._playwright.chromium.connect_over_cdp(tab.cdp_url)
@@ -1126,11 +1214,14 @@ class WebUseTool:
                 self._live_cdp_url = tab.cdp_url
             self._context = self._browser.contexts[0]
             page = self._find_live_page(tab.target_id)
-        except Exception:
-            self._live_browser.close(tab.tab_id)
+            self._adopt_page(page)
+            self._live_tab = tab.tab_id
+        except BaseException:
+            if tab is not None:
+                self._live_browser.close(tab.tab_id)
+            if page is not None and self._page is page:
+                self._page = self._live_tab = self._live_target = None
             raise
-        self._adopt_page(page)
-        self._live_tab = tab.tab_id
 
     def _live_connected(self, cdp_url: str) -> bool:
         """Whether the CDP connection to the Browser tab's browser is still usable.
@@ -1151,25 +1242,17 @@ class WebUseTool:
     def _target_id(self, page: Any) -> str:
         """Chromium's target id of *page* (what the daemon's service knows it by).
 
-        Read over a CDP session of the page that is kept for the page's
-        lifetime (:attr:`_cdp_sessions`): attaching and the read answer
-        at once even when a script has wedged the renderer, but
-        ``detach()`` waits for the renderer and would hang forever.
-        Both round trips are bounded by :func:`_cdp_call`: neither has a
-        timeout of its own, and the driver never fails them when the
-        browser stops answering or exits under them.
+        Read over the page's CDP session (:meth:`_page_session`), which
+        answers at once even when a script has wedged the renderer.  The
+        read is bounded by :func:`_cdp_call` like the attach: it has no
+        timeout of its own, and the driver never fails it when the
+        browser stops answering or exits under it.
 
         Raises:
             TimeoutError: The browser did not answer within
                 :data:`_CDP_CALL_TIMEOUT_SECS`.
         """
-        session = self._cdp_sessions.get(page)
-        if session is None:
-            self._cdp_sessions = {p: s for p, s in self._cdp_sessions.items() if not p.is_closed()}
-            context = self._context
-            session = _cdp_call(context, context._impl_obj.new_cdp_session(page))
-            self._cdp_sessions[page] = session
-        info = _cdp_call(page, session.send("Target.getTargetInfo"))
+        info = _cdp_call(page, self._page_session(page).send("Target.getTargetInfo"))
         return str(info["targetInfo"]["targetId"])
 
     def _find_live_page(self, target_id: str) -> Any:
@@ -1230,7 +1313,6 @@ class WebUseTool:
             return
         self._live_tab = None
         self._live_target = None
-        self._cdp_sessions = {}
         self._disconnect_live()
         self._on_browser_lost()
 
@@ -1356,7 +1438,6 @@ class WebUseTool:
         playwright, self._playwright = self._playwright, None
         live_tab, self._live_tab = self._live_tab, None
         target, self._live_target = self._live_target, None
-        self._cdp_sessions = {}
         if self._live and close_live_tab:
             try:
                 if live_tab is None and target is not None:
@@ -1460,17 +1541,25 @@ class WebUseTool:
             except Exception:  # pragma: no cover — context already dead
                 logger.debug("Exception caught", exc_info=True)
                 pages = []
+            if self._attached_url is not None:
+                # The user's other tabs, never their browser's own UI.
+                pages = [p for p in pages if not _is_browser_ui(p)]
             if pages:
                 self._adopt_page(pages[-1])
                 return
         if self._attached_url is not None:
-            # The user's own browser exited (or the connection dropped):
-            # relaunching the stealth Chromium instead would silently
-            # swap the logged-in session the agent was driving for a
-            # synthetic profile, so fail with the way back.
+            # The driven tab's renderer crashed (only the page was dropped;
+            # the connection and the user's other tabs are fine), or the
+            # user's own browser exited or the connection dropped:
+            # relaunching the stealth Chromium instead would silently swap
+            # the logged-in session the agent was driving for a synthetic
+            # profile, so fail with the way back.
+            if self._page is None and self._context is not None:
+                lost = "The attached tab crashed"
+            else:
+                lost = f"The Chrome at {self._attached_url} disconnected"
             raise RuntimeError(
-                f"The Chrome at {self._attached_url} disconnected. "
-                f'Reconnect with attach_to_chrome("{self._attached_url}"), or call '
+                f'{lost}. Reconnect with attach_to_chrome("{self._attached_url}"), or call '
                 "close_browser() to return to the built-in Chromium."
             )
         atexit.unregister(self.close)
@@ -1846,7 +1935,7 @@ class WebUseTool:
         self._page.wait_for_function("() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
 
     def _input_hang_watchdog(self, deadline_secs: float = _INPUT_WATCHDOG_SECS) -> Any:
-        """Kill Chromium if the guarded raw input call outlives *deadline_secs*.
+        """Cut off the guarded raw input call if it outlives *deadline_secs*.
 
         Raw input operations (``keyboard.press``/``type``,
         ``mouse.move``/``wheel``) carry no timeout in the Playwright
@@ -1857,7 +1946,11 @@ class WebUseTool:
         returns its documented error string, and the next tool call
         relaunches a fresh browser via ``_ensure_browser``.  A page in
         that state is permanently wedged, so losing the session is the
-        correct recovery, exactly like the graceful-close watchdog.
+        correct recovery, exactly like the graceful-close watchdog.  In
+        a Chrome the user started (``attach_to_chrome``) the tool's own
+        Node driver is killed instead (:func:`_kill_driver`): the user's
+        browser is never signalled, and the next call reports the lost
+        connection with the way back.
 
         Args:
             deadline_secs: Seconds the guarded block may run before the
@@ -1869,6 +1962,12 @@ class WebUseTool:
             A ``threading.Timer``-cancelling context manager guarding the
             ``with`` block.
         """
+        if self._attached_url is not None:
+            timer = threading.Timer(
+                deadline_secs, _kill_driver, args=(self._playwright, deadline_secs)
+            )
+            timer.daemon = True
+            return _TimerGuard(timer)
         if self._live:
             # The browser is the user's: the daemon's service stops the
             # hung script (and closes only that tab if it stays wedged).
@@ -2028,10 +2127,13 @@ class WebUseTool:
         Two widgets are pressed on the user's behalf: Cloudflare Turnstile's
         checkbox (:meth:`_turnstile_checkbox`; its accessible element spans
         the square and the "Verify you are human" label, people press the
-        square) and HUMAN / PerimeterX's "Press & Hold" bar
-        (:data:`web_stealth.PRESS_AND_HOLD_BOX_JS`), pressed anywhere along
-        it.  CAPTCHA puzzles and hard blocks have no such element and are
-        reported for :meth:`show_browser`.
+        square) and HUMAN / PerimeterX's "Press & Hold" button, found in
+        the visible frame of the ``#px-captcha`` widget
+        (:data:`web_stealth.PRESS_AND_HOLD_BOX_JS`,
+        :func:`web_stealth.press_and_hold_box`; the widget can be wider
+        than its button) and pressed anywhere on it.  CAPTCHA puzzles and
+        hard blocks have no such element and are reported for
+        :meth:`show_browser`.
 
         Args:
             vendor: The label :meth:`_challenge_vendor` returned.
@@ -2048,7 +2150,11 @@ class WebUseTool:
             return {"x": box["x"], "y": box["y"], "width": side, "height": box["height"]}
         if vendor == web_stealth.PERIMETERX_CHECK:
             boxes = self._read_page(self._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
-            return boxes[0] if boxes else None
+            if not boxes:
+                return None
+            # Frame-owner box reads carry no protocol timeout, as raw input.
+            with self._input_hang_watchdog():
+                return web_stealth.press_and_hold_box(self._page, boxes[0])
         return None
 
     def _press_at(self, box: dict[str, float], hold_secs: float) -> None:
@@ -2531,8 +2637,10 @@ class WebUseTool:
         src = script.strip()
         if not src:
             return "Error evaluating script: empty script."
-        session = self._console_session()
-        if session is None:
+        try:
+            session = self._page_session(self._page)
+        except Exception:  # noqa: BLE001 - the browser did not answer the attach
+            logger.debug("Exception caught", exc_info=True)
             return "Error evaluating script: no CDP session for the current page."
         # One-shot evaluation over the page's CDP session: unlike
         # wait_for_function it is never re-armed in a new document, so a
@@ -2543,9 +2651,10 @@ class WebUseTool:
         # promise-waiting and JSON serialization into the browser, and
         # the page-side timeout ends scripts that run long; the
         # _cdp_call deadline covers a renderer that never answers at
-        # all.
+        # all.  The script sits on lines of its own, so a line comment
+        # ending it cannot swallow the rest of the wrapper.
         expression = (
-            f"(async () => {{ const f = ({src}); try {{"
+            f"(async () => {{ const f = (\n{src}\n); try {{"
             " return [true, await (typeof f === 'function' ? f() : f)];"
             " } catch (e) { return [false, String((e && e.stack) || e)]; } })()"
         )
@@ -2571,10 +2680,9 @@ class WebUseTool:
             exception = details.get("exception") or {}
             message = exception.get("description") or details.get("text") or "unknown error"
             return f"Error evaluating script: {str(message).splitlines()[0]}"
-        result = reply.get("result", {})
-        if "value" not in result:  # unserializable (an uncloned DOM node, undefined)
-            return str(result.get("description", "undefined"))
-        ok, value = result["value"]
+        # The wrapper always resolves to a [ok, value] pair, and returnByValue
+        # serializes it (or the call failed above with a protocol error).
+        ok, value = reply["result"]["value"]
         if not ok:
             return f"Error evaluating script: {value}"
         text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
@@ -2587,8 +2695,9 @@ class WebUseTool:
 
         The accessibility tree never shows a TypeError or a failed
         console.assert; when a click or a page load did not do what it
-        should, look here first.  Messages are recorded per page from the
-        moment it is opened (the last 200 are kept).
+        should, look here first.  Recording starts with the first call
+        for a page: it shows what the current document has logged so
+        far, and from then on the page's messages are kept (the last 200).
 
         Args:
             clear: If True, empty the recorded messages after listing them,
@@ -2602,14 +2711,14 @@ class WebUseTool:
         if err is not None:
             return err
         try:
-            self._console_session()  # capture resumes if adoption could not start it
+            self._capture_console(self._page)
             # The sync driver only delivers page events while a call is in
             # flight, so the round trip comes FIRST: it pumps events queued
             # since the last tool call into the buffers.  The snapshot and
             # the clear then happen with no driver yield between them.
             title = self._page_title(self._page)
             url = self._page.url
-            log = self._console_logs.get(self._page)
+            log = self._record(self._page).console
             if not log:
                 return "No console messages recorded for the current page."
             entries = list(log)
@@ -2654,14 +2763,14 @@ class WebUseTool:
             # the clear then happen with no driver yield between them.
             title = self._page_title(self._page)
             url = self._page.url
-            log = self._network_logs.get(self._page)
-            if not log:
+            record = self._record(self._page)
+            if not record.network:
                 return "No network requests recorded for the current page."
-            entries = list(log)
+            entries = list(record.network)
             if clear:
-                log.clear()
+                record.network.clear()
                 # Retired entries must not linger in the pending index.
-                self._network_pending[self._page] = {}
+                record.pending.clear()
             entries = [e for e in entries if url_filter in e["url"]] if url_filter else entries
             if not entries:
                 return f"No network requests matching {url_filter!r}."
@@ -2705,15 +2814,18 @@ class WebUseTool:
             return err
         timeout = min(max(float(timeout), 0.5), _WAIT_FOR_MAX_SECS)
         # What a viewer can actually read: copies of *text* hidden by
-        # display:none, visibility:hidden or content-visibility:hidden
-        # count for neither appearing nor disappearing, ALL visible
+        # display:none, visibility:hidden, content-visibility:hidden or a
+        # closed <details> (all but its first <summary>) count for
+        # neither appearing nor disappearing, ALL visible
         # copies must go for a disappearance, and open shadow roots
         # (including text nodes directly under the root) and
         # input/textarea values (e.g. <input type="submit" value="...">)
         # count too.  The page's rendered text is rebuilt from its text
-        # nodes in rendered order (shadow trees in place, a <slot>
-        # expanded to the light DOM assigned to it, whose visibility and
-        # line box then follow the slot, not the host): a text node counts
+        # nodes in rendered order (shadow trees in place, a <slot> of a
+        # shadow tree expanded to the light DOM assigned to it, whose
+        # visibility and line box then follow the slot, not the host; a
+        # <slot> outside any shadow tree renders its own children like
+        # any inline element): a text node counts
         # when it has layout boxes of its own (a Range over it has
         # client rects: this leaves out display:none, undistributed
         # light DOM under a shadow host, the options of a collapsed
@@ -2744,12 +2856,15 @@ class WebUseTool:
             "   || (n.getRootNode && n.getRootNode().host) || null;"
             " const isField = (el) => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';"
             " const isMenu = (el) => el.tagName === 'SELECT' && !el.multiple && el.size <= 1;"
+            " const folded = (n, holder) =>"  # a closed <details> renders its first <summary> only
+            "   !!holder && holder.tagName === 'DETAILS' && !holder.open"
+            "   && n !== holder.querySelector(':scope > summary');"
             " const skipped = new Map();"  # inside a content-visibility:hidden subtree
             " const isSkipped = (el) => {"
             "   if (!el) return false;"
             "   if (!skipped.has(el))"
             "     skipped.set(el, getComputedStyle(el).contentVisibility === 'hidden'"
-            "       || isSkipped(parentOf(el)));"
+            "       || folded(el, parentOf(el)) || isSkipped(parentOf(el)));"
             "   return skipped.get(el); };"
             " const styles = new Map();"
             " const styleOf = (el) => {"
@@ -2771,7 +2886,8 @@ class WebUseTool:
             "   if (n.nodeType !== 1) return;"
             "   if (n.tagName === 'BR' || isField(n) || isMenu(n)) nodes.push(n);"
             "   if (n.shadowRoot) walk(n.shadowRoot);"  # its light DOM shows through <slot>s only
-            "   else if (n.tagName === 'SLOT') n.assignedNodes({flatten: true}).forEach(visit);"
+            "   else if (n.tagName === 'SLOT' && n.getRootNode() instanceof ShadowRoot)"
+            "     n.assignedNodes({flatten: true}).forEach(visit);"
             "   else walk(n); };"
             " const walk = (root) => { for (const c of root.childNodes) visit(c); };"
             " const labelOf = (n) => n.nodeType === 3 ? n.data"
@@ -2796,7 +2912,7 @@ class WebUseTool:
             "       let box;"
             "       if (n.nodeType === 3) {"
             "         const holder = parentOf(n);"
-            "         if (!visible(holder) || !rendered(n)) continue;"
+            "         if (!visible(holder) || folded(n, holder) || !rendered(n)) continue;"
             "         box = blockOf(holder);"
             "       } else {"
             "         if (!boxed(n)) continue;"
@@ -2870,8 +2986,7 @@ class WebUseTool:
                 p
                 for context in browser.contexts
                 for p in context.pages
-                if not p.is_closed()
-                and not p.url.startswith(("chrome://", "devtools://", "chrome-extension://"))
+                if not p.is_closed() and not _is_browser_ui(p)
             ]
             if not pages:
                 raise RuntimeError("no open tabs found")
@@ -2907,19 +3022,19 @@ class WebUseTool:
         text: str = "",
         timeout: int = 30,
     ) -> str:
-        """Drive the user's everyday Chrome through the KISS Sorcar Bridge extension.
+        """Drive the user's everyday Chrome through the bridge Chrome extension.
 
         This is the way into the browser the user is actually logged into
         (their default-profile Chrome with Gmail, SSO, passkeys): Chrome
         since v136 ignores --remote-debugging-port on the default profile,
-        so attach_to_chrome cannot reach it, but the KISS Sorcar Bridge
-        Chrome extension can.  The user loads the extension once
-        (chrome://extensions → Developer mode → Load unpacked →
-        ~/.kiss/chrome_extension); this tool then talks to it over a
-        token-gated loopback WebSocket.  The daemon serves that socket
-        from start-up when the "Drive my Chrome" setting is on;
-        otherwise the first call starts it and may wait a few seconds
-        for the extension to find it.
+        so attach_to_chrome cannot reach it, but the bridge extension can.
+        The user loads the extension once (chrome://extensions → Developer
+        mode → Load unpacked → the directory named in this tool's error
+        while no extension is connected); this tool then talks to it
+        over a token-gated loopback WebSocket.  The daemon
+        serves that socket from start-up when the "Drive my Chrome"
+        setting is on; otherwise the first call starts it and may wait a
+        few seconds for the extension to find it.
 
         Actions:
             "list_tabs": every tab as "id=<id> [active] <title> — <url>".
@@ -2957,7 +3072,7 @@ class WebUseTool:
             script: JavaScript for evaluate.
             uid: Element number from snapshot, for click/type_text.
             text: Replacement value for type_text.
-            timeout: Seconds to wait for the extension's answer.
+            timeout: Seconds to wait for the extension's answer (1 to 120).
 
         Returns:
             The action result, or "Error ..." explaining what to do (e.g.
@@ -2968,39 +3083,22 @@ class WebUseTool:
         reading over acting."""
         from kiss.agents.sorcar import chrome_bridge  # deferred: websockets import cost
 
+        needed = _BRIDGE_ACTIONS.get(action)
+        if needed is None:
+            return f"Error: unknown action '{action}'. Use one of: {', '.join(_BRIDGE_ACTIONS)}."
+        given: dict[str, Any] = {
+            "tab_id": tab_id,
+            "url": url,
+            "script": script,
+            "uid": uid,
+            "text": text,
+        }
         args: dict[str, Any] = {}
-        if action in (
-            "navigate", "activate_tab", "close_tab", "evaluate", "screenshot",
-            "snapshot", "click", "type_text",
-        ):
-            if not tab_id:
-                return f"Error: action '{action}' needs tab_id (from list_tabs or open_tab)."
-            args["tabId"] = tab_id
-        if action in ("open_tab", "navigate"):
-            if not url:
-                return f"Error: action '{action}' needs a url."
-            args["url"] = url
-        if action == "evaluate":
-            if not script:
-                return "Error: action 'evaluate' needs a script."
-            args["script"] = script
-        if action in ("click", "type_text"):
-            if not uid:
-                return f"Error: action '{action}' needs a uid (from a snapshot)."
-            args["uid"] = uid
-        if action == "type_text":
-            if not text:
-                return "Error: action 'type_text' needs text."
-            args["text"] = text
-        if action not in (
-            "list_tabs", "open_tab", "navigate", "activate_tab", "close_tab",
-            "evaluate", "screenshot", "snapshot", "click", "type_text",
-        ):
-            return (
-                f"Error: unknown action '{action}'. Use one of: list_tabs, open_tab, "
-                "navigate, activate_tab, close_tab, evaluate, screenshot, "
-                "snapshot, click, type_text."
-            )
+        for name in needed:
+            wire_name, wanted = _BRIDGE_ARGS[name]
+            if not given[name]:
+                return f"Error: action '{action}' needs {wanted}."
+            args[wire_name] = given[name]
         try:
             bridge = chrome_bridge.ChromeBridge.instance()
         except chrome_bridge.ChromeBridgeError as e:
@@ -3009,8 +3107,12 @@ class WebUseTool:
             # Started by this very call (daemon setting off, or a CLI run):
             # the extension finds the new config on its next retry.
             bridge.wait_for_extension(_BRIDGE_CONNECT_WAIT_SECS)
+        # Bounded like wait_for: a Stop cannot interrupt the wait, and a
+        # deadline already past would drop the extension's connection while
+        # the user's Chrome still runs the action.
+        wait_secs = min(max(float(timeout), 1.0), _WAIT_FOR_MAX_SECS)
         try:
-            result = bridge.call(action, args, timeout=float(timeout))
+            result = bridge.call(action, args, timeout=wait_secs)
         except chrome_bridge.ChromeBridgeError as e:
             return f"Error using my Chrome: {e}"
         if action == "screenshot":
@@ -3136,8 +3238,9 @@ class WebUseTool:
         """
         # The user may have opened a tab themselves while the window was
         # visible; that newest tab is the one worth carrying over.  In the
-        # Browser tab the newest page may be an unrelated tab of the user's.
-        if not self._live:
+        # Browser tab, and in a Chrome the user started, the newest page
+        # may be an unrelated tab of the user's.
+        if not self._live and self._attached_url is None:
             self._check_for_new_tab()
         url = self._page.url
         if url.startswith("about:"):

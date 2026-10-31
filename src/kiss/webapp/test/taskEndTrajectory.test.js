@@ -100,9 +100,8 @@ function assertFolded(root, why) {
 
 /**
  * Stream a small real task: prompt, thoughts, three tools, finish. The
- * stream keeps its newest two panels open, so the Bash panel only folds
- * because two more panels (the Read call and the thoughts its result
- * arms) follow it.
+ * prompt and every tool panel start folded; the Thoughts panels never
+ * fold.
  */
 function streamTask(win, tabId) {
   send(win, {type: 'status', running: true, tabId, startTs: Date.now()});

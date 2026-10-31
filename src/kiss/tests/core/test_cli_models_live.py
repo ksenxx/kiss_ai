@@ -13,7 +13,7 @@ contract against the genuine article:
    a KISS tool the model calls through the text-based ``tool_calls``
    protocol (the fake-CLI tests cover the plumbing; this proves the real
    model reads KISS's system prompt and follows the protocol).
-2. The system prompt (``--system-prompt`` for claude, the
+2. The system prompt (``--system-prompt-file`` for claude, the
    ``model_instructions_file`` for codex) reaches the model: the final
    answer carries a marker only the system prompt asks for.
 3. The result comes back wrapped in the structured ``finish`` YAML contract.

@@ -344,16 +344,8 @@ class TabRegistry:
         return [dict(entry) for entry in self._tabs]
 
     def bindings(self) -> dict[str, str]:
-        """Return ``{tabId: chatId}`` for every chat-bound tab."""
-        return locked_call(self._lock, self._bindings_locked)
-
-    def _bindings_locked(self) -> dict[str, str]:
-        """Under ``_lock``: the body of :meth:`bindings`."""
-        return {
-            entry["tabId"]: entry["chatId"]
-            for entry in self._tabs
-            if entry["chatId"]
-        }
+        """Return ``{tabId: chatId}`` for every chat-bound tab (:meth:`bound_tabs` as a map)."""
+        return {tab_id: chat_id for tab_id, chat_id, _ in self.bound_tabs()}
 
     def bound_tabs(self) -> list[tuple[str, str, str]]:
         """Return ``(tabId, chatId, taskId)`` for every chat-bound tab.

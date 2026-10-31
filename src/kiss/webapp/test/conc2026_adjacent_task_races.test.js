@@ -4,9 +4,8 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for adjacent-task / background-status races
-// in media/main.js (audit candidates C CAND-1..CAND-4, see
-// tmp/audit-media-cand-C.md). Each test asserts the CORRECT (post-fix)
-// behavior:
+// in media/main.js (audit candidates CAND-1..CAND-4). Each test asserts
+// the CORRECT (post-fix) behavior:
 //
 //   CAND-1  After a neighbouring task W was spliced into tab A's
 //           transcript, switching to tab B and back to A and then
@@ -20,10 +19,11 @@
 //   CAND-2  When a background tab's event swaps the visible tab
 //           mid-event (a bg `summary` tool_call adopts a finished
 //           run_parallel panel, collapses it, and closeTab() closes the
-//           ACTIVE sub-agent tab), processOutputEventForBgTab must NOT
-//           overwrite the newly restored tab's status row texts /
-//           stepCount with the pre-event values of the tab that was
-//           closed: the row keeps the swapped-in tab's own values.
+//           ACTIVE sub-agent tab, a finished one the user reopened),
+//           processOutputEventForBgTab must NOT overwrite the newly
+//           restored tab's status row texts / stepCount with the
+//           pre-event values of the tab that was closed: the row keeps
+//           the swapped-in tab's own values.
 //
 //   CAND-3  An #adjacent-loader that was detached into a tab's
 //           fragment during a tab switch (its reply arrived addressed
@@ -37,8 +37,8 @@
 //           ever by a reply the outage swallowed.
 //
 // The harness mirrors adjacentTaskScroll.test.js (overscroll + adjacent
-// replies) and bgTabStreamParity.test.js (multi-tab status row,
-// clickTab, run_parallel sub-agent tabs).
+// replies) and bgRenderTabSwap_sweep1026.test.js (a hidden parent's
+// `summary` swapping a reopened sub-agent tab off screen).
 
 'use strict';
 
@@ -46,6 +46,12 @@ const assert = require('assert');
 const harness = require('./simplify2_harness');
 
 const {send, clickTab, fakeGeometry, wheel, getAdjacent} = harness;
+const {
+  bootParallelRun,
+  finishFanOut,
+  togglePanel,
+  subagentTabEls,
+} = require('./subagent_tab_helpers');
 
 function makePage() {
   const page = harness.makePage();
@@ -161,20 +167,21 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
   }
 }
 
-// CAND-2: a background tab's event can swap the visible tab mid-event
-// (its `summary` tool_call adopts the finished run_parallel panel,
-// collapses it, and the collapse closes the ACTIVE sub-agent tab;
-// closeTab falls back to the parent and restoreTab repaints the status
-// row from the parent's saved numbers). processOutputEventForBgTab must
-// then leave the row as restoreTab painted it — not overwrite it with
-// the closed tab's pre-event values.
+// CAND-2: a background tab's event can swap the visible tab mid-event.
+// The user reads a finished sub-agent's tab S, reopened by expanding
+// the fan-out panel, while the hidden parent P gets a `summary`
+// tool_call: the summary folds the fan-out, the fold closes the
+// finished tab S, and closeTab puts P on screen (restoreTab repaints
+// the status row from P's saved numbers). processOutputEventForBgTab
+// must then leave the row as restoreTab painted it, not overwrite it
+// with the closed tab's pre-event values.
 function testBgEventTabSwapKeepsRestoredStatusRow() {
-  const {win, posted} = makePage();
+  const {win, parentId: tabP, panel, subTabIds} = bootParallelRun(
+    1,
+    makePage(),
+  );
   try {
-    const tabP = win._testApi.getActiveTabId();
-
-    // Parent tab P runs live with numbers of its own...
-    send(win, {type: 'status', running: true, tabId: tabP, startTs: TS});
+    // Parent tab P runs live with numbers of its own.
     send(win, {
       type: 'usage_info',
       text: '',
@@ -185,67 +192,58 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
       ts: TS,
     });
     const parentRow = statusRow(win);
-    assert.strictEqual(parentRow.tokens, 'Tokens: 999');
-    assert.strictEqual(parentRow.budget, 'Cost: $9.99');
-    assert.strictEqual(parentRow.steps, 'Steps: 9');
-
-    // ...fans out, and its sub-agent gets a tab.
-    send(win, {
-      type: 'tool_call',
-      name: 'run_parallel',
-      tabId: tabP,
-      extras: {tasks: JSON.stringify(['sub 1'])},
-      ts: TS,
-    });
-    const before = posted.length;
-    send(win, {
-      type: 'new_tab',
-      task_id: 'sub-task-1',
-      parent_tab_id: tabP,
-      taskId: '',
-    });
-    const resume = posted
-      .slice(before)
-      .find(m => m.type === 'resumeSession' && m.taskId === 'sub-task-1');
-    assert.ok(resume, 'new_tab must make the page post resumeSession');
-    const tabS = resume.tabId;
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: tabS,
-      parent_tab_id: tabP,
-      description: 'sub 1',
-      task_id: 'sub-task-1',
-      taskIndex: 0,
+    assert.deepStrictEqual(parentRow, {
+      tokens: 'Tokens: 999',
+      budget: 'Cost: $9.99',
+      steps: 'Steps: 9',
     });
 
-    // The sub-agent tab is on screen with numbers of ITS own.
+    // The sub-agent finishes (its tab closes) and the user expands the
+    // folded fan-out again: the finished sub-agent's tab reopens.
+    finishFanOut(win, subTabIds);
+    togglePanel(win, panel);
+    const [tabS] = subagentTabEls(win).map(el => el.dataset.tabId);
+    assert.ok(tabS, 'expanding the fan-out reopens the finished tab');
+
+    // The reopened tab S is on screen with numbers of ITS own.
     clickTab(win, tabS);
     assert.strictEqual(win._testApi.getActiveTabId(), tabS);
     send(win, {
-      type: 'usage_info',
-      text: '',
-      total_tokens: 555,
-      cost: '$5.55',
-      total_steps: 5,
+      type: 'task_events',
       tabId: tabS,
-      ts: TS,
+      task: 'sub 1',
+      task_id: 'sub-task-1',
+      events: [
+        {
+          type: 'usage_info',
+          text: '',
+          total_tokens: 555,
+          cost: '$5.55',
+          total_steps: 5,
+          ts: TS,
+        },
+      ],
     });
     const subRow = statusRow(win);
-    assert.strictEqual(subRow.tokens, 'Tokens: 555');
-    assert.strictEqual(subRow.budget, 'Cost: $5.55');
-    assert.strictEqual(subRow.steps, 'Steps: 5');
+    assert.deepStrictEqual(subRow, {
+      tokens: 'Tokens: 555',
+      budget: 'Cost: $5.55',
+      steps: 'Steps: 5',
+    });
 
-    // The sub-agent finishes while its tab S is on screen: the daemon's
-    // subagentDone closes S mid-event (a collapse alone no longer closes
-    // a running sub-agent's tab).
-    send(win, {type: 'tool_result', content: 'sub done', tabId: tabP, ts: TS});
-    send(win, {type: 'subagentDone', tab_id: tabS});
-
+    // The hidden parent's summary folds the fan-out mid-event.
+    send(win, {
+      type: 'tool_call',
+      name: 'summary',
+      tabId: tabP,
+      extras: {description: 'folded the fan-out'},
+      ts: TS,
+    });
     assert.strictEqual(
       win._testApi.getActiveTabId(),
       tabP,
-      'subagentDone must have closed sub-agent tab S and put ' +
-        'parent tab P on screen (scenario precondition)',
+      'the fold must have closed sub-agent tab S and put parent tab P ' +
+        'on screen (scenario precondition)',
     );
     const after = statusRow(win);
     assert.deepStrictEqual(

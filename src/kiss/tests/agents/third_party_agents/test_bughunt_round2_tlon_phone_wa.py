@@ -12,7 +12,7 @@ Bugs covered:
   with a JSON array of action objects, an incrementing message id, and the
   configured ship name (RuntimeError when the ship is not configured).
 - Tlon ``post_message`` memo author must be the configured ship, not ``"~"``,
-  and it, ``list_third_party_agents`` and ``get_messages`` must address the
+  and it, ``list_channels`` and ``get_messages`` must address the
   ``channels`` gall agent (poke app / scry path).
 - ``authenticate_tlon`` persists the ``rstrip("/")``-normalised ship URL.
 - phone_control ``poll_messages`` must only return SMS from the requested
@@ -121,7 +121,7 @@ class TestTlonPokeProtocol:
 
     def test_list_channels_scries_channels_agent(self) -> None:
         """Group channel listing must scry the 'channels' gall agent."""
-        result = json.loads(self.backend.list_third_party_agents("~zod/my-group"))
+        result = json.loads(self.backend.list_channels("~zod/my-group"))
         scries = _scries(self.server)
         assert any(p.startswith("/~/scry/channels/channels/~zod/my-group/light") for p in scries), (
             f"expected scry of channels agent at /channels/..., saw {scries}"

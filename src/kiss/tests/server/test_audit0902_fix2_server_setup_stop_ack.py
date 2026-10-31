@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -181,6 +182,7 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-setup-stop-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.endpoint_file = self.tmp / "sorcar-local.json"

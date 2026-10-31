@@ -108,7 +108,8 @@ def test_interrupted_helper_start_kills_the_spawned_shell(helper: str) -> None:
     tag = f"concaudit-f2-{uuid.uuid4().hex}"
     # The tag rides in a shell comment, so it shows in the shell's own
     # command line (what the probe looks for) without reaching ``sleep``.
-    command = f"sleep 60 # {tag}"
+    # 30 s is the longest foreground sleep the sleep guard lets run.
+    command = f"sleep 30 # {tag}"
     stop_event = threading.Event()
     tools = UsefulTools(stop_event=stop_event)
     before = set(threading.enumerate())

@@ -26,6 +26,7 @@ const {
 } = require('./simplify2_harness');
 const {
   todayNoonSec,
+  freezeClock,
   groupedSession: session,
   sendHistoryPage: sendHistory,
   listShape,
@@ -36,10 +37,16 @@ const VIEW_KEY = 'kissSorcar.historyLegacyView';
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 const {byId, all} = require('./ui_antipattern_harness');
 
+const DAY = 86400;
+// The page's clock stays at the noon the fixture rows are dated from, so
+// a run that crosses midnight still files them under Today / Yesterday.
+const todayNoon = todayNoonSec();
+
 function makePage(beforeMain) {
   function beforeScripts(win) {
     stubRaf(win);
     fakeMatchMedia(win, true);
+    freezeClock(win, todayNoon * 1000);
     if (beforeMain) beforeMain(win);
   }
   return makeChatPage({
@@ -52,9 +59,6 @@ function makePage(beforeMain) {
     ],
   });
 }
-
-const DAY = 86400;
-const todayNoon = todayNoonSec();
 
 function page() {
   return [

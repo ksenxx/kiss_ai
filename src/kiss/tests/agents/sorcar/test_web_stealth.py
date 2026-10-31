@@ -22,7 +22,8 @@ properties :mod:`kiss.agents.sorcar.web_stealth` provides:
    interstitial that clears is waited out and the real page returned; one
    that stays is reported with a ``Note:``; Turnstile's checkbox is
    ticked; HUMAN / PerimeterX's press-and-hold bar is held for seconds
-   (twice for the two-step variant) and a page without the bar is
+   (twice for the two-step variant), on its button when the widget's
+   frame is wider than the button (fiverr), and a page without the bar is
    reported; an Anubis proof-of-work page gets its longer wait; a Google
    "unusual traffic" page is answered by re-running the query on Bing.
 
@@ -119,6 +120,51 @@ addEventListener('message', e => {
 </script></body></html>"""
 
 
+# fiverr.com's "It needs a human touch" page as served on 30 Oct 2026:
+# ``#px-captcha`` is a block as wide as the column; its closed shadow root
+# holds three ``display:none`` copies of the widget iframe (HUMAN's
+# honeypots) and then the visible one, as wide as the element, whose
+# "Press & Hold" button is 200 px at its left edge, so no part of it lies
+# in the middle 35-65 % of the 900 px element.  Ahead of the button the
+# frame carries an off-frame decoy with the same role and name.  The page
+# loads the content after ``NEED`` holds of 5 s or more on the button;
+# ``SHOWN`` 0 keeps every copy hidden (the widget still rendering).
+_WIDE_PRESS_HOLD_PAGE = """<!doctype html><html><head><title>It needs a human touch</title></head>
+<body style="margin:0;padding:40px;font:16px sans-serif">
+<h1>It needs a human touch</h1>
+<p>Complete the task and we\u2019ll get you right back into Fiverr.</p>
+<div id="px-captcha" style="display:block;width:900px;min-height:102px"></div>
+<script>
+const root = document.getElementById('px-captcha').attachShadow({mode: 'closed'});
+const bar = "<body style='margin:0'><div role=button aria-label='Press &amp; Hold'"
+  + " style='position:absolute;left:-400px;top:0;width:200px;height:100px'>Press</div>"
+  + "<div id=b role=button aria-label='Press &amp; Hold' style='width:200px;height:100px;"
+  + "background:#ddd;user-select:none'>Press &amp; Hold</div></body>";
+let holds = 0;
+for (let i = 0; i < 4; i++) {
+  const f = document.createElement('iframe');
+  f.title = 'Human verification challenge';
+  f.style.cssText = 'width:100%;height:102px;border:0;display:'
+    + (i === 3 && SHOWN ? 'block' : 'none');
+  f.addEventListener('load', () => {
+    const b = f.contentDocument.getElementById('b');
+    let down = 0, moves = 0;
+    b.addEventListener('mousedown', () => { down = performance.now(); moves = 0; });
+    b.addEventListener('mousemove', () => { if (down) moves++; });
+    b.addEventListener('mouseup', () => {
+      if (!down) return;
+      const ms = performance.now() - down;
+      down = 0;
+      if (ms >= 5000 && ++holds >= NEED)
+        location.href = '/press-hold-done?ms=' + Math.round(ms) + '&moves=' + moves;
+    });
+  });
+  f.srcdoc = bar;
+  root.appendChild(f);
+}
+</script></body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Serve the probe pages.
 
@@ -128,7 +174,9 @@ class _Handler(BaseHTTPRequestHandler):
     title, a script reloading after 1 s) and content afterwards;
     ``/blocked`` never clears; ``/press-hold?need=N&w=W&h=H`` is a
     press-and-hold page cleared by *N* holds of its *W* x *H* bar and
-    ``/press-hold-bare`` the same page without the bar; ``/anubis``
+    ``/press-hold-bare`` the same page without the bar;
+    ``/press-hold-wide?need=N&shown=S`` is fiverr's layout of the widget
+    (a narrow button in a wide frame among hidden copies); ``/anubis``
     answers the first request per query with an Anubis page that reloads
     after 16 s (more than the ordinary 12 s wait); ``/sorry/index`` is
     Google's "unusual traffic" page; ``/headers`` echoes the request's
@@ -166,6 +214,11 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif path == "/press-hold-bare":
             body = _PRESS_HOLD_PAGE.split('<div id="px-captcha"')[0] + "</body></html>"
+        elif path == "/press-hold-wide":
+            query = parse_qs(urlparse(self.path).query)
+            body = _WIDE_PRESS_HOLD_PAGE.replace("NEED", query.get("need", ["1"])[0]).replace(
+                "SHOWN", query.get("shown", ["1"])[0]
+            )
         elif path == "/press-hold-done":
             body = "<title>Real content</title><body><h1>Welcome</h1></body>"
         elif path == "/anubis":
@@ -949,12 +1002,65 @@ def test_press_and_hold_page_without_a_bar_is_reported(tool, server):
         tool._page.goto(f"{server}/press-hold?{size}", wait_until="domcontentloaded")
         assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None, size
     tool._page.goto(f"{server}/press-hold", wait_until="domcontentloaded")
-    box = tool._challenge_widget(web_stealth.PERIMETERX_CHECK)
+    box = _widget_box(tool)
     assert box is not None and box["width"] == 300 and box["height"] == 100, box
     assert tool._challenge_widget("Akamai block") is None
     assert web_stealth.widget_presses(web_stealth.PERIMETERX_CHECK) == 2
     assert web_stealth.widget_presses(web_stealth.CLOUDFLARE_CHALLENGE) == 1
     assert web_stealth.widget_presses(web_stealth.ANUBIS_CHECK) == 0
+
+
+def _widget_box(tool: WebUseTool) -> dict[str, float] | None:
+    """Poll the press-and-hold target for up to 10 s (its frame renders late)."""
+    deadline = time.monotonic() + 10
+    while True:
+        box = tool._challenge_widget(web_stealth.PERIMETERX_CHECK)
+        if box is not None or time.monotonic() >= deadline:
+            return box
+        time.sleep(0.2)
+
+
+def test_press_and_hold_button_narrower_than_its_widget_is_held(tool, server):
+    """fiverr's layout: the hold lands on the button, not the middle of ``#px-captcha``.
+
+    The widget's visible frame (in a closed shadow root, after hidden
+    honeypot copies) is 900 px wide and its button 200 px at the left
+    edge.  Holding the middle of the element, as the tool did until
+    30 Oct 2026, lands on empty frame and the page never clears.
+    """
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold-wide?need=1")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    result = parse_qs(urlparse(tool._page.url).query)
+    assert 8000 <= int(result["ms"][0]) < 11000, result
+    assert int(result["moves"][0]) >= 10, result
+    assert time.monotonic() - start < 12 + 10 + 10
+
+
+def test_press_and_hold_target_is_the_visible_frames_button(tool, server):
+    """The target is the visible copy's button: not the element, a decoy or a hidden copy."""
+    tool.go_to_url(f"{server}/inert")  # launches the browser when this test runs alone
+    tool._page.goto(f"{server}/press-hold-wide", wait_until="domcontentloaded")
+    widget = tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)[0]
+    assert widget["width"] == 900, widget
+    box = _widget_box(tool)
+    assert box is not None, widget
+    assert abs(box["x"] - widget["x"]) < 1 and abs(box["y"] - widget["y"]) < 1, (box, widget)
+    assert (box["width"], box["height"]) == (200, 100), box
+    # Every point the old press drew from (35-65 % of the element) misses it.
+    assert box["x"] + box["width"] < widget["x"] + 0.35 * widget["width"]
+    # While every copy is hidden nothing is pressed, though the element
+    # itself is bar-sized.
+    tool._page.goto(f"{server}/press-hold-wide?shown=0", wait_until="load")
+    assert tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
+    copies: list = []
+    deadline = time.monotonic() + 10
+    while len(copies) < 4 and time.monotonic() < deadline:
+        time.sleep(0.1)
+        copies = [f for f in tool._page.frames if f.parent_frame is not None]
+    assert len(copies) == 4, copies
+    assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None
 
 
 def test_anubis_proof_of_work_gets_its_longer_wait(tool, server):

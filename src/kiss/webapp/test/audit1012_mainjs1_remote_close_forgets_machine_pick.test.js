@@ -14,23 +14,12 @@
 
 const assert = require('assert');
 const {
-  makePage: makeChatPage,
+  makeRemoteChatPage: makePage,
+  persistedPicks,
   send,
   pickMachine: pick,
 } = require('./simplify2_harness');
 const {MACHINES} = require('./settings_helpers');
-
-function makePage(state) {
-  const {win, posted, getState} = makeChatPage({
-    bodyClass: 'remote-chat',
-    initialState: state || undefined,
-  });
-  return {win, posted, state: getState};
-}
-
-function persistedPicks(state) {
-  return JSON.parse(JSON.stringify(state().tabMachinePicks));
-}
 
 function testRemotelyClosedTabForgetsItsPick() {
   const {win, state} = makePage();

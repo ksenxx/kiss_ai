@@ -33,7 +33,7 @@
 //    filter change that shows it;
 //  - a fresh tab (no chat, no task) clears both highlights;
 //  - the page paints its in-page list from its own tabs (task_settings,
-//    tab switches) and never posts `activeTask`.
+//    tab switches).
 
 'use strict';
 
@@ -479,12 +479,6 @@ function testPagePaintsFromOwnTabs() {
   assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-2', 3)]);
   assert.ok(activeChat(win, 'chat-2') && !activeChat(win, 'chat-1'));
   assert.ok(collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
-
-  assert.strictEqual(
-    ofType(posted, 'activeTask').length,
-    0,
-    'the page never posts activeTask (its postMessage is the daemon)',
-  );
   win.close();
   console.log('PASS the page paints its in-page list from its own tabs');
 }

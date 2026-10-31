@@ -492,7 +492,7 @@ def test_compaction_maintenance_is_near_linear() -> None:
         view = agent._usage_ledger_object().view
         # One dedup entry per keyed source, organized in O(log n)
         # geometric levels — never a flat per-fold copy.
-        assert view.seen.size == view.fold_index
+        assert sum(map(len, view.seen.levels)) == view.fold_index
         assert len(view.seen.levels) <= 24
         return elapsed
 
@@ -520,7 +520,6 @@ def test_one_shot_flood_leaves_no_dedup_residue() -> None:
     assert agent.usage_snapshot() == (events * 0.5, events * 100, events)
     ledger = agent._usage_ledger_object()
     view = ledger.view
-    assert view.seen.size == 0
     assert view.seen.levels == ()
     assert len(ledger.records) - view.fold_index < _COMPACTION_THRESHOLD
 

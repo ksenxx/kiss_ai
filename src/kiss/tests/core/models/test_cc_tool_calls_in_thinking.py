@@ -274,20 +274,17 @@ class TestCCToolCallsInsideThinking:
         }
 
     def test_visible_text_wins_when_both_blocks_have_tool_calls(self) -> None:
-        """Tool calls from both text and thinking are merged.
+        """Only the visible text's tool calls run when both blocks carry one.
 
         The text block carries ``{"command": "ls"}`` and the thinking block
-        carries ``{"command": "WRONG"}``.  Since we now merge tool calls
-        from all sources, both are extracted (de-duplicated by name+args).
+        carries ``{"command": "WRONG"}``, a draft the model revised: the
+        thinking is parsed only when the text calls no tool.
         """
         function_calls, content, _ = self._run(
             _make_events_tool_call_in_text_and_thinking()
         )
 
-        assert len(function_calls) == 2
-        commands = {fc["arguments"]["command"] for fc in function_calls}
-        assert "ls" in commands
-        assert "WRONG" in commands
+        assert [fc["arguments"]["command"] for fc in function_calls] == ["ls"]
 
     def test_no_tool_calls_anywhere_returns_empty(self) -> None:
         """When neither block has tool_calls, function_calls is empty."""

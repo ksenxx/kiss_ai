@@ -68,7 +68,9 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
+from kiss.core.utils import seed_file_atomically
 from kiss.server.agent_state import current_agent
 
 RSI7D_SEA_RELATIVE = "src/kiss/agents/seas/rsi7d/rsi7d_sea.py"
@@ -734,16 +736,25 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     if tier not in TIER_NAMES:
         return f"Error: unknown tier {tier!r}; use one of {', '.join(TIER_NAMES)}."
     path = ledger_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text(LEDGER_HEADER, encoding="utf-8")
+    # Created whole and never rewritten: two first writers that both saw
+    # no ledger cannot truncate each other's rows with the header.
+    seed_file_atomically(path, LEDGER_HEADER)
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     cells = [
         _terse(cell)
         for cell in (stamp, _current_task_id() or "-", unit, tier, model, reason, outcome)
     ]
     with path.open("a", encoding="utf-8") as handle:
-        handle.write("| " + " | ".join(cells) + " |\n")
+        # Windows emulates O_APPEND with a seek to the end before each
+        # write, so two rows written at once (the sub-agents of one
+        # run) overwrote each other there; the lock on the ledger makes
+        # the append one step everywhere.  Held for one line only.
+        lock_exclusive(handle)
+        try:
+            handle.write("| " + " | ".join(cells) + " |\n")
+            handle.flush()
+        finally:
+            unlock(handle)
     return f"logged to {path}"
 
 

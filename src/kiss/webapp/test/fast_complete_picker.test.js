@@ -75,10 +75,12 @@ const COMPLETIONS = [
 function testCompletionsRendersPicker() {
   const {win} = openPage();
   setInput(win, 'fix');
+  // The daemon stamps the requesting connection's id on the reply.
   send(win, {
     type: 'completions',
     completions: COMPLETIONS,
     query: 'fix',
+    connId: 'sibling-window-uuid',
   });
   assert.strictEqual(
     visible(win),
@@ -390,18 +392,6 @@ function testPickerSurvivesMouseDown() {
   assert.strictEqual(visible(win), true);
 }
 
-function testCompletionsConnIdTolerated() {
-  const {win} = openPage();
-  setInput(win, 'fix');
-  send(win, {
-    type: 'completions',
-    completions: COMPLETIONS,
-    query: 'fix',
-    connId: 'sibling-window-uuid',
-  });
-  assert.strictEqual(visible(win), true);
-}
-
 function testCompletionsBackCompatNoQuery() {
   const {win} = openPage();
   setInput(win, 'fix');
@@ -579,7 +569,6 @@ const tests = [
   testTypingRequestsCompletions,
   testCompletionsForEmptyInputDoesNotShow,
   testPickerSurvivesMouseDown,
-  testCompletionsConnIdTolerated,
   testCompletionsBackCompatNoQuery,
   testCompletionsMissingFieldHandled,
   testCompletionsIconsPerType,

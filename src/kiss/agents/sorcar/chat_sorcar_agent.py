@@ -38,6 +38,7 @@ from kiss.agents.sorcar.persistence import (
     _task_has_transcript_events,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
+from kiss.agents.sorcar.sea_commands import named_commands_help
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     canonical_tool_profile,
@@ -278,12 +279,14 @@ class ChatSorcarAgent(SorcarAgent):
         return self._last_user_prompt
 
     def new_chat(self) -> None:
-        """Reset to a new chat session (the chat page's 'Clear').
+        """Reset to a new chat session: the next :meth:`run` starts a fresh chat.
 
-        Retires any pending worktree first (``SorcarAgent.new_chat``),
-        and drops any pending one-shot :meth:`resume_from_task_id`
-        seed: a brand-new chat must never have its first prompt
-        augmented with the previous task's parent-chain context.
+        Library API; the chat page never calls it (a new chat there is
+        a new tab, whose agent is created for its first run).  Retires
+        any pending worktree first (``SorcarAgent.new_chat``), and drops
+        any pending one-shot :meth:`resume_from_task_id` seed: a
+        brand-new chat must never have its first prompt augmented with
+        the previous task's parent-chain context.
         """
         super().new_chat()
         self._chat_id = ""
@@ -321,11 +324,18 @@ class ChatSorcarAgent(SorcarAgent):
         if task_id:
             self._context_task_id = task_id
 
-    def build_chat_prompt(self, prompt: str) -> str:
+    def build_chat_prompt(self, prompt: str, name_commands: bool = False) -> str:
         """Load chat context and augment prompt with previous tasks/results.
 
         Args:
             prompt: The original task prompt.
+            name_commands: Whether to append the help of the slash
+                commands that *prompt* and the chat's earlier tasks
+                loaded here name (:func:`named_commands_help`; also one
+                the history digest drops for size), so a task told to
+                "use /discover" knows what it does.  Only for a plain
+                task the user wrote: a SEA run or a sub-agent sees the
+                same chat and must not be sent after itself.
 
         Returns:
             The augmented prompt with chat history prepended, or the
@@ -338,17 +348,24 @@ class ChatSorcarAgent(SorcarAgent):
         if not chat_context:
             chat_context = _load_chat_context(self._chat_id)
         if not chat_context:
-            return "# Task\n" + prompt
-        if len(chat_context) > MAX_TASKS:
-            del chat_context[2:2 + len(chat_context) - MAX_TASKS]
-        if DEFAULT_CONFIG.chat_history_digest:
-            body = _digest_history(chat_context)
+            augmented = "# Task\n" + prompt
         else:
-            body = _format_history(chat_context, full_from=0)
-        return (
-            "## Previous tasks and results from the chat session for reference\n\n"
-            + body + "\n\n---\n\n# Task (work on it now)\n\n" + prompt
+            if len(chat_context) > MAX_TASKS:
+                del chat_context[2:2 + len(chat_context) - MAX_TASKS]
+            if DEFAULT_CONFIG.chat_history_digest:
+                body = _digest_history(chat_context)
+            else:
+                body = _format_history(chat_context, full_from=0)
+            augmented = (
+                "## Previous tasks and results from the chat session for reference\n\n"
+                + body + "\n\n---\n\n# Task (work on it now)\n\n" + prompt
+            )
+        named = (
+            named_commands_help(prompt, (str(e["task"]) for e in chat_context))
+            if name_commands
+            else ""
         )
+        return augmented + "\n\n" + named if named else augmented
 
     def _save_final_usage(
         self,
@@ -357,7 +374,7 @@ class ChatSorcarAgent(SorcarAgent):
         prompt: str = "",
         parsed: dict[str, Any] | None = None,
         result_summary: str = "",
-    ) -> tuple[float, int, int]:
+    ) -> None:
         """Stamp the ledger totals and the end time on the row (``TASK_USAGE_LOCK`` held).
 
         A run that recorded no transcript events (one outside a chat
@@ -374,9 +391,6 @@ class ChatSorcarAgent(SorcarAgent):
             parsed: The run's result mapping (:func:`_parse_result`), or
                 ``None``.
             result_summary: The extracted human-readable summary text.
-
-        Returns:
-            The ``(cost, tokens, steps)`` triple that was saved.
         """
         # One coherent triple (see usage_snapshot): three property reads
         # could tear across a concurrent abandoned-subagent reclaim.
@@ -395,7 +409,6 @@ class ChatSorcarAgent(SorcarAgent):
             usage=(final_cost, final_tokens, final_steps),
         )
         _save_task_extra(extra_payload, task_id=task_id)
-        return final_cost, final_tokens, final_steps
 
     def _build_extra_payload(
         self,
@@ -530,7 +543,7 @@ class ChatSorcarAgent(SorcarAgent):
         parsed: dict[str, Any] | None,
         result_summary: str,
         usage: tuple[float, int, int],
-    ) -> bool:
+    ) -> None:
         """Persist a minimal replayable event stream when none was recorded.
 
         Runs that happen from a chat page stream every agent event
@@ -563,14 +576,9 @@ class ChatSorcarAgent(SorcarAgent):
             usage: One coherent ``(budget_used, total_tokens_used,
                 total_steps)`` triple (:meth:`usage_snapshot`) to stamp
                 on the ``result`` event.
-
-        Returns:
-            True when events were synthesized (:meth:`_save_final_usage`
-            calls this before its ``endTs`` save, so the task's tags are
-            derived over them), False when a transcript already existed.
         """
         if _task_has_transcript_events(task_id):
-            return False
+            return
         if prompt:
             _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
         cost, tokens, steps = usage
@@ -594,7 +602,6 @@ class ChatSorcarAgent(SorcarAgent):
             _append_chat_event(
                 {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
             )
-        return True
 
     def _begin_run_usage_epoch(self) -> None:
         """Keep the usage epoch :meth:`run` started at row allocation.
@@ -757,8 +764,10 @@ class ChatSorcarAgent(SorcarAgent):
         # A task that is only a filesystem path means "open it"; the
         # directive is added here, AFTER ``history_prompt`` was taken,
         # so history and the tab keep the raw path the user typed.
-        # Only for a task the user typed into a chat box, though: the
-        # task runner passes ``_open_bare_path=False`` for a run it
+        # Only for a task the user typed into a chat box (or scheduled as
+        # an in-chat cron job), though, which alone also gets the help of
+        # the slash commands it names: the task runner passes
+        # ``_open_bare_path=False`` for a run it
         # starts on behalf of a SEA (``seaPath``: an SEA
         # dispatched by ``/git_extract_knowledge /path/to/repo`` or
         # ``/review_paper /path/to/paper.pdf`` receives the path as its
@@ -774,6 +783,7 @@ class ChatSorcarAgent(SorcarAgent):
             with_open_directive(prompt_template, work_dir or ".")
             if open_bare_path
             else prompt_template,
+            name_commands=open_bare_path,
         )
 
         try:
@@ -840,14 +850,17 @@ class ChatSorcarAgent(SorcarAgent):
         # capture the epoch and later bank its spend into it, so the
         # epoch must not be swapped again by ``_reset`` (see
         # ``_begin_run_usage_epoch``).  Classifier spend is held apart
-        # until ``SorcarAgent.run`` folds it, so nothing is lost here.
+        # until the ``finally`` below folds it, so nothing is lost here.
         self.reset_usage()
         task_id, self._chat_id = _add_task(
             history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
         locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
-        # ``_begin_task`` bound *printer* above, so this is the run's.
-        run_printer = self.printer
+        # ``super().run`` binds the printer from the *printer* argument
+        # (``None`` gives a fresh console printer or none, never the one
+        # an earlier run left in ``self.printer``), so the setup and
+        # cleanup hooks below use the argument too.
+        run_printer = printer
         task_key = str(task_id)
         result_summary = ""
         parsed: dict[str, Any] | None = None
@@ -974,6 +987,11 @@ class ChatSorcarAgent(SorcarAgent):
             result_summary = "Task interrupted"
             raise
         finally:
+            # ``SorcarAgent.run``'s cleanup folds the pre-run classifier's
+            # spend, but a run stopped or failing before ``super().run``
+            # never gets there.  The fold is keyed and consumes the
+            # record, so after a normal run it is a no-op.
+            self._fold_classifier_usage()
             self._last_result_summary = result_summary
             if run_printer is not None:
                 finished = getattr(run_printer, "agent_task_finished", None)

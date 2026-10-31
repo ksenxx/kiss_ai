@@ -4,9 +4,9 @@
 # add your name here
 """The MCP config and token-file locks wait for a wedged holder only so long.
 
-``save_mcp_server``, ``remove_mcp_server``, ``FileTokenStorage.put`` and
-``.clear`` take the cross-process ``flock`` next to the file they
-rewrite.  Without a bound
+``save_mcp_server`` and ``remove_mcp_server`` take the cross-process
+``flock`` on ``$KISS_HOME/mcp.lock``, ``FileTokenStorage.put`` and
+``.clear`` the one next to the token file.  Without a bound
 a holder stopped in a debugger or on a stuck filesystem parked the tool
 thread forever; they now wait ``mcp_servers._LOCK_TIMEOUT_S`` and raise
 ``TimeoutError``, like ``user_config`` and ``machines``.  The tests hold
@@ -50,9 +50,8 @@ def test_save_mcp_server_gives_up_on_a_wedged_project_lock(
     quick_timeout: None,
 ) -> None:
     cfg = mcp_servers.MCPServerConfig(name="demo", transport="http", url="http://x/")
-    lock_path = mcp_servers.project_mcp_config_path(str(tmp_path)).with_suffix(".lock")
     save = partial(mcp_servers.save_mcp_server, cfg, "project", str(tmp_path))
-    _assert_times_out(save, lock_path)
+    _assert_times_out(save, mcp_servers._config_lock_path())
     assert not mcp_servers.project_mcp_config_path(str(tmp_path)).exists()
     # Released: the same save goes through at once.
     saved = mcp_servers.save_mcp_server(cfg, "project", str(tmp_path))
@@ -70,7 +69,7 @@ def test_remove_mcp_server_gives_up_on_a_wedged_project_lock(
     mcp_servers.save_mcp_server(cfg, "project", str(tmp_path))
     config_path = mcp_servers.project_mcp_config_path(str(tmp_path))
     remove = partial(mcp_servers.remove_mcp_server, "demo", str(tmp_path))
-    _assert_times_out(remove, config_path.with_suffix(".lock"))
+    _assert_times_out(remove, mcp_servers._config_lock_path())
     assert "demo" in mcp_servers.load_mcp_servers(str(tmp_path)), "timed out: untouched"
     # Released: the same removal goes through at once.
     assert remove() == [config_path]

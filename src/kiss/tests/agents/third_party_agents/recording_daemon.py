@@ -165,7 +165,10 @@ class RecordingDaemon:
 
 @contextmanager
 def serve_recording_daemon(
-    module: ModuleType, attribute: str, **kwargs: Any
+    module: ModuleType,
+    attribute: str,
+    daemon_class: type[RecordingDaemon] = RecordingDaemon,
+    **kwargs: Any,
 ) -> Iterator[RecordingDaemon]:
     """Serve a :class:`RecordingDaemon` and point ``module.attribute`` at its endpoint file.
 
@@ -177,12 +180,14 @@ def serve_recording_daemon(
     Args:
         module: The module holding the endpoint-file attribute.
         attribute: Name of that attribute (an ``str | None``).
-        **kwargs: Passed to :class:`RecordingDaemon` (``text``, ``cost``, ...).
+        daemon_class: The stand-in to serve: :class:`RecordingDaemon` or a
+            subclass that answers differently.
+        **kwargs: Passed to *daemon_class* (``text``, ``cost``, ...).
 
     Yields:
         The running daemon stand-in.
     """
-    daemon = RecordingDaemon(**kwargs)
+    daemon = daemon_class(**kwargs)
     saved = getattr(module, attribute)
     setattr(module, attribute, str(daemon.endpoint_file))
     try:

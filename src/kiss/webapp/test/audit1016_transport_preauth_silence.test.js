@@ -22,7 +22,8 @@ const {
 } = require('./transport_page_helpers');
 
 // A page with fake timers and a fake clock: `timers` collects every
-// setTimeout the shim arms, `clock.now` is what Date.now() returns.
+// setTimeout the shim arms (marked `cleared` once it is cancelled),
+// `clock.now` is what Date.now() returns.
 function page() {
   const {window} = newAuthDom();
   const sockets = [];
@@ -31,10 +32,13 @@ function page() {
   const clock = {now: 1000000};
   installFakeWebSocket(window, sockets, {halfOpen: true});
   window.setTimeout = function (fn, ms) {
-    timers.push({fn, ms});
+    timers.push({fn, ms, cleared: false});
     return timers.length;
   };
-  window.clearTimeout = function () {};
+  window.clearTimeout = function (id) {
+    const t = timers[id - 1];
+    if (t) t.cleared = true;
+  };
   window.Date.now = () => clock.now;
   window.addEventListener('message', ev => {
     if (ev.data && ev.data.type === 'daemonStatus') statuses.push(ev.data);
@@ -43,15 +47,15 @@ function page() {
   return {window, sockets, timers, statuses, clock};
 }
 
-function staleChecks(timers) {
-  return timers.filter(t => t.ms === 15000);
+// The stale checks still pending: armed, neither run nor cancelled.
+function pendingStaleChecks(timers) {
+  return timers.filter(t => t.ms === 15000 && !t.ran && !t.cleared);
 }
 
-// Run every stale check armed so far once, in order, as the clock
-// would (each may arm a successor, which runs on the next call).
+// Run every pending stale check once, in order, as the clock would
+// (each may arm a successor, which runs on the next call).
 function runStaleChecks(timers) {
-  const due = staleChecks(timers).filter(t => !t.ran);
-  for (const t of due) {
+  for (const t of pendingStaleChecks(timers)) {
     t.ran = true;
     t.fn();
   }
@@ -64,7 +68,7 @@ function main() {
     const s0 = sockets[0];
     s0.fireOpen();
     assert.strictEqual(
-      staleChecks(timers).length,
+      pendingStaleChecks(timers).length,
       1,
       'the half-open check is armed as soon as the socket opens',
     );
@@ -118,7 +122,7 @@ function main() {
     assert.strictEqual(sockets.length, 1, 'no reconnect while it is alive');
     s0.fireMessage({type: 'auth_ok'});
     assert.strictEqual(
-      staleChecks(timers).filter(t => !t.ran).length,
+      pendingStaleChecks(timers).length,
       1,
       'auth_ok leaves exactly one pending stale check (no duplicate chain)',
     );

@@ -28,7 +28,9 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_parser("lint", help="check SEAs against the SEA contract")
     )
     sea_docs.add_arguments(
-        sub.add_parser("docs", help="regenerate the settings/kind/option/command tables")
+        sub.add_parser(
+            "docs", help=f"regenerate the sea-docs tables ({', '.join(sea_docs.TABLES)})"
+        )
     )
     args = parser.parse_args(argv)
     return sea_lint.run(args) if args.command == "lint" else sea_docs.run(args)

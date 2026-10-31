@@ -7,7 +7,12 @@
       },
       {
         "type": "thinking_delta",
-        "text": "let me look",
+        "text": "let me ",
+        "ts": 1767225600000
+      },
+      {
+        "type": "thinking_delta",
+        "text": "look",
         "ts": 1767225600000
       },
       {
@@ -16,7 +21,12 @@
       },
       {
         "type": "text_delta",
-        "text": "Reading the file.",
+        "text": "Reading ",
+        "ts": 1767225600000
+      },
+      {
+        "type": "text_delta",
+        "text": "the file.",
         "ts": 1767225600000
       },
       {
@@ -34,6 +44,11 @@
         "type": "tool_result",
         "content": "one",
         "ts": 1767225600000
+      },
+      {
+        "type": "worktree_created",
+        "worktreeDir": "/repo/.kiss-worktrees/kiss_wt-1",
+        "branch": "kiss/wt-1"
       },
       {
         "type": "thinking_start",

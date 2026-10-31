@@ -7,7 +7,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
-const {visibleTitles, makeRow} = require('./history_helpers');
+const {visibleTitles, STATUS_CHIP_SESSIONS} = require('./history_helpers');
 
 function makePage(preSetup) {
   return harness.makePage({beforeScripts: preSetup});
@@ -32,13 +32,6 @@ const FILTER_CONTROL_IDS = [
   'hf-to',
   'hf-to-btn',
   'hf-tag',
-];
-
-// One row per status chip: running, errored, succeeded.
-const SESSIONS_FIXTURE = [
-  makeRow({id: 'chatR', task_id: 1, title: 'running task', is_running: true, endTs: 0}),
-  makeRow({id: 'chatE', task_id: 2, title: 'errored task', failed: true}),
-  makeRow({id: 'chatS', task_id: 3, title: 'succeeded task'}),
 ];
 
 function testFiltersPanelMarkup() {
@@ -251,7 +244,7 @@ function testExpandedStatePersists() {
 // only checks that collapsing the panel does not reset the filters.
 function testFiltersStayAppliedWhileCollapsed() {
   const {win} = makePage();
-  send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  send(win, {type: 'history', sessions: STATUS_CHIP_SESSIONS, offset: 0});
 
   clickToggle(win);
   const chk = win.document.getElementById('hf-completed');

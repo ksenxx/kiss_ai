@@ -82,13 +82,21 @@ function testSteerPromptRendersLikeTaskPanel() {
     1,
     'the task prompt is still the one Prompt panel; the steer echo is not a second one',
   );
-  // Same accent look as the task panel.
+  // Same accent look as the task panel.  jsdom leaves a var() in the
+  // `background` shorthand unresolved (backgroundColor reads transparent
+  // for every panel), so the declared backgrounds are compared.
   const task = output(win).querySelector('.ev.task-panel');
   assert.ok(task, 'the task panel is on screen');
+  const tint = win.getComputedStyle(task).background;
   assert.strictEqual(
-    win.getComputedStyle(msg).backgroundColor,
-    win.getComputedStyle(task).backgroundColor,
+    win.getComputedStyle(msg).background,
+    tint,
     'same background as the task panel',
+  );
+  assert.notStrictEqual(
+    win.getComputedStyle(output(win).querySelector('.ev.prompt')).background,
+    tint,
+    'the neutral Prompt panel does not carry the accent tint',
   );
   assert.strictEqual(
     win.getComputedStyle(body).whiteSpace,
@@ -107,14 +115,18 @@ function testSteerPromptRendersLikeTaskPanel() {
 
 function testPlainPromptStaysPromptPanel() {
   const win = startedPage('Plain prompt');
+  const before = output(win).querySelectorAll('.ev.prompt').length;
   send(win, {type: 'prompt', text: 'authoritative prompt text'});
   assert.strictEqual(
     output(win).querySelectorAll('.ev.user-msg').length,
     0,
     'no Message panel',
   );
-  const prompts = output(win).querySelectorAll('.ev.prompt');
-  assert.ok(prompts.length >= 1, 'the plain prompt renders a Prompt panel');
+  assert.strictEqual(
+    output(win).querySelectorAll('.ev.prompt').length,
+    before + 1,
+    'the plain prompt renders a Prompt panel',
+  );
   win.close();
   console.log('  ok - a prompt without the steer flag is still a Prompt panel');
 }

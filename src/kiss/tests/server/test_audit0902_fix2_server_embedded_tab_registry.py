@@ -72,16 +72,20 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
             "title": "earlier chat", "workDir": str(self.tmp),
         }]}), encoding="utf-8")
         self._saved_launcher = (
-            launcher._API_SERVER, launcher._API_SERVER_ENDPOINT,
+            launcher._API_SERVER, launcher._API_SERVER_ENDPOINT, launcher._API_SERVER_THREAD,
         )
         launcher._API_SERVER = None
         launcher._API_SERVER_ENDPOINT = ""
+        launcher._API_SERVER_THREAD = None
 
     def tearDown(self) -> None:
-        embedded = launcher._API_SERVER
-        if embedded is not None and embedded._loop is not None:
-            embedded._loop.call_soon_threadsafe(embedded._loop.stop)
-        launcher._API_SERVER, launcher._API_SERVER_ENDPOINT = self._saved_launcher
+        # Stops the embedded daemon (listeners, loop thread) and removes
+        # its private kiss-tp-api-* directory, which only stopping the
+        # loop left behind.
+        launcher._stop_api_server()
+        (
+            launcher._API_SERVER, launcher._API_SERVER_ENDPOINT, launcher._API_SERVER_THREAD,
+        ) = self._saved_launcher
         (
             _persistence._DB_PATH, _persistence._db_conn, _persistence._KISS_DIR,
         ) = self._saved_persistence

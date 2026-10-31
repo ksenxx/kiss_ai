@@ -4,11 +4,13 @@
 # add your name here
 """Useful tools for agents: file editing and bash execution."""
 
+import collections
 import difflib
 import functools
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -24,9 +26,11 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
+from kiss.agents.sorcar.checkpoints import Checkpoints
 from kiss.agents.sorcar.edit_guards import (
+    heredoc_guard,
     line_of,
     numbered_region,
     output_shows_file,
@@ -41,6 +45,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
 )
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
+from kiss.agents.sorcar.shell_scan import Word, bash_path, host_path, simple_commands
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.models.model import (
@@ -559,29 +564,199 @@ def _popen_kwargs(command: str) -> dict[str, Any]:
     return {"args": [ps, "-NoProfile", "-Command", command]}
 
 
-def _truncate_output(output: str, max_chars: int, spilled_to: str = "") -> str:
+def _truncate_output(output: str, max_chars: int, spilled_to: str = "", dropped: int = 0) -> str:
     """Return *output* cut to *max_chars*: its head and tail around a marker.
 
     Args:
-        output: The full text.
+        output: The full text, or its head and tail when *dropped*.
         max_chars: Characters kept, marker included.
         spilled_to: Path of the file holding the full text (named in
             the marker so the model can grep it), ``""`` when none.
+        dropped: Characters already missing between the head and the
+            tail of *output* (see :class:`_Capture`); at most
+            *max_chars* of each end may be kept then.
     """
-    if len(output) <= max_chars:
+    total = len(output) + dropped
+    if total <= max_chars:
         return output
-    where = f"; full output ({len(output)} chars) in {spilled_to}" if spilled_to else ""
-    worst_msg = f"\n\n... [truncated {len(output)} chars{where}] ...\n\n"
+    where = f"; full output ({total} chars) in {spilled_to}" if spilled_to else ""
+    worst_msg = f"\n\n... [truncated {total} chars{where}] ...\n\n"
     if max_chars < len(worst_msg):
         return output[:max_chars]
     remaining = max_chars - len(worst_msg)
     head = remaining // 2
     tail = remaining - head
-    dropped = len(output) - head - tail
-    msg = f"\n\n... [truncated {dropped} chars{where}] ...\n\n"
+    msg = f"\n\n... [truncated {total - head - tail} chars{where}] ...\n\n"
     if tail:
         return output[:head] + msg + output[-tail:]
     return output[:head] + msg
+
+
+_CAPTURE_CHARS = 1_000_000
+"""Characters of each end of a command's output kept once it passes twice this."""
+_READ_CHARS = 1 << 16
+"""The longest piece of output read at once: a longer line arrives in pieces."""
+_QUEUED_PIECES = 64
+"""Pieces of output a reader thread may read ahead of the thread taking them."""
+
+
+class _Capture:
+    """The combined output of a command, bounded in memory.
+
+    All of it is kept until it passes twice :data:`_CAPTURE_CHARS`; from
+    then on only the first :data:`_CAPTURE_CHARS` and (to the piece) the
+    last :data:`_CAPTURE_CHARS` stay.  Once the output passes
+    *spill_after* characters (at the latest when the first piece is
+    dropped) and *new_spill* gives a file, the whole output goes on to
+    that file as it arrives, so it can still be grepped.  A result cut
+    to its budget (:func:`_truncate_output`) needs no more than what is
+    kept.
+
+    Attributes:
+        dropped: Characters left out between the kept head and tail.
+        spilled_to: The file holding the whole output, as shown to the
+            model; ``""`` when there is none.
+    """
+
+    def __init__(
+        self,
+        spill_after: int = 0,
+        new_spill: Callable[[], tuple[str, Path] | None] | None = None,
+    ) -> None:
+        """Start empty.
+
+        Args:
+            spill_after: Characters of output that fit without a spill
+                file.
+            new_spill: Returns the shown and the real path of a new spill
+                file, ``None`` when there is no directory for one; ``None``
+                keeps no spill file.
+        """
+        self._spill_after = min(spill_after, 2 * _CAPTURE_CHARS)
+        self._new_spill = new_spill
+        self._head = ""
+        self._tail: collections.deque[str] = collections.deque()
+        self._tail_chars = 0
+        self._file: IO[str] | None = None
+        self.dropped = 0
+        self.spilled_to = ""
+
+    def append(self, piece: str) -> None:
+        """Add the next *piece* of output."""
+        self._tail.append(piece)
+        self._tail_chars += len(piece)
+        if self._file is not None:
+            self._write(piece)
+        elif self._new_spill is not None and self._tail_chars > self._spill_after:
+            self._start_spill(self._new_spill)
+        if self._head:
+            self._trim()
+        elif self._tail_chars > 2 * _CAPTURE_CHARS:
+            whole = "".join(self._tail)
+            self._head = whole[:_CAPTURE_CHARS]
+            self._tail = collections.deque([whole[_CAPTURE_CHARS:]])
+            self._tail_chars -= _CAPTURE_CHARS
+
+    def text(self) -> str:
+        """Return the output kept: all of it, or its head and tail when :attr:`dropped`."""
+        return self._head + "".join(self._tail)
+
+    def close(self) -> None:
+        """Close the spill file, if one was started; a failed close gives it up."""
+        if self._file is None:
+            return
+        try:
+            self._file.close()
+        except OSError:
+            self.spilled_to = ""
+        self._file = None
+
+    def _trim(self) -> None:
+        """Drop the oldest pieces of the tail that are not among its last characters."""
+        while self._tail_chars - len(self._tail[0]) >= _CAPTURE_CHARS:
+            piece = self._tail.popleft()
+            self._tail_chars -= len(piece)
+            self.dropped += len(piece)
+
+    def _start_spill(self, new_spill: Callable[[], tuple[str, Path] | None]) -> None:
+        """Open the one spill file *new_spill* gives and write the output so far to it.
+
+        Runs once, before anything is dropped, so the file gets the
+        whole output.
+        """
+        self._new_spill = None
+        spill = new_spill()
+        if spill is None:
+            return
+        shown, path = spill
+        try:
+            self._file = open(path, "w", encoding="utf-8", errors="replace", newline="")
+        except OSError:
+            return
+        self.spilled_to = shown
+        self._write("".join(self._tail))
+
+    def _write(self, text: str) -> None:
+        """Append *text* to the spill file; a failed write gives the file up (no longer whole)."""
+        assert self._file is not None
+        try:
+            self._file.write(text)
+        except OSError:
+            self.close()
+            self.spilled_to = ""
+
+
+def _make_dirs_under(root: str, relative: str) -> Path:
+    """Create the directories of the relative path *relative* under *root*; return the last.
+
+    Unlike ``mkdir(parents=True)`` this never creates *root* itself: a
+    worktree that vanished after :meth:`UsefulTools._resolve_cwd` chose
+    it is not brought back as an empty directory.
+
+    Raises:
+        OSError: When *root* is gone or a directory cannot be made.
+    """
+    path = Path(root)
+    for part in Path(relative).parts:
+        path /= part
+        path.mkdir(exist_ok=True)
+    return path
+
+
+def _drain_stdout(
+    stdout: IO[str], out_queue: queue.Queue[str | None], abandoned: threading.Event,
+) -> None:
+    """Reader thread of :meth:`UsefulTools._bash_streaming`: queue *stdout*, then ``None``.
+
+    Lines are queued as they arrive, a line longer than
+    :data:`_READ_CHARS` in pieces of that size.  *out_queue* is bounded,
+    so a command that prints faster than its output is taken waits on
+    the pipe instead of filling memory.  Once *abandoned* is set nobody
+    takes from the queue any more: the rest is read and dropped, so a
+    child still holding the inherited pipe never blocks on it.  The
+    reader is the pipe's only user, so it owns the close: EOF means
+    every writer let go, whether the caller is still waiting or
+    returned (abandoned) long ago.
+    """
+    try:
+        for piece in iter(functools.partial(stdout.readline, _READ_CHARS), ""):
+            _put_unless_abandoned(out_queue, piece, abandoned)
+    finally:
+        try:
+            stdout.close()
+        except Exception:
+            logger.debug("stdout close failed", exc_info=True)
+        _put_unless_abandoned(out_queue, None, abandoned)
+
+
+def _put_unless_abandoned(
+    out_queue: queue.Queue[str | None], item: str | None, abandoned: threading.Event,
+) -> None:
+    """Put *item* on the bounded *out_queue*, waiting for room until *abandoned* is set."""
+    while not abandoned.is_set():
+        with suppress(queue.Full):
+            out_queue.put(item, timeout=0.2)
+            return
 
 
 def _edit_pairs(edits: str) -> list[tuple[str, str, bool]] | str:
@@ -632,62 +807,96 @@ def _moved_by_later_edit(
     return moved
 
 
+_LOG_SCAN_BYTES = 8_000_000
+"""The most of a job log ``bash_job(until=...)`` searches (its end, when the log is longer)."""
+
+
+def _read_end(path: Path, max_bytes: int) -> str:
+    """Return the text of the last *max_bytes* of *path*, from the first line start in them.
+
+    When the read starts mid-file the partial first line is dropped.
+    Invalid UTF-8 is replaced.  Bytes appended after the size was taken
+    (a job log grows) are not read.
+
+    Raises:
+        OSError: When the file cannot be read.
+    """
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        start = max(0, size - max_bytes)
+        # One byte before the window tells whether the window starts
+        # on a line boundary (that byte is "\n") or mid-line.
+        f.seek(max(0, start - 1))
+        data = f.read(size - max(0, start - 1))
+    if start > 0:
+        data = data.partition(b"\n")[2]
+    return data.decode("utf-8", errors="replace")
+
+
 def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
     """Return whether *pattern* occurs in the job log at *log_path* (unreadable = no).
 
-    The whole log is searched every time: an anchored or multi-line
-    pattern (``^READY``, ``START[\\s\\S]*END``) only keeps its meaning
-    against the full text.
+    A log of at most :data:`_LOG_SCAN_BYTES` is searched whole, so an
+    anchored or multi-line pattern (``^READY``, ``START[\\s\\S]*END``)
+    keeps its meaning; a longer one only in its last
+    :data:`_LOG_SCAN_BYTES`, from a line start (where ``\\A`` then
+    matches).  The wait scans once a second: rereading a log of
+    gigabytes each time would hold that much of the daemon's memory
+    and delay a Stop.
     """
     try:
-        return pattern.search(log_path.read_text(encoding="utf-8", errors="replace")) is not None
+        return pattern.search(_read_end(log_path, _LOG_SCAN_BYTES)) is not None
     except OSError:
         return False
 
 
-#: A ``sleep N`` that starts a simple command (the separators and the
-#: trailing context are left in place so adjacent sleeps both match).
-_SLEEP_COMMAND = re.compile(
-    r"(?:^|[;&|(`\n][ \t]*)sleep[ \t]+(\d+(?:\.\d+)?)(?=[ \t]*(?:[;&|)`\n]|$))"
-)
-#: A heredoc from its ``<<TAG`` line through its terminator line: the
-#: ``<<TAG`` line, the quote around the tag (``''`` when unquoted), the
-#: tag and the body.
-_HEREDOC = re.compile(
-    r"(<<-?[ \t]*(['\"]?)(\w+)\2[^\n]*\n)((?:.*\n)*?[ \t]*\3[ \t]*$)", re.MULTILINE,
-)
-_COMMAND_SUBSTITUTION = re.compile(r"\$\(|`")
 FOREGROUND_SLEEP_MAX_SECONDS = 30
+# A literal ``sleep`` operand: a number with GNU sleep's optional unit suffix.
+_SLEEP_OPERAND = re.compile(r"(\d+(?:\.\d*)?|\.\d+)([smhd]?)")
+_SLEEP_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
-def _drop_literal_heredoc_body(heredoc: re.Match[str]) -> str:
-    """Return the heredoc's ``<<TAG`` line alone when the shell only copies its body.
+def _sleep_seconds(operands: list[Word]) -> float:
+    """Return how long ``sleep`` waits for *operands*: the sum of the literal ones, as GNU sleep.
 
-    A quoted tag (``<<'EOF'``) makes the body literal; an unquoted one
-    expands ``$(...)`` and backticks, so such a body is kept for the
-    sleep scan.
+    ``inf``/``infinity`` is forever; an operand only the shell knows
+    (``"$N"``) or that sleep rejects counts as nothing.
     """
-    if heredoc.group(2) or not _COMMAND_SUBSTITUTION.search(heredoc.group(4)):
-        return heredoc.group(1)
-    return heredoc.group(0)
+    total = 0.0
+    for word in operands:
+        if not word.literal:
+            continue
+        if word.text.lower() in ("inf", "infinity"):
+            return math.inf
+        match = _SLEEP_OPERAND.fullmatch(word.text)
+        if match:
+            total += float(match[1]) * _SLEEP_UNIT_SECONDS[match[2]]
+    return total
 
 
 def sleep_guard(command: str) -> str | None:
-    """Refuse a ``sleep N`` with N over :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
+    """Refuse a ``sleep`` longer than :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
 
     A long sleep is a polling turn: the model pays a full step to wait.
     The wait belongs in ``bash_job(action="wait", until=<regex>,
     timeout_seconds=N)``, which blocks server-side at no step cost.
-    A ``sleep N &`` is refused too: the child keeps the call's output
-    pipe, so the call blocks until the sleep ends all the same.  Only a
-    sleep the shell never runs (a heredoc body without a command
-    substitution) is allowed.
+    Every ``sleep`` the shell runs counts (read with
+    :func:`~kiss.agents.sorcar.shell_scan.simple_commands`: in a loop,
+    a substitution, behind ``nohup``), with GNU sleep's ``s``/``m``/
+    ``h``/``d`` suffixes and the sum of its operands.  A ``sleep N &``
+    is refused too: the child keeps the call's output pipe, so the call
+    blocks until the sleep ends all the same.  Text that only mentions
+    a sleep (quoted, a here-document body outside its substitutions) is
+    allowed.
     """
-    command = _HEREDOC.sub(_drop_literal_heredoc_body, command)
-    for match in _SLEEP_COMMAND.finditer(command):
-        if float(match.group(1)) > FOREGROUND_SLEEP_MAX_SECONDS:
+    for simple in simple_commands(command, None):
+        if simple.program() != "sleep":
+            continue
+        seconds = _sleep_seconds(simple.argv()[1:])
+        if seconds > FOREGROUND_SLEEP_MAX_SECONDS:
+            shown = "infinity" if math.isinf(seconds) else f"{seconds:.10g}s"
             return (
-                f"REFUSED: the Bash call did NOT run: a foreground sleep of {match.group(1)}s "
+                f"REFUSED: the Bash call did NOT run: a foreground sleep of {shown} "
                 "is a polling turn. Start the thing you are waiting for with "
                 "Bash(background=True) and block on it with "
                 'bash_job(job_id, action="wait", until="<regex in its log>", '
@@ -722,6 +931,8 @@ SPILL_DIR = "tmp/tool-out"
 POSIX form on every OS: the path is shown to the model for the Bash tool,
 which is bash on Windows too, where a backslash would be eaten.
 """
+JOB_LOG_DIR = "tmp/bash_jobs"
+"""Where a background job's log is written, under the directory it runs in."""
 
 
 def _output_budget(max_output_chars: int) -> int:
@@ -759,34 +970,41 @@ def _clean_env(work_dir: str | None = None) -> dict[str, str]:
 
 
 def _format_bash_result(
-    returncode: int, output: str, max_output_chars: int, spilled_to: str = ""
+    returncode: int, output: str, max_output_chars: int, spilled_to: str = "", dropped: int = 0,
 ) -> str:
+    """Report a finished command: its output, after its exit code when that is not 0.
+
+    *spilled_to* and *dropped* are as for :func:`_truncate_output`.
+    """
     if returncode != 0:
         msg = f"Error (exit code {returncode}):"
         if output:
             msg += f"\n{output}"
-        return _truncate_output(msg, max_output_chars, spilled_to)
-    return _truncate_output(output, max_output_chars, spilled_to)
+        return _truncate_output(msg, max_output_chars, spilled_to, dropped)
+    return _truncate_output(output, max_output_chars, spilled_to, dropped)
 
 
 def _format_bash_timeout(
-    output: str, timeout_seconds: float, max_output_chars: int, spilled_to: str = ""
+    output: str, timeout_seconds: float, max_output_chars: int, spilled_to: str = "",
+    dropped: int = 0,
 ) -> str:
     """Report a killed-at-the-deadline command, keeping what it printed before the kill.
 
     The partial output (how far a test run or build got) is what lets the
     model act on the next step instead of re-running the command blind.
+    *spilled_to* and *dropped* are as for :func:`_truncate_output`.
     """
     msg = "Error: Command execution timeout"
     if output:
         msg += f" after {timeout_seconds:g}s. Output before the timeout:\n{output}"
-    return _truncate_output(msg, max_output_chars, spilled_to)
+    return _truncate_output(msg, max_output_chars, spilled_to, dropped)
 
 
 def _refuse_or_lift(
     command: str,
     work_dir: str | None,
     timeout_seconds: float,
+    cwd: str | None,
 ) -> tuple[str | None, float]:
     """Apply the shell guards to *command* and lift its timeout for installs.
 
@@ -797,6 +1015,10 @@ def _refuse_or_lift(
         command: The shell command the model wants to run.
         work_dir: The agent's working directory (worktree + destructive guards).
         timeout_seconds: The caller's deadline.
+        cwd: The directory the command runs in on this host
+            (:meth:`UsefulTools._resolve_cwd`), where the here-document
+            guard looks its targets up; ``None`` for a command run on
+            another machine, whose files this host cannot see.
 
     Returns:
         ``(refusal, timeout_seconds)``: the guard's error message (``None``
@@ -804,7 +1026,14 @@ def _refuse_or_lift(
     """
     guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
     refusal = _bash_parent_repo_guard(command, work_dir) or guard or rewrite_guard(command)
+    if refusal is None and cwd is not None:
+        refusal = heredoc_guard(command, bash_path(os.path.abspath(cwd)), _host_lexists)
     return refusal, timeout_seconds
+
+
+def _host_lexists(path: str) -> bool:
+    """Return whether the absolute bash *path* (see :func:`bash_path`) exists on this host."""
+    return os.path.lexists(host_path(path))
 
 
 def _run_one_command(
@@ -812,6 +1041,7 @@ def _run_one_command(
     cancel: threading.Event,
     work_dir: str | None,
     timeout_seconds: float,
+    max_output_chars: int,
 ) -> tuple[int | None, str, float]:
     """Run one host ``run_commands_parallel`` command on a worker thread.
 
@@ -820,28 +1050,35 @@ def _run_one_command(
         cancel: The fan-out's stop event; setting it kills the shell.
         work_dir: The agent's working directory (worktree guard + cwd).
         timeout_seconds: Deadline for the shell.
+        max_output_chars: The report's per-command budget; an output too
+            big to be kept whole (see :class:`_Capture`) is cut to it
+            here, where the count of what was left out is known.
 
     Returns:
         ``(returncode, output, seconds)``: the exit code (``None`` on
         timeout, ``-1`` when the command was refused or failed to
         launch), the combined output, and the wall time spent.
     """
-    guard, timeout_seconds = _refuse_or_lift(command, work_dir, timeout_seconds)
+    # Stream-less: printers attribute output by thread-local task id, so
+    # a callback from this worker thread would detach the output from
+    # the task.
+    runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
+    cwd = runner._resolve_cwd()
+    guard, timeout_seconds = _refuse_or_lift(command, work_dir, timeout_seconds, cwd or os.getcwd())
     # Every command of the fan-out is a foreground wait for the caller,
     # so a long sleep is refused as in a foreground ``Bash`` call.
     guard = guard or sleep_guard(command)
     if guard is not None:
         return -1, guard, 0.0
     started = time.monotonic()
+    capture = _Capture()
     try:
-        # Stream-less: printers attribute output by thread-local task
-        # id, so a callback from this worker thread would detach the
-        # output from the task.
-        runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
-        returncode, output = runner._bash_streaming(command, timeout_seconds)
+        returncode, output = runner._bash_streaming(command, timeout_seconds, cwd, capture)
     except Exception as e:
         logger.debug("Exception caught", exc_info=True)
-        returncode, output = -1, f"Error: {e}"
+        return -1, f"Error: {e}", time.monotonic() - started
+    if capture.dropped:
+        output = _truncate_output(output, max_output_chars, dropped=capture.dropped)
     return returncode, output, time.monotonic() - started
 
 
@@ -1013,24 +1250,14 @@ def _tail_lines(path: Path, lines: int, max_bytes: int) -> str:
     """Return the last *lines* lines of *path*, reading at most *max_bytes* from its end.
 
     A build or training log can be gigabytes long, so only the tail is
-    read; when the read starts mid-file the partial first line is
-    dropped.  Invalid UTF-8 is replaced.
+    read (:func:`_read_end`).
     """
     if lines <= 0 or max_bytes <= 0:
         return ""
     try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            start = max(0, f.tell() - max_bytes)
-            # One byte before the window tells whether the window starts
-            # on a line boundary (that byte is "\n") or mid-line.
-            f.seek(max(0, start - 1))
-            data = f.read()
+        text = _read_end(path, max_bytes)
     except OSError as e:
         return f"(log unreadable: {e})"
-    if start > 0:
-        data = data.partition(b"\n")[2]
-    text = data.decode("utf-8", errors="replace")
     return "".join(text.splitlines(keepends=True)[-lines:])
 
 
@@ -1156,6 +1383,8 @@ class UsefulTools:
         # Files this instance wrote (Write, Edit): listed in a
         # continuation's first message.
         self.written_files: set[Path] = set()
+        # Snapshots saved by ``checkpoint`` for ``rollback``, by name.
+        self._checkpoints = Checkpoints(stop_event)
 
     def _mark_read(self, resolved: Path) -> None:
         """Record that the model has seen *resolved* (a Read, a Write, or a Bash view of it)."""
@@ -1203,39 +1432,28 @@ class UsefulTools:
             + region_around_string(content, old_string)
         )
 
-    def _spawn(self, command: str) -> subprocess.Popen:
-        """Launch *command* with the shared Popen configuration.
+    def _spawn(self, command: str, cwd: str | None) -> subprocess.Popen:
+        """Launch *command* in *cwd* with the shared Popen configuration.
 
         Output (stdout + stderr combined) is captured as UTF-8 text and
-        the child runs in ``self.work_dir`` with a cleaned environment.
+        the child runs with a cleaned environment.
         Invalid UTF-8 bytes in the output (e.g. ``cat`` of a binary,
         ``grep`` on a binary file) are replaced with U+FFFD instead of
         raising ``UnicodeDecodeError`` — strict decoding would lose the
         ENTIRE output (and, on the streaming path, leak the exception
         out of the tool) even when the command itself succeeded.
 
-        Vanished-worktree fallback: if ``self.work_dir`` points at a
-        directory that no longer exists on disk (e.g. the per-task
-        ``.kiss-worktrees/kiss_wt-*`` worktree was torn down by a
-        concurrent cleanup, discard, or crashed merge between
-        ``RelentlessAgent`` sub-sessions), launching the subprocess
-        with that missing ``cwd`` would crash *every* Bash call with
-        ``FileNotFoundError: [Errno 2] No such file or directory``
-        before any output is produced.  In that case we transparently
-        fall back to the parent repository root (with the
-        ``.kiss-worktrees/kiss_wt-<slug>`` segment stripped) so the
-        agent can keep working from the user's main checkout instead
-        of dying on every command.  If even the fallback path does
-        not exist we drop ``cwd`` entirely and let the child inherit
-        the agent process's cwd.
-
         Args:
             command: The shell command to execute.
+            cwd: The directory :meth:`_resolve_cwd` chose for this
+                command before its guards checked it.  It is not
+                resolved again here: a worktree removed since makes the
+                launch fail with ``FileNotFoundError`` instead of running
+                the command in a fallback directory no guard checked.
 
         Returns:
             The started subprocess.
         """
-        cwd = self._resolve_cwd()
         return popen_process_group(
             **_popen_kwargs(command),
             stdout=subprocess.PIPE,
@@ -1248,11 +1466,20 @@ class UsefulTools:
         )
 
     def _resolve_cwd(self) -> str | None:
-        """Return the directory Bash children run in (see :meth:`_spawn`).
+        """Return the directory a Bash command runs in.
 
         ``self.work_dir`` when it exists, its parent repository root when
         the worktree vanished mid-task, ``None`` (inherit the agent's
-        cwd) when neither exists or no ``work_dir`` was set.
+        cwd) when neither exists or no ``work_dir`` was set.  The
+        per-task ``.kiss-worktrees/kiss_wt-*`` worktree can be torn down
+        by a concurrent cleanup, discard or crashed merge; falling back
+        to the main checkout keeps every later command working instead
+        of failing on the missing directory.
+
+        Called once per command: its guards and its launch
+        (:meth:`_spawn`, :meth:`_start_background_job`) use the same
+        result, so a command never runs in a directory its guards did
+        not check.
         """
         cwd: str | None = self.work_dir or None
         if cwd is None or os.path.isdir(cwd):
@@ -1272,7 +1499,7 @@ class UsefulTools:
         return None
 
     def _start_background_job(
-        self, command: str, machine: str = ""
+        self, command: str, cwd: str | None, machine: str = ""
     ) -> tuple[BackgroundJob | None, str]:
         """Start *command* detached and register it as a background job.
 
@@ -1292,6 +1519,9 @@ class UsefulTools:
 
         Args:
             command: The shell command to run.
+            cwd: The directory :meth:`_resolve_cwd` chose before the
+                command's guards ran (see :meth:`_spawn`); it also holds
+                the log.
             machine: Name or address of a registered SSH machine to run
                 on; empty runs locally.
 
@@ -1300,9 +1530,9 @@ class UsefulTools:
             pid and log path plus how to follow it; ``None`` and a string
             starting with ``Error:`` when it could not be started.
         """
-        cwd = self._resolve_cwd()
         job_id = "j" + uuid.uuid4().hex[:8]
-        log_path = Path(cwd or os.getcwd()) / "tmp" / "bash_jobs" / f"{job_id}.log"
+        root = cwd or os.getcwd()
+        log_path = Path(root, JOB_LOG_DIR, f"{job_id}.log")
         popen_kwargs = _popen_kwargs(command)
         if machine:
             from kiss.agents.sorcar.machines import find_machine, ssh_command
@@ -1317,7 +1547,7 @@ class UsefulTools:
                 )
             popen_kwargs = {"args": ssh_command(found.ssh, command=command)}
         try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            _make_dirs_under(root, JOB_LOG_DIR)
             with open(log_path, "wb") as log_file:
                 process = popen_process_group(
                     **popen_kwargs,
@@ -1731,37 +1961,47 @@ class UsefulTools:
         del description
         max_output_chars = _output_budget(max_output_chars)
 
-        guard, timeout_seconds = _refuse_or_lift(command, self.work_dir, timeout_seconds)
+        cwd = self._resolve_cwd()
+        guard, timeout_seconds = _refuse_or_lift(
+            command, self.work_dir, timeout_seconds, None if machine else cwd or os.getcwd(),
+        )
         if guard is not None:
             return guard
         if background:
-            return self._start_background_job(command, machine)[1]
+            return self._start_background_job(command, cwd, machine)[1]
         if machine:
             return "Error: machine= applies to background=True only."
         refused = sleep_guard(command)
         if refused is not None:
             return refused
         if on_timeout == "background":
-            return self._run_then_detach(command, timeout_seconds, max_output_chars)
+            return self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
         if on_timeout != "kill":
             return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
 
+        capture = _Capture(max_output_chars, self._new_spill)
         try:
-            returncode, output = self._bash_streaming(command, timeout_seconds)
+            returncode, output = self._bash_streaming(command, timeout_seconds, cwd, capture)
         except Exception as e:
             # Contract (see test_bash_background_pipe_hang): an exception
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
-            # swallowed into an "Error:" string like internal failures are.
+            # swallowed into an "Error:" string like internal failures
+            # (a launch in a vanished worktree) are.
             if self.stream_callback:
                 raise
-            logger.debug("Exception caught", exc_info=True)  # pragma: no cover
-            return f"Error: {e}"  # pragma: no cover
-        spilled_to = self._spill(output, max_output_chars, "bash")
+            logger.debug("Exception caught", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            capture.close()
         if returncode is None:
-            return _format_bash_timeout(output, timeout_seconds, max_output_chars, spilled_to)
+            return _format_bash_timeout(
+                output, timeout_seconds, max_output_chars, capture.spilled_to, capture.dropped,
+            )
         self._note_shell_view(command, returncode, output)
-        return _format_bash_result(returncode, output, max_output_chars, spilled_to)
+        return _format_bash_result(
+            returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
+        )
 
     def _note_shell_view(self, command: str, returncode: int | None, output: str) -> None:
         """Count a ``cat`` / ``sed -n`` / ``grep -n`` of one file as a read of it for Edit/Write.
@@ -1777,46 +2017,45 @@ class UsefulTools:
         """
         if returncode != 0 or not output.strip():
             return
-        viewed = shell_view_target(command, self.work_dir)
+        viewed = shell_view_target(command, self._resolve_cwd())
         if viewed is not None and output_shows_file(output, viewed):
             self._mark_read(viewed)
 
-    def _spill(self, output: str, max_output_chars: int, label: str) -> str:
-        """Write *output* under ``tmp/tool-out/`` when it exceeds the budget; return the path shown.
+    def _new_spill(self) -> tuple[str, Path] | None:
+        """Name the next file an output over its budget is written to in full.
 
-        The path is relative to the work dir
-        (``tmp/tool-out/<tag>-<n>-<label>.txt``, ``tag`` naming this
-        instance and ``n`` counting its spills) so the model can
-        ``grep`` it; ``""`` when the output fits or cannot be written.
-        The file holds the output verbatim (no newline translation, so
-        a Windows file is not longer than the output by one CR per line).
+        The shown path is relative to the directory Bash commands run in
+        (:meth:`_resolve_cwd`: the work dir, or the parent repository of
+        a vanished worktree, which is not recreated):
+        ``tmp/tool-out/<tag>-<n>-bash.txt``, ``tag`` naming this instance
+        and ``n`` counting its spills, so the model can ``grep`` it.
 
-        Args:
-            output: The full output.
-            max_output_chars: The budget it must exceed to be spilled.
-            label: Tool label in the file name.
+        Returns:
+            The shown path and the real one, ``None`` when there is no
+            such directory or ``tmp/tool-out`` cannot be made in it.
         """
-        if len(output) <= max_output_chars or not self.work_dir:
-            return ""
-        self._spill_count += 1
-        relative = f"{SPILL_DIR}/{self._spill_tag}-{self._spill_count}-{label}.txt"
+        root = self._resolve_cwd()
+        if root is None:
+            return None
         try:
-            path = Path(self.work_dir) / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(output, encoding="utf-8", errors="replace", newline="")
+            spill_dir = _make_dirs_under(root, SPILL_DIR)
         except OSError:
-            return ""
-        return relative
+            return None
+        self._spill_count += 1
+        name = f"{self._spill_tag}-{self._spill_count}-bash.txt"
+        return f"{SPILL_DIR}/{name}", spill_dir / name
 
-    def _run_then_detach(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
-        """Run *command* as a background job and wait up to *timeout_seconds* for it.
+    def _run_then_detach(
+        self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,
+    ) -> str:
+        """Run *command* as a background job in *cwd* and wait up to *timeout_seconds* for it.
 
         The ``on_timeout="background"`` path of :meth:`Bash`: a command
         that finishes in time reads like a foreground result (its log,
         exit code first); one that does not stays running under its job
         id instead of being killed at the deadline.
         """
-        job, started = self._start_background_job(command)
+        job, started = self._start_background_job(command, cwd)
         if job is None:
             return started
         self._wait_for_job(job, timeout_seconds)
@@ -1828,10 +2067,18 @@ class UsefulTools:
                 f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
                 f"timeout_seconds=...).\n" + _tail_lines(job.log_path, 30, max_output_chars // 2)
             )
-        output = job.log_path.read_text(encoding="utf-8", errors="replace")
-        spilled_to = self._spill(output, max_output_chars, "bash")
+        capture = _Capture(max_output_chars, self._new_spill)
+        try:
+            with open(job.log_path, encoding="utf-8", errors="replace") as log:
+                for piece in iter(functools.partial(log.read, _READ_CHARS), ""):
+                    capture.append(piece)
+        finally:
+            capture.close()
+        output = capture.text()
         self._note_shell_view(command, returncode, output)
-        return _format_bash_result(returncode, output, max_output_chars, spilled_to)
+        return _format_bash_result(
+            returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
+        )
 
     def bash_job(
         self,
@@ -1888,12 +2135,47 @@ class UsefulTools:
             return f"Error: action must be one of wait, tail, kill; got {action!r}."
         return _format_job_report(job, tail_lines, max_output_chars)
 
+    def checkpoint(self, name: str) -> str:
+        """Save the files of the work dir's git working tree as checkpoint *name*.
+
+        The snapshot holds every file git does not ignore, tracked or not,
+        and changes nothing: HEAD, the branch, the index and the files
+        stay as they are.  Take one of a working version before a risky
+        or large change; ``rollback(name)`` returns to it.  Saving a name
+        again replaces it.
+
+        Args:
+            name: A short label: letters, digits, ``-`` and ``_`` (1 to 40).
+
+        Returns:
+            A confirmation naming the snapshot's git tree, or a string
+            starting with ``Error:`` (for instance outside a git repository).
+        """
+        return self._checkpoints.save(name, self._resolve_cwd() or os.getcwd())
+
+    def rollback(self, name: str) -> str:
+        """Restore the files of the work dir's git working tree from checkpoint *name*.
+
+        Files changed or deleted since the checkpoint are rewritten from
+        it and files created since are deleted; files git ignores are
+        left alone.  The state it replaces is saved first as checkpoint
+        ``before-rollback``, so a rollback can be undone.
+
+        Args:
+            name: The label given to ``checkpoint``.
+
+        Returns:
+            The files rewritten and deleted, or a string starting with ``Error:``.
+        """
+        return self._checkpoints.roll_back(name, self._resolve_cwd() or os.getcwd())
+
     def _run_one_command_noting_views(
         self,
         command: str,
         cancel: threading.Event,
         work_dir: str | None,
         timeout_seconds: float,
+        max_output_chars: int,
     ) -> tuple[int | None, str, float]:
         """Run one ``run_commands_parallel`` command and count a file it showed as read.
 
@@ -1902,11 +2184,12 @@ class UsefulTools:
             cancel: The pool's cancel event.
             work_dir: Directory the command runs in.
             timeout_seconds: Per-command deadline.
+            max_output_chars: The report's per-command budget.
 
         Returns:
             What :func:`_run_one_command` returns.
         """
-        result = _run_one_command(command, cancel, work_dir, timeout_seconds)
+        result = _run_one_command(command, cancel, work_dir, timeout_seconds, max_output_chars)
         self._note_shell_view(command, result[0], result[1])
         return result
 
@@ -1953,13 +2236,14 @@ class UsefulTools:
             self._run_one_command_noting_views,
             work_dir=self.work_dir,
             timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
         )
         return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
 
     def _consume_stream(
         self,
         out_queue: "queue.Queue[str | None]",
-        chunks: list[str],
+        capture: _Capture,
         deadline: float,
         until_stop: bool = False,
     ) -> bool:
@@ -1975,8 +2259,9 @@ class UsefulTools:
         "garbage" events reaching every chat client).
 
         Args:
-            out_queue: Queue fed by the reader thread; ``None`` marks EOF.
-            chunks: Accumulator that received lines are appended to.
+            out_queue: Queue fed by the reader thread: lines, a longer
+                line in pieces of :data:`_READ_CHARS`; ``None`` marks EOF.
+            capture: Where the received pieces go.
             deadline: ``time.monotonic()`` timestamp to stop waiting at.
             until_stop: When true, the wait also ends once the task's
                 stop event or the tool panel's Stop fired (see
@@ -2008,7 +2293,7 @@ class UsefulTools:
                 continue
             if line is None:
                 return True
-            chunks.append(line)
+            capture.append(line)
             if self.stream_callback is not None:
                 self.stream_callback(line)
 
@@ -2016,15 +2301,19 @@ class UsefulTools:
         self,
         command: str,
         timeout_seconds: float,
+        cwd: str | None,
+        capture: _Capture | None = None,
     ) -> tuple[int | None, str]:
-        """Run *command* through a reader thread, bounded by *timeout_seconds*.
+        """Run *command* in *cwd* through a reader thread, bounded by *timeout_seconds*.
 
         Single engine behind :meth:`Bash` and :meth:`run_commands_parallel`
         for both the streaming and the non-streaming case
         (``stream_callback`` may be ``None``).  Returns the shell's exit
         code — ``None`` for a genuine timeout — and its combined
-        stdout/stderr, untruncated.  The timeout is a deadline on the
-        SHELL, not on its descendants:
+        stdout/stderr as *capture* keeps it: all of it, or its head and
+        tail once it is too big (a new :class:`_Capture` without a spill
+        file when *capture* is ``None``).  The timeout is a deadline on
+        the SHELL, not on its descendants:
 
         * Shell still running at the deadline — genuine timeout.  The
           whole process group is killed and the timeout error returned.
@@ -2042,42 +2331,28 @@ class UsefulTools:
         shell is killed and its exit code reported; an exited shell's
         output is returned after the same short EOF grace period.
         """
-        process = self._spawn(command)
+        if capture is None:
+            capture = _Capture()
+        process = self._spawn(command, cwd)
         done = threading.Event()
         abandoned = threading.Event()
-        out_queue: queue.Queue[str | None] = queue.Queue()
-
-        def _drain_stdout() -> None:
-            try:
-                assert process.stdout is not None
-                for line in iter(process.stdout.readline, ""):
-                    if not abandoned.is_set():
-                        out_queue.put(line)
-            finally:
-                # The reader is the pipe's only user, so it owns the close:
-                # EOF here means every writer let go, whether the main
-                # thread is still waiting or returned (abandoned) long ago.
-                try:
-                    process.stdout.close()  # type: ignore[union-attr]
-                except Exception:
-                    logger.debug("stdout close failed", exc_info=True)
-                out_queue.put(None)
-
+        out_queue: queue.Queue[str | None] = queue.Queue(_QUEUED_PIECES)
         timed_out = False
         eof = False
-        chunks: list[str] = []
         try:
             # The helper threads start INSIDE the kill/cleanup region:
             # a ``Thread.start()`` that raises (thread exhaustion) or a
             # stop injected here must still kill the shell just spawned
             # and set ``done`` — otherwise the command runs on unowned
             # and an already-started monitor polls forever.
-            reader = threading.Thread(target=_drain_stdout, daemon=True)
+            reader = threading.Thread(
+                target=_drain_stdout, args=(process.stdout, out_queue, abandoned), daemon=True,
+            )
             self._start_stop_monitor(process, done)
             reader.start()
             interrupt = tool_interrupt.current_tool_interrupt_event()
             deadline = time.monotonic() + timeout_seconds
-            eof = self._consume_stream(out_queue, chunks, deadline, until_stop=True)
+            eof = self._consume_stream(out_queue, capture, deadline, until_stop=True)
             if not eof:
                 # A stop is not a timeout: the shell is killed (the
                 # monitor may already have done so) and its exit code
@@ -2095,7 +2370,7 @@ class UsefulTools:
                 # instead of at the raise below.
                 eof = self._consume_stream(
                     out_queue,
-                    chunks,
+                    capture,
                     time.monotonic() + (0.5 if interrupted else 5),
                 )
                 if not eof:
@@ -2133,5 +2408,5 @@ class UsefulTools:
         tool_interrupt.raise_if_interrupted()
 
         if timed_out:
-            return None, "".join(chunks)
-        return process.returncode, "".join(chunks)
+            return None, capture.text()
+        return process.returncode, capture.text()

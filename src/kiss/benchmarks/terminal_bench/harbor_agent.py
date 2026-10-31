@@ -25,6 +25,10 @@ A trial whose environment is not a local Docker container (Harbor's
 (:class:`kiss.benchmarks.terminal_bench.exec_bridge_server.ExecBridgeServer`)
 that serves ``environment.exec`` to the daemon over loopback HTTP; the SEA's
 tools then run on the remote sandbox exactly as they would in a container.
+When the bridge finds the sandbox gone (the provider shut it down), the
+trial is stopped and ``run`` raises :class:`EnvironmentLostError`, so
+Harbor records an error the job can re-run (``harbor jobs resume -f
+EnvironmentLostError``) instead of a failure the agent could not help.
 
 Usage (from the repo root, with the benchmark daemon running)::
 
@@ -62,6 +66,12 @@ AGENT_VERSION = "2026.10.28"
 #: ``reviewer`` option values: the trial's own model, and no review at all.
 SAME_MODEL = "same"
 NO_REVIEW = "none"
+#: Seconds between two looks at the exec bridge's ``lost`` state while a trial runs.
+LOST_POLL_S = 5.0
+
+
+class EnvironmentLostError(RuntimeError):
+    """The trial's remote environment stopped answering commands (the sandbox is gone)."""
 
 
 class SeaOptions(AgentOptions):
@@ -132,7 +142,9 @@ class SeaHarborAgent(BaseAgent):
             bridge = ExecBridgeServer(environment, asyncio.get_running_loop())
             container = BRIDGE_PREFIX + bridge.url
         try:
-            metrics = await self.run_sea(instruction, environment, context, container, options)
+            metrics = await self.run_sea(
+                instruction, environment, context, container, options, bridge,
+            )
         finally:
             # Every exit after the bridge started (a failed setup exec, Harbor's
             # cancellation, the normal end) stops its server thread.
@@ -147,15 +159,24 @@ class SeaHarborAgent(BaseAgent):
         context: AgentContext,
         container: str,
         options: SeaOptions,
+        bridge: ExecBridgeServer | None = None,
     ) -> dict[str, Any]:
         """Build the trial's SEA config and run it on the daemon; return its metrics.
 
         Args:
             instruction: The task instruction (``instruction.md``).
             environment: Harbor's running environment (for ``pwd`` and the skills note).
-            context: Receives the spend when Harbor cancels the run.
+            context: Receives the spend when Harbor cancels the run or the
+                environment is lost.
             container: The container name, or the ``exec:<url>`` bridge address.
             options: The agent's parsed ``--ak`` options.
+            bridge: The trial's exec bridge, polled every :data:`LOST_POLL_S`
+                seconds for a lost environment; ``None`` for a Docker trial.
+
+        Raises:
+            EnvironmentLostError: The bridge found the environment gone and a
+                later probe confirmed it; the daemon task was stopped and its
+                spend recorded first.
         """
         workdir = await environment.exec("pwd")
         cwd = (workdir.stdout or "").strip() or "/app"
@@ -177,7 +198,25 @@ class SeaHarborAgent(BaseAgent):
             Path(options.home).expanduser() / ENDPOINT_FILE, cancel,
         ))
         try:
-            return await asyncio.shield(job)
+            # ``asyncio.wait`` never cancels the job, so Harbor's cancellation
+            # of this coroutine leaves the trial thread to the handler below.
+            lost = ""
+            while not job.done():
+                await asyncio.wait({job}, timeout=LOST_POLL_S)
+                if bridge is not None and bridge.lost and not lost:
+                    if await bridge.confirm_lost():
+                        lost = bridge.lost
+                        cancel.set()  # the stopped job ends the loop
+            metrics = job.result()
+            # A sandbox lost just before the task finished on its own is
+            # confirmed too: its result could not be verified anyway, and an
+            # error is what the job re-runs.
+            if bridge is not None and bridge.lost and not lost and await bridge.confirm_lost():
+                lost = bridge.lost
+            if lost:
+                self.record(context, metrics)
+                raise EnvironmentLostError(lost)
+            return metrics
         except asyncio.CancelledError:
             # Harbor's agent timeout: stop the daemon task and wait for the client
             # to confirm it (bounded by its stop grace), so the spend so far is

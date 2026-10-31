@@ -99,7 +99,9 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
             loaded = yaml.safe_load(match.group(1))
             if isinstance(loaded, dict):
                 meta = loaded
-        except yaml.YAMLError:
+        # Not only YAMLError: an impossible date or an over-long integer
+        # raises ValueError, a deeply nested block RecursionError.
+        except (yaml.YAMLError, ValueError, RecursionError):
             logger.debug("bad frontmatter in %s", path, exc_info=True)
     return meta, body
 

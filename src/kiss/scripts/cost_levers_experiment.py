@@ -66,7 +66,6 @@ def isolate_kiss_home() -> Path:
     home = Path(tempfile.mkdtemp(prefix="kiss_cost_experiment_"))
     os.environ["KISS_HOME"] = str(home)
     os.environ["KISS_MUSE_AUTH"] = "0"
-    th._db_conn = None
     th._KISS_DIR = home
     th._DB_PATH = home / "history.db"
     return home

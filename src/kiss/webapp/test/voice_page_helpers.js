@@ -77,7 +77,6 @@ function makeTrack(win, state, log) {
   track.getSettings = () => ({});
   track.stop = () => {
     track.readyState = 'ended';
-    state.tracksStopped++;
     log.push('track-stopped');
   };
   track.end = () => {
@@ -99,8 +98,8 @@ function makeTrack(win, state, log) {
  *   vosk bundle itself); `pendingModel` holds `createModel` until the test
  *   calls `page.resolveModel()`; `autoGrant` grants every microphone
  *   request at once instead of waiting for the test's `grant()`.
- * @returns {{state: {recognizers: Array, processors: Array, tracks: Array,
- *   tracksStopped: number}, mic: {calls: Array}, clock: {now: number},
+ * @returns {{state: {recognizers: Array, processors: Array, tracks: Array},
+ *   mic: {calls: Array}, clock: {now: number},
  *   model: object, timers: Array, log: Array<string>, options: object,
  *   resolveModel: ?Function}} `state.tracks` lists every microphone
  *   track granted (see makeTrack); `log` lists the audio-graph and
@@ -108,7 +107,7 @@ function makeTrack(win, state, log) {
  *   `track-stopped`).
  */
 function voicePageState(opts) {
-  const state = {recognizers: [], processors: [], tracks: [], tracksStopped: 0};
+  const state = {recognizers: [], processors: [], tracks: []};
   return {
     state,
     mic: {calls: []},
@@ -150,9 +149,9 @@ function stubVoiceSurface(win, page) {
                 getAudioTracks: () => [track],
               });
             },
-            refuse: message => {
+            refuse: (message, name) => {
               const err = new Error(message || 'Permission denied');
-              err.name = 'NotAllowedError';
+              err.name = name || 'NotAllowedError';
               reject(err);
             },
           };
@@ -216,18 +215,18 @@ function stubVoiceSurface(win, page) {
  *   the wake one); `sourceUrl` is passed to simplify2_harness.makePage;
  *   `noVosk` / `pendingModel` / `autoGrant` as for voicePageState.
  * @returns {{win: object, posted: Array<object>, getState: Function,
- *   state: {recognizers: Array, processors: Array, tracks: Array,
- *   tracksStopped: number},
+ *   state: {recognizers: Array, processors: Array, tracks: Array},
  *   mic: {calls: Array<{constraints: *, grant: Function, refuse: Function}>},
  *   clock: {now: number}, model: object, timers: Array<object>,
  *   log: Array<string>, resolveModel: ?Function}}
  *   `state.recognizers` / `state.processors` list every recognizer and
  *   audio processor node the pipeline ever built; `mic.calls` every
- *   getUserMedia request, settled by the test; `clock.now` is what the
- *   page's Date.now() returns; `model` is the fake Vosk model
- *   (`model.recognizers` maps the ids of the live recognizers); `timers`
- *   is the ledger of the page's setTimeout calls; `log` and
- *   `resolveModel` as for voicePageState.
+ *   getUserMedia request, settled by the test (`refuse(message, name)`
+ *   fails it with an error named `name`, NotAllowedError by default);
+ *   `clock.now` is what the page's Date.now() returns; `model` is the
+ *   fake Vosk model (`model.recognizers` maps the ids of the live
+ *   recognizers); `timers` is the ledger of the page's setTimeout calls;
+ *   `log` and `resolveModel` as for voicePageState.
  */
 function makeVoicePage(opts) {
   const options = opts || {};

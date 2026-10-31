@@ -84,6 +84,11 @@ function testBadgeFollowsTheWorkingTree() {
   const st = ofType(posted, 'gitStatus');
   assert.ok(st.length > before, 'the 5 s poll asks for the git status');
   assert.strictEqual(st[st.length - 1].workDir, WD);
+  assert.strictEqual(
+    ofType(posted, 'gitLog').length,
+    logsBefore + 1,
+    'the first tick loads the unloaded workspace whole (status + log)',
+  );
   send(win, statusReply(st[st.length - 1].token, 3));
   assert.strictEqual(
     byId(win, 'scm-hdr-count').textContent,
@@ -102,7 +107,6 @@ function testBadgeFollowsTheWorkingTree() {
     logsAfterLoad,
     'a same-workspace tick does not re-ask for the log',
   );
-  assert.ok(logsAfterLoad >= logsBefore);
   send(win, statusReply(again[again.length - 1].token, 1));
   assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '1');
   send(win, statusReply(again[again.length - 1].token, 0));

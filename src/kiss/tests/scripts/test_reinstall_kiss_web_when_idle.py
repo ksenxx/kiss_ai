@@ -33,6 +33,10 @@ import time
 import unittest
 from pathlib import Path
 
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("the helper is a bash script for macOS/Linux daemons")
+
 REPO = Path(__file__).resolve().parents[4]
 SCRIPT = REPO / "scripts" / "reinstall-kiss-web-when-idle.sh"
 

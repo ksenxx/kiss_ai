@@ -41,8 +41,9 @@ function tabBarIds(win) {
 const {ofType: msgsOf, snapshotEntry} = harness;
 
 // Give a page a mirrored parent tab plus one sub-agent tab: live by
-// default, finished history with `done` (only such a tab may be
-// hand-closed; a running sub-agent's tab stays open on every surface).
+// default, finished history with `done`.  The user may hand-close
+// either: a running sub-agent's tab stays open only until the user
+// closes it.
 function seedSubagent(win, done) {
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('parent', 'Parent')]});
   send(win, {

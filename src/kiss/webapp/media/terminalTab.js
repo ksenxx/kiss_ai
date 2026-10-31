@@ -79,15 +79,16 @@
       fetchText(FIT_BASE + '/lib/addon-fit.js'),
     ])
       .then(parts => {
-        const style = document.createElement('style');
-        style.id = 'xterm-css';
-        style.textContent = parts[0];
-        document.head.appendChild(style);
         evalUmd(parts[1]);
         evalUmd(parts[2]);
         if (!global.Terminal || !global.FitAddon) {
           throw new Error('xterm.js did not initialise');
         }
+        // Only now: a failed load (whose retry downloads again) must
+        // not leave its stylesheet in the page.
+        const style = document.createElement('style');
+        style.textContent = parts[0];
+        document.head.appendChild(style);
       })
       .catch(err => {
         // A failed download must not poison every later open.
@@ -158,7 +159,7 @@
     surface.className = 'terminal-surface';
     el.appendChild(surface);
 
-    const view = {el: el, tabId: tabId, disposed: false, exited: false};
+    const view = {el: el, disposed: false, exited: false};
     let term = null;
     let fit = null;
     let observer = null;

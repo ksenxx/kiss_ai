@@ -19,7 +19,11 @@ const {
   settle: tick,
 } = require('./simplify2_harness');
 const {installTokenisedCss} = require('./designTokens');
-const {makeRow: helperMakeRow, sendHistory} = require('./history_helpers');
+const {
+  makeRow: helperMakeRow,
+  sendHistory,
+  chatHeader: header,
+} = require('./history_helpers');
 
 function makePage() {
   return makeChatPage({
@@ -47,10 +51,6 @@ function group(win, chatId) {
   );
   assert.ok(g, 'chat panel for ' + chatId);
   return g;
-}
-
-function header(win, chatId) {
-  return group(win, chatId).querySelector(':scope > .history-chat-header');
 }
 
 function headerMark(win, chatId) {

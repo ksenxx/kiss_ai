@@ -368,7 +368,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_third_party_agents(self, team_id: str) -> str:
+    def list_channels(self, team_id: str) -> str:
         """List channels in a Microsoft Team.
 
         Args:
@@ -379,7 +379,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get(f"/teams/{team_id}/channels")
-            third_party_agents = [
+            channels = [
                 {
                     "id": c.get("id", ""),
                     "name": c.get("displayName", ""),
@@ -388,7 +388,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 }
                 for c in result.get("value", [])
             ]
-            payload = {"ok": True, "third_party_agents": third_party_agents}
+            payload = {"ok": True, "channels": channels}
             return json.dumps(payload, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})

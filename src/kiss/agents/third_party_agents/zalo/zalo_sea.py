@@ -501,15 +501,20 @@ class ZaloChannelBackend(ToolMethodBackend):
 
 
 def _muse_authenticate(backend: ZaloChannelBackend, access_token: str, oa_id: str) -> str:
-    """Enroll a Zalo OA token into the Muse vault and validate it.
+    """Enroll a Zalo OA token into the Muse vault once Zalo accepts it.
 
-    The plaintext token goes straight into the vault as a header-kind
-    credential (Zalo's ``access_token`` request header), atomically
-    replacing any previous enrollment, and is never written to
-    ``config.json`` (only the non-secret ``oa_id`` metadata is — written
-    first, so a failed enrollment leaves no token on disk).  Validation
-    runs ``/getoa`` through the daemon boundary, so it is audited; an
-    invalid token leaves the vault empty.
+    A direct ``GET /getoa`` (:func:`probe_credential`) checks the token
+    BEFORE anything is stored, so a token Zalo rejects leaves the
+    previous enrollment and ``config.json`` untouched.  Only then does
+    :func:`enroll_credential` store the token as a header-kind
+    credential (Zalo's ``access_token`` request header; the store
+    atomically replaces any previous vault entry and the token never
+    reaches ``config.json``) together with the non-secret ``oa_id``
+    metadata (or the file's removal), under the config lock: a failed
+    metadata write leaves the vault untouched, and a refused store puts
+    the old file back, so the old token stays paired with the old
+    ``oa_id``.  A daemon failure after the probe is reported without
+    clearing the vault: whichever credential it holds is worth keeping.
 
     Args:
         backend: The agent's Zalo backend to (re)wire.
@@ -519,38 +524,26 @@ def _muse_authenticate(backend: ZaloChannelBackend, access_token: str, oa_id: st
     Returns:
         JSON string with the validation result.
     """
-    import contextlib
-
-    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
+    from kiss.agents.third_party_agents._channel_agent_utils import (
+        enroll_credential,
+        probe_credential,
     )
 
+    oa, _ = probe_credential(f"{backend._api_base()}/getoa", {"access_token": access_token})
+    if not (isinstance(oa, dict) and oa.get("error") == 0):
+        return json.dumps({"ok": False, "error": "Could not verify credentials."})
     try:
-        if oa_id:
-            save_json_config(_config.path, {"oa_id": oa_id})
-        else:
-            _config.clear()
-        store_credentials(
-            "zalo", {"kind": "header", "header": "access_token", "token": access_token}, []
+        enroll_credential(
+            _config.path,
+            {"oa_id": oa_id} if oa_id else None,
+            "zalo",
+            {"kind": "header", "header": "access_token", "token": access_token},
         )
-        if backend._wire_muse():  # pragma: no branch - credential was just stored
-            result = json.loads(backend.get_oa_info())
-            if result.get("ok"):
-                return json.dumps({"ok": True, "message": "Zalo credentials saved (Muse-auth)."})
-            error = json.dumps({"ok": False, "error": "Could not verify credentials."})
-        else:  # pragma: no cover - defense in depth
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+        if not backend._wire_muse():  # pragma: no cover - credential was just stored
+            return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so a bad token is not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("zalo")
-    backend._access_token = ""
-    backend._http = requests
-    backend._muse = False
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps({"ok": True, "message": "Zalo credentials saved (Muse-auth)."})
 
 
 class ZaloAgent(BaseChannelAgent):

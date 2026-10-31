@@ -8,8 +8,8 @@
   paths used to park in the untimed C-level ``RLock.acquire()`` while
   another tab's merge held ``repo_lock`` for minutes, so the daemon's
   Stop (an injected ``KeyboardInterrupt``) reached them only when the
-  holder released.  They now acquire through
-  ``interruptible_locked_call`` (short slices); the shape of each test
+  holder released.  They now acquire through ``locked_call``, which
+  acquires in short slices; the shape of each test
   is ``test_conc1018_f_repo_lock_stop.py``: a holder thread keeps the
   lock for ``_HOLD_SECONDS``, the blocked thread is stopped after one
   second and must end well before the holder releases.
@@ -24,7 +24,7 @@
   out of it.  A git alias starting such a descendant shows the read
   giving up ``PIPE_GIVE_UP_SECONDS`` after the kill, and an empty
   ``PATH`` shows the "no output" return.
-* D2-1 — a re-entrant ``interruptible_locked_call`` (the thread already
+* D2-1 — a re-entrant sliced ``locked_call`` (the thread already
   owns the ``RLock``) used to enter its ``try`` before acquiring, so a
   Stop landing between the two made the ``finally`` release the OUTER
   hold (no ``RuntimeError``: the recursion count just dropped to 0).
@@ -53,7 +53,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar._concurrency import interruptible_locked_call, locked_call
+from kiss.agents.sorcar._concurrency import locked_call
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -299,11 +299,11 @@ def test_stdout_head_without_git_on_the_path_reports_no_output(
 
 # --- D2-1: a Stop before a re-entrant acquire must not release the outer hold ---
 
-_INNER_CODE = interruptible_locked_call.__code__
+_INNER_CODE = locked_call.__code__
 
 
 def _interrupt_at_acquire(frame: FrameType, event: str, arg: Any) -> Any:
-    """Trace hook: ``KeyboardInterrupt`` on the acquire line of ``interruptible_locked_call``."""
+    """Trace hook: ``KeyboardInterrupt`` on the acquire line of ``locked_call``."""
     if frame.f_code is not _INNER_CODE:
         return None
     source_line = linecache.getline(frame.f_code.co_filename, frame.f_lineno)
@@ -334,7 +334,7 @@ def _outer(lock: threading.RLock, outcome: dict[str, object]) -> None:
     """The outer critical section: a nested take, with a Stop landing before its acquire."""
     sys.settrace(_interrupt_at_acquire)
     try:
-        outcome["inner"] = interruptible_locked_call(lock, _inner)
+        outcome["inner"] = locked_call(lock, _inner)
     except KeyboardInterrupt:
         outcome["stopped"] = True
     finally:

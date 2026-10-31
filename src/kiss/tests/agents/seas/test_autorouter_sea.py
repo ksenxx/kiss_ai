@@ -16,7 +16,9 @@ task's persisted id are the real ones.
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -113,12 +115,6 @@ def test_sea_methods_follow_the_contract() -> None:
         == (sea.settings({}))
     )
     assert_no_removed_getters(autorouter_sea)
-
-
-def test_autorouter_is_a_model_picker_sea() -> None:
-    """``register_as_model()`` lists the SEA under its command name in the picker registry."""
-    assert sea_commands.model_seas()["autorouter"] == _SEA_PATH
-    assert sea_commands.model_sea("autorouter") == _SEA_PATH
 
 
 def test_agent_file_loader_stages_the_sea_tools() -> None:
@@ -413,16 +409,28 @@ _OWNER = autorouter_sea.kiss_checkout(str(_CHECKOUT))
 the main checkout when the tests run inside a linked task worktree."""
 
 
-def test_kiss_checkout_walks_up_to_the_checkout_and_rejects_other_dirs(tmp_path: Path) -> None:
+@pytest.fixture
+def foreign_dir() -> Iterator[Path]:
+    """An empty directory outside every checkout, removed afterwards.
+
+    In the system temp dir, not under ``tmp_path``: with an in-repo
+    ``--basetemp`` every ``tmp_path`` is inside the checkout, which
+    :func:`autorouter_sea.kiss_checkout` walks up to.
+    """
+    with tempfile.TemporaryDirectory(prefix="kiss-foreign-") as path:
+        yield Path(path).resolve()
+
+
+def test_kiss_checkout_walks_up_to_the_checkout_and_rejects_other_dirs(foreign_dir: Path) -> None:
     """Any directory inside the checkout maps to its root; foreign dirs and '' map to ''."""
     owner = Path(_OWNER)
     assert (owner / ".git").is_dir() and (owner / autorouter_sea.RSI7D_SEA_RELATIVE).is_file()
     assert _OWNER in (str(_CHECKOUT), str(autorouter_sea._owning_checkout(_CHECKOUT)))
     assert autorouter_sea.kiss_checkout(str(_SEA_PATH.parent)) == _OWNER
-    assert autorouter_sea.kiss_checkout(str(tmp_path)) == ""
+    assert autorouter_sea.kiss_checkout(str(foreign_dir)) == ""
     assert autorouter_sea.kiss_checkout("") == ""
     # The SEA tree without a ``.git`` marker is not a checkout either.
-    copy = tmp_path / "copy"
+    copy = foreign_dir / "copy"
     (copy / autorouter_sea.RSI7D_SEA_RELATIVE).parent.mkdir(parents=True)
     (copy / autorouter_sea.RSI7D_SEA_RELATIVE).write_text("", encoding="utf-8")
     assert autorouter_sea.kiss_checkout(str(copy)) == ""
@@ -457,7 +465,9 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
         autorouter_sea.RSI7D_JOB_MODEL,
         autorouter_sea.orchestrator_model(),
     )
-    assert job["model_name"] in get_available_models()
+    runnable = get_available_models()
+    if runnable:  # a keyless install falls back to the default model, "No model"
+        assert job["model_name"] in runnable
     prompt = job["prompt"]
     assert prompt.startswith("Call the run_agent tool IMMEDIATELY")
     assert f"agent        = {autorouter_sea.RSI7D_SEA_RELATIVE!r}" in prompt
@@ -484,11 +494,11 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
 
 
 def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, foreign_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without a checkout: no work dir and a relay to the installed rsi7d file."""
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
-    assert AutorouterSea().on_picked_as_model(str(tmp_path)).startswith("created:")
+    assert AutorouterSea().on_picked_as_model(str(foreign_dir)).startswith("created:")
     (job,) = load_jobs()
     assert job["work_dir"] == ""
     installed = _SEA_PATH.parents[1] / "rsi7d" / "rsi7d_sea.py"

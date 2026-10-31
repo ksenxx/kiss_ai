@@ -5,12 +5,12 @@
 
 // The status-bar timer (#status-text) is coloured by state, not by
 // alarm: the theme accent while the tab's task runs, the quiet --dim
-// once it is ready or done.  A fresh tab starts dim.  The colour is
-// part of the per-tab state that saveCurrentTab / switchToTab carry
-// across tab switches, and a background tab finishing (task_done for a
-// hidden tab) records the dim colour into that tab's saved state, so
-// coming back to it never shows a stale colour.  Nothing may paint the
-// old red (running) or green (done).
+// once it is ready or done.  A fresh tab starts dim.  The colour
+// follows the running state of the tab on screen: showing a tab (a
+// switch, or a hidden tab finishing and being focused) sets its
+// running state, which repaints the timer, so coming back to a tab
+// never shows a stale colour.  Nothing may paint the old red (running)
+// or green (done).
 
 'use strict';
 
@@ -43,7 +43,7 @@ function testFreshTabIsDimAndRunningIsAccent() {
   assert.strictEqual(
     statusColor(win),
     'var(--accent)',
-    "switching back restores the running tab's accent timer",
+    'switching back to the running tab shows the accent timer again',
   );
   win.close();
   console.log(
@@ -68,13 +68,13 @@ function testDoneTabIsDimAfterSwitchingAway() {
   assert.strictEqual(
     statusColor(win),
     'var(--dim)',
-    "the done tab's saved state carries the --dim timer across a switch",
+    'switching back to the done tab shows the --dim timer',
   );
   win.close();
   console.log('  ok - done tab stays dim after switching away and back');
 }
 
-function testHiddenTabFinishingRecordsDim() {
+function testHiddenTabFinishingShowsDim() {
   const {win} = makePage();
   const tabA = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tabA, startTs: Date.now()});
@@ -83,8 +83,8 @@ function testHiddenTabFinishingRecordsDim() {
   const tabB = win._testApi.getActiveTabId();
   assert.notStrictEqual(tabA, tabB, 'a second tab must have been created');
 
-  // task_done for the hidden tab A: setReady writes A's saved state and
-  // focusFinishedTab switches to it, restoring that saved colour.
+  // task_done for the hidden tab A: focusFinishedTab switches to it, and
+  // the tab, now idle, shows the dim timer.
   send(win, {type: 'task_done', tabId: tabA, startTs: 1000, endTs: 3000});
   assert.strictEqual(
     win._testApi.getActiveTabId(),
@@ -94,13 +94,13 @@ function testHiddenTabFinishingRecordsDim() {
   assert.strictEqual(
     statusColor(win),
     'var(--dim)',
-    'a hidden tab finishing records the --dim timer in its saved state',
+    'a hidden tab that finished shows the --dim timer when focused',
   );
   win.close();
-  console.log('  ok - a hidden tab finishing records the dim timer');
+  console.log('  ok - a hidden tab that finished shows the dim timer');
 }
 
 testFreshTabIsDimAndRunningIsAccent();
 testDoneTabIsDimAfterSwitchingAway();
-testHiddenTabFinishingRecordsDim();
+testHiddenTabFinishingShowsDim();
 console.log('All statusTimerColours tests passed');

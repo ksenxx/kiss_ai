@@ -645,6 +645,8 @@ def test_bundled_catalog_ships_gpt_5_6_sol_level_aliases() -> None:
     assert not mod._has_thinking_normalization_changes(data), (
         "Bundled catalog must be fully normalized"
     )
-    assert "alias_of" not in data["openrouter/openai/o3-mini-high"], (
-        "Real upstream -high models must not be marked as aliases"
+    # OpenRouter delisted o3-mini-high; qwen3.7-max is a real upstream model
+    # whose name likewise ends in a level suffix (``max``).
+    assert "alias_of" not in data["openrouter/qwen/qwen3.7-max"], (
+        "Real upstream level-suffixed models must not be marked as aliases"
     )

@@ -70,8 +70,8 @@ def test_a_tool_the_bridge_does_not_serve_is_refused_before_the_executor() -> No
     EXECUTED.clear()
     with ToolBridge(_schema("noop"), _record) as bridge:
         assert bridge.tool_names == frozenset({"noop"})
-        assert _reply(_call(bridge.port, "finish")) == {"error": "KISSError: unknown tool 'finish'"}
-        assert _reply(_call(bridge.port, "noop")) == {"text": "ran"}
+        assert _reply(_call(bridge, "finish")) == {"error": "KISSError: unknown tool 'finish'"}
+        assert _reply(_call(bridge, "noop")) == {"text": "ran"}
     assert EXECUTED == ["noop"]
     assert [served.name for served in bridge.take_served()] == ["noop"]
 
@@ -95,7 +95,7 @@ def test_a_stop_raised_by_the_printer_is_reported_to_codex_and_recorded() -> Non
     try:
         with agent._native_tools_exposed():
             bridge = _bridge_of(agent)
-            reply = _reply(_call(bridge.port, "noop"))
+            reply = _reply(_call(bridge, "noop"))
     finally:
         stop_signal.set_thread_stop_event(None)
     assert reply == {"error": "KISSError: KISS Error: Tool noop stopped: Agent stop requested"}
@@ -118,7 +118,7 @@ def test_a_call_abandoned_by_the_stop_leaves_the_conversation_alone_when_it_retu
     try:
         with agent._native_tools_exposed():
             bridge = _bridge_of(agent)
-            client = _call(bridge.port, hold_until_released.__name__)
+            client = _call(bridge, hold_until_released.__name__)
             assert HOLD_STARTED.wait(5)
             stopped_at = time.monotonic()
             stop.set()
@@ -159,7 +159,7 @@ def test_a_call_abandoned_by_the_stop_leaves_the_fatal_error_alone_when_it_raise
     try:
         with agent._native_tools_exposed():
             bridge = _bridge_of(agent)
-            client = _call(bridge.port, "noop")
+            client = _call(bridge, "noop")
             assert HOLD_STARTED.wait(5)
             stop.set()
         agent._native_turn = NativeTurn()  # what the next turn's _execute_step does
@@ -190,7 +190,7 @@ def test_an_abandoned_call_that_raises_records_its_error_on_its_own_turn_only() 
         with agent._native_tools_exposed():
             abandoned = agent._native_turn
             bridge = _bridge_of(agent)
-            client = _call(bridge.port, "noop")
+            client = _call(bridge, "noop")
             assert HOLD_STARTED.wait(5)
             stop.set()
         assert abandoned.closed.is_set()
@@ -205,10 +205,10 @@ def test_an_abandoned_call_that_raises_records_its_error_on_its_own_turn_only() 
     assert agent._native_turn is not abandoned
 
 
-def _probe(port: int, payload: dict[str, Any]) -> dict[str, Any]:
-    """Send *payload* to the bridge on *port* and return its reply line."""
-    with socket.create_connection(("127.0.0.1", port), timeout=15) as client:
-        client.sendall(json.dumps(payload).encode() + b"\n")
+def _probe(bridge: ToolBridge, payload: dict[str, Any]) -> dict[str, Any]:
+    """Send *payload* with the secret to *bridge* and return its reply line."""
+    with socket.create_connection(("127.0.0.1", bridge.port), timeout=15) as client:
+        client.sendall(json.dumps({**payload, "token": bridge._server.token}).encode() + b"\n")
         with client.makefile("rb") as reply:
             return dict(json.loads(reply.readline()))
 
@@ -216,4 +216,4 @@ def _probe(port: int, payload: dict[str, Any]) -> dict[str, Any]:
 def test_the_tool_list_is_still_served_to_the_proxy() -> None:
     """Control: the ``tools`` request is unaffected by the name check."""
     with ToolBridge(_schema("noop"), _record) as bridge:
-        assert [tool["name"] for tool in _probe(bridge.port, {"op": "tools"})["tools"]] == ["noop"]
+        assert [tool["name"] for tool in _probe(bridge, {"op": "tools"})["tools"]] == ["noop"]

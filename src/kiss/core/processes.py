@@ -490,7 +490,22 @@ class CappedOutput:
         # process group happens after it is set, and the leader is
         # reaped only after it (see :func:`run_capped`).
         self._finished = False
-        self._guard = threading.Lock()
+        # Reentrant and taken only through ``locked_call``: the reader
+        # takes it on a task thread, where a Stop injected right after a
+        # plain ``with``'s ``__enter__`` would leave it held and the
+        # ``except`` handler of :func:`run_capped` would wait on it forever.
+        self._guard = threading.RLock()
+
+
+def _mark_capped(out: CappedOutput) -> None:
+    """Label *out* capped and final unless the timer labelled it timed out; guard held."""
+    if not out.timed_out:
+        out.truncated = out._finished = True
+
+
+def _mark_finished(out: CappedOutput) -> None:
+    """Mark *out*'s result final, so the timer kills nothing more; guard held."""
+    out._finished = True
 
 
 def _capped_timeout(proc: subprocess.Popen[bytes], out: CappedOutput) -> None:
@@ -506,20 +521,31 @@ def _capped_timeout(proc: subprocess.Popen[bytes], out: CappedOutput) -> None:
     (see :func:`kill_process_group`); a leader found reaped anyway
     (``returncode`` set) is left alone for the same reason.
     """
-    with out._guard:
-        if out._finished or proc.returncode is not None:
-            return
-        out.timed_out = True
-        kill_process_tree(proc)
+    locked_call(out._guard, _time_out_unless_finished, proc, out)
 
 
-def _exited(proc: subprocess.Popen[bytes]) -> bool:
+def _time_out_unless_finished(proc: subprocess.Popen[bytes], out: CappedOutput) -> None:
+    """Body of :func:`_capped_timeout`; the caller holds ``out._guard``."""
+    if out._finished or proc.returncode is not None:
+        return
+    out.timed_out = True
+    kill_process_tree(proc)
+
+
+def exited_unreaped(proc: subprocess.Popen[Any]) -> bool:
     """Whether *proc* has exited, without reaping it.
 
     The leader stays a zombie, so its pid (and process group) cannot be
-    handed to a stranger before :func:`run_capped`'s last group kill;
-    POSIX asks with ``waitid(WNOWAIT)``.  On Windows the ``Popen``
-    handle keeps the pid reserved, so ``poll`` is as good.
+    handed to a stranger before the caller's last group kill (that of
+    :func:`run_capped`, or :func:`terminate_process_group` after a
+    service exited); POSIX asks with ``waitid(WNOWAIT)``.  On Windows
+    the ``Popen`` handle keeps the pid reserved, so ``poll`` is as good.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+
+    Returns:
+        True once *proc* has exited, reaped or not.
     """
     if proc.returncode is not None:
         return True
@@ -529,8 +555,8 @@ def _exited(proc: subprocess.Popen[bytes]) -> bool:
 
 
 def _wait_exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
-    """Poll :func:`_exited` until it holds or ``time.monotonic()`` passes *deadline*."""
-    while not _exited(proc):
+    """Poll :func:`exited_unreaped` until it holds or ``time.monotonic()`` passes *deadline*."""
+    while not exited_unreaped(proc):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
@@ -675,9 +701,7 @@ def run_capped(
             # the capped result as timed out, and a timer that already
             # did wins.
             if _read_some(stdout, 1, give_up):
-                with out._guard:
-                    if not out.timed_out:
-                        out.truncated = out._finished = True
+                locked_call(out._guard, _mark_capped, out)
         if out.truncated:
             kill_process_tree(proc)
         stdout.close()
@@ -691,8 +715,7 @@ def run_capped(
             # A SIGKILLed process that still does not exit is stuck in
             # the kernel; report it (returncode -1) rather than wait.
             _wait_exited(proc, time.monotonic() + 5)
-        with out._guard:
-            out._finished = True
+        locked_call(out._guard, _mark_finished, out)
         if err_thread is not None:
             err_thread.join(timeout=1)
             if err_thread.is_alive():
@@ -709,8 +732,7 @@ def run_capped(
         # pipe under its read would only turn that into an error).  The
         # leader is still unreaped here, so the group kill is safe; the
         # timer must not kill again after the reap below.
-        with out._guard:
-            out._finished = True
+        locked_call(out._guard, _mark_finished, out)
         kill_process_tree(proc)
         stdout.close()
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -718,7 +740,7 @@ def run_capped(
         raise
     finally:
         timer.cancel()
-    if _exited(proc):
+    if exited_unreaped(proc):
         out.returncode = proc.wait()
     data = b"".join(chunks)
     if last_full_line and (out.truncated or out.timed_out) and b"\n" in data:

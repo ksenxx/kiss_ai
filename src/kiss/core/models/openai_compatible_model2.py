@@ -30,7 +30,6 @@ from openai.types.responses import response_create_params
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
-    TOOL_RESULT_ATTACHMENT_NOTE,
     Attachment,
     ThinkingCallback,
     TokenCallback,
@@ -376,6 +375,45 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     new_item = dict(item)
                     new_item["content"] = filtered
                     out.append(new_item)
+        return out
+
+    def _drop_foreign_item_state(self, items: list[Any]) -> list[Any]:
+        """Strip what only another vendor can replay from the ``input`` array.
+
+        Output items are replayed verbatim (see
+        :meth:`_response_output_items_to_input_items`), so after a hand-off
+        between two Responses endpoints (``set_model``) the input carries
+        the other vendor's ``reasoning`` items and item ids.  OpenAI
+        rejects both: every request after a hop from Together's
+        ``openai/gpt-oss-120b`` back to an OpenAI model failed with
+        ``Missing required parameter: 'input[8].summary'``.  The endpoint's
+        ``responses_item_id_prefixes`` tells such items apart.  Only the
+        request changes; the conversation keeps them for a hop back.
+
+        Args:
+            items: The normalized ``input`` array.
+
+        Returns:
+            The array to send.
+        """
+        from kiss.core.models.model_info import openai_compatible_provider_for_base_url
+
+        provider = openai_compatible_provider_for_base_url(self.base_url or "")
+        prefixes = dict(provider.responses_item_id_prefixes) if provider else {}
+        if not prefixes:
+            return items
+        out: list[Any] = []
+        for item in items:
+            itype = item.get("type") if isinstance(item, dict) else None
+            prefix = prefixes.get(itype) if isinstance(itype, str) else None
+            if prefix is not None:
+                item_id = item.get("id")
+                if not (isinstance(item_id, str) and item_id.startswith(prefix)):
+                    if itype == "reasoning":
+                        continue
+                    if "id" in item:
+                        item = {k: v for k, v in item.items() if k != "id"}
+            out.append(item)
         return out
 
     # The pending-attachment sentinel counts as native so
@@ -772,7 +810,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             kwargs["text"] = text_cfg
 
         kwargs["model"] = self._api_model_name
-        normalized = checked_nonempty(self._normalize_input(input_items))
+        normalized = self._drop_foreign_item_state(self._normalize_input(input_items))
+        normalized = checked_nonempty(normalized)
         kwargs["input"] = normalized
 
         # A conversation handed over from a Chat Completions model
@@ -1467,13 +1506,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 caller so partial / truncated ``output`` (e.g. a
                 half-formed ``function_call.arguments`` string) is never
                 silently treated as a successful generation.  Whatever
-                usage the response carries was billed, so it is kept for
-                :meth:`take_partial_usage_response`.
+                usage the response carries was billed: both callers
+                recorded it in ``_rejected_response`` (for
+                :meth:`take_partial_usage_response`) before calling this.
         """
         status = _get_attr_or_key(response, "status")
         if status not in ("failed", "incomplete"):
             return
-        self._rejected_response = response
         detail = self._failure_detail(response)
         raise KISSError(
             f"Responses API returned {status} response" + (f": {detail}" if detail else "")
@@ -1866,13 +1905,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 the same order as the preceding function_call items in
                 the conversation.
         """
-        self.conversation = self._foreign_items_to_native_input(self.conversation)
-        conv_snapshot_len = len(self.conversation)
+        # The conversion builds a new list, so a rejected result leaves
+        # the original one exactly as it was.
+        original = self.conversation
         pending_snapshot = list(self._pending_function_calls)
+        self.conversation = self._foreign_items_to_native_input(original)
         try:
             self._add_function_results_inner(function_results)
         except Exception:
-            self.conversation = self.conversation[:conv_snapshot_len]
+            self.conversation = original
             self._pending_function_calls = pending_snapshot
             raise
 
@@ -1934,9 +1975,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ]
             for i in reversed(sentinel_indexes):
                 del self.conversation[i]
-            message = self._user_message_with_attachments(
-                sentinel_attachments, TOOL_RESULT_ATTACHMENT_NOTE
-            )
+            message = self._user_message_with_attachments(sentinel_attachments)
             if message is not None:
                 self.conversation.append(message)
 

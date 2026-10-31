@@ -38,6 +38,7 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 API_KEY = "test-composio-key"
 TOKEN = "composio-injected-token"
 API = "/api/v3.1"
+_ACCOUNT_NOT_FOUND = {"error": {"message": "connected account not found", "status": 404}}
 
 
 class FakeComposioServer(RecordingServer):
@@ -91,7 +92,8 @@ class FakeComposioServer(RecordingServer):
         self.status_holds: dict[str, tuple[threading.Event, threading.Event]] = {}
         self._counter = 0
         # Guards the check-then-act steps handler threads share: the ID
-        # counter, a status-queue pop and a download's index.
+        # counter, an account's status read or delete (with its status
+        # queue) and a download's index.
         self._lock = threading.Lock()
 
     def next_id(self, prefix: str) -> str:
@@ -205,32 +207,42 @@ class _Handler(RecordingHandler):
 
     def _account(self, account: str, api_key: str) -> None:
         server = self.server
-        if account not in server.accounts:
-            self._json(404, {"error": {"message": "connected account not found", "status": 404}})
-        elif self.command == "DELETE":
-            if account in server.undeletable:
-                self._json(404, {"error": {"message": "not found", "status": 404}})
-                return
-            del server.accounts[account]
-            server.status_queue.pop(account, None)
-            server.deleted.append(account)
-            self._json(200, {"success": True})
-        else:
-            hold = server.status_holds.get(api_key)
-            if hold is not None:
-                held, release = hold
-                held.set()
-                if not release.wait(timeout=15.0):
-                    # An expired hold is a test failure, never a normal answer.
-                    self._json(503, {"error": {"message": "status poll hold expired"}})
-                    return
+        if self.command == "DELETE":
             with server._lock:
-                queue = server.status_queue.get(account)
-                status = queue.pop(0) if queue else server.accounts[account]
-            polled = server.status_polled.get(api_key)
-            if polled is not None:
-                polled.set()
-            self._json(200, {"id": account, "status": status})
+                known = account in server.accounts
+                deleted = known and account not in server.undeletable
+                if deleted:
+                    del server.accounts[account]
+                    server.status_queue.pop(account, None)
+                    server.deleted.append(account)
+            if deleted:
+                self._json(200, {"success": True})
+            elif known:
+                self._json(404, {"error": {"message": "not found", "status": 404}})
+            else:
+                self._json(404, _ACCOUNT_NOT_FOUND)
+            return
+        if account not in server.accounts:
+            self._json(404, _ACCOUNT_NOT_FOUND)
+            return
+        hold = server.status_holds.get(api_key)
+        if hold is not None:
+            held, release = hold
+            held.set()
+            if not release.wait(timeout=15.0):
+                # An expired hold is a test failure, never a normal answer.
+                self._json(503, {"error": {"message": "status poll hold expired"}})
+                return
+        with server._lock:
+            queue = server.status_queue.get(account)
+            status = queue.pop(0) if queue else server.accounts.get(account)
+        if status is None:  # deleted while the poll was held
+            self._json(404, _ACCOUNT_NOT_FOUND)
+            return
+        polled = server.status_polled.get(api_key)
+        if polled is not None:
+            polled.set()
+        self._json(200, {"id": account, "status": status})
 
     def _proxy(self, body: dict[str, Any]) -> None:
         server = self.server

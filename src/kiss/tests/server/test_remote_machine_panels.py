@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests: the Schedule, Apps, Spend and Recommendations subpanels of a machine.
+"""End-to-end tests: the Schedule, Machines, Apps, Spend and Recommendations subpanels of a machine.
 
 The fixture of :mod:`kiss.tests.server.test_remote_machine_settings`: a
 real local daemon, a real remote daemon registered as ``box``, a client
@@ -14,6 +14,10 @@ by the machine's daemon, the reply stamped ``machine`` and ``forwarded``:
   cron store, which this daemon's own Schedule never shows, and a
   refused one comes back as the ``cronJobs`` reply carrying ``error``
   and the ``action``;
+* ``getMachines`` / ``machineAction`` list, add and remove the
+  MACHINE's registered machines, which this daemon's own registry
+  never shows, and a refused action comes back carrying ``error`` and
+  the ``action``;
 * ``getSpendReport``, ``getRecommendations`` and ``getAppsStatus`` are
   the machine's figures, apps and tips;
 * an unknown machine answers each with an empty reply of the right
@@ -70,6 +74,49 @@ class TestRemoteMachinePanels(RemoteMachineCase):
         )
         self.assertIn("no-such-job", missing["error"])
         self.assertEqual(missing["action"], "remove")
+
+    async def test_registered_machines_are_the_machines(self) -> None:
+        listed = await self._ask_box({"type": "getMachines"}, "machines")
+        self.assertEqual(listed.get("error", ""), "")
+        self.assertEqual(listed["machine"], "box")
+        self.assertIs(listed["forwarded"], True)
+        # Only the machine's own row: box has registered no machine.
+        (own,) = listed["machines"]
+        self.assertIs(own["local"], True)
+
+        # box registers a machine of its own (its own daemon, reachable).
+        added = await self._ask_box({
+            "type": "machineAction", "action": "add", "name": "loop",
+            "address": self.remote.url, "machinePassword": "pw-remote",
+        }, "machines")
+        self.assertEqual(added.get("error", ""), "")
+        self.assertEqual(added["action"], "add")
+        self.assertIn("loop", [m["name"] for m in added["machines"]])
+        mine = await self._ask({"type": "getMachines"}, "machines")
+        self.assertNotIn("forwarded", mine)
+        self.assertEqual([m["name"] for m in mine["machines"][1:]], ["box"])
+
+        removed = await self._ask_box(
+            {"type": "machineAction", "action": "remove", "name": "loop"}, "machines",
+        )
+        self.assertEqual(removed.get("error", ""), "")
+        self.assertEqual(removed["action"], "remove")
+        self.assertNotIn("loop", [m["name"] for m in removed["machines"]])
+
+    async def test_a_refused_machine_action_is_the_machines_error(self) -> None:
+        missing = await self._ask_box(
+            {"type": "machineAction", "action": "remove", "name": "loop"}, "machines",
+        )
+        self.assertEqual(missing["error"], "no machine named 'loop'")
+        self.assertEqual(missing["action"], "remove")
+        bad = await self._ask_box({
+            "type": "machineAction", "action": "add", "name": "bad name",
+            "address": "https://127.0.0.1:1",
+        }, "machines")
+        self.assertIn("not a valid machine name", bad["error"])
+        self.assertEqual(bad["action"], "add")
+        # box's own row is still listed with the refusal.
+        self.assertEqual([m["local"] for m in bad["machines"]], [True])
 
     async def test_spend_recommendations_and_apps_are_the_machines(self) -> None:
         spend = await self._ask_box({"type": "getSpendReport"}, "spendReport")
@@ -131,6 +178,9 @@ class TestRemoteMachinePanels(RemoteMachineCase):
             ({"type": "getCronJobs"}, "cronJobs", {"jobs": []}),
             ({"type": "cronAction", "action": "pause", "jobId": "x"}, "cronJobs",
              {"jobs": [], "action": "pause"}),
+            ({"type": "getMachines"}, "machines", {"machines": [], "checkedAt": 0}),
+            ({"type": "machineAction", "action": "remove", "name": "x"}, "machines",
+             {"machines": [], "checkedAt": 0, "action": "remove"}),
             ({"type": "getAppsStatus"}, "appsStatus", {"apps": [], "checkedAt": 0}),
             ({"type": "getSpendReport"}, "spendReport", {}),
             ({"type": "getRecommendations"}, "recommendations",

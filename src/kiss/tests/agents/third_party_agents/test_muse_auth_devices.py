@@ -22,10 +22,9 @@ and refused when the host is merely allowlisted.
 Branch-coverage notes (unreachable without test doubles, so documented
 instead of mocked):
 
-* ``discord_sea._muse_authenticate``'s ``except Exception`` rollback
-  and ``homeassistant_sea``/``ntfy_sea``'s ``MuseAuthError``
-  handlers in their authenticate tools need the daemon to die between
-  the enrollment and the validation call (a cross-process race).
+* ``homeassistant_sea``/``ntfy_sea``'s ``MuseAuthError`` handlers in
+  their authenticate tools need the daemon to die between the
+  enrollment and the validation call (a cross-process race).
 * ``ntfy_sea._wire_muse``'s empty-surrogate return after
   ``bearer_surrogate`` needs the vault cleared between the store and
   the mint (a cross-process race); the tokenless return is covered.
@@ -362,7 +361,7 @@ def test_discord_vault_first_and_make_backend(
 def test_discord_authenticate_rotation_rollback_clear(
     muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """authenticate_discord enrolls, validates, rolls back, and rotates."""
+    """authenticate_discord probes, enrolls and rotates; a rejected token changes nothing."""
 
     monkeypatch.setenv("DISCORD_API_BASE", f"{api_server.base_url}/api/v10")
     agent = DiscordAgent()
@@ -370,15 +369,17 @@ def test_discord_authenticate_rotation_rollback_clear(
     tools = auth_tools(agent)
     assert "Not authenticated" in tools["check_discord_auth"]()
 
-    # Enrollment validates through the boundary and never writes the
-    # token to disk (no metadata was given, so no config file at all).
+    # Enrollment probes Discord directly before storing, and never
+    # writes the token to disk (no metadata was given, so no config
+    # file at all); the check then goes through the audited boundary.
     result = json.loads(tools["authenticate_discord"]("tok-first"))
     assert result["ok"] is True and result["username"] == "kissbot"
     assert not discord_config.path.exists()
     assert api_server.header("Authorization") == "Bot tok-first"
+    assert json.loads(tools["check_discord_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == "Bot tok-first"
     audit = (muse_auth_dir() / "audit.jsonl").read_text()
     assert any(json.loads(line)["service"] == "discord" for line in audit.splitlines())
-    assert json.loads(tools["check_discord_auth"]())["ok"] is True
 
     # Rotation: the second token replaces the first at the boundary.
     assert json.loads(tools["authenticate_discord"]("tok-second", "app2", "G1,G2"))["ok"] is True
@@ -389,18 +390,41 @@ def test_discord_authenticate_rotation_rollback_clear(
     json.loads(tools["check_discord_auth"]())
     assert api_server.header("Authorization") == "Bot tok-second"
 
-    # An invalid token is rolled back: nothing stays enrolled.
+    # A token Discord rejects changes nothing: the working token stays
+    # enrolled with its metadata, and the backend keeps using it.
+    surrogate = agent._backend._token
     failed = json.loads(tools["authenticate_discord"]("tok-invalid"))
     assert failed["ok"] is False
-    assert not vault_has_credentials("discord")
-    assert agent._backend._token == ""
+    assert "Discord rejected the token" in failed["error"]
+    assert "401: Unauthorized" in failed["error"]
+    assert vault_has_credentials("discord")
+    assert agent._backend._token == surrogate
+    assert json.loads(discord_config.path.read_text()) == {
+        "application_id": "app2",
+        "guild_ids": "G1,G2",
+    }
+    assert json.loads(tools["check_discord_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == "Bot tok-second"
 
-    # A token the daemon itself rejects (embedded newline) surfaces the
-    # enrollment error and leaves the vault empty too.
+    # A malformed token (embedded newline) never leaves the process:
+    # the probe cannot build the request, and again nothing changes.
+    requests_before = len(api_server.requests)
     failed = json.loads(tools["authenticate_discord"]("bad\ntoken"))
     assert failed["ok"] is False
+    assert "InvalidHeader" in failed["error"]
+    assert len(api_server.requests) == requests_before
+    assert vault_has_credentials("discord")
+    assert agent._backend._token == surrogate
+
+    # A token Discord accepts but the vault refuses (doubled space)
+    # fails at the store, before the working enrollment is replaced.
+    failed = json.loads(tools["authenticate_discord"]("tok  spaced"))
+    assert failed["ok"] is False
     assert "invalid credential token value" in failed["error"]
-    assert not vault_has_credentials("discord")
+    assert vault_has_credentials("discord")
+    assert agent._backend._token == surrogate
+    assert json.loads(tools["check_discord_auth"]())["ok"] is True
+    assert api_server.header("Authorization") == "Bot tok-second"
 
     # Clearing wipes both the config metadata and the vault enrollment.
     assert json.loads(tools["authenticate_discord"]("tok-third"))["ok"] is True

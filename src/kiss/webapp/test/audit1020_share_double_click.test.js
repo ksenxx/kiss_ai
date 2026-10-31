@@ -40,7 +40,6 @@ function makePage() {
         return realSetTimeout(fn, ms, ...args);
       };
     },
-    sourceUrl: 'share-double-main.js',
   });
   wv.longTimers = longTimers;
   return wv;

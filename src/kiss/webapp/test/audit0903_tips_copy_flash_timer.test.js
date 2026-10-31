@@ -6,11 +6,14 @@
 // End-to-end (JSDOM) test for the "Copied!" flash of the code-block
 // copy button in the tips panel (media/tips.js).
 //
-// Race: flashCopyResult armed a bare 1500 ms setTimeout to put the
-// label back to "Copy" and never cleared it, so a second click while
-// a flash was showing had its "Copied!" label wiped early by the
-// first click's stale timer.  The fix tracks the timer per button
-// and restarts it on every copy.
+// The tips button is wired through PanelCopy.wireCopyButton
+// (media/panelCopy.js) with tips.js's label painter.  The per-button
+// revert timer (a first click's stale timer once cut a second flash
+// short) is pinned by audit0903_panelcopy_flash_timer.test.js, the
+// Copy/Copied!/Failed labels by tipsWindow.test.js.  This suite pins
+// the out-of-order completion on the tips button, including what the
+// panel-copy suite does not check: the stale completion arms no revert
+// timer of its own.
 
 'use strict';
 
@@ -29,10 +32,8 @@ const {
   fireTimers,
 } = require('./simplify2_harness');
 
-// The 1500 ms revert timers are recorded instead of waited for: the
-// test fires them by hand, so no wall-clock sleep decides whether the
-// stale one lands before or after the second click.  The only other
-// asynchrony is the clipboard promise, so `sleep(0)` is the exact wait.
+// The 1500 ms revert timers are recorded instead of waited for and the
+// clipboard writes are settled by hand, so `sleep(0)` is the exact wait.
 
 function makePage(clipboardImpl) {
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
@@ -60,66 +61,6 @@ function openTipWithCode(win) {
   const btn = el.shadowRoot.querySelector('.tips-copy');
   assert.ok(btn, 'the code block must get a copy button');
   return btn;
-}
-
-async function testStaleTimerDoesNotEndSecondFlash() {
-  const writes = [];
-  const {win, timers} = makePage({
-    writeText: t => {
-      writes.push(String(t));
-      return Promise.resolve();
-    },
-  });
-  const btn = openTipWithCode(win);
-
-  click(win, btn);
-  await sleep(0);
-  assert.strictEqual(writes.length, 1);
-  assert.match(writes[0], /echo hello/);
-  assert.strictEqual(btn.textContent, 'Copied!');
-  assert.strictEqual(timers.length, 1, 'the first click arms one revert timer');
-
-  click(win, btn);
-  await sleep(0);
-  assert.strictEqual(btn.textContent, 'Copied!');
-  assert.strictEqual(
-    timers.length,
-    2,
-    'the second click arms its own revert timer',
-  );
-
-  // 1500 ms after the FIRST click: whatever the first click left armed
-  // fires now, before the second click's timer is due.
-  fireTimers(timers.slice(0, 1));
-  assert.strictEqual(
-    btn.textContent,
-    'Copied!',
-    "the first click's stale timer must not wipe the second flash early",
-  );
-
-  fireTimers(timers);
-  assert.strictEqual(
-    btn.textContent,
-    'Copy',
-    'the flash must still revert after the second timer',
-  );
-  win.close();
-  console.log('  ok - a stale timer does not end the second flash');
-}
-
-async function testFailedCopyFlashesFailed() {
-  const {win, timers} = makePage({
-    writeText: () => Promise.reject(new Error('denied')),
-  });
-  // No document.execCommand in JSDOM: the fallback reports failure.
-  const btn = openTipWithCode(win);
-  click(win, btn);
-  await sleep(0);
-  assert.strictEqual(btn.textContent, 'Failed');
-  fireTimers(timers);
-  assert.strictEqual(btn.textContent, 'Copy');
-  win.close();
-  console.log('  ok - a failed copy flashes and reverts too');
 }
 
 // Out-of-order completion: two rapid clicks are two async clipboard
@@ -168,8 +109,6 @@ async function testStaleCompletionDoesNotOverwriteLatest() {
 }
 
 async function main() {
-  await testStaleTimerDoesNotEndSecondFlash();
-  await testFailedCopyFlashesFailed();
   await testStaleCompletionDoesNotOverwriteLatest();
   console.log('audit0903_tips_copy_flash_timer.test.js: all passed.');
 }

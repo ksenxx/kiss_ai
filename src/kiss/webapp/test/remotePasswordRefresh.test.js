@@ -15,9 +15,8 @@
 //     afterwards does not overwrite it and closing Settings saves it;
 //   * a second click replaces it with a different one; a later manual
 //     edit of the box still wins;
-//   * the refresh posts nothing to the daemon by itself (no
-//     rotateRemotePassword), and clicking it does not toggle the eye
-//     back to masked when the box is already revealed.
+//   * the refresh saves nothing by itself, and clicking it does not
+//     toggle the eye back to masked when the box is already revealed.
 // generateRemotePassword's rejection sampling (a byte at or above 248
 // is redrawn) has no deterministic trigger from the page; 200 clicks
 // draw thousands of bytes, so both arms of its `if` run with
@@ -56,6 +55,16 @@ function testRefreshButtonIsALabelledIconButton() {
     'Generate a new random password',
   );
   assert.ok(refresh.querySelector('svg'), 'the refresh button shows an icon');
+  const wrap = refresh.parentElement;
+  assert.ok(
+    wrap.classList.contains('config-password-wrap'),
+    'the refresh button sits in the password box wrap',
+  );
+  assert.ok(
+    wrap.contains(byId(wv.win, 'cfg-remote-password')) &&
+      wrap.contains(byId(wv.win, 'cfg-remote-password-toggle')),
+    'the box, the eye toggle and the refresh button share one row',
+  );
   wv.close();
   console.log('  ok - the refresh button is a labelled icon button');
 }
@@ -105,10 +114,6 @@ function testClickFillsRevealsAndSavesARandomPassword() {
     'the second click makes a different password',
   );
   assert.strictEqual(box.type, 'text', 'the box stays revealed');
-  assert.ok(
-    !wv.posted.some(m => m.type === 'rotateRemotePassword'),
-    'the refresh asks nothing of the daemon',
-  );
   assert.ok(
     !lastMsg(wv.posted, 'saveConfig'),
     'nothing is saved until Settings closes',

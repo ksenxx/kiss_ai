@@ -20,14 +20,12 @@ import json
 import time
 from pathlib import Path
 
-from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.good_morning import good_morning_sea as sea
 from kiss.agents.seas.good_morning.good_morning_sea import GoodMorningSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
-    assert_no_removed_getters,
+    assert_worker_contract,
     system_message,
     tool_names,
     tool_results,
@@ -55,18 +53,12 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert agent.prompt("now") == agent.prompt("") == sea.PROMPT
     assert agent.tools([]) == [sea.stored_recommendations]
     assert agent.tools([print]) == [print, sea.stored_recommendations]
-    assert isinstance(agent, WorkerSea)
-    assert agent.settings({}) == {
-        "tool_profile": "none",
-        "max_budget": 0.5,
-        "timeout": 300,
-        "locked": ["tool_profile"],
-    }
-    assert sea_commands.base_settings([agent]) == resolve_settings(
-        {**WORKER_DEFAULTS, **agent.settings({})}
+    assert_worker_contract(
+        sea,
+        agent,
+        {"tool_profile": "none", "max_budget": 0.5, "timeout": 300, "locked": ["tool_profile"]},
     )
     assert "never generated on the fly" in agent.description()
-    assert_no_removed_getters(sea)
 
 
 def test_stored_recommendations_reads_the_file_only(recommendations_path: Path) -> None:

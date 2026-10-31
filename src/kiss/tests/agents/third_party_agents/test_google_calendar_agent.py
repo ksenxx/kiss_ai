@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -76,12 +75,11 @@ class _CalendarRequestHandler(RecordingHandler):
 
     def _handle(self) -> None:
         body = self._read_body()
-        self.record_request(body)
+        entry = self.record_request(body)
         if not self.bearer_ok(TOKEN):
             self._reply(401, json.dumps({"error": {"code": 401, "message": "Unauthorized"}}))
             return
-        parsed = urlparse(self.path)
-        path, query = parsed.path, parse_qs(parsed.query)
+        path, query = entry["path"], entry["query"]
         if "/calendars/boom/" in path:
             self._reply(500, json.dumps({"error": {"code": 500, "message": "boom"}}))
         elif self.command == "GET" and path == "/plaintext":

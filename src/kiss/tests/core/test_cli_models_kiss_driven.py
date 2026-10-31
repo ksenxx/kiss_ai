@@ -12,7 +12,7 @@ text-based ``tool_calls`` protocol describing KISS's tools — installed as
 the CLI's system prompt:
 
 - ``claude``: ``--tools ""``, ``--safe-mode``, ``--strict-mcp-config``
-  and ``--system-prompt <KISS prompt>``;
+  and ``--system-prompt-file <file holding the KISS prompt>``;
 - ``codex``: the lock-down flags of ``CODEX_LOCKDOWN_ARGS``,
   ``-c model_instructions_file=<file holding the KISS prompt>`` and,
   within an agent step, the ``-c mcp_servers.kiss.*`` overrides that
@@ -47,14 +47,7 @@ from kiss.core.models.codex_model import (
 )
 from kiss.core.models.model_info import model as model_factory
 from kiss.core.utils import finish as structured_finish
-from kiss.tests.conftest import install_cli_script, posix_only
-
-# The fake claude receives the KISS tool prompt as one multi-line
-# ``--system-prompt`` argument.  On Windows the stand-in is a plain
-# ``.cmd`` shim run by cmd.exe, which cuts an argument at its first
-# newline; the real npm ``claude.CMD`` is unwrapped by the model
-# instead (see test_cli_npm_cmd_shim.py), so only the fake is affected.
-_CLAUDE_ARGV = posix_only("cmd.exe cuts the multi-line --system-prompt of the fake claude")
+from kiss.tests.conftest import install_cli_script
 
 TASK = "Echo MARKER-42 through the tool, then stop."
 SYSTEM_PROMPT = "Always answer in exactly three words."
@@ -104,19 +97,22 @@ def _codex_events(text: str) -> list[dict]:
 
 
 # The fake answers call N with turns[N] (the last turn repeats).  It
-# records argv, the stdin prompt, the cwd, and — for codex — the content
-# of the instructions file named in argv, which the model deletes once
-# the turn is over.
+# records argv, the stdin prompt, the cwd, and the content of the system
+# prompt file named in argv (claude's ``--system-prompt-file``, codex's
+# ``model_instructions_file``), which the model deletes once the turn is
+# over.
 _FAKE_CLI_TEMPLATE = """#!/usr/bin/env python3
 import json, os, re, sys, pathlib, time
 record_dir = pathlib.Path({record_dir!r})
 n = len(list(record_dir.glob("call-*.json")))
 prompt = sys.stdin.read()
 instructions = None
-for arg in sys.argv[1:]:
+for i, arg in enumerate(sys.argv):
     m = re.match(r'model_instructions_file=(.*)$', arg)
     if m:
         instructions = pathlib.Path(json.loads(m.group(1))).read_text()
+    elif arg == "--system-prompt-file":
+        instructions = pathlib.Path(sys.argv[i + 1]).read_text()
 (record_dir / f"call-{{n}}.json").write_text(json.dumps(
     {{"argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd(),
       "instructions": instructions}}))
@@ -185,10 +181,10 @@ def _dummy_tool(x: str) -> str:
 def _system_text(call: dict, cli_name: str) -> str:
     """The system prompt a recorded CLI call received."""
     argv = call["argv"]
-    if cli_name == "claude":
-        return str(argv[argv.index("--system-prompt") + 1])
     instructions = call["instructions"]
-    assert instructions is not None, "codex must get an instructions file"
+    assert instructions is not None, f"{cli_name} must get a system prompt file"
+    if cli_name == "claude":
+        return str(instructions)
     assert instructions.startswith(CODEX_INSTRUCTIONS_PREAMBLE)
     instructions = instructions[len(CODEX_INSTRUCTIONS_PREAMBLE) :]
     if any(arg.startswith("mcp_servers.kiss.") for arg in argv):
@@ -202,7 +198,7 @@ def _system_text(call: dict, cli_name: str) -> str:
 @pytest.mark.parametrize(
     "model_name,cli_name,make_events",
     [
-        pytest.param("cc/sonnet", "claude", _claude_events, marks=_CLAUDE_ARGV),
+        ("cc/sonnet", "claude", _claude_events),
         ("codex/gpt-5.5", "codex", _codex_events),
     ],
 )
@@ -431,7 +427,6 @@ def _serve_one_switch_turn() -> "HTTPServer":
     return server
 
 
-@_CLAUDE_ARGV
 def test_mid_run_model_switch_keeps_the_tool_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

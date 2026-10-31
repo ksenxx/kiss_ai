@@ -29,9 +29,8 @@ These tests drive a real :class:`RemoteAccessServer` over real
   still reaches every client — pinned by
   ``test_resume_binds_titles_and_mirrors_transcript`` in the mirroring
   suite, which this file relies on rather than duplicates;
-* the conn-scoped delivery still re-presents a tab's worktree to the
-  daemon: after a daemon restart, the first ``ready`` restores the
-  worktree directory tracked for a tab whose transcript created one;
+* the conn-scoped replay of a tab whose task runs in a worktree keeps
+  the worktree directory the daemon tracks for the tab;
 * the persisted sub-agent tabs a parent's replay reopens follow the
   same scope: another client's ``ready`` neither re-sends their
   transcripts nor re-opens them in windows that already show them;
@@ -50,6 +49,10 @@ from typing import Any
 from websockets.asyncio.client import ClientConnection
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
+from kiss.tests.server.conftest import init_repo
 from kiss.tests.server.test_web_server_tab_mirroring import (
     TabMirroringBase,
 )
@@ -258,40 +261,48 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         assert fetched is not None
         self.assertEqual(fetched.get("task_id"), old_task)
 
-    async def test_scoped_replay_restores_worktree_tracking_after_restart(
+    async def test_scoped_replay_keeps_running_worktree_tracked(
         self,
     ) -> None:
-        """The conn-scoped replay still records the tab's worktree dir."""
-        wt_dir = f"{self.tmpdir}/wt/feature-x"
-        _task_id, chat_id = self._seed_chat("Worktree task", [
+        """The conn-scoped replay of a running worktree task keeps its worktree dir."""
+        repo = f"{self.tmpdir}/repo"
+        init_repo(repo)
+        task_id, chat_id = self._seed_chat("Worktree task", [
             {"type": "prompt", "text": "change things in a worktree"},
-            {"type": "worktree_created", "worktreeDir": wt_dir},
-            {"type": "text", "text": "done"},
         ])
-        ws_a = await self._connect_ok()
-        await self._ready(ws_a)
-        await self._bind_tab(ws_a, "tab-w", chat_id)
-        assert self.server is not None
-        self.assertEqual(
-            self.server._printer.worktree_dir_for_tab("tab-w"), wt_dir,
+        agent = ChatSorcarAgent("agent")
+        agent._enter_work_dir(repo)
+        agent.create_worktree()
+        wt_work_dir = str(agent._wt_work_dir)
+        state = AgentState(
+            str(task_id), agent=agent, chat_id=chat_id, tab_id="tab-w",
+            is_task_active=True,
         )
+        agent_state.register(state)
+        try:
+            ws_a = await self._connect_ok()
+            await self._ready(ws_a)
+            await self._bind_tab(ws_a, "tab-w", chat_id)
+            assert self.server is not None
+            self.assertEqual(
+                self.server._printer.worktree_dir_for_tab("tab-w"), wt_work_dir,
+            )
 
-        # A restarted daemon knows nothing about the worktree until the
-        # first ready replays the tab's transcript — to that client only.
-        await self._stop_server()
-        await self._start_server()
-        assert self.server is not None
-        self.assertEqual(self.server._printer.worktree_dir_for_tab("tab-w"), "")
-
-        ws_b = await self._connect_ok()
-        await self._ready(ws_b, tab_id="tab-w")
-        self.assertIsNotNone(await self._wait_for_event(
-            ws_b, "task_events", pred=lambda ev: ev.get("tabId") == "tab-w",
-        ))
-        self.assertEqual(
-            self.server._printer.worktree_dir_for_tab("tab-w"), wt_dir,
-            "the conn-scoped replay skipped the worktree tracking",
-        )
+            # B's ready replays the tab to B alone; the replay drops and
+            # re-creates the daemon's per-tab state on the way.
+            ws_b = await self._connect_ok()
+            await self._ready(ws_b, tab_id="tab-w")
+            self.assertIsNotNone(await self._wait_for_event(
+                ws_b, "task_events", pred=lambda ev: ev.get("tabId") == "tab-w",
+            ))
+            self.assertEqual(
+                self.server._printer.worktree_dir_for_tab("tab-w"), wt_work_dir,
+                "the conn-scoped replay dropped the worktree tracking",
+            )
+        finally:
+            state.is_task_active = False
+            agent_state.unregister(state.task_id, state)
+            agent.discard()
 
     async def test_persisted_subagent_tabs_follow_the_replay_scope(
         self,

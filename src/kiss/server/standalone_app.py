@@ -192,10 +192,19 @@ def read_loopback_url(url_file: Path) -> str | None:
     return None
 
 
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+"""Opens the daemon's URL without the environment's proxy.
+
+The probes below ask the daemon on this machine: an ``http_proxy``
+without a matching ``no_proxy`` would send them to a proxy, which cannot
+reach this machine's loopback, and the daemon would never seem to answer.
+"""
+
+
 def daemon_answers(url: str, timeout: float = 2.0) -> bool:
     """Whether an HTTP server answers at *url* (with any status: a 404 is an answer too)."""
     try:
-        with urllib.request.urlopen(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=timeout):
+        with _DIRECT_OPENER.open(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=timeout):
             return True
     except urllib.error.HTTPError:
         return True
@@ -931,7 +940,7 @@ def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
     """Ask the daemon at *url* whether the app window is open; None when it does not answer."""
     try:
         api = urllib.parse.urljoin(url, APP_WINDOW_API)
-        with urllib.request.urlopen(api, timeout=timeout) as answer:
+        with _DIRECT_OPENER.open(api, timeout=timeout) as answer:
             state = json.loads(answer.read())
         return bool(state["open"])
     except (OSError, ValueError, KeyError, TypeError):
@@ -1348,7 +1357,9 @@ def main(argv: list[str] | None = None) -> int:
         browser, url, kiss_home() / PROFILE_DIR_NAME, brand_slug(), sandbox=sandbox, popups=macos
     )
     if args.print_command:
-        print(" ".join(command))
+        # Quoted for the platform's shell: a browser or profile path with
+        # a space ("Google Chrome.app") must paste as one argument.
+        print(subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command))
         return 0
     # A running browser without its popup window gets the command line
     # instead of a reopen, which would open an empty browser window

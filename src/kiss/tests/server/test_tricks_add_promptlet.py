@@ -18,6 +18,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import shutil
 import stat
 import tempfile
 import threading
@@ -42,7 +43,8 @@ class _TricksHome(unittest.TestCase):
         self._saved = {
             k: os.environ.get(k) for k in ("KISS_HOME", "KISS_INJECTIONS_PATH")
         }
-        self.kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_add_trick_")) / ".kiss"
+        self.home = Path(tempfile.mkdtemp(prefix="kiss_add_trick_"))
+        self.kiss_dir = self.home / ".kiss"
         self.kiss_dir.mkdir(parents=True)
         bundled = self.kiss_dir / "bundled_INJECTIONS.md"
         bundled.write_text(_BUNDLED, encoding="utf-8")
@@ -56,6 +58,7 @@ class _TricksHome(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        shutil.rmtree(self.home, ignore_errors=True)
 
     def user_text(self) -> str:
         return self.user_file.read_text(encoding="utf-8")

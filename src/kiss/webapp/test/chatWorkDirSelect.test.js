@@ -19,7 +19,7 @@
 // notification, and the daemon's workDirChanged broadcast re-scopes the
 // page to a pick made in another browser.
 
-/* global require, __dirname, console, process */
+/* global require, __dirname */
 
 'use strict';
 
@@ -28,7 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   makePage,
-  closeWindows,
+  runTests,
   send,
   byId,
   msgs,
@@ -717,9 +717,6 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
   assert.strictEqual(listing.workDir, '/new');
   const status = msgs(posted, 'gitStatus').pop();
   assert.strictEqual(status.workDir, '/new');
-  // The desktop layout polls the task info every 5 s for as long as the
-  // page lives; closing the window drops that timer so node can exit.
-  win.close();
 }
 
 const tests = [
@@ -759,22 +756,4 @@ const tests = [
   ],
 ];
 
-let failed = 0;
-for (const [name, fn] of tests) {
-  try {
-    fn();
-    console.log('ok - ' + name);
-  } catch (e) {
-    failed += 1;
-    console.log('not ok - ' + name);
-    console.log(e && e.stack ? e.stack : String(e));
-  } finally {
-    closeWindows();
-  }
-}
-if (failed) {
-  console.log(`${failed} of ${tests.length} tests failed`);
-  process.exit(1);
-}
-console.log(`all ${tests.length} chatWorkDirSelect tests passed`);
-process.exit(0);
+runTests(tests);

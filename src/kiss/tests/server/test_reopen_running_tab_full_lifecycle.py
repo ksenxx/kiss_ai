@@ -37,6 +37,7 @@ import time
 import unittest
 
 from kiss.server import agent_state
+from kiss.server.json_printer import _take_pending_messages
 from kiss.server.server import AgentServer
 
 
@@ -71,7 +72,7 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             # as a hidden next run, which would race the follow-up ``run``
             # the test sends after this one finishes.
             with agent_state.STATE_LOCK:
-                state.pending_user_messages.clear()
+                _take_pending_messages(state)
 
         self.server._run_task_inner = fake_inner  # type: ignore[assignment]
 

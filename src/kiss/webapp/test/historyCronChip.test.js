@@ -13,23 +13,13 @@
 // needs both Cron and Errored on).
 
 const assert = require('assert');
-const harness = require('./simplify2_harness');
+const {send, makeRemoteChatPage} = require('./simplify2_harness');
 const {
   historyRows,
   visibleTitles,
   sendHistory,
   finishedSession: session,
 } = require('./history_helpers');
-const {send} = harness;
-
-function markRemoteChat(win) {
-  win.document.body.classList.add('remote-chat');
-}
-
-/** The webapp (remote-chat) page over the harness's recording transport. */
-function makePage() {
-  return harness.makePage({beforeScripts: markRemoteChat});
-}
 
 const SESSIONS = [
   session(1, 'plain one'),
@@ -47,7 +37,7 @@ function setChip(win, id, checked) {
 }
 
 function testChipIsOffByDefaultAndHidesCronRows() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeRemoteChatPage();
   const box = win.document.getElementById('hf-cron');
   assert.ok(box && box.type === 'checkbox', 'hf-cron checkbox must exist');
   assert.strictEqual(box.checked, false, 'the Cron chip starts off');
@@ -73,7 +63,7 @@ function testChipIsOffByDefaultAndHidesCronRows() {
 }
 
 function testSwitchingTheChipShowsAndHidesCronRows() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeRemoteChatPage();
   sendHistory(win, posted, SESSIONS);
   setChip(win, 'hf-cron', true);
   assert.deepStrictEqual(visibleTitles(win), [
@@ -125,7 +115,7 @@ function layOutHistoryList(win, height) {
 }
 
 function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeRemoteChatPage();
   layOutHistoryList(win, 400);
   const cronPage = [];
   for (let i = 1; i <= 50; i += 1) {
@@ -166,7 +156,7 @@ function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {
 }
 
 function testAFilledListDoesNotPageOnItsOwn() {
-  const {win, posted} = makePage();
+  const {win, posted} = makeRemoteChatPage();
   layOutHistoryList(win, 100);
   const page = [];
   for (let i = 1; i <= 50; i += 1) {

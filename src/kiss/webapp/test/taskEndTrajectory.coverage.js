@@ -18,6 +18,6 @@ gateRegions({
   mark: 'trajectory',
   label: 'trajectory fold',
   targets: [
-    {file: 'main.js', sourceUrl: 'trajectory-main.js'},
+    {file: 'main.js', sourceUrl: 'trajectory-main.js', regions: 4},
   ],
 });

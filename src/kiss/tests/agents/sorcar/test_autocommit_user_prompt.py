@@ -127,7 +127,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
             agent._last_user_prompt = "implement feature Z"
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             msg = _head_message(wt_dir)
             assert msg.endswith("User prompt:\nimplement feature Z")
@@ -159,7 +159,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
                 baseline_commit=None,
             ))
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             msg = _head_message(wt_dir)
             assert "User prompt:" not in msg

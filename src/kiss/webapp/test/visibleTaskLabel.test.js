@@ -18,6 +18,7 @@ const {
   makePage: makeHarnessPage,
   send,
   clickTab,
+  stackOutputLayout,
 } = require('./simplify2_harness');
 
 const VIEWPORT = 500;
@@ -27,56 +28,14 @@ function makePage() {
   return makeHarnessPage({sourceUrl: 'visibletask-main.js'});
 }
 
+// #output is a VIEWPORT-tall scroller whose children stack by their
+// data-test-height (DEFAULT_HEIGHT when unset), exactly like the real
+// column layout the page renders.
 function heightOf(el) {
   const h = el.dataset ? el.dataset.testHeight : '';
   if (h) return Number(h);
   // The "Loading … task" strip is one thin line of chrome.
   return el.id === 'adjacent-loader' ? 0 : DEFAULT_HEIGHT;
-}
-
-function rect(top, height) {
-  return {
-    top,
-    bottom: top + height,
-    height,
-    left: 0,
-    right: 400,
-    width: 400,
-  };
-}
-
-// #output is a VIEWPORT-tall scroller whose children stack by their
-// data-test-height (DEFAULT_HEIGHT when unset), exactly like the real
-// column layout the page renders.
-function installLayout(win, O) {
-  const origGBCR = win.Element.prototype.getBoundingClientRect;
-  win.Element.prototype.getBoundingClientRect = function () {
-    if (this === O) return rect(0, VIEWPORT);
-    if (this.parentNode === O) {
-      let top = -O.scrollTop;
-      for (let i = 0; i < O.children.length; i++) {
-        const child = O.children[i];
-        const h = heightOf(child);
-        if (child === this) return rect(top, h);
-        top += h;
-      }
-    }
-    return origGBCR.call(this);
-  };
-  Object.defineProperty(O, 'scrollHeight', {
-    get: () => {
-      let total = 0;
-      for (let i = 0; i < O.children.length; i++)
-        total += heightOf(O.children[i]);
-      return total;
-    },
-    configurable: true,
-  });
-  Object.defineProperty(O, 'clientHeight', {
-    value: VIEWPORT,
-    configurable: true,
-  });
-  Object.defineProperty(O, 'clientWidth', {value: 400, configurable: true});
 }
 
 function scrollTo(win, O, top) {
@@ -144,7 +103,7 @@ function setup(opts) {
   const tabId = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
-  installLayout(win, O);
+  stackOutputLayout(win, heightOf, VIEWPORT);
   send(win, {
     type: 'task_events',
     tabId,
@@ -1006,11 +965,11 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
   console.log('PASS a hidden tab’s replay leaves the visible row alone');
 }
 
-// A hidden tab's replay can close the sub-agent tab that is on screen —
-// a finished run_parallel panel takes its sub-agent tabs with it — and
-// put another tab there. The numbers borrowed from the tab that left
-// must not land on the tab that arrived.
-function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
+// A sub-agent's subagentDone closes its tab while it is on screen and
+// puts the parent there: the parent shows its own numbers, not the ones
+// borrowed from the child, and keeps them through the replay of its
+// finished transcript.
+function testSubagentDoneShowsTheParentsOwnNumbers() {
   const {win, posted} = makePage();
   const parent = posted.find(m => m.type === 'ready').tabId;
   win._testApi.hideWelcome();
@@ -1087,7 +1046,7 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
     'the tab that came on screen must keep its own numbers',
   );
   win.close();
-  console.log('PASS a hidden replay that switches tabs keeps the new numbers');
+  console.log("PASS a sub-agent's end shows the parent's own numbers");
 }
 
 // With no neighbouring task loaded there is nothing to disambiguate: the
@@ -1124,7 +1083,7 @@ async function main() {
     testAdjacentReplayLeavesTheLiveStepCountAlone,
     testHiddenTabStreamLeavesTheVisibleRowAlone,
     testHiddenTabReplayLeavesTheVisibleRowAlone,
-    testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers,
+    testSubagentDoneShowsTheParentsOwnNumbers,
     testPanelUnchangedWithoutAdjacentTasks,
   ];
   const failures = [];

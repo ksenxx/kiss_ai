@@ -20,29 +20,18 @@ const {
   newAuthDom,
   bootShim,
   installFakeWebSocket,
+  installFakeTimers,
+  openNextSocket,
 } = require('./transport_page_helpers');
 
 // A page with fake timers, fake intervals and a fake clock.
 function page() {
   const {window} = newAuthDom();
   const sockets = [];
-  const timers = [];
   const intervals = [];
   const clock = {now: 1000000};
   installFakeWebSocket(window, sockets, {halfOpen: true});
-  window.setTimeout = function (fn, ms) {
-    timers.push({fn, ms});
-    return timers.length;
-  };
-  window.clearTimeout = function () {};
-  window.setInterval = function (fn, ms) {
-    intervals.push({fn, ms, cleared: false});
-    return intervals.length;
-  };
-  window.clearInterval = function (id) {
-    if (intervals[id - 1]) intervals[id - 1].cleared = true;
-  };
-  window.Date.now = () => clock.now;
+  const timers = installFakeTimers(window, {intervals, clock});
   bootShim(window);
   return {window, sockets, timers, intervals, clock};
 }
@@ -75,8 +64,7 @@ function main() {
     );
     assert.ok(retryButton(window), 'Retry now shown while escalated');
 
-    timers[timers.length - 1].fn();
-    const s1 = sockets[1];
+    const s1 = openNextSocket(sockets, timers, 0);
     s1.fireOpen();
     s1.fireMessage({
       type: 'error',
@@ -104,8 +92,7 @@ function main() {
     // The server closes the socket; the quiet reconnect and a repeated
     // refusal keep showing the explanation.
     s1.fireClose();
-    timers[timers.length - 1].fn();
-    const s2 = sockets[2];
+    const s2 = openNextSocket(sockets, timers, 1);
     s2.fireOpen();
     s2.fireMessage({
       type: 'error',
@@ -125,8 +112,7 @@ function main() {
     sockets[0].fireClose();
     clock.now += 9000;
     runTicks(intervals);
-    timers[timers.length - 1].fn();
-    const s1 = sockets[1];
+    const s1 = openNextSocket(sockets, timers, 0);
     s1.fireOpen();
     s1.fireMessage({type: 'auth_required'});
     assert.ok(intervals[0].cleared, 'auth_required stops the tick');

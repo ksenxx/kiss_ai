@@ -25,8 +25,9 @@ const {checkPathCommands} = require('./file_link_helpers');
 
 const WORK_DIR = '/tmp/kiss-owner-parity';
 
-// Two tabs; the SECOND one is left on screen so the first is a genuine
-// background tab whose transcript is rendered into a detached fragment.
+// Two tabs; the FIRST one is put back on screen so the second is a
+// genuine background tab whose transcript is rendered into a detached
+// fragment.
 function makeTwoTabs() {
   const {win, posted} = makePage();
   send(win, {type: 'configData', config: {work_dir: WORK_DIR}, apiKeys: {}});

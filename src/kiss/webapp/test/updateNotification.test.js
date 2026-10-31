@@ -7,9 +7,10 @@
 
 // The sticky update notification's markup (sticky flag, SVG icon, aria
 // label) and its lifecycle across `available: false` / re-broadcast.  The
-// badge icon and the Update click posting `runUpdate` are pinned by
-// simplify2_update_badge.test.js.  main.js renders the toast
-// synchronously inside its message handler, so every check is direct.
+// badge icon is pinned by simplify2_update_badge.test.js and the Update
+// click posting `runUpdate` by updateWhenIdleToast.test.js.  main.js
+// renders the toast synchronously inside its message handler, so every
+// check is direct.
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');

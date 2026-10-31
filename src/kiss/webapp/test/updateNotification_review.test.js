@@ -239,12 +239,11 @@ async function testRepaintUnderPointerKeepsDismissCleared() {
   }
 }
 
-// A focusout while the pointer still rests on the toast armed the
-// transient dismiss; the toast is then repainted as a sticky error.
-// That repaint must cancel the stale timer: the error stays.  The
-// timers are recorded, so "no live 5 s auto-dismiss remains" is checked
-// directly instead of sleeping past the 5 s dismiss.
-async function testStickyErrorRepaintCancelsStaleFocusoutTimer() {
+// A transient toast armed its 5 s auto-dismiss; the same toast is then
+// repainted as a sticky error.  That repaint must cancel the transient
+// timer: the error stays.  The timers are recorded, so the cancel is
+// checked directly instead of sleeping past the 5 s dismiss.
+async function testStickyErrorRepaintCancelsTransientDismiss() {
   const wv = makeDomPage();
   const {win} = wv;
   try {
@@ -259,11 +258,8 @@ async function testStickyErrorRepaintCancelsStaleFocusoutTimer() {
       () => win.document.querySelector('.kiss-notification'),
       'notification must render',
     );
-    toast.dispatchEvent(new win.MouseEvent('mouseenter', {bubbles: true}));
-    toast.focus();
-    assert.strictEqual(win.document.activeElement, toast, 'toast focused');
-    win.document.getElementById('task-input').focus();
-    assert.notStrictEqual(win.document.activeElement, toast, 'focus left');
+    const transientDismiss = latestTimer(wv, 5000);
+    assert.ok(transientDismiss, 'the transient toast armed its 5 s dismiss');
 
     send(win, {
       type: 'notification',
@@ -278,8 +274,12 @@ async function testStickyErrorRepaintCancelsStaleFocusoutTimer() {
       'the repaint reuses the toast',
     );
     assert.ok(
+      transientDismiss.cleared,
+      'the sticky repaint cancels the transient dismiss',
+    );
+    assert.ok(
       !timerDelays(wv).includes(5000),
-      'a sticky error repainted over a hovered toast leaves no auto-dismiss armed',
+      'the sticky repaint arms no new auto-dismiss',
     );
     assert.ok(toast.isConnected, 'the sticky error stays on screen');
     assert.strictEqual(
@@ -295,7 +295,7 @@ async function testStickyErrorRepaintCancelsStaleFocusoutTimer() {
 async function runTests() {
   await testStickyStateRefreshesAfterReusingNotificationId();
   await testRepaintUnderPointerKeepsDismissCleared();
-  await testStickyErrorRepaintCancelsStaleFocusoutTimer();
+  await testStickyErrorRepaintCancelsTransientDismiss();
   await testUpdateToastCloseDoesNotPostNotificationAction();
   await testUpdateRebroadcastRefreshesMessageAndAriaLabel();
 }

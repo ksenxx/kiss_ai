@@ -22,33 +22,24 @@ from types import ModuleType
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import sea_commands, sea_lint
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.tests.agents.seas.conftest import run_sea
 
-REMOVED_GETTERS: tuple[str, ...] = (
-    "model",
-    "work_dir",
+REMOVED_GETTERS: tuple[str, ...] = sea_lint.REMOVED_GETTERS + (
     "chat_id",
-    "docker_image",
     "model_config",
-    "max_budget",
-    "tool_profile",
-    "use_worktree",
-    "auto_commit",
     "auto_classify",
     "allow_fan_out",
     "use_web_tools",
     "use_memory",
-    "dispatch_timeout",
-    "append_to_prompt",
-    "append_to_system_prompt",
     "if_append_basic_tools",
-    "add_to_prompt",
-    "add_to_system_prompt",
-    "add_to_tools",
 )
-"""Names the old contracts read as getters; none is read any more, on a module or a class."""
+"""Names the old contracts read as getters; none is read any more, on a module or a class.
+
+The lint's own list (the getters its ``stale-docstring`` rule looks for)
+plus the per-field getters it does not look for in docstrings.
+"""
 
 MODULE_GETTERS: tuple[str, ...] = (
     "description",

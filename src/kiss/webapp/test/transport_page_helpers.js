@@ -190,6 +190,10 @@ function makeWebappClient() {
     'the shim must authenticate before sending commands',
   );
   sock.onmessage({data: JSON.stringify({type: 'auth_ok'})});
+  // The daemon answers the boot batch's ``ping`` with ``pong``
+  // (sorcar.py), and transport.js holds later frames until it does.
+  assert.strictEqual(JSON.parse(sock.sent[sock.sent.length - 1]).type, 'ping');
+  sock.onmessage({data: JSON.stringify({type: 'pong'})});
   const posted = [];
   function drain() {
     while (posted.length < sock.sent.length) {

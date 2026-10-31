@@ -122,7 +122,8 @@ def synthesize_talk_audio(
     Returns:
         ``(audio_b64, mime)`` — base64-encoded MP3 bytes and its MIME
         type ``"audio/mpeg"`` — or ``None`` when *text* is empty or the
-        API call fails (callers then fall back to client-side TTS).
+        API call fails (the ``talk`` event is then broadcast without
+        audio).
     """
     if not text.strip():
         return None

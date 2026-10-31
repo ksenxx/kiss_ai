@@ -41,6 +41,7 @@ from kiss.agents.sorcar import exec_bridge
 from kiss.agents.sorcar.container_jobs import ContainerJobs
 from kiss.agents.sorcar.decide_tool import decisions_tool_available
 from kiss.agents.sorcar.docker_tools import DockerTools
+from kiss.agents.sorcar.edit_guards import HEREDOC_VERDICT
 from kiss.benchmarks.terminal_bench.exec_bridge_server import SERVER_THREAD_NAME, ExecBridgeServer
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import get_fast_model
@@ -109,12 +110,15 @@ def test_gate_runs_the_agents_own_verifier_in_the_container(tmp_path: Path) -> N
         assert "FAIL: out.txt lacks goodbye" in failed.text and "checking out.txt" in failed.text
         assert "Traceback: detail" in failed.text
         # a verifier slower than its timeout: refused, and its whole process tree
-        # (here a background subshell) is killed in the container
-        slow_script = "(sleep 5; echo post > /tmp/late) & wait"
+        # (here a background subshell, whose pid it records) is killed in the
+        # container: once the subshell is dead with /tmp/late absent, the write due
+        # 8 s after the start can never land; a surviving subshell writes it first
+        slow_script = "(sleep 8; echo post > /tmp/late) & echo $! > /tmp/slow.pid; wait"
         _write_in(live, VERIFIER, slow_script)
         slow = harness.on_tool_call("finish", done)
         assert not slow.allowed and "did not finish within 3 seconds" in slow.text
-        assert live.exec_run(["sh", "-c", "sleep 3; test -e /tmp/late"]).exit_code != 0
+        assert _wait_until(partial(_dead_in, live, "/tmp/slow.pid"))
+        assert live.exec_run(["test", "-e", "/tmp/late"]).exit_code != 0
         # the budget of refusals is spent: the run is let go even though the verifier
         # fails, but a finish let through that way is not a verified one (no checkpoint)
         assert harness.on_tool_call("finish", done) == ALLOW
@@ -259,7 +263,7 @@ def test_checkpoints_and_the_best_snapshot_submitted(
         jobs = ContainerJobs(bash_fn)
         job_id, started = jobs.start("while true; do printf broken > /app/out.txt; sleep 0.1; done")
         assert job_id is not None, started
-        assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"broken"
+        assert _wait_until(partial(_holds, live, "/app/out.txt", b"broken"))
         assert coding_sea.submit_best_checkpoint(config) == "restored"
         assert _events(tmp_path, "submit")[-1]["killed_jobs"] == [job_id]
         assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"hello"
@@ -270,7 +274,7 @@ def test_checkpoints_and_the_best_snapshot_submitted(
                                         "done) & echo started")
         assert orphaning is not None, started
         assert "status: exited 0" in jobs.bash_job(orphaning, action="wait", timeout_seconds=10)
-        assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"broken"
+        assert _wait_until(partial(_holds, live, "/app/out.txt", b"broken"))
         assert coding_sea.submit_best_checkpoint(config) == "restored"
         assert orphaning in _events(tmp_path, "submit")[-1]["killed_jobs"]
         assert live.exec_run(["sh", "-c", "sleep 1; cat /app/out.txt"]).output == b"hello"
@@ -338,7 +342,7 @@ def test_heredoc_may_create_but_not_rewrite_a_file(tmp_path: Path) -> None:
                         "cat <<EOF | tee /app/out.txt\nx\nEOF",
                         "cat <<EOF | tee -a out.txt\nx\nEOF"):
             verdict = harness.on_tool_call("Bash", {"command": command})
-            rewrite = refuse(coding_sea.HEREDOC_VERDICT.format(path="/app/out.txt"))
+            rewrite = refuse(HEREDOC_VERDICT.format(path="/app/out.txt"))
             assert verdict == rewrite, command
     finally:
         live.remove(force=True)
@@ -354,6 +358,8 @@ def test_gate_reviews_the_work_and_holds_the_findings(tmp_path: Path) -> None:
     bounds the rounds.  A reviewer whose first answer is cut before its
     verdict (``max_tokens`` override) is retried at the provider's defaults.
     """
+    if not decisions_tool_available():
+        pytest.skip("no decisions model configured")
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
     if live is None:
         pytest.skip("Docker is not available")
@@ -367,9 +373,12 @@ def test_gate_reviews_the_work_and_holds_the_findings(tmp_path: Path) -> None:
         # the commands the summaries below quote were run (the quote gate checks that)
         _turn(harness, [("Bash", {"command": "test -s /app/out.txt"}),
                         ("Bash", {"command": "cat /app/out.txt"})], ["", "goodbye"])
+        # The summary claims the asked content outright: a bare "`test -s` passes"
+        # reads as a weaker rule to the open-reading gate, whose live score for it
+        # sat at 0.58-0.70 against the 0.7 threshold and now and then refused first.
         done = {"success": True,
-                "summary_in_html": "<p>Wrote /app/out.txt. Checked: `test -s /app/out.txt` "
-                                   "passes.</p>"}
+                "summary_in_html": "<p>Wrote /app/out.txt with the requested content; "
+                                   "`test -s /app/out.txt` passes.</p>"}
         review = harness.on_tool_call("finish", done)
         assert not review.allowed and review.text.startswith("Not finished: an independent review")
         assert "out.txt" in review.text and "Answer every numbered finding" in review.text
@@ -1028,6 +1037,21 @@ def _dead(pidfile: Path) -> bool:
     return state.startswith("Z")
 
 
+def _dead_in(container: Any, pidfile: str) -> bool:
+    """Whether the process whose pid *pidfile* in *container* records is gone or a zombie.
+
+    :func:`_dead` inside the container; ``False`` while no pid is recorded.
+    """
+    script = (f"pid=$(cat {pidfile}) || exit 1; test -e /proc/$pid || exit 0; "
+              "grep -q ') Z ' /proc/$pid/stat")
+    return bool(container.exec_run(["sh", "-c", script]).exit_code == 0)
+
+
+def _holds(container: Any, path: str, content: bytes) -> bool:
+    """Whether *path* in *container* holds exactly *content*."""
+    return bool(container.exec_run(["cat", path]).output == content)
+
+
 def _late_toucher(late: Path, pidfile: Path) -> str:
     """A command whose background subshell's pid is recorded, then touches *late* after 6 s.
 
@@ -1271,12 +1295,16 @@ def test_bridge_kill_covers_a_launch_the_provider_delays(tmp_path: Path) -> None
         # ``/exec`` is read, which is the reordered case pinned at the end)
         stop = _stop_when(partial(_launch_pending, server))
         stopped = exec_bridge.bridge_exec(
-            server.url, f"sleep 2; touch {late} # DELAY-ME", 30, stop)
+            server.url, f"sleep 6; touch {late} # DELAY-ME", 30, stop)
         assert stopped == (-1, "Killed: the task was stopped.")
         assert not late.exists() and server.pending  # the launch is still pending
         environment.gate.set()  # the provider launches the command now: the reaper gets it
         # the exec ends (the launch leaves ``pending``) only once its tree is dead: had the
-        # reaper missed it, the shell would have touched ``late`` before ending on its own
+        # reaper missed it, the shell would have touched ``late`` before ending on its own,
+        # within ``_wait_until``'s 10 s.  The 6 s (as in :func:`_late_toucher`) cover the
+        # reaper's next sweep, a host-wide ``/proc`` scan in its own subprocess: about 1 s
+        # idle, up to 4.2 s with 100 busy loops on an 80-core box, where a 2 s touch always
+        # landed first (and once under a parallel full-suite run, 2026-10-29).
         assert _wait_until(partial(_exec_cleaned_up, server))
         assert not late.exists()
         # /kill before /exec (request threads reordered): the command never runs

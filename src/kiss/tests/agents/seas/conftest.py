@@ -20,6 +20,7 @@ import yaml
 
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
 from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
+from kiss.agents.seas.write_paper.write_paper_sea import _find_tex_binary
 from kiss.agents.sorcar import machines, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
@@ -204,6 +205,20 @@ def recommendations_path() -> Iterator[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
     yield path
     path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def tex_bin() -> str:
+    """Return the directory of the ``pdflatex`` the paper and patent builds find; skip without one.
+
+    The lookup is the builds' own (``PATH``, then TeX Live under
+    ``/usr/local/texlive``), so a TeX Live that is not on ``PATH`` still
+    runs the test.
+    """
+    pdflatex = _find_tex_binary("pdflatex", "")
+    if not pdflatex or not Path(pdflatex).is_file():
+        pytest.skip("pdflatex is not installed")
+    return str(Path(pdflatex).parent)
 
 
 def run_sea(

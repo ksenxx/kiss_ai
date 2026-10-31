@@ -56,6 +56,9 @@ async function run() {
     sock.fireMessage({type: 'auth_ok'});
     transport.postMessage({type: 'runTask', prompt: 'a "quoted" {thing}'});
     try {
+      assert.strictEqual(frames(sock).length, 4, 'the runTask waits for the pong');
+      // The daemon answers the batch's ping; the held frame goes out.
+      sock.fireMessage({type: 'pong'});
       assert.deepStrictEqual(frames(sock), [
         {type: 'auth', password: 'Secret20Chars0000000'},
         {password: 'Secret20Chars0000000', type: 'ready'},
@@ -63,7 +66,7 @@ async function run() {
         {password: 'Secret20Chars0000000', type: 'ping'},
         {password: 'Secret20Chars0000000', type: 'runTask', prompt: 'a "quoted" {thing}'},
       ]);
-      ok('the auth frame, the queued batch, its ping and a live frame all carry the password');
+      ok('the auth frame, the queued batch, its ping and a held frame all carry the password');
     } catch (err) {
       fail('per-frame password', err);
     }
@@ -89,15 +92,18 @@ async function run() {
     // The dialog resolves a promise before the auth frame goes out.
     await settle();
     assert.strictEqual(sockets[1].sent.length, 2, 'the typed password went out');
+    // Posted while socket 2 waits for its auth_ok: queued for it.
+    transport.postMessage({type: 'getConfig'});
     sockets[1].fireMessage({type: 'auth_ok'});
+    sockets[1].fireMessage({type: 'pong'});
     transport.postMessage({type: 'ping'});
     try {
-      // After the auth frame: the unconfirmed batch of socket 1 (no
-      // pong came back) is re-sent, then its ping, then the live ping.
+      // After the auth frame: the batch queued for this socket, its
+      // ping, then a live frame.  Socket 1 confirmed its own batch, so
+      // nothing of it is sent again.
       assert.deepStrictEqual(frames(sockets[1]).slice(1), [
         {type: 'auth', password: 'NewPassword000000000'},
-        {password: 'NewPassword000000000', type: 'ready'},
-        {password: 'NewPassword000000000'},
+        {password: 'NewPassword000000000', type: 'getConfig'},
         {password: 'NewPassword000000000', type: 'ping'},
         {password: 'NewPassword000000000', type: 'ping'},
       ]);
@@ -120,6 +126,7 @@ async function run() {
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_ok', local: false});
+    sock.fireMessage({type: 'pong'}); // the daemon answers the batch's ping
     transport.postMessage({type: 'getConfig'});
     try {
       assert.deepStrictEqual(frames(sock), [

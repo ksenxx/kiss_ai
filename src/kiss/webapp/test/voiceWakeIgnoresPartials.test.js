@@ -34,6 +34,8 @@ const {
   lastProcessor,
   lastRecognizer,
   fireWake,
+  wake,
+  speak,
 } = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
@@ -100,18 +102,10 @@ async function main() {
     // result are ignored; the final result is what wakes.
     rec.handlers.partialresult({result: {partial: '[unk] abracadabra'}});
     assert.ok(!triggered(page), 'the partial alone must not wake');
-    fireWake(page);
-    assert.ok(triggered(page), 'the final result must wake');
+    wake(page); // the final result wakes
     // Half a second of speech and two seconds of silence end the
     // capture: its audio goes to the daemon for transcription.
-    const proc = lastProcessor(page);
-    feed(proc, true, 2);
-    feed(proc, false, 8);
-    assert.strictEqual(
-      page.posted.filter(m => m.type === 'voiceTranscribe').length,
-      1,
-      'the woken round must post its audio',
-    );
+    speak(page);
   });
 
   await test('an empty final result after the wake is harmless', async () => {
