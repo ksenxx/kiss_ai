@@ -243,6 +243,13 @@ class TestComposableProfiles:
         assert agent._tool_profile() == "shell+edit"
         assert _names(agent._get_tools()) == {
             "Bash", "bash_job", "Read", "run_commands_parallel", "Edit", "Write",
+            "create_worktree", "commit_and_merge", "checkpoint", "rollback",
+        }
+        # A sub-agent edits its caller's tree in place: no rollback of it.
+        child = _bare_agent(tmp_path, _tool_profile_name="shell+edit",
+                            _subagent_info={"parent_task_id": "parent"})
+        assert _names(child._get_tools()) == {
+            "Bash", "bash_job", "Read", "run_commands_parallel", "Edit", "Write",
             "create_worktree", "commit_and_merge",
         }
 

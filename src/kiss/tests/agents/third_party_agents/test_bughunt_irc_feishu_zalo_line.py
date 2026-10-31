@@ -18,8 +18,6 @@ Bugs covered:
 from __future__ import annotations
 
 import json
-import socket
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -32,7 +30,7 @@ from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
 from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
-from kiss.tests.agents.third_party_agents.muse_test_utils import wait_until
+from kiss.tests.agents.third_party_agents.irc_test_utils import IRCServer, read_lines
 from kiss.tests.agents.third_party_agents.recording_http import (
     RecordingHandler,
     RecordingServer,
@@ -40,101 +38,17 @@ from kiss.tests.agents.third_party_agents.recording_http import (
 )
 
 
-class _FakeIRCServer:
-    """A real plaintext TCP server speaking just enough IRC for the tests."""
-
-    def __init__(self) -> None:
-        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._listener.bind(("127.0.0.1", 0))
-        self._listener.listen(1)
-        self.port = self._listener.getsockname()[1]
-        self.received: list[str] = []
-        self._conn: socket.socket | None = None
-        self._lock = threading.Lock()  # guards _conn against close()
-        self._stopping = threading.Event()
-        self._connected = threading.Event()
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
-
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._listener.accept()
-        except OSError:
-            return
-        conn.settimeout(0.5)  # before publishing: close() may close conn right after
-        with self._lock:
-            # close() may have run between accept() and here: it then saw
-            # no connection to close, so this one must not be served.
-            if self._stopping.is_set():
-                conn.close()
-                return
-            self._conn = conn
-        buf = b""
-        first = True
-        with conn:  # closed on every exit, including the EOF of close()'s wake-up connection
-            while not self._stopping.is_set():
-                try:
-                    data = conn.recv(4096)
-                except TimeoutError:
-                    continue
-                except OSError:
-                    break
-                if not data:
-                    break
-                if first:
-                    first = False
-                    if data[:1] == b"\x16":
-                        return
-                    self._connected.set()
-                buf += data
-                while b"\r\n" in buf:
-                    line, buf = buf.split(b"\r\n", 1)
-                    self.received.append(line.decode("utf-8", errors="replace"))
-
-    def send_line(self, line: str) -> None:
-        assert self._connected.wait(timeout=5.0), "client never connected"
-        assert self._conn is not None
-        self._conn.sendall(line.encode("utf-8") + b"\r\n")
-
-    def wait_received(self, needle: str, timeout: float = 5.0) -> bool:
-        return wait_until(lambda: any(needle in line for line in self.received), timeout)
-
-    def close(self) -> None:
-        with self._lock:
-            self._stopping.set()
-            conn = self._conn
-        if conn is not None:
-            # Wakes the recv loop (OSError, or its next 0.5 s timeout
-            # followed by the _stopping check).
-            try:
-                conn.close()
-            except OSError:
-                pass
-        elif self._thread.is_alive():
-            # Closing a listening socket does not wake accept(); a
-            # throw-away connection does.  The server thread accepts it
-            # (or a client accepted before _stopping was set) and, seeing
-            # _stopping, closes it and returns.
-            try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=1.0).close()
-            except OSError:
-                pass
-        try:
-            self._listener.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=5.0)
-        assert not self._thread.is_alive(), "fake IRC server thread did not exit"
-
-
 class TestIRCBugs:
-    """IRC bugs (A)-(D) against a real local TCP server."""
+    """IRC bugs (A)-(D) against a real loopback TCP listener.
+
+    Nothing answers a TLS ClientHello, so a regression of (A) fails
+    ``connect`` only after the backend's 30 s handshake timeout.
+    """
 
     @pytest.fixture(autouse=True)
     def _isolated(self, isolated_kiss_home: Path):
-        """Clean IRC config, a fake IRC server and a backend per test."""
-        with closing(_FakeIRCServer()) as self.server:
+        """Clean IRC config, a loopback IRC listener and a backend per test."""
+        with closing(IRCServer()) as self.server:
             self.backend = IRCChannelBackend()
             try:
                 yield
@@ -149,7 +63,8 @@ class TestIRCBugs:
             )
         )
         assert result["ok"] is True, result
-        assert self.server.wait_received("NICK kissbot")
+        with self.server.accept() as conn:
+            assert "NICK kissbot" in read_lines(conn, "NICK")
         cfg = json.loads(_irc_config.path.read_text())
         assert cfg["use_tls"].lower() in ("", "false")
 
@@ -165,7 +80,8 @@ class TestIRCBugs:
             }
         )
         assert self.backend.connect() is True, self.backend._connection_info
-        assert self.server.wait_received("NICK kissbot")
+        with self.server.accept() as conn:
+            assert "NICK kissbot" in read_lines(conn, "NICK")
 
     def test_privmsg_text_and_command_parsing(self) -> None:
         """(B)+(C) text keeps a single leading ':'; non-PRIVMSG lines ignored."""
@@ -175,18 +91,19 @@ class TestIRCBugs:
             )
         )
         assert result["ok"] is True, result
-        self.server.send_line(":alice!u@h PRIVMSG #ch ::) hello")
-        self.server.send_line(":srv NOTICE kissbot :please use PRIVMSG to chat")
-        # Sentinel PRIVMSG on the same TCP connection: FIFO ordering guarantees
-        # the NOTICE was processed before the sentinel is queued, so once the
-        # sentinel arrives we know the NOTICE was (correctly) not enqueued.
-        self.server.send_line(":bob!u@h PRIVMSG #ch :sentinel")
-        messages: list = []
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and len(messages) < 2:
-            more, _ = self.backend.poll_messages("", "")
-            messages.extend(more)
-            time.sleep(0.1)
+        with self.server.accept() as conn:
+            conn.sendall(b":alice!u@h PRIVMSG #ch ::) hello\r\n")
+            conn.sendall(b":srv NOTICE kissbot :please use PRIVMSG to chat\r\n")
+            # Sentinel PRIVMSG on the same TCP connection: FIFO ordering guarantees
+            # the NOTICE was processed before the sentinel is queued, so once the
+            # sentinel arrives we know the NOTICE was (correctly) not enqueued.
+            conn.sendall(b":bob!u@h PRIVMSG #ch :sentinel\r\n")
+            messages: list = []
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and len(messages) < 2:
+                more, _ = self.backend.poll_messages("", "")
+                messages.extend(more)
+                time.sleep(0.1)
         assert [m["text"] for m in messages] == [":) hello", "sentinel"], messages
         assert messages[0]["user"] == "alice"
         assert messages[0]["target"] == "#ch"
@@ -212,8 +129,8 @@ class TestIRCFreshDaemonTools:
 
     @pytest.fixture(autouse=True)
     def _isolated(self, isolated_kiss_home: Path):
-        """Clean IRC config and a fake IRC server per test."""
-        with closing(_FakeIRCServer()) as self.server:
+        """Clean IRC config and a loopback IRC listener per test."""
+        with closing(IRCServer()) as self.server:
             yield
 
     def test_tools_post_message_connects_on_demand(self) -> None:
@@ -235,9 +152,10 @@ class TestIRCFreshDaemonTools:
         try:
             result = json.loads(tools["post_message"]("#chan", "from daemon"))
             assert result["ok"] is True, result
-            assert self.server.wait_received("PRIVMSG #chan :from daemon"), (
-                "the lazily-connected backend must really send the line"
-            )
+            with self.server.accept() as conn:
+                assert "PRIVMSG #chan :from daemon" in read_lines(conn, "PRIVMSG"), (
+                    "the lazily-connected backend must really send the line"
+                )
         finally:
             tools["clear_irc_auth"]()
             backend.disconnect()

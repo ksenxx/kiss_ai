@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -52,8 +53,10 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_thr_")) / "jobs"
-        self._jobs_root.mkdir(parents=True)
+        tmp = Path(tempfile.mkdtemp(prefix="kiss_traj_thr_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self._jobs_root = tmp / "jobs"
+        self._jobs_root.mkdir()
         write_trajectory(self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A")
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
@@ -84,10 +87,12 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             str(self._orig_template)
         )
 
+        work_dir = tmp / "work"
+        work_dir.mkdir()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=str(work_dir),
         )
         await self.server.start_async()
         self._loop_thread = threading.get_ident()

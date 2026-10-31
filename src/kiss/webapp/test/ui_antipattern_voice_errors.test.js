@@ -13,13 +13,9 @@
 // later successful start closes that toast again.
 
 const assert = require('assert');
-const {
-  makePage: makeChatPage,
-  stubRaf,
-  waitFor,
-} = require('./simplify2_harness');
+const {settle} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {makeVoicePage, micBtn, startMic} = require('./voice_page_helpers');
 const runner = makeRunner();
 const report = runner.report;
 
@@ -36,105 +32,12 @@ async function test(name, fn) {
 // timer keeps node alive.
 const windows = [];
 
-function installVoiceStubs(win, options) {
-  stubRaf(win);
-  win.Audio = function (src) {
-    return {src, play: () => Promise.resolve()};
-  };
-  if (options.mediaDevices) {
-    Object.defineProperty(win.navigator, 'mediaDevices', {
-      value: options.mediaDevices,
-      configurable: true,
-    });
-  }
-  if (options.vosk) win.Vosk = options.vosk;
-  win.AudioContext = FakeAudioContext;
-  win.__VOICE__ = Object.assign({}, options.voiceCfg);
-  win.localStorage.setItem('kissVoiceEnabled', '0');
-}
-
-function makePage(opts) {
-  const options = opts || {};
-  const page = makeChatPage({
-    beforeScripts: win => installVoiceStubs(win, options),
-    extraScripts: ['voice.js'],
-  });
+// The chat page over voice_page_helpers' scriptable microphone, with the
+// mic remembered OFF: a test turns it on with a click.
+function makePage() {
+  const page = makeVoicePage();
   windows.push(page.win);
   return page;
-}
-
-const BROWSER_CFG = {
-  voskSrc: '/media/vosk.js',
-  modelUrl: 'https://models.example.com/model.tar.gz',
-  ackAudioUrl: '/media/working-on-it.mp3',
-};
-
-/** A KaldiRecognizer with the surface the pipeline uses. */
-class FakeRecognizer {
-  setWords() {}
-  on() {}
-  acceptWaveform() {}
-  retrieveFinalResult() {}
-  remove() {}
-}
-
-/** A speech engine whose model loads at once, so getUserMedia is reached. */
-const FAKE_VOSK = {
-  createModel: () =>
-    Promise.resolve({KaldiRecognizer: FakeRecognizer, terminate() {}}),
-};
-
-/** A minimal AudioContext for a granted microphone. */
-class FakeAudioContext {
-  constructor() {
-    this.sampleRate = 16000;
-    this.state = 'running';
-    this.destination = {};
-  }
-  resume() {
-    return Promise.resolve();
-  }
-  close() {
-    return Promise.resolve();
-  }
-  createMediaStreamSource() {
-    return {connect: () => {}, disconnect: () => {}};
-  }
-  createScriptProcessor() {
-    return {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
-  }
-}
-
-function denyingMediaDevices(name, message) {
-  return {
-    getUserMedia: () => {
-      const err = new Error(message);
-      err.name = name;
-      return Promise.reject(err);
-    },
-  };
-}
-
-/**
- * A microphone that fails each request with the next message in
- * `messages`, then grants every later request.
- */
-function flakyMediaDevices(messages) {
-  const pending = messages.slice();
-  return {
-    getUserMedia: () => {
-      if (pending.length) {
-        const err = new Error(pending.shift());
-        err.name = 'AbortError';
-        return Promise.reject(err);
-      }
-      return Promise.resolve({
-        getTracks: () => [{stop: () => {}}],
-        getAudioTracks: () => [],
-      });
-    },
-    enumerateDevices: () => Promise.resolve([]),
-  };
 }
 
 function toast(win) {
@@ -144,37 +47,41 @@ function toast(win) {
 }
 
 /**
- * Wait for the voice trigger's failure to land: voice.js raises the
- * toast and paints the button's state in one synchronous step, so once
- * the toast exists the class, tooltip and aria-pressed are set too.
+ * Let the failed start land: voice.js raises the toast and paints the
+ * button's state in one synchronous step, so once the toast exists the
+ * class, tooltip and aria-pressed are set too.
  */
-function waitForToast(win) {
-  return waitFor(() => toast(win), 'no voice error toast appeared');
+async function settledToast(win) {
+  await settle();
+  const t = toast(win);
+  assert.ok(t, 'no voice error toast appeared');
+  return t;
+}
+
+function toastMessage(win) {
+  return toast(win).querySelector('.kiss-notification-message').textContent;
 }
 
 async function main() {
   await test('a denied microphone raises a sticky error toast with a remedy', async () => {
-    const {win} = makePage({
-      voiceCfg: BROWSER_CFG,
-      vosk: FAKE_VOSK,
-      mediaDevices: denyingMediaDevices('NotAllowedError', 'Permission denied'),
-    });
+    const page = makePage();
+    const {win} = page;
     assert.strictEqual(toast(win), null, 'no toast before the failure');
     micBtn(win).click();
-    await waitForToast(win);
+    await settle();
+    page.mic.calls[0].refuse('Permission denied');
+    const t = await settledToast(win);
     assert.ok(
       micBtn(win).classList.contains('voice-error'),
       micBtn(win).className,
     );
-    const t = toast(win);
-    assert.ok(t, 'a visible notification must be raised');
     assert.ok(t.classList.contains('kiss-notification-error'), t.className);
     assert.strictEqual(
       t.dataset.notificationSticky,
       'true',
       'errors never auto-dismiss',
     );
-    const text = t.querySelector('.kiss-notification-message').textContent;
+    const text = toastMessage(win);
     assert.strictEqual(
       text,
       'Microphone access was denied. Allow the microphone for this site in ' +
@@ -193,19 +100,12 @@ async function main() {
   });
 
   await test('a missing microphone gets its own remedy', async () => {
-    const {win} = makePage({
-      voiceCfg: BROWSER_CFG,
-      vosk: FAKE_VOSK,
-      mediaDevices: denyingMediaDevices(
-        'NotFoundError',
-        'Requested device not found',
-      ),
-    });
-    micBtn(win).click();
-    await waitForToast(win);
-    const text = toast(win).querySelector(
-      '.kiss-notification-message',
-    ).textContent;
+    const page = makePage();
+    micBtn(page.win).click();
+    await settle();
+    page.mic.calls[0].refuse('Requested device not found', 'NotFoundError');
+    await settledToast(page.win);
+    const text = toastMessage(page.win);
     assert.ok(
       /No microphone was found\. Connect a microphone/.test(text),
       text,
@@ -213,63 +113,44 @@ async function main() {
   });
 
   await test('an unknown failure names the cause and what to do next', async () => {
-    const {win} = makePage({
-      voiceCfg: BROWSER_CFG,
-      vosk: FAKE_VOSK,
-      mediaDevices: denyingMediaDevices('AbortError', 'Starting audio failed'),
-    });
-    micBtn(win).click();
-    await waitForToast(win);
-    const text = toast(win).querySelector(
-      '.kiss-notification-message',
-    ).textContent;
+    const page = makePage();
+    micBtn(page.win).click();
+    await settle();
+    page.mic.calls[0].refuse('Starting audio failed', 'AbortError');
+    await settledToast(page.win);
     assert.strictEqual(
-      text,
+      toastMessage(page.win),
       'The voice trigger could not start (Starting audio failed). Check the ' +
         'microphone, then turn the voice trigger on again.',
     );
   });
 
   await test('a repeated failure updates the same toast, and a later success closes it', async () => {
-    const {win} = makePage({
-      voiceCfg: BROWSER_CFG,
-      vosk: FAKE_VOSK,
-      mediaDevices: flakyMediaDevices([
-        'microphone busy (code 1)',
-        'microphone busy (code 2)',
-      ]),
-    });
+    const page = makePage();
+    const {win} = page;
     micBtn(win).click();
-    await waitForToast(win);
-    const t = toast(win);
-    assert.ok(t, 'the failure must be visible');
+    await settle();
+    page.mic.calls[0].refuse('microphone busy (code 1)', 'AbortError');
+    const t = await settledToast(win);
     assert.ok(t.classList.contains('kiss-notification-error'));
     assert.ok(/microphone busy \(code 1\)/.test(t.textContent));
     assert.ok(/turn the voice trigger on again/.test(t.textContent));
     assert.strictEqual(micBtn(win).getAttribute('aria-pressed'), 'false');
     // A repeated failure updates the same toast instead of stacking.
     micBtn(win).click();
-    await waitFor(
-      () => /code 2/.test(toast(win).textContent),
-      'the toast was not updated',
-    );
+    await settle();
+    page.mic.calls[1].refuse('microphone busy (code 2)', 'AbortError');
+    await settle();
+    assert.ok(/code 2/.test(toast(win).textContent), 'the toast was updated');
     assert.strictEqual(
       win.document.querySelectorAll('.kiss-notification').length,
       1,
       'one toast, updated in place',
     );
-    assert.ok(/code 2/.test(toast(win).textContent));
     assert.strictEqual(micBtn(win).getAttribute('aria-pressed'), 'false');
     // The third attempt gets the microphone: the stale error goes away.
     micBtn(win).click();
-    await waitFor(
-      () => micBtn(win).classList.contains('voice-listening'),
-      'the voice trigger never started listening',
-    );
-    assert.ok(
-      micBtn(win).classList.contains('voice-listening'),
-      micBtn(win).className,
-    );
+    await startMic(page);
     assert.strictEqual(
       toast(win),
       null,

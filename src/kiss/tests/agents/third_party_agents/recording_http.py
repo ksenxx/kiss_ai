@@ -190,9 +190,9 @@ class JsonWebhookServer(RecordingServer):
 
     Stands in for JSON endpoints (group-robot webhooks, typing
     indicators, bot APIs) whose reply the test fixes in advance.  Each
-    request is recorded as ``{"method", "path", "query", "headers",
-    "json"}`` (``query`` is ``parse_qs`` of the URL query with blank
-    values kept, so ``?cursor=`` is visible; ``json`` the
+    request is recorded by :meth:`RecordingHandler.record_request` plus
+    ``"headers"`` and ``"json"`` (``query`` is ``parse_qs`` of the URL
+    query with blank values kept, so ``?cursor=`` is visible; ``json`` the
     decoded body: ``{}`` when empty, ``None`` when malformed); a test
     changes ``response_status`` / ``response_body`` before the request to
     simulate an API error.
@@ -276,16 +276,7 @@ class JsonWebhookHandler(RecordingHandler):
 
     def record(self) -> dict[str, Any]:
         """Append this request to the server's ``requests`` and return the entry."""
-        split = urlsplit(self.path)
-        entry = {
-            "method": self.command,
-            "path": split.path,
-            "query": parse_qs(split.query, keep_blank_values=True),
-            "headers": dict(self.headers),
-            "json": self._read_body(),
-        }
-        cast(RecordingServer, self.server).requests.append(entry)
-        return entry
+        return self.record_request(None, headers=dict(self.headers), json=self._read_body())
 
     def do_POST(self) -> None:  # noqa: N802
         """Record the request; reply with the server's ``response_status`` / ``response_body``."""
@@ -349,26 +340,20 @@ class PhoneApiHandler(RecordingHandler):
     """Phone companion app emulator: ``/api/device/info`` and ``/api/sms/messages``.
 
     ``messages`` is the canned ``/api/sms/messages`` answer (a subclass
-    sets its own).  Each request is recorded as ``{"method", "path",
-    "query"}`` (``query`` is ``parse_qs`` of the URL query, blank values
-    kept) so a test can check the ``since`` cursor the backend sends.
+    sets its own).  Each request is recorded by
+    :meth:`RecordingHandler.record_request` (``query`` is ``parse_qs`` of
+    the URL query, blank values kept) so a test can check the ``since``
+    cursor the backend sends.
     """
 
     messages: list[dict[str, Any]] = []
 
     def do_GET(self) -> None:  # noqa: N802
         """Answer the two phone endpoints with canned JSON, anything else with 404."""
-        split = urlsplit(self.path)
-        cast(RecordingServer, self.server).requests.append(
-            {
-                "method": self.command,
-                "path": split.path,
-                "query": parse_qs(split.query, keep_blank_values=True),
-            }
-        )
-        if split.path == "/api/device/info":
+        path = self.record_request(None)["path"]
+        if path == "/api/device/info":
             self._json(200, {"device_name": "testphone"})
-        elif split.path == "/api/sms/messages":
+        elif path == "/api/sms/messages":
             self._json(200, {"messages": self.messages})
         else:
             self._json(404, {"error": "Not Found"})

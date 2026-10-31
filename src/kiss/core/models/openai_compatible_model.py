@@ -45,6 +45,7 @@ from kiss.core.models.model import (
 )
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
+    make_pool_abortable,
     shutdown_pool_sockets,
     stop_error,
     stop_or_stall_error,
@@ -74,6 +75,17 @@ _MAX_RETRIES = 1
 # How often ``_blocking_request`` looks at the stop event while its worker
 # thread waits on the provider; the stream watchdog's stop poll rate.
 _BLOCKING_STOP_POLL_SECONDS = 0.1
+
+# Chat Completions ``finish_reason`` values meaning the provider cut the
+# completion short, with the cause shown to the user.  ``error`` is how a
+# gateway (OpenRouter's normalized value) reports a provider that failed
+# mid-generation; the Responses transport refuses the matching
+# ``status="incomplete"`` / ``"failed"`` responses.
+_CUT_SHORT_FINISH_REASONS = {
+    "length": "the model hit its output-token budget",
+    "content_filter": "the provider's content filter stopped the output",
+    "error": "the provider failed mid-generation",
+}
 
 
 def _call_into(outcome: dict[str, Any], create: Callable[..., Any], kwargs: dict[str, Any]) -> None:
@@ -626,14 +638,21 @@ class OpenAICompatibleBase(Model):
         self._reuse_client(inputs, self._build_client)
 
     def _build_client(self) -> OpenAI:
-        """Return a new ``OpenAI`` client for the current endpoint, key and headers."""
-        return OpenAI(
+        """Return a new ``OpenAI`` client for the current endpoint, key and headers.
+
+        Its pool can be aborted (:func:`make_pool_abortable`), so a Stop
+        also reaches a request whose connection is still being set up
+        (:meth:`_abort_pending_request`).
+        """
+        client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=1800.0,
             max_retries=_MAX_RETRIES,
             default_headers=self.model_config.get("extra_headers") or {},
         )
+        make_pool_abortable(client._client)
+        return client
 
     def _stream_request(
         self,
@@ -648,11 +667,16 @@ class OpenAICompatibleBase(Model):
         ``stream_abort.CONNECT_TIMEOUT`` to connect) and, once the headers
         arrive, the abort watchdog the transport's *consume* runs the
         events under.  Both raise the same retryable stall error (or the
-        Stop error when the user stopped meanwhile).  A Stop that landed
-        after *consume* left its loop early (a ``break`` on the terminal
-        event skips the post-loop check inside ``stop_aware_events``) is
-        honoured here, once the usage *consume* recorded is in
-        ``_rejected_response`` for the stopped run's bill.
+        Stop error when the user stopped meanwhile).  The client's one
+        silent retry (:data:`_MAX_RETRIES`, kept for a transient 429/5xx
+        or connect failure) also re-sends a request whose headers never
+        came, so a provider that never answers is reported after two
+        header timeouts.
+
+        A Stop that landed after *consume* left its loop early (a
+        ``break`` on the terminal event skips the post-loop check inside
+        ``stop_aware_events``) is honoured here, once the usage *consume*
+        recorded is in ``_rejected_response`` for the stopped run's bill.
 
         Args:
             create: The SDK call that opens the stream
@@ -687,9 +711,12 @@ class OpenAICompatibleBase(Model):
         poll rate).  On a Stop the pending socket is shut down, which
         wakes the worker, and the client is closed and dropped so the
         SDK's retry of the woken call fails at once instead of re-sending
-        the stopped request and the next turn builds a fresh pool.  If the
-        socket could not be reached the worker is simply abandoned (a
-        daemon thread) until the client timeout.
+        the stopped request and the next turn builds a fresh pool.  A
+        connection still being set up is shut down the moment it is up,
+        before the request is written on it (the pool's
+        ``AbortableNetworkBackend``).  If the socket could not be reached
+        otherwise the worker is simply abandoned (a daemon thread) until
+        the client timeout.
 
         A reply that arrived was billed, whatever the caller then makes
         of it (a Stop already set, a failed status, a tool call the agent
@@ -721,8 +748,8 @@ class OpenAICompatibleBase(Model):
             name="model-blocking-request",
             daemon=True,
         )
-        worker.start()
         try:
+            worker.start()
             while worker.is_alive():
                 if stop_event.wait(_BLOCKING_STOP_POLL_SECONDS):
                     # A reply landing this very moment is billed too: give
@@ -731,17 +758,22 @@ class OpenAICompatibleBase(Model):
                     break
         finally:
             # Also on a KeyboardInterrupt raised into this thread (the
-            # runner's forced stop): the pending request is torn down
-            # and a reply the worker already stored is still billed.
-            if worker.is_alive():
+            # runner's forced stop), even one landing inside start()
+            # before the worker reports itself alive (is_alive() is
+            # still False then, yet the worker runs): a worker that has
+            # not answered is torn down, failing at once on the closed
+            # client if it had not sent the request yet, and a reply it
+            # already stored is still billed.
+            if not outcome:
                 self._abort_pending_request()
                 # The shutdown wakes the worker; one that already had the
                 # whole reply in hand stores it now, so wait a poll
-                # interval before looking at the outcome rather than only
-                # at the worker's liveness: a reply that landed between
-                # the alive check and the abort was billed and must not
-                # be dropped.
-                worker.join(_BLOCKING_STOP_POLL_SECONDS)
+                # interval before looking at the outcome: a reply that
+                # landed between the check and the abort was billed and
+                # must not be dropped.  A worker that has not started
+                # yet cannot be joined and has nothing to store.
+                if worker.is_alive():
+                    worker.join(_BLOCKING_STOP_POLL_SECONDS)
             if "response" in outcome:
                 self._rejected_response = outcome["response"]
         if stop_event.is_set():
@@ -808,15 +840,15 @@ class OpenAICompatibleBase(Model):
         return {"type": cls._TEXT_PART_TYPE, "text": text}
 
     @classmethod
-    def _user_message_with_attachments(
-        cls, attachments: list[Attachment], text: str
-    ) -> dict[str, Any] | None:
-        """Build a user message carrying *attachments* followed by *text*.
+    def _user_message_with_attachments(cls, attachments: list[Attachment]) -> dict[str, Any] | None:
+        """Build the user message carrying tool-result *attachments*.
+
+        The attachment parts are followed by
+        :data:`~kiss.core.models.model.TOOL_RESULT_ATTACHMENT_NOTE`.
 
         Args:
             attachments: The attachments to convert (unsupported formats
                 are dropped with a warning).
-            text: The note appended after the attachment parts.
 
         Returns:
             The user message, or ``None`` when no attachment survived the
@@ -825,16 +857,25 @@ class OpenAICompatibleBase(Model):
         parts = cls._attachments_to_content_parts(attachments)
         if not parts:
             return None
-        parts.append(cls._text_part(text))
+        parts.append(cls._text_part(TOOL_RESULT_ATTACHMENT_NOTE))
         return {"role": "user", "content": parts}
 
     def _create_embeddings(
         self, model_to_use: str, text_or_texts: str | list[str]
     ) -> list[list[float]]:
-        """Send one embeddings request bounded by :data:`EMBEDDINGS_TIMEOUT`.
+        """Send an embeddings request bounded by :data:`EMBEDDINGS_TIMEOUT`.
+
+        The request names the model by its provider id
+        (:func:`_provider_model_name`), as the chat and Responses requests
+        do.  Its connect phase is capped at ``CONNECT_TIMEOUT``: the call
+        runs inline on the task thread, where a Stop arrives only as an
+        injected ``KeyboardInterrupt``, and that cannot land while the
+        thread waits in ``connect()``.  The client's one silent retry
+        (:data:`_MAX_RETRIES`) may send the request twice, so a silent
+        endpoint is reported after up to twice the timeout.
 
         Args:
-            model_to_use: The embeddings model name.
+            model_to_use: The embeddings model's catalog name.
             text_or_texts: One text or the batch to embed.
 
         Returns:
@@ -847,9 +888,11 @@ class OpenAICompatibleBase(Model):
         """
         self._ensure_client()
         timeout = self.model_config.get("timeout", EMBEDDINGS_TIMEOUT)
+        if isinstance(timeout, int | float):
+            timeout = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
         try:
             response = self.client.embeddings.create(
-                model=model_to_use, input=text_or_texts, timeout=timeout
+                model=_provider_model_name(model_to_use), input=text_or_texts, timeout=timeout
             )
             ordered = sorted(response.data, key=lambda item: item.index)
             expected = 1 if isinstance(text_or_texts, str) else len(text_or_texts)
@@ -1219,7 +1262,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Args:
             attachments: The attachments lifted out of the tool results.
         """
-        message = self._user_message_with_attachments(attachments, TOOL_RESULT_ATTACHMENT_NOTE)
+        message = self._user_message_with_attachments(attachments)
         if message is not None:
             self.conversation.append(message)
 
@@ -1440,51 +1483,61 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
     @staticmethod
     def _response_error_message(response: Any) -> str:
-        """Return the gateway-level error message carried by a response.
+        """Return the gateway-level error message carried by a response or a choice.
 
         Several OpenAI-compatible gateways answer an upstream failure
         with ``200 {"choices": [], "error": {...}}`` rather than a 4xx,
-        so the only diagnosis available is this extra field.
+        or end a choice with ``finish_reason="error"`` and an ``error``
+        beside it, so the only diagnosis available is this extra field.
 
         Args:
-            response: A Chat Completions response (SDK object or dict).
+            response: A Chat Completions response or one of its choices
+                (SDK object or dict).
 
         Returns:
-            The error message, or ``""`` when the response carries none.
+            The error message, or ``""`` when *response* carries none.
         """
         err = _get_attr_or_key(response, "error")
         if err is None:
             return ""
         return str(_get_attr_or_key(err, "message") or err)
 
-    def _raise_for_finish_reason(self, finish_reason: str | None) -> None:
-        """Reject a truncated completion instead of using its partial output.
+    def _raise_for_finish_reason(self, choice: Any, response: Any) -> None:
+        """Reject a completion the provider cut short instead of using its partial output.
 
-        ``finish_reason="length"`` means the model hit its output-token
-        budget mid-sentence — and, on a tool-bearing turn, mid-JSON.  The
+        A :data:`_CUT_SHORT_FINISH_REASONS` value means the output stopped
+        mid-sentence — and, on a tool-bearing turn, mid-JSON.  The
         partial ``arguments`` string then fails to parse and
         :meth:`_build_tool_call_lists` turns it into ``{}``, so the agent
-        calls the tool with no arguments and is told the tool failed for
-        a reason unrelated to the real cause.  The Responses transport
-        already refuses the equivalent ``status="incomplete"`` response.
+        would call the tool with no arguments and be told the tool failed
+        for a reason unrelated to the real cause.
 
-        The truncated completion was still billed: the transport already
+        The cut-short completion was still billed: the transport already
         holds it in ``_rejected_response`` for
         :meth:`take_partial_usage_response`.
 
         Args:
-            finish_reason: The choice's ``finish_reason``, if any.
+            choice: The choice that carried the ``finish_reason`` (the
+                response's first choice, or the stream chunk's), or
+                ``None`` when no choice ended the completion.
+            response: The response (or the stream's usage chunk) the
+                choice came with; a gateway may put the upstream error
+                there instead of on the choice.
 
         Raises:
-            KISSError: When the completion was truncated.
+            KISSError: When the provider cut the completion short.
         """
-        if finish_reason == "length":
-            raise KISSError(
-                "Chat Completions response was truncated "
-                "(finish_reason='length'): the model hit its output-token "
-                "budget, so its text and any tool-call arguments are "
-                "incomplete. Raise max_tokens or lower reasoning_effort."
-            )
+        finish_reason = getattr(choice, "finish_reason", None)
+        cause = _CUT_SHORT_FINISH_REASONS.get(finish_reason or "")
+        if cause is None:
+            return
+        error = self._response_error_message(choice) or self._response_error_message(response)
+        advice = " Raise max_tokens or lower reasoning_effort." if finish_reason == "length" else ""
+        raise KISSError(
+            f"Chat Completions response was truncated (finish_reason={finish_reason!r}): "
+            f"{cause}{f' ({error})' if error else ''}, so its text and any tool-call "
+            f"arguments are incomplete.{advice}"
+        )
 
     def _raise_for_failed_completion(self, response: Any) -> None:
         """Reject a non-streamed response that carries no usable choice.
@@ -1492,30 +1545,28 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         The counterpart of
         :meth:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2._raise_for_failed_response`
         for the Chat Completions transport.  *response* is billed either
-        way, so it is recorded in ``_rejected_response`` first (the
-        streamed path records its usage chunk the same way); the public
-        generation methods clear the slot on success.
+        way; :meth:`_blocking_request` already recorded it in
+        ``_rejected_response`` and the public generation methods clear
+        the slot on success.
 
         Args:
             response: The response returned by ``chat.completions.create``.
 
         Raises:
             KISSError: When ``choices`` is empty (surfacing the gateway's
-                own error message) or the single choice was truncated.
+                own error message) or the single choice was cut short.
         """
-        # Any usage the gateway reported alongside an error was billed.
-        self._rejected_response = response
         choices = getattr(response, "choices", None) or []
         if not choices:
             message = self._response_error_message(response)
             raise KISSError(
                 "Chat Completions returned no choices" + (f": {message}" if message else "")
             )
-        self._raise_for_finish_reason(getattr(choices[0], "finish_reason", None))
+        self._raise_for_finish_reason(choices[0], response)
 
     def _stream_chat_completion(
         self, kwargs: dict[str, Any], adaptive: bool
-    ) -> tuple[str, dict[int, dict[str, str]], Any, str | None]:
+    ) -> tuple[str, dict[int, dict[str, str]], Any, Any]:
         """Stream one chat completion, driving the token/thinking callbacks.
 
         The single streaming loop behind both streamed entry points —
@@ -1537,7 +1588,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 instead of a plain create.
 
         Returns:
-            ``(content, tool_call_accumulator, response, finish_reason)``.
+            ``(content, tool_call_accumulator, response, finish_choice)``;
+            ``finish_choice`` is the choice that carried the
+            ``finish_reason``, or ``None`` when none did.
         """
         kwargs["stream_options"] = {"include_usage": True}
         if adaptive:
@@ -1546,18 +1599,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         else:
             create = self.client.chat.completions.create
             watchdog_name = "openai-stream-abort-watchdog"
-        content, tool_calls_accum, response, last_chunk, finish_reason = self._stream_request(
+        content, tool_calls_accum, response, last_chunk, finish_choice = self._stream_request(
             create, kwargs, partial(self._consume_chat_stream, watchdog_name=watchdog_name)
         )
         response = self._finalize_stream_response(response, last_chunk)
         # Billed: kept for ``take_partial_usage_response`` until the public
         # generation method hands the response to its caller.
         self._rejected_response = response
-        return content, tool_calls_accum, response, finish_reason
+        return content, tool_calls_accum, response, finish_choice
 
     def _consume_chat_stream(
         self, stream: Any, watchdog_name: str
-    ) -> tuple[str, dict[int, dict[str, str]], Any, Any, str | None]:
+    ) -> tuple[str, dict[int, dict[str, str]], Any, Any, Any]:
         """Read one open chat-completion stream, driving the token/thinking callbacks.
 
         ``stop_aware_events`` (instead of a bare ``for chunk in ...``)
@@ -1574,14 +1627,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         Returns:
             ``(content, tool_call_accumulator, usage_chunk, last_chunk,
-            finish_reason)``; ``usage_chunk`` is ``None`` when no chunk
-            carried usage.
+            finish_choice)``; ``usage_chunk`` is ``None`` when no chunk
+            carried usage, ``finish_choice`` (the choice that carried the
+            ``finish_reason``) when none ended the stream.
         """
         content = ""
         tool_calls_accum: dict[int, dict[str, str]] = {}
         response = None
         last_chunk = None
-        finish_reason: str | None = None
+        finish_choice = None
         # The transport handler sits inside the watched block so that
         # the generator and the thinking bracket are closed only after
         # it ran: an error raised by that cleanup is not a transport
@@ -1602,7 +1656,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     if chunk.choices:
                         choice = chunk.choices[0]
                         if getattr(choice, "finish_reason", None):
-                            finish_reason = choice.finish_reason
+                            finish_choice = choice
                         delta = choice.delta
                     if delta:
                         reasoning = _delta_reasoning_text(delta)
@@ -1616,7 +1670,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                         if delta.tool_calls:
                             self._close_thinking_if_open()
                             _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
-                    if finish_reason is not None and response is not None:
+                    if finish_choice is not None and response is not None:
                         # The answer and its billing are both complete;
                         # only ``[DONE]`` can follow.  Waiting for it let
                         # a connection that went silent here trip the
@@ -1640,17 +1694,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 # stalls (``TimeoutError``) raised by
                 # ``stop_aware_events`` are not transport errors and are
                 # never swallowed.
-                if finish_reason is None or isinstance(
+                if finish_choice is None or isinstance(
                     err, httpx.TimeoutException | APITimeoutError
                 ):
                     raise
                 logger.warning(
                     "Stream connection lost after finish_reason=%r; keeping "
                     "the complete response instead of retrying: %s",
-                    finish_reason,
+                    finish_choice.finish_reason,
                     err,
                 )
-        return content, tool_calls_accum, response, last_chunk, finish_reason
+        return content, tool_calls_accum, response, last_chunk, finish_choice
 
     def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
         """Stream a chat completion, invoking the token callback for each text delta.
@@ -1668,10 +1722,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             self._raise_for_failed_completion(response)
             return response.choices[0].message.content or "", response
 
-        content, _accum, response, finish_reason = self._stream_chat_completion(
+        content, _accum, response, finish_choice = self._stream_chat_completion(
             kwargs, adaptive=False
         )
-        self._raise_for_finish_reason(finish_reason)
+        self._raise_for_finish_reason(finish_choice, response)
         return content, response
 
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1777,9 +1831,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 content,
                 tool_calls_accum,
                 response,
-                finish_reason,
+                finish_choice,
             ) = self._stream_chat_completion(kwargs, adaptive=True)
-            self._raise_for_finish_reason(finish_reason)
+            self._raise_for_finish_reason(finish_choice, response)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
             response = self._blocking_request(

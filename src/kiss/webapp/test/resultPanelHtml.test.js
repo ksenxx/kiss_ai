@@ -61,9 +61,12 @@ function testHtmlSummaryRendersAsHtml() {
 }
 
 function testSummaryIsNotParsedAsMarkdown() {
-  const {win} = makePage();
-  // The wire format is HTML; Markdown syntax inside text must stay literal.
-  sendResult(win, '<p>keep **stars** and _underscores_ literal</p>');
+  // marked is on the page, as on the served chat page, so a summary piped
+  // through marked.parse() would really be styled.
+  const {win} = makePage({extraScripts: ['marked.min.js']});
+  // The wire format is HTML; Markdown syntax in its text must stay
+  // literal, also outside an HTML block (which marked leaves untouched).
+  sendResult(win, '<p>intro</p>\n\nkeep **stars** and _underscores_ literal');
   const body = resultBodies(win)[0];
   assert.ok(
     !body.querySelector('strong') && !body.querySelector('em'),

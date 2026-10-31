@@ -39,6 +39,7 @@ the real home directory is never scanned.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -94,6 +95,7 @@ class TestAutocompleteStaleReply(TestCase):
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-files-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.wd_old = self.tmp / "repo-old"
         self.wd_old.mkdir()
         (self.wd_old / "marker-old.py").write_text("old\n", encoding="utf-8")

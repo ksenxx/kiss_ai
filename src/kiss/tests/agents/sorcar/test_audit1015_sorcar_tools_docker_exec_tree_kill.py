@@ -64,7 +64,9 @@ class _DockerSocketProxy:
 
     def __init__(self) -> None:
         self.cut_exec_stream_after: float | None = None
-        self.directory = tempfile.mkdtemp(prefix="kiss-docker-proxy-")
+        # Directly under /tmp: inside the session temp root under macOS's
+        # long TMPDIR the socket path (104 bytes) is too long for bind().
+        self.directory = tempfile.mkdtemp(prefix="kiss-docker-proxy-", dir="/tmp")
         self.path = os.path.join(self.directory, "docker.sock")
         self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server.bind(self.path)

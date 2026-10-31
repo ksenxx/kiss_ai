@@ -53,7 +53,8 @@ async function openEditAndSave(ctx, fileEvent) {
   const {win, posted, created} = ctx;
   const before = created.length;
   send(win, Object.assign({type: 'fileContent', tabId: 'a1'}, fileEvent));
-  for (let i = 0; i < 100 && created.length < before + 1; i++) await sleep(20);
+  // The stubbed editor is created on the next microtask.
+  await sleep(0);
   assert.strictEqual(created.length, before + 1, 'the file got an editor');
   created[before].editor._type('edited');
   posted.length = 0;

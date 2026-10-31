@@ -53,6 +53,10 @@
 # Usage:
 #   ./install.sh                  interactive: asks before installing Homebrew
 #   ./install.sh --non-interactive  every question takes its default answer
+#   ./install.sh --restart-only   install nothing; only (re)start kiss-web from
+#                                 the app already in $KISS_HOME, serving the
+#                                 directory it is run from -- how kiss-web
+#                                 finishes a restart a run deferred
 #
 # Environment:
 #   KISS_HOME            state directory (default ~/.kiss); the app goes in
@@ -77,7 +81,9 @@
 #
 # Re-running the script updates the app in place: the app directory is
 # rebuilt from the checkout this script lives in, the venv is re-synced
-# and the daemon is restarted (never while it reports tasks in flight).
+# and the daemon is restarted -- never while it reports tasks in flight:
+# the restart is then deferred, and the daemon finishes it by itself once
+# its tasks are done (record_deferred_restart).
 # The daemon's Update button and the curl bootstrap (scripts/install.sh)
 # both run this script from the ``~/.kiss/kiss_ai`` checkout.
 
@@ -253,6 +259,18 @@ fi
 # non-zero exit from its body instead of returning the tail's status.
 set -eo pipefail
 
+# ``--restart-only``: kiss-web finishing the restart an earlier run
+# deferred because tasks were in flight (record_deferred_restart).  The
+# app is installed already; the run only (re)starts the daemon from it.
+# Read before the update lock below, which such a run waits for.
+_KISS_RESTART_ONLY=0
+for _kiss_arg in "$@"; do
+    if [ "$_kiss_arg" = "--restart-only" ]; then
+        _KISS_RESTART_ONLY=1
+    fi
+done
+unset _kiss_arg
+
 # ---------------------------------------------------------------------------
 # Cross-process update lock — the same lock as install.sh and
 # scripts/install.sh.
@@ -298,8 +316,17 @@ acquire_update_lock() {
             [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null && break
             sleep 0.05
         done
-        echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
-        exit 1
+        if [ "$_KISS_RESTART_ONLY" != 1 ]; then
+            echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
+            exit 1
+        fi
+        # A deferred restart waits instead: the run that deferred it may
+        # still be finishing.  Any run holding the lock leaves an app on
+        # disk to restart onto, and a daemon it restarted meanwhile is left
+        # running (restart_kiss_web_locked compares fingerprints).
+        echo "   Waiting for the KISS update running as pid ${holder:-unknown} to finish..."
+        perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX) ? 0 : 1)' \
+            || exit 1
     fi
     echo "$$" > "$_kiss_lock_file"
     export KISS_UPDATE_LOCK_HELD=1
@@ -403,11 +430,12 @@ APP_DIR="$(app_dir_of "$KISS_HOME_DIR")"
 # file's lines as a notification in the web app (see
 # kiss/server/install_problems.py).  A run starts afresh; a run with no
 # failure leaves no file, so a previous run's problems are not reported
-# again once an update succeeds.
+# again once an update succeeds.  A ``--restart-only`` run keeps them:
+# they are the deferred run's, for the daemon it restarts to report.
 PROBLEMS_FILE="$KISS_HOME_DIR/.install-problems"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$KISS_HOME_DIR"
-rm -f "$PROBLEMS_FILE"
+[ "$_KISS_RESTART_ONLY" = 1 ] || rm -f "$PROBLEMS_FILE"
 export PATH="$BIN_DIR:$PATH"
 
 # BEGIN: kiss-install-problems  (tests extract this block verbatim)
@@ -888,13 +916,26 @@ kiss_web_is_idle() {
     # True when no daemon reachable through any of the endpoint files $@
     # reports tasks in flight (scripts/check-kiss-web-active-tasks.py:
     # exit 0 = absent, refused or idle; 1 = busy, unknown, or a daemon
-    # too old to answer).
+    # too old to answer).  A busy daemon that finishes a deferred restart
+    # by itself names the file it reads it from (the probe prints it):
+    # KISS_WEB_RESTART_PENDING, empty otherwise.
     local python="$1" endpoint
     shift
+    KISS_WEB_RESTART_PENDING=""
     for endpoint in "$@"; do
-        KISS_SORCAR_LOCAL="$endpoint" KISS_ACTIVE_TASKS_STRICT=1 \
-            "$python" "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py" || return 1
+        KISS_WEB_RESTART_PENDING="$(KISS_SORCAR_LOCAL="$endpoint" KISS_ACTIVE_TASKS_STRICT=1 \
+            "$python" "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py")" || return 1
     done
+}
+
+record_deferred_restart() {
+    # Record in file $1, the busy daemon's (KISS_WEB_RESTART_PENDING), the
+    # restart deferred for state dir $3 and work dir $4: once no task is
+    # in flight, kiss-web runs this script with --restart-only, KISS_HOME
+    # $3, from $4 (kiss.server.deferred_restart).  Python $2 writes the
+    # JSON; the rename keeps the daemon from reading half a file.
+    "$2" -c 'import json, sys; print(json.dumps(dict(installer=sys.argv[1], home=sys.argv[2], workdir=sys.argv[3])))' \
+        "$PROJECT_DIR/install.sh" "$3" "$4" > "$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
 service_kiss_home() {
@@ -1527,7 +1568,14 @@ restart_kiss_web_locked() {
         [ -n "$old" ] && candidates+=("$old/sorcar-local.json")
     done < <(previous_kiss_web_homes)
     if ! kiss_web_is_idle "$python" "${candidates[@]}"; then
-        echo "   kiss-web has tasks in flight; restart deferred (re-run this script once they finish)."
+        # Not from a --restart-only run: that is the daemon's own attempt,
+        # and a record would have it retry at once, in a loop.
+        if [ -n "$KISS_WEB_RESTART_PENDING" ] && [ "${_KISS_RESTART_ONLY:-0}" != 1 ] \
+            && record_deferred_restart "$KISS_WEB_RESTART_PENDING" "$python" "$home" "$workdir"; then
+            echo "   kiss-web has tasks in flight; restart deferred: kiss-web restarts itself onto this build once they finish."
+        else
+            echo "   kiss-web has tasks in flight; restart deferred (re-run this script once they finish)."
+        fi
         return 0
     fi
     # "Up" below means the new daemon rewrote its endpoint file after this
@@ -1824,6 +1872,16 @@ fi
 
     if [ ! -d "$PROJECT_DIR/src/kiss" ]; then
         fail "$PROJECT_DIR/src/kiss not found; run this script from a KISS Sorcar checkout."
+    fi
+
+    # --restart-only: what the deferred run's step [5/5] left undone, the
+    # daemon restart onto the app it installed; nothing else runs.
+    if [ "$_KISS_RESTART_ONLY" = 1 ]; then
+        report_step "Restarting kiss-web onto the app in $APP_DIR..."
+        start_kiss_web_daemon "$APP_DIR" "$USER_PWD" \
+            || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+        retire_legacy_app_dir "$KISS_HOME_DIR" "$APP_DIR"
+        exit 0
     fi
 
     if [ "$OS" = "Darwin" ]; then

@@ -11,11 +11,11 @@ F2  ``_AutocompleteMixin._refresh_files_after_task`` queues a rescan on
     concurrent ``_file_cache`` writer and the post-task scan no longer
     exists: a single worker thread owns every index.)
 F4  (obsolete) ``_MergeFlowMixin._main_dirty_files`` was removed with the
-    main-tree auto-commit; ``_porcelain_paths`` (F5) keeps its no-strip rule.
-F5  The porcelain fallback of ``_get_worktree_changed_files`` (extracted
-    as ``merge_flow._porcelain_paths``) must not strip paths and must
-    split rename entries ``old -> new`` instead of emitting the joined
-    string as one bogus file.
+    main-tree auto-commit.
+F5  (moved) The porcelain fallback of ``_get_worktree_changed_files`` now
+    reads ``git status --porcelain -z`` (no quoting, no `` -> `` to
+    split); ``src/kiss/tests/server/test_porcelain_z_wave3.py`` drives it
+    end to end with renamed and space-padded names.
 F8  (obsolete) ``diff_merge._write_base_copy`` was removed together
     with the interactive diff/merge review workflow.
 F9  ``autocomplete._ghost_suffix`` behaviour for the three completion
@@ -33,41 +33,15 @@ the production functions directly.  No mocks, patches, or fakes.
 
 from __future__ import annotations
 
-import subprocess
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import _git
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter
-from kiss.tests.conftest import posix_only
-
-
-def _run_git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        [
-            "git",
-            "-c", "user.email=test@test",
-            "-c", "user.name=test",
-            "-c", "commit.gpgsign=false",
-            *args,
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-
-def _make_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    _run_git(repo, "init")
-    (repo / "a.txt").write_text("hello\n")
-    _run_git(repo, "add", "a.txt")
-    _run_git(repo, "commit", "-m", "initial")
 
 
 class _RecordingPrinter(JsonPrinter):
@@ -122,51 +96,6 @@ def _paths(registry: FileIndexRegistry, work_dir: str) -> list[str]:
     """Return the current entries of *work_dir*'s view (``[]`` when unindexed)."""
     view = registry.view_for(work_dir)
     return [] if view is None else view.paths
-
-
-class TestPorcelainPathsFallbackParser:
-    def test_rename_split_and_spaces_preserved(self, tmp_path: Path) -> None:
-        from kiss.server.merge_flow import _porcelain_paths
-
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        _run_git(repo, "mv", "a.txt", "b.txt")
-        (repo / " padded .txt").write_text("x\n")
-
-        status = _git("status", "--porcelain", cwd=str(repo))
-        assert status.returncode == 0
-        files = _porcelain_paths(status.stdout)
-
-        assert "a.txt" in files
-        assert "b.txt" in files
-        assert "a.txt -> b.txt" not in files
-        assert " padded .txt" in files
-
-    def test_rename_lists_both_sides_in_order(self, tmp_path: Path) -> None:
-        from kiss.server.merge_flow import _porcelain_paths
-
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        _run_git(repo, "mv", "a.txt", "b.txt")
-
-        status = _git("status", "--porcelain", cwd=str(repo))
-        files = _porcelain_paths(status.stdout)
-
-        assert files == ["a.txt", "b.txt"]
-
-    @posix_only('a double quote is not a valid NTFS file-name character')
-    def test_quoted_path_unquoted_once(self, tmp_path: Path) -> None:
-        from kiss.server.merge_flow import _porcelain_paths
-
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        (repo / 'we"ird.txt').write_text("x\n")
-
-        status = _git("status", "--porcelain", cwd=str(repo))
-        files = _porcelain_paths(status.stdout)
-
-        assert 'we"ird.txt' in files
-
 
 
 class TestGhostSuffixKinds:

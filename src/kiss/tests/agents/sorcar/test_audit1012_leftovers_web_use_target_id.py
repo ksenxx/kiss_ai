@@ -82,7 +82,7 @@ def test_target_id_of_a_browser_that_does_not_answer_is_bounded(tool, service):
     pid = _daemon_browser_pid(tool)
     # ``show_browser`` attached a session while finding the page; forget it
     # (as ``_detach_live`` does) so the next read has to attach again.
-    tool._cdp_sessions.clear()
+    tool._page_records.clear()
     os.kill(pid, signal.SIGSTOP)
     resume = threading.Timer(40, os.kill, args=(pid, signal.SIGCONT))
     resume.daemon = True
@@ -92,7 +92,7 @@ def test_target_id_of_a_browser_that_does_not_answer_is_bounded(tool, service):
         os.kill(pid, signal.SIGCONT)
         time.sleep(0.2)
         first = tool._target_id(page)  # attaches for real
-        assert page in tool._cdp_sessions
+        assert tool._page_records[page].session is not None
         os.kill(pid, signal.SIGSTOP)
         send_exc, send_elapsed = _timed_target_id(tool)
     finally:

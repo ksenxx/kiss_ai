@@ -20,10 +20,10 @@ import datetime as dt
 import json
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -53,6 +53,11 @@ def _date(task_id: str, timestamp: float) -> None:
             "UPDATE task_history SET timestamp = ? WHERE id = ?",
             (timestamp, task_id),
         )
+
+
+def _assert_live(task: Future[Any]) -> None:
+    """Fail with the live task's own result when it ended before the test released it."""
+    assert not task.done(), f"the live task ended early: {task.result().text}"
 
 
 def _record_error(errors: list[str], error: Exception) -> None:
@@ -98,8 +103,12 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
     cancel = threading.Event()
     today = dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
     yesterday = (today - dt.timedelta(days=1)).timestamp()
+    # Left to itself the model picks the Bash timeout (gpt-5.4-mini often
+    # chose 1 to 5 s), and the task finished seconds in, while a loaded
+    # parallel run was still clicking through the steps below.
     prompt = (
-        "section-live: Use Bash to run this command once, then finish successfully: "
+        "section-live: Use Bash to run this command once in the foreground with "
+        "timeout_seconds=900, then finish successfully: "
         f"`while [ ! -f '{release}' ]; do sleep 0.2; done`. "
         "Do not create the release file. Do not do any other work."
     )
@@ -172,7 +181,7 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                     page.click("#history-view-toggle")
                 # A task that died at start (its model import, say) is
                 # dated history, not "Running": name the real cause.
-                assert not task.done(), f"the live task ended early: {task.result().text}"
+                _assert_live(task)
                 expect(page.locator("#history-list > .history-day-sep").first).to_have_text(
                     "Running"
                 )
@@ -197,6 +206,7 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 assert _shape(page)[0] == "Running"
 
                 # Every layout switch keeps the pinned section and date boundary.
+                _assert_live(task)
                 page.click("#history-view-toggle")
                 assert _shape(page)[0] == "Running"
                 page.click("#history-view-toggle")
@@ -255,6 +265,7 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                     expect(page.locator(selector)).to_be_checked()
                 # The list re-renders after the checkbox state changes, so
                 # wait for the Running label instead of snapshotting at once.
+                _assert_live(task)
                 expect(page.locator("#history-list > :visible").first).to_have_text("Running")
 
                 # Natural task-runner completion must update the already-open

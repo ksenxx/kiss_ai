@@ -57,6 +57,23 @@ function makePage(opts) {
 
 const label = 'remote webapp';
 
+/**
+ * Unfold every tool panel of the transcript on screen by hand (not
+ * pinned), so the sweep's own rule, fold all but the newest two panels,
+ * decides what a wrongly applied sweep would change.  Returns them.
+ */
+function openToolPanels(O) {
+  const panels = Array.from(O.querySelectorAll('.ev.tc'));
+  for (const p of panels) p.classList.remove('collapsed');
+  return panels;
+}
+
+/** Run one finished Bash step (call and result) in tab `tabId`. */
+function sendBashStep(win, tabId, command) {
+  send(win, {type: 'tool_call', name: 'Bash', command, tabId});
+  send(win, {type: 'tool_result', content: 'ok', is_error: false, tabId});
+}
+
 // --------------------------------------------------------------------
 // system_output chunks: the older-panel collapse a chunk used to run
 // synchronously (via streamEnd) is deferred to the per-frame sweep,
@@ -275,7 +292,7 @@ async function testTabSwitchDropsPendingSweep() {
   const {win, posted} = makePage();
   const O = win.document.getElementById('output');
   fakeGeometry(O, {sh: 3000, ch: 500});
-  startRunningTask(win, posted);
+  const tab1 = startRunningTask(win, posted);
   win._testApi.endLaunch();
 
   // Tab 1: leave a sweep pending WITH collapse debt (the stream keeps
@@ -289,33 +306,24 @@ async function testTabSwitchDropsPendingSweep() {
   assert.ok(!t1panel1.classList.contains('collapsed'), 'tail must be pending');
 
   // Switch tabs before the frame fires, and make tab 2 run a stream
-  // of its own whose chunks carry NO collapse debt.
+  // of its own whose chunks carry NO collapse debt.  Its panels are
+  // all open, three of them, so a debt carried over would fold one.
   win._testApi.createNewTab();
   const tab2 = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab2, startTs: Date.now()});
-  send(win, {type: 'tool_call', name: 'Bash', command: 'true', tabId: tab2});
-  send(win, {
-    type: 'tool_result',
-    content: 'ok',
-    is_error: false,
-    tabId: tab2,
-  });
+  sendBashStep(win, tab2, 'true');
+  sendBashStep(win, tab2, 'false');
   send(win, {type: 'text_delta', text: 'hi ', tabId: tab2});
-  const t2panel = O.querySelector('.ev.tc');
-  t2panel.classList.remove('collapsed');
+  const t2panels = openToolPanels(O);
   // This chunk re-arms the sweep for tab 2: the debt tab 1 left behind
   // must have been dropped with tab 1's transcript.
   send(win, {type: 'text_delta', text: 'there', tabId: tab2});
 
   await nextFrames(win);
   assert.ok(
-    !t2panel.classList.contains('collapsed'),
+    !t2panels[0].classList.contains('collapsed'),
     'BUG: the collapse debt of a transcript that left the screen was ' +
       "applied to the NEW tab's transcript",
-  );
-  assert.ok(
-    !t1panel1.classList.contains('collapsed'),
-    "BUG: a pending sweep collapsed a hidden tab's panel",
   );
   assert.strictEqual(
     O.querySelector('.llm-panel .txt').textContent,
@@ -324,21 +332,22 @@ async function testTabSwitchDropsPendingSweep() {
   );
 
   // A sweep still pending when its own tab leaves the screen must do
-  // nothing at all when it fires.
+  // nothing at all when it fires, whatever transcript is on screen.
   send(win, {
     type: 'tool_call',
     name: 'Bash',
     command: 'make three',
     tabId: tab2,
   });
-  const t2panels = O.querySelectorAll('.ev.tc');
-  t2panels[0].classList.remove('collapsed');
+  openToolPanels(O);
   send(win, {type: 'system_output', text: 'three\n', tabId: tab2});
-  win._testApi.createNewTab();
+  win._testApi.switchToTab(tab1);
+  const t1panels = openToolPanels(O);
   await nextFrames(win);
   assert.ok(
-    !t2panels[0].classList.contains('collapsed'),
-    'BUG: a sweep fired for a transcript that had left the screen',
+    !t1panels[0].classList.contains('collapsed'),
+    'BUG: a sweep left pending by a tab that left the screen folded ' +
+      'the transcript on screen',
   );
   win.close();
   console.log('  ok - tab switches drop the pending sweep and its debt');
@@ -362,33 +371,29 @@ async function testChunkAfterSwitchRetargetsSweep() {
   // Tab 1 gets a bash panel so a later chunk can buffer into it.
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
 
-  // Tab 2 runs its own stream with an open thoughts panel mid-text.
+  // Tab 2 runs its own stream: two tool panels, then an open thoughts
+  // panel mid-text.
   win._testApi.createNewTab();
   const tab2 = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab2, startTs: Date.now()});
-  send(win, {type: 'tool_call', name: 'Bash', command: 'true', tabId: tab2});
-  send(win, {
-    type: 'tool_result',
-    content: 'ok',
-    is_error: false,
-    tabId: tab2,
-  });
+  sendBashStep(win, tab2, 'true');
+  sendBashStep(win, tab2, 'false');
   send(win, {type: 'text_delta', text: 'hi ', tabId: tab2});
 
   // Back on tab 1, leave a sweep pending WITH collapse debt...
   win._testApi.switchToTab(tab1);
   send(win, {type: 'system_output', text: 'one\n', tabId: tab1});
 
-  // ...switch to tab 2 and make its FIRST event a buffered chunk: the
+  // ...switch to tab 2, open its panels (a leaked debt would fold the
+  // oldest of the three) and make its FIRST event a buffered chunk: the
   // pending sweep is retargeted, dropping tab 1's debt.
   win._testApi.switchToTab(tab2);
-  const t2panel = O.querySelector('.ev.tc');
-  t2panel.classList.remove('collapsed');
+  const t2panels = openToolPanels(O);
   send(win, {type: 'text_delta', text: 'there', tabId: tab2});
 
   await nextFrames(win);
   assert.ok(
-    !t2panel.classList.contains('collapsed'),
+    !t2panels[0].classList.contains('collapsed'),
     'BUG: the outgoing tab\u2019s collapse debt leaked into the sweep ' +
       'retargeted to the new tab',
   );
@@ -420,11 +425,8 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'make zero'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
-  const panels = O.querySelectorAll('.ev.tc');
-  // Tool panels start folded: open all three by hand (not pinned), so
-  // the sweep's own rule — fold all but the newest two — is what is
-  // under test.
-  for (const p of panels) p.classList.remove('collapsed');
+  // Tool panels start folded: open all three by hand.
+  const panels = openToolPanels(O);
   send(win, {type: 'system_output', text: 'late output\n'});
   assert.ok(!panels[0].classList.contains('collapsed'), 'tail must defer');
 
@@ -511,19 +513,23 @@ async function testReplayCancelsPendingSweep() {
   send(win, {type: 'system_output', text: 'one\n'});
 
   // Replace the transcript while the sweep (and the flush) are pending.
+  // The replayed transcript has three panels, opened by hand, so the
+  // outgoing transcript's collapse debt would fold the oldest.
   send(win, {
     type: 'task_events',
     tabId: tabId,
     task: 'replayed task',
-    events: [{type: 'tool_call', name: 'Bash', command: 'replayed'}],
+    events: ['one', 'two', 'three'].map(n => ({
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'replayed ' + n,
+    })),
   });
-  const replayed = O.querySelectorAll('.ev.tc');
-  assert.strictEqual(replayed.length, 1, 'replay must replace the transcript');
-  const stateBefore = replayed[0].className;
+  const replayed = openToolPanels(O);
+  assert.strictEqual(replayed.length, 3, 'replay must replace the transcript');
   await nextFrames(win);
-  assert.strictEqual(
-    replayed[0].className,
-    stateBefore,
+  assert.ok(
+    !replayed[0].classList.contains('collapsed'),
     'BUG: a sweep deferred for the outgoing transcript ran against ' +
       'the replayed one',
   );

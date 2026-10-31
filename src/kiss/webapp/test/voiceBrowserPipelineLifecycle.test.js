@@ -28,7 +28,13 @@
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {makeVoicePage, micBtn, settle, VOICE_CFG} = require('./voice_page_helpers');
+const {
+  makeVoicePage,
+  micBtn,
+  settle,
+  startPipeline,
+  VOICE_CFG,
+} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
 // Every page built; closed after the run so no armed timer keeps node
@@ -239,12 +245,9 @@ async function main() {
   });
 
   await test('turning the mic off releases the microphone and closes the audio graph', async () => {
-    const {win, mic, log} = makePage();
-    micBtn(win).click();
-    await settle();
-    mic.calls[0].grant();
-    await settle();
-    assert.ok(micBtn(win).classList.contains('voice-listening'));
+    const page = makePage();
+    const {win, log} = page;
+    await startPipeline(page);
     micBtn(win).click(); // off
     assert.ok(
       log.includes('track-stopped'),
@@ -256,12 +259,9 @@ async function main() {
   });
 
   await test('a hidden tab keeps listening for its wake word', async () => {
-    const {win, mic, log} = makePage();
-    micBtn(win).click();
-    await settle();
-    mic.calls[0].grant();
-    await settle();
-    assert.ok(micBtn(win).classList.contains('voice-listening'));
+    const page = makePage();
+    const {win, mic, log} = page;
+    await startPipeline(page);
     setPageVisibility(win, 'hidden');
     assert.ok(
       !log.includes('track-stopped'),

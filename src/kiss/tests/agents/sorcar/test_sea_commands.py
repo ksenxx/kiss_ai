@@ -982,6 +982,60 @@ class Sea(BaseSea):
         sea_commands.load_sea(missing)
 
 
+_STATIC_DESCRIPTION_SEA = '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+class Sea(BaseSea):
+    @staticmethod
+    def description():
+        return "Describes a SEA."
+'''
+
+
+def test_named_commands_help_lists_the_commands_the_texts_name(tmp_path: Path) -> None:
+    """Each registered command the texts name gets one help line, in order of first mention.
+
+    A name counts at a text's start or after whitespace, an opening
+    bracket, a quote or Markdown emphasis; a path, a URL or a Markdown link
+    target that merely contains it does not, nor does an unknown command or
+    a SEA whose file or ``description()`` is broken (a staticmethod is not
+    a method).  A task that invokes a registered command itself, a bare
+    ``/xxx`` that fell back to a plain prompt, gets no block.
+    """
+    folder = tmp_path / "seas"
+    _touch_sea(folder, "echo").write_text(_DESCRIBED_SEA, encoding="utf-8")
+    _touch_sea(folder, "shout").write_text(
+        _DESCRIBED_SEA.replace("Echoes the task back; use it as /echo", "Shouts it; /shout"),
+        encoding="utf-8",
+    )
+    _touch_sea(folder, "broken")  # defines no SEA class
+    _touch_sea(folder, "static").write_text(_STATIC_DESCRIPTION_SEA, encoding="utf-8")
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+
+    block = sea_commands.named_commands_help(
+        "Fix /broken, /static and /unknown, then use **/shout**.",
+        ["(\u201c/echo\u201d) and /echo.", "/shout"],
+    )
+    lines = block.splitlines()
+    assert lines[0] == sea_commands.NAMED_COMMANDS_HEADING
+    assert 'run_agent(agent="<name>", task="...")' in lines[1]
+    echo = "- `/echo`: Echoes the task back; use it as /echo <text>."
+    assert lines[2:] == ["- `/shout`: Shouts it; /shout <text>.", echo]
+    for text in ("/echo", "`/echo`", "*/echo*", "'/echo'", "[/echo]", "Did you\n/echo?"):
+        assert sea_commands.named_commands_help("", [text]).splitlines()[2:] == [echo], text
+    for text in (
+        "~/echo", "a/echo", "/echo/x", "/echo.py", "/echo-2", "/echo?q=1", "/echo#a",
+        "[t](/echo)", "https://x.org/echo", "/broken /static /unknown", "no command",
+    ):
+        assert sea_commands.named_commands_help("", [text]) == "", text
+    with pytest.raises(sea_commands.SeaError, match="must be a method, got staticmethod"):
+        sea_commands.help_text_if_command("/static help")
+    assert sea_commands.named_commands_help("/echo", ["Use /shout."]) == ""
+    assert sea_commands.named_commands_help("/unknown, then /echo").splitlines()[2:] == [echo]
+
+
 def test_every_bundled_sea_has_a_description() -> None:
     """Every registered bundled SEA (``seas/`` and ``third_party_agents/``) describes itself.
 

@@ -4,7 +4,6 @@
     "./scripts/stylelint-design-tokens.mjs"
   ],
   "ignoreFiles": [
-    "media/**/*.min.css",
     "node_modules/**"
   ],
   "rules": {

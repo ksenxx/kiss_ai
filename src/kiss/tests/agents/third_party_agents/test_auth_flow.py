@@ -100,8 +100,7 @@ class TestPlatformSpecificAuth:
             pytest.skip("Running on macOS — platform check passes")
         result = auth_tools(_agent("IMessageAgent"))["check_imessage_auth"]()
         data = json.loads(result)
-        assert data.get("ok") is False
-        assert "macOS" in data.get("error", "") or "macos" in data.get("error", "").lower()
+        assert data["ok"] is False and "macOS" in data["error"]
 
     def test_imessage_authenticate_on_non_darwin(self) -> None:
         """authenticate_imessage() returns platform error on non-darwin."""
@@ -109,14 +108,17 @@ class TestPlatformSpecificAuth:
             pytest.skip("Running on macOS — platform check passes")
         result = auth_tools(_agent("IMessageAgent"))["authenticate_imessage"]()
         data = json.loads(result)
-        assert data.get("ok") is False
+        # Any failure is ok:false (a missing osascript too); only the
+        # platform gate names macOS.
+        assert data["ok"] is False and "macOS" in data["error"]
 
-    def test_bluebubbles_authenticate_on_non_darwin(self) -> None:
+    def test_bluebubbles_authenticate_on_non_darwin(self, refusing_port: int) -> None:
         """authenticate_bluebubbles() returns platform error on non-darwin."""
         if sys.platform == "darwin":
             pytest.skip("Running on macOS — platform check passes")
+        # Past a missing gate the server probe fails at once on the refusing port.
         result = auth_tools(_agent("BlueBubblesAgent"))["authenticate_bluebubbles"](
-            server_url="http://localhost:1234", password="test"
+            server_url=f"http://127.0.0.1:{refusing_port}", password="test"
         )
         data = json.loads(result)
-        assert data.get("ok") is False
+        assert data["ok"] is False and "macOS" in data["error"]

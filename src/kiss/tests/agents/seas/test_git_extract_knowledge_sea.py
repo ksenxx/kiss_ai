@@ -23,6 +23,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -38,6 +39,7 @@ from kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea import (
 )
 from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     KINDS,
+    WRITE_BATCH,
     Block,
     KnowledgeStore,
     query_tokens,
@@ -82,11 +84,14 @@ class Ledger:
 WITHDRAW = "\n\ndef withdraw(account, amount):\n    account['balance'] -= amount\n"
 
 
-def _init(root: Path, name: str) -> Path:
-    """Create an empty repository *name* under *root* whose commits are by Alice."""
+def _init(root: Path, name: str, *init_args: str) -> Path:
+    """Create an empty repository *name* under *root* whose commits are by Alice.
+
+    *init_args* are extra ``git init`` options (``--object-format=sha256``).
+    """
     repo = root / name
     repo.mkdir(parents=True)
-    git(root, "init", "-q", "-b", "main", str(repo))
+    git(root, "init", "-q", "-b", "main", *init_args, str(repo))
     git(repo, "config", "user.email", "alice@example.com")
     git(repo, "config", "user.name", "Alice")
     return repo
@@ -1201,12 +1206,24 @@ def test_store_delete_requires_a_filter(tmp_path: Path) -> None:
     assert store.file_shas() == {} and store.delete_shas(["x"]) == 0
 
 
+def _notes(store: KnowledgeStore, n: int, committed: list[int]) -> Iterator[Block]:
+    """Yield *n* note blocks; on either side of each batch boundary, first record in
+    *committed* how many notes *store* holds, read on a connection of its own."""
+    for i in range(n):
+        if i % WRITE_BATCH in (0, WRITE_BATCH - 1):
+            committed.append(store.counts().get("note", 0))
+        yield Block("note", f"note:n{i}", f"n{i}", f"word{i} common")
+
+
 def test_store_batches_large_writes_and_dedupes_query_tokens(tmp_path: Path) -> None:
-    """Writes above the batch size land in several transactions; repeated words collapse."""
+    """Writes commit every :data:`WRITE_BATCH` rows while the input streams in, then the
+    remainder; repeated words collapse."""
     store = KnowledgeStore(tmp_path / "big.sqlite3")
-    n = 2 * 2000 + 1  # WRITE_BATCH is 2000
-    blocks = [Block("note", f"note:n{i}", f"n{i}", f"word{i} common") for i in range(n)]
-    assert store.upsert(blocks, index.now_iso()) == n
+    n = 2 * WRITE_BATCH + 1
+    committed: list[int] = []
+    assert store.upsert(_notes(store, n, committed), index.now_iso()) == n
+    # A batch is committed right after its last row is read, and not before.
+    assert committed == [0, 0, WRITE_BATCH, WRITE_BATCH, 2 * WRITE_BATCH]
     assert store.counts() == {"note": n} and len(list(store.iter_blocks("note"))) == n
     assert query_tokens("common common Common") == ["common"]
     assert len(store.search("common", k=100)) == 100
@@ -1218,11 +1235,7 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     names, a file literally named ``f:2``, non-UTF-8 names, control bytes in a tag message
     at a ref tip, a NEL byte inside a line, and clock skew between parent and child."""
     _forget("s256")
-    repo = tmp_path / "s256"
-    repo.mkdir()
-    git(tmp_path, "init", "-q", "-b", "main", "--object-format=sha256", str(repo))
-    git(repo, "config", "user.email", "alice@example.com")
-    git(repo, "config", "user.name", "Alice")
+    repo = _init(tmp_path, "s256", "--object-format=sha256")
     git(repo, "config", "diff.noprefix", "true")  # would drop a/ b/ from patch headers
     git(repo, "config", "log.showRoot", "false")  # would hide the root commit's diff
     (repo / "f:2").write_text("COLONFACT\n")

@@ -7,8 +7,13 @@
 // media/transport.js and media/assetLoadGuard.js (not a fenced region) when
 // running test/remotePasswordBypass.test.js together with
 // test/transportReloadOnNewDaemon.test.js (the shim's GET /api/daemon
-// reload check, whose pages have a fetch), plus every branch except the
-// spec-unreachable `location.reload()` catch.
+// reload check, whose pages have a fetch),
+// test/transportAuthBatch_sweep1030.test.js (a failed Unlock reconnect,
+// frames held behind an unconfirmed batch) and
+// test/transportFramePassword.test.js (the per-frame password, a frame
+// with no fields), plus every branch except the spec-unreachable
+// `location.reload()` catch.  run-all.js runs these suites through this
+// gate only.
 
 'use strict';
 
@@ -24,6 +29,8 @@ const SCRIPTS = [
 const SUITES = [
   'remotePasswordBypass.test.js',
   'transportReloadOnNewDaemon.test.js',
+  'transportAuthBatch_sweep1030.test.js',
+  'transportFramePassword.test.js',
 ];
 
 function main() {

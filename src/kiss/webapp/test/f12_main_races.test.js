@@ -200,6 +200,9 @@ function testUntouchedPopulatedSettingsSheetSavesNothing() {
   console.log('  ok - an untouched populated settings sheet saves nothing');
 }
 
+// The daemon merges the payload, so every untouched key box, empty or
+// populated, is left out: sending it would re-save (or, as "", delete)
+// a key another window may have changed between populate and close.
 function testTouchedSettingsSheetSavesOnlyTheTouchedFields() {
   const {win, posted} = makeChatPage();
   openSettings(win);

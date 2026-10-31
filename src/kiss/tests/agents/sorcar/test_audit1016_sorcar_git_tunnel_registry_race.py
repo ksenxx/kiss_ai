@@ -31,8 +31,10 @@ from kiss.agents.sorcar import machines as mach
 from kiss.tests.agents.sorcar.test_machines import fake_ssh_only
 
 _FAKE_SSH = '''#!__PYTHON__
-"""Stand-in for ssh: ``-N -L`` binds the local port and serves nothing."""
+"""Stand-in for ssh: ``-N -L`` binds the local port, runs the ``LocalCommand`` (as ssh
+does once the port is bound) and serves nothing."""
 import socket
+import subprocess
 import sys
 import time
 
@@ -41,6 +43,7 @@ _host, local, _rhost, _remote = args[args.index("-L") + 1].split(":")
 server = socket.socket()
 server.bind(("127.0.0.1", int(local)))
 server.listen()
+subprocess.run(next(a[13:] for a in args if a.startswith("LocalCommand=")), shell=True)
 while True:
     time.sleep(1)
 '''
@@ -78,6 +81,8 @@ def test_registry_change_during_tunnel_open_closes_the_orphan(
             errors.append(exc)
 
     mach.close_tunnels()
+    # tunnel_port opens forwards for registered logins only.
+    mach.save_machines([mach.Machine("far", "https://far.example.org:8787", ssh=login)])
     thread = threading.Thread(target=opener, name="opener")
     thread.start()
     tunnel: mach.SshTunnel | None = None
@@ -100,6 +105,6 @@ def test_registry_change_during_tunnel_open_closes_the_orphan(
         assert mach._tunnels == {}
     finally:
         thread.join(timeout=30.0)
-        mach.close_tunnels()
+        mach.save_machines([])
         if tunnel is not None:
             tunnel.close()

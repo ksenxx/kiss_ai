@@ -45,38 +45,27 @@ const {
 
 const openWindows = [];
 
-// The harness's recording Monaco, exposing the editors themselves in
-// creation order (a suite types into them and reads their models).
-function stubEditors(win) {
-  stubMonaco(win);
-  const editors = [];
-  const create = win.monaco.editor.create;
-  win.monaco.editor.create = (holder, opts) => {
-    const editor = create(holder, opts);
-    editors.push(editor);
-    return editor;
-  };
-  return editors;
-}
-
+// `created` is the harness's recording Monaco's list of the editors in
+// creation order (`created[i].editor`: a suite types into them and reads
+// their models).
 function makePage() {
-  let editors;
+  let created;
   const {win, posted} = buildPage({
     bodyClass: 'remote-chat',
-    extraScripts: ['treeContextMenu.js'],
+    extraScripts: ['contentContextMenu.js', 'treeContextMenu.js'],
     beforeScripts: w => {
       stubRaf(w);
       // The desktop layout docks the task-info panel, so the views are on
       // screen as soon as their section is expanded.
       fakeMatchMedia(w, true);
-      editors = stubEditors(w);
+      created = stubMonaco(w);
       // A folder added to this daemon's Explorer earlier (Add Folder to
       // Explorer...), remembered across reloads.
       w.localStorage.setItem('kiss-explorer-roots', JSON.stringify(['/extra']));
     },
   });
   openWindows.push(win);
-  return {win, posted, editors};
+  return {win, posted, created};
 }
 
 function msgs(posted, type) {
@@ -348,7 +337,7 @@ function testTheDaemonsBindingMovesTheViews() {
 }
 
 async function testAFileOfTheMachineIsSavedAndReloadedThere() {
-  const {win, posted, editors} = boot();
+  const {win, posted, created} = boot();
   goToBox(win);
   answerListing(win, posted, '/srv/proj', 'gpu-box', [FILE]);
   const chat = win._testApi.getActiveTabId();
@@ -361,7 +350,7 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
     content: 'print(1)\n',
     version: 'v1',
   });
-  await waitFor(() => editors.length === 1, 'the file opened as a content tab');
+  await waitFor(() => created.length === 1, 'the file opened as a content tab');
   const content = win._testApi.openTabs().find(t => t.isContentTab);
   assert.ok(content, 'the content tab exists');
   // Shown as the active tab (the desktop layout's content pane shows
@@ -371,7 +360,7 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
   click(win, byId(win, 'explorer-refresh'));
   assert.strictEqual(msgs(posted, 'listDir')[0].machine, 'gpu-box');
   assert.strictEqual(msgs(posted, 'listDir')[0].path, '/srv/proj');
-  editors[0]._type('print(2)\n');
+  created[0].editor._type('print(2)\n');
   posted.length = 0;
   click(win, win.document.querySelector('.content-save-btn'));
   const saves = msgs(posted, 'saveFile');
@@ -417,20 +406,20 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
     content: 'print(9)\n',
     version: 'v3',
   });
-  await waitFor(() => editors.length === 2, 'the reload rebuilt the editor');
-  assert.strictEqual(editors[1].getModel().getValue(), 'print(9)\n');
+  await waitFor(() => created.length === 2, 'the reload rebuilt the editor');
+  assert.strictEqual(created[1].editor.getModel().getValue(), 'print(9)\n');
   // Even once the chat is brought home, the file stays the machine's.
   win._testApi.switchToTab(chat);
   pickMachine(win, '');
   win._testApi.switchToTab(content.id);
   posted.length = 0;
-  editors[1]._type('print(3)\n');
+  created[1].editor._type('print(3)\n');
   click(win, win.document.querySelector('.content-save-btn'));
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, 'gpu-box');
 }
 
 async function testTheSamePathOnTwoMachinesIsTwoFiles() {
-  const {win, posted, editors} = boot();
+  const {win, posted, created} = boot();
   const chat = win._testApi.getActiveTabId();
   // This daemon's /work/ws/notes.txt, then gpu-box's: the reply's
   // machine stamp tells them apart, whatever the chat's machine is
@@ -443,7 +432,7 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
     content: 'home\n',
     version: 'h1',
   });
-  await waitFor(() => editors.length === 1, 'the home file opened');
+  await waitFor(() => created.length === 1, 'the home file opened');
   goToBox(win);
   win._testApi.switchToTab(chat);
   pickMachine(win, '');
@@ -457,23 +446,23 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
     version: 'b1',
   });
   await waitFor(
-    () => editors.length === 2,
+    () => created.length === 2,
     "the machine's file opened as its own tab",
   );
   const contentTabs = win._testApi.openTabs().filter(t => t.isContentTab);
   assert.strictEqual(contentTabs.length, 2, 'two tabs for the two files');
-  assert.strictEqual(editors[0].getModel().getValue(), 'home\n');
-  assert.strictEqual(editors[1].getModel().getValue(), 'box\n');
+  assert.strictEqual(created[0].editor.getModel().getValue(), 'home\n');
+  assert.strictEqual(created[1].editor.getModel().getValue(), 'box\n');
   // Each saves where it came from.
   win._testApi.switchToTab(contentTabs[1].id);
   posted.length = 0;
-  editors[1]._type('box 2\n');
+  created[1].editor._type('box 2\n');
   click(win, saveButton(win));
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, 'gpu-box');
   assert.strictEqual(msgs(posted, 'saveFile')[0].workDir, '/srv/proj');
   win._testApi.switchToTab(contentTabs[0].id);
   posted.length = 0;
-  editors[0]._type('home 2\n');
+  created[0].editor._type('home 2\n');
   click(win, saveButton(win));
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, undefined);
   assert.strictEqual(msgs(posted, 'saveFile')[0].workDir, '/work/ws');
@@ -492,11 +481,11 @@ async function testTheSamePathOnTwoMachinesIsTwoFiles() {
     content: 'out\n',
     version: 'o1',
   });
-  await waitFor(() => editors.length === 3, 'the local file opened');
+  await waitFor(() => created.length === 3, 'the local file opened');
   const local = win._testApi.openTabs().filter(t => t.isContentTab)[2];
   win._testApi.switchToTab(local.id);
   posted.length = 0;
-  editors[2]._type('out 2\n');
+  created[2].editor._type('out 2\n');
   click(win, saveButton(win));
   assert.strictEqual(msgs(posted, 'saveFile')[0].machine, undefined);
 }
@@ -530,16 +519,6 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
     'deleted where it was picked',
   );
   assert.strictEqual(deletes[0].path, '/srv/proj/main.py');
-  // An overwrite retry keeps it too.
-  send(win, {
-    type: 'fsResult',
-    token: deletes[0].token,
-    action: 'delete',
-    path: '/srv/proj/main.py',
-    machine: 'gpu-box',
-    error: 'exists',
-    exists: true,
-  });
   // Cut on this machine, pasted on the machine: refused.
   rightClick(win, rowFor(win, '/work/ws/home.txt'));
   click(win, menuItem(win, 'Cut'));
@@ -566,6 +545,36 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   assert.strictEqual(moves[0].action, 'move');
   assert.strictEqual(moves[0].machine, 'gpu-box');
   assert.strictEqual(moves[0].dest, '/srv/proj/pkg');
+  // pkg already holds a main.py; the chat comes home while the
+  // overwrite question is up.  Replace retries the move on gpu-box.
+  send(win, {
+    type: 'fsResult',
+    token: moves[0].token,
+    machine: 'gpu-box',
+    error: 'exists',
+    exists: true,
+  });
+  pickMachine(win, '');
+  posted.length = 0;
+  const clash = win.document.querySelector(
+    '[data-notification-id="fs-overwrite:/srv/proj/pkg|main.py"]',
+  );
+  assert.ok(clash, 'the overwrite question is up');
+  click(
+    win,
+    Array.from(clash.querySelectorAll('.kiss-notification-action')).find(
+      b => b.textContent.trim() === 'Replace',
+    ),
+  );
+  const retries = msgs(posted, 'fsAction');
+  assert.strictEqual(retries.length, 1, 'Replace retries the move');
+  assert.strictEqual(retries[0].action, 'move');
+  assert.strictEqual(retries[0].overwrite, true);
+  assert.strictEqual(
+    retries[0].machine,
+    'gpu-box',
+    'retried where it was picked',
+  );
 }
 
 function testAHomeChatSendsNothingStamped() {

@@ -187,7 +187,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             agent._last_result_summary = "Implemented feature Z in z.py"
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             msg = _head_message(wt_dir)
             assert "User prompt:\nimplement feature Z" in msg
@@ -208,7 +208,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             ))
             agent._last_user_prompt = "implement feature Q"
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             msg = _head_message(wt_dir)
             assert "Result:" not in msg

@@ -406,6 +406,65 @@ function testOpenSubagentTabOnlyPathIsAssociated() {
   console.log('  ok - openSubagentTab-only path is associated with panel');
 }
 
+/**
+ * Send the `openSubagentTab` a parent's replay makes for child *taskId*
+ * (*fields* adds `isDone` and `closedHistory`).
+ */
+function announceChild(win, parentId, taskId, taskIndex, fields) {
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: parentId + '__sub_' + taskId,
+    parent_tab_id: parentId,
+    description: 'sub ' + (taskIndex + 1),
+    task_id: taskId,
+    taskIndex,
+    isSubagentTab: true,
+    ...fields,
+  });
+}
+
+function testReadyReplayKeepsFinishedSubTabClosed() {
+  // A reload (or another window) replays the running parent: the
+  // daemon marks its finished child closedHistory.  Its tab closed when
+  // it finished, so it stays closed here too until the panel reopens it.
+  const {win, posted} = makePage();
+  const parentId = posted.find(m => m.type === 'ready').tabId;
+  send(win, {type: 'status', running: true, tabId: parentId});
+  send(win, {type: 'tool_call', name: 'run_parallel', tabId: parentId});
+  const panel = runParallelPanel(win);
+  assert.ok(panel, 'run_parallel tool_call must render a panel');
+
+  announceChild(win, parentId, 'finished-task', 0, {
+    isDone: true,
+    closedHistory: true,
+  });
+  announceChild(win, parentId, 'running-task', 1, {isDone: false});
+  assert.deepStrictEqual(
+    subagentTabEls(win).map(el => el.dataset.tabId),
+    [parentId + '__sub_running-task'],
+    'only the running sub-agent has a tab after the replay',
+  );
+
+  togglePanel(win, panel);
+  const before = posted.length;
+  togglePanel(win, panel);
+  assert.deepStrictEqual(
+    subagentTabEls(win)
+      .map(el => el.dataset.tabId)
+      .sort(),
+    [parentId + '__sub_finished-task', parentId + '__sub_running-task'],
+    'collapsing and expanding the panel reopens the finished sub-agent',
+  );
+  assert.ok(
+    posted
+      .slice(before)
+      .some(m => m.type === 'resumeSession' && m.taskId === 'finished-task'),
+    'the reopened sub-agent tab resumes its task id',
+  );
+  win.close();
+  console.log('  ok - a ready replay keeps a finished sub-agent tab closed');
+}
+
 function testSpawnWhileCollapsedOpensTabAtOnce() {
   const {win, posted, panel, parentId} = bootParallelRun(2, makePage());
 
@@ -692,6 +751,7 @@ function main() {
     testAutoCollapseKeepsInvariant,
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
+    testReadyReplayKeepsFinishedSubTabClosed,
     testSpawnWhileCollapsedOpensTabAtOnce,
     testTaskEndFoldsUserOpenedFanOutIntoTrajectory,
     testRunParallelFinishAutoCollapseClosesSubTabs,

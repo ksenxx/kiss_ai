@@ -651,6 +651,22 @@ result.  A `description()` that raises or returns something other than
 a non-empty string yields a diagnostic instead
 (`sea_commands.sea_description`).
 
+A plain task the user wrote (typed, or an in-chat cron job's prompt)
+also gets the sentence of every command it names, so a task told to
+"use /discover" knows what the command does and how to call it: a
+`/<name>` in its text or in the chat's earlier tasks (the ones
+`build_chat_prompt` loads, even one the history digest drops for size;
+at a text's start or after whitespace, an opening bracket, a quote or
+Markdown emphasis; `~/x`, `a/x`, `/x/`, `/x.py`, `/x?q=1`, `/x#a` and
+`[t](/x)` do not count) adds a ``- `/<name>`: <description()>`` line
+under `# Slash commands the user named` after the task
+(`sea_commands.named_commands_help`, called by
+`ChatSorcarAgent.build_chat_prompt`).  A bare `/x` that fell back to a
+plain prompt gets no block, so its SEA file stays executed once, and a
+SEA whose file or `description()` is broken is left out.  A SEA run and
+a `run_agent` sub-task get no block either: they see the same chat, and
+a `/discover` run told about `/discover` could call itself.
+
 ### `timeout` — optional, for SEAs that run longer than an hour
 
 A `run_agent` or `run_parallel` call waits for its sub-task(s) for a
@@ -790,7 +806,8 @@ has); when the SEA passes the empty task through (the stock
 SEA, on the tab's prior SEA or picker SEA if any.  The SEA's file is
 executed once either way: `slash_command` only splits the prompt,
 and the daemon reads whether a default task exists off the layers it
-has already loaded (`_reload_layers` reuses them for the fallback).
+has already loaded (`load_layers(..., loaded=layers)` reuses them for
+the fallback).
 `/xxx help` answers with `description()` without
 running anything (and the `<task>` follow-ups typed while
 `description()` ran are run next, see `_end_run_before_loop`
@@ -812,7 +829,16 @@ local call), with that machine's tools, files and models.  The call is the same 
 its settings checked here, and the `run` command goes to the local
 daemon with a `machine` field, which `server.remote_tabs` forwards to
 the machine's daemon over the registered link and whose frames it
-relays back, as it does for a chat tab bound to a machine.  What
+relays back, as it does for a chat tab bound to a machine (a `submit`
+or `appendUserMessage` typed into a bound tab, `remote_tabs.TYPED_COMMANDS`,
+is also written to this daemon's `steer_inputs` table,
+`persistence._record_steer_input`, before it is handed to the machine:
+the task row and the steer echo are the machine's, and the composer
+history that `inputHistory` builds (ArrowUp/ArrowDown, ghost
+completions, the `/` popup's order) reads only this daemon's database,
+so a prompt or a `/ask` line typed there would otherwise be forgotten;
+a `run` and a `userAnswer` are not recorded, and a refused local write
+is logged as a warning rather than failing the command).  What
 differs is what travels: the SEA runs as the machine's own copy (a
 registered command by its name, the run's `seaCommand`, which the
 machine's daemon resolves to its own copy in `task_runner._apply_sea` and
@@ -949,7 +975,9 @@ class BestrouterSea(BaseSea):
 being chosen.  `kiss.agents.sorcar.sea_commands.run_picked_hook` runs it
 on a daemon thread at two moments: when the user picks the SEA in the
 model picker (`selectModel`, with the tab's registered work directory,
-else the daemon's global one, without waiting), and once per run whose model is the SEA (after the
+else the daemon's global one, without waiting; a pick stamped `machine`
+never reaches this handler, it is forwarded to that machine's daemon,
+`sidebar_panels.machine_models_reply`), and once per run whose model is the SEA (after the
 SEA overrides, with the run's effective work directory,
 waiting at most `PICKED_HOOK_TIMEOUT_SECONDS`, 15 s, before the task
 starts).  It is not a run parameter: the return value is only logged,
@@ -1230,7 +1258,97 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   the page the agent is browsing into the Browser tab on every surface
   (the daemon's `BrowserTabService`, passed to the run as
   `live_browser` and forwarded to its sub-agents) so the user can
-  watch and act on it; there is no setting for it.  A browser the
+  watch and act on it; there is no setting for it.  The toolset
+  (`WebUseTool.get_tools`, fifteen tools, `sorcar_agent.BROWSER_TOOL_NAMES`)
+  is `go_to_url` (a URL, `tab:list` or `tab:N`), `click`, `type_text`,
+  `press_key`, `scroll`, `screenshot` (its `file_path`, default
+  `screenshot.png`, is resolved against the task's work dir, parents
+  created), `get_page_content`, `show_browser`, `close_browser`, and
+  six developer tools — four DevTools inspection tools over the page's
+  CDP session and two routes into the user's own Chrome: `evaluate_script(script)`
+  runs a function (invoked, and awaited when it returns a promise) or
+  a bare expression through one `Runtime.evaluate` and returns a
+  string as is, anything else as JSON cut at 20,000 characters (the
+  page gets 10 s, the call 3 s more; `_cdp_call(..., timeout_secs=3.0)`
+  is the deadline every CDP round trip gets so a renderer that never
+  answers cannot hang the tool); `list_console_messages(clear=False)`
+  lists the page's console output and uncaught errors as `[level] text
+  (url:line)` lines, recorded per page from the moment the tool
+  adopts it (`_observe_page`; a tab that existed before an
+  `attach_to_chrome` is observed from the attach on), the
+  last 200 kept, texts cut at 500 characters; `list_network_requests(url_filter="",
+  clear=False)` lists `METHOD status URL (type)` lines (`...` while
+  pending, `FAILED: <reason>`), the last 300 per page, URLs cut at
+  300 characters; `clear=True` empties the buffer after listing so the
+  next call shows only what the next action caused; `wait_for(text,
+  timeout=15, disappear=False)` polls the page's rendered text (runs
+  of white space read as one space) until the substring appears or is
+  gone — `timeout` is clamped to 0.5–120 s — and returns the
+  accessibility tree, or `Timed out after Ns waiting for text ...`.
+  Two routes lead into the user's own logged-in Chrome instead of the
+  tool's Chromium.  `attach_to_chrome(cdp_url="http://localhost:9222")`
+  connects over CDP to a Chrome the user started with
+  `--remote-debugging-port` and adopts its newest tab; from then on
+  every browser tool drives that browser, `close_browser` detaches
+  without closing it (the built-in Chromium takes over on the next
+  call), a Chrome that goes away is reported with the way back
+  (`Reconnect with attach_to_chrome(...)`, or `close_browser()`)
+  rather than silently replaced, and a `show_browser` relaunch carries
+  only the current URL out of it — the cookie jar and localStorage are
+  the user's profile and stay there (`_capture_session`).
+  `use_my_chrome(action, tab_id, url, script, uid, text, timeout=30)`
+  drives the user's everyday Chrome — where Chrome ignores
+  `--remote-debugging-port` on the default profile since Chrome 136 —
+  through the bundled "KISS Sorcar Bridge" MV3 extension
+  (`chrome_bridge.py`): `list_tabs`, `open_tab`, `navigate`,
+  `activate_tab`, `close_tab`, `evaluate`, `screenshot` (the PNG is
+  decoded into `tmp/chrome-shot-<ns>.png` under the work dir and its
+  path returned), `snapshot` (an interactive-element listing whose
+  numbers feed `click` and `type_text`), each waiting `timeout`
+  seconds for the extension's answer (`ChromeBridge.call`; a command
+  the extension has not answered by then drops the connection so the
+  extension reconnects, while the extension's own 30 s execution
+  deadline, `COMMAND_DEADLINE_MS`, answers with an ordinary error and
+  keeps the connection).  The bridge is a loopback
+  WebSocket server on an ephemeral `127.0.0.1` port with a mutual
+  challenge–response handshake (`challenge` nonce → `hello` with
+  `sha256(token:nonce)` → `hello_ok` with `sha256(nonce:token)`; the
+  token never crosses the wire, a wrong proof gets `hello_error` and
+  a 4001 close, a second Chrome profile connecting replaces the first
+  with a 4002 close, `ping`/`pong` frames keep the service worker
+  alive).  The extension files (`manifest.json`, with the product
+  name filled in so a white-label install never shows "KISS Sorcar",
+  and `background.js`) are installed into `$KISS_HOME/chrome_extension/`
+  on the first bridge start and refreshed when the bundled copy
+  changes; the user loads that directory once as an unpacked
+  extension (`chrome://extensions` → Developer mode → Load unpacked),
+  and the tool's error says so while no extension is connected.  Next
+  to them `bridge-config.json` (mode 600) names the live port and
+  token; the extension re-reads it on every reconnect attempt, so a
+  restarted daemon on a new port is found without touching Chrome,
+  and `stop` removes the file only while it still holds this server's
+  token.  The `chrome_bridge` key of `config.json` (default `false`;
+  the settings panel's "Drive my Chrome" checkbox) makes the daemon
+  own the bridge: `chrome_bridge.start_if_enabled()` runs at daemon
+  start and after every settings save (`takeover=True`, so its port
+  and token replace whatever the file named; a start failure is
+  logged and the first tool call retries lazily; switching the key
+  off takes effect at the next daemon start) and
+  `ChromeBridge.shutdown()` runs when the daemon stops.  With the key
+  off, or in a CLI run, the first `use_my_chrome` call starts the
+  bridge itself and waits up to 5 s for the extension to find the new
+  config; a lazy start that finds another process's bridge still
+  answering on the file's port (recognised by the `challenge` frame it
+  sends, so a reused port does not count) does not steal the
+  extension but returns `Error starting the Chrome bridge: another
+  KISS process already serves the Chrome bridge on port N ... run this
+  task through that process`.  The bundled `/devtools` SEA
+  (`devtools_sea.py`) packages this workflow — act, then verify the
+  effect with `wait_for`, `list_console_messages`,
+  `list_network_requests` and `evaluate_script` instead of re-reading
+  the tree blindly, plus the two routes into the user's Chrome — as a
+  system-prompt addendum and forces `use_web_tools` on; it replaced
+  the former `browser-devtools` skill.  A browser the
   agent runs without a window is a headed Chromium on a private Xvfb
   display when one can be started (headless mode is the first thing
   bot-protection scripts detect); real headless mode is the fallback
@@ -1292,7 +1410,7 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   appends nothing).  A search (the recall's or `memory_search`'s)
   syncs and searches each selected memory on its own worker thread
   while the task thread waits in 0.1 s slices without joining the
-  pool (`MemoryTools._search`, `tools._result`), so a Stop pressed
+  pool (`MemoryTools._search`, `tool_interrupt.result_interruptible`), so a Stop pressed
   during a first-time index build lands at once and the worker
   finishes its current embedding batch in the background.  `True`
   enables, `False` disables,
@@ -1350,8 +1468,11 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   `summary`, `set_model`), `"bash"` (`Bash` only — the bundled `/sh`
   agent's choice), or a tool group: `"shell"` (`Bash`, `bash_job`,
   `Read`, `run_commands_parallel`), `"edit"` (`Edit`, `Write`,
-  `create_worktree`, `commit_and_merge`),
-  `"browser"`, `"memory"`, `"agents"` (`run_agent`, `agent_job`,
+  `create_worktree`, `commit_and_merge`, `checkpoint`, `rollback`),
+  `"browser"` (the fifteen `WebUseTool` tools listed under
+  `use_web_tools`, `sorcar_agent.BROWSER_TOOL_NAMES`; the group
+  only names them, the setting still decides whether they are
+  built), `"memory"`, `"agents"` (`run_agent`, `agent_job`,
   `run_parallel`, `number_of_cores`), `"mcp"` (the configured servers' tools and the
   sign-in pair), `"skills"`, `"user"` (`ask_user_question`, `talk`),
   `"decide"`, `"control"` (`summary`, `set_model`).  Join several with
@@ -1565,10 +1686,16 @@ kill a background job), `run_commands_parallel` (several shell
 commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
 `create_worktree` and `commit_and_merge` (the last two not in a
 Docker run, whose file tools work inside the container),
+`checkpoint` and `rollback` (named snapshots of the git working tree,
+see below; a top-level host run only — a sub-agent edits its caller's
+tree in place, so a rollback of its own would undo the caller's and
+its siblings' work, and a Docker run's file tools are
+container-backed, so the pair is not registered there),
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
 `agent_job`, `run_parallel` and `number_of_cores` (the last two only
 when the run's `is_parallel` is on, the user's parallel-mode toggle),
-browser tools (when `use_web_tools`), `decide` (when
+the fifteen browser tools (when `use_web_tools`; listed under that
+setting), `decide` (when
 `OPENROUTER_API_KEY` is configured, the `classify_with_decisions`
 key in `$KISS_HOME/config.json` is on (the default; it has no settings-panel toggle)
 and the decisions model is in the catalog,
@@ -1581,7 +1708,11 @@ are still appended.  An MCP server's tools are named
 `<server>_<tool>` and built last, after the profile filter: a
 synthesized name that collides with a tool the run already has (the
 built-ins actually built, the static built-in list
-`mcp_servers._RESERVED_TOOL_NAMES`, the tools passed to `run(tools=)`,
+`mcp_servers._RESERVED_TOOL_NAMES` — every name above including
+`checkpoint`/`rollback`, the fifteen browser tools, the `memory_*`
+tools, the MCP sign-in pair and `cron_job`, whether or not the run
+actually has them, so a profile change never un-reserves a name — the
+tools passed to `run(tools=)`,
 the tools inherited from the calling task and the MCP wrappers built
 before it, passed as `make_mcp_tools(work_dir, taken_names)`) gets a
 numeric suffix (`run_parallel_2`) instead of aborting the tool
@@ -1603,7 +1734,9 @@ SEA's own `tool_call_hook` need not restate:
   and a request is capped at `tool_output_max_chars` (50,000,
   `KISS_TOOL_OUTPUT_MAX_CHARS`).  Output over the budget is written in
   full to `tmp/tool-out/<tag>-<n>-bash.txt` under the work dir and
-  the marker names the file (`UsefulTools._spill`; the tag is per
+  the marker names the file (`UsefulTools._new_spill` names it and
+  `_Capture` writes the output to it as it arrives, keeping only the
+  first and last million characters in memory; the tag is per
   tools instance, so a parent and its reviewer never overwrite each
   other's spills; the path is shown in POSIX form on every OS,
   `useful_tools.SPILL_DIR`, since the model pastes it into `Bash`,
@@ -1656,7 +1789,21 @@ SEA's own `tool_call_hook` need not restate:
   script contains `\n` and a `python3 -` heredoc that reads a file,
   `.replace(` / `re.sub(` on it and writes it back
   (`edit_guards.rewrite_guard`, `REFUSED: ... did NOT run`, naming
-  the `Edit` call to make instead); and a `sleep N` with N over 30
+  the `Edit` call to make instead); a `cat` or `tee` here-document
+  whose text reaches an existing file — through `>`, `>>`, a `tee`
+  operand or `tee -a`, directly or down a pipe of `cat`/`tee` copies
+  — (`edit_guards.heredoc_guard`, `REFUSED: the command did not run:
+  it writes the existing file ...`, pointing at `Edit`/`Write`), and
+  one whose target only the shell can name — an expansion such as
+  `"$OUT"` or `~/x`, or a relative path after a `cd` the guard cannot
+  resolve — since it may be an existing file (`HEREDOC_UNRESOLVED_VERDICT`);
+  a here-document that creates a new file at a literal path, one aimed
+  at `/dev/*`, and one fed to an interpreter (`python3 - <<EOF >
+  out.json` writes the program's output, not the text) run.  The
+  command is read by `shell_scan.simple_commands`, a quote-aware
+  scanner that follows `cd`s, pipes, `&&`/`||`/`;` chains and groups
+  the way bash does, so a redirect inside a quoted string or a
+  heredoc body is not a write; and a `sleep N` with N over 30
   (`useful_tools.sleep_guard`: the wait belongs in `bash_job`; the
   host `run_commands_parallel` refuses it in any of its commands too,
   since each is a foreground wait for the caller), a
@@ -1664,9 +1811,12 @@ SEA's own `tool_call_hook` need not restate:
   and the call blocks until it ends anyway — only a `sleep` inside a
   heredoc body the shell never runs (a quoted tag, `<<'EOF'`, with
   no `$(...)` or backtick in the body) is let through.  The
-  destructive-command and rewrite guards also run on a container
-  `Bash` (`docker_manager._refuse_or_lift`) and the destructive one
-  on an exec bridge; the sleep guard is the host tool's only (the
+  destructive-command, rewrite and here-document guards also run on a
+  container `Bash` (`docker_manager._refuse_or_lift`, which asks the
+  container whether the target exists with `test -e`) and on the
+  coding SEA's trial shell (`container_path_exists`); the host tool
+  checks with `os.path.lexists` against the work dir.  The destructive
+  one alone runs on an exec bridge; the sleep guard is the host tool's only (the
   container paths, `_refuse_or_lift`, do not call `sleep_guard`; the
   bundled coding SEA adds its own, `coding_sea.SLEEP_POLL`, to its
   trials).  A
@@ -1712,6 +1862,44 @@ SEA's own `tool_call_hook` need not restate:
   checkout's uncommitted changes block (`git stash push` failed)
   returns the blocking files from `git status --porcelain` and leaves
   the committed worktree branch in place.
+- **`checkpoint(name)` / `rollback(name)`** (`checkpoints.py`) are
+  the task-local undo of a top-level host run (not offered to a
+  sub-agent or a Docker run, see above).  `checkpoint` snapshots every
+  non-ignored file under the top level of the git working tree that
+  holds the work dir (the same directory `Bash` runs in,
+  `_resolve_cwd`) as a git tree object, written through a
+  private copy of the index so `HEAD`, the branch, the real index and
+  the stash are untouched: untracked files are included (`git add
+  --all` on the private index), untracked ignored files are not,
+  tracked files stay in even when an ignore pattern matches them,
+  submodules and embedded repositories are gitlink entries whose
+  contents are not captured (and whose changes a rollback skips), and
+  files flagged `assume-unchanged`/`skip-worktree` are read as they
+  are on disk.  Names match `[A-Za-z0-9_-]{1,40}`; `before-rollback`
+  is reserved — a `rollback` whose target differs from the current
+  tree snapshots the current tree under that name before it changes
+  the first file (a rollback refused because something no checkpoint
+  holds is in the way keeps the previous one), so a rollback can
+  itself be rolled back — and re-using a name replaces
+  the earlier snapshot.  The result names the tree (`Saved checkpoint
+  'x' of <root> (git tree 1a2b…; git show 1a2b…:<path> prints a file
+  as it was)`); the snapshots themselves are plain objects in the
+  repository's object store, the name table lives in the tool object
+  of the task (`Checkpoints.saved`, nothing on disk, so a new task
+  starts with none).  `rollback` rewrites the files that differ
+  (working tree only, the branch and the index are left alone),
+  deletes the non-ignored files added since along with the directories
+  that leaves empty, and lists both with counts, the first 10 paths
+  each (`Rolled <root> back to checkpoint 'x': rewrote 2 files (a.py,
+  b.py); deleted 1 file (c.py). The replaced state is checkpoint
+  'before-rollback'`); it refuses an unknown name (listing the known
+  ones), a
+  snapshot of another working tree (one taken before `create_worktree`
+  moved the work dir, for example), a no-op (`Nothing to roll back`)
+  and an obstacle — an ignored file or the work dir itself standing
+  where a restored file must go — in which case nothing is changed.
+  Neither tool is a SEA setting: the coding SEA's container trials have
+  their own `checkpoint`/`rollback` pair over the container's tree.
 
 With `"tool_profile": "none"` the agent's **only** tools are `finish`
 and the tools `tools([])` returned; the built-in toolset is not
@@ -1776,6 +1964,7 @@ prefixes the message below with `Task failed: SeaError: `):
 | `locked` naming something other than a run setting (`locked`, `hidden`, an unknown name) | `SEA '...': settings()['locked'] may only name settings keys (work_dir, model, chat_id, ...); got ['hidden']` |
 | `description()` of a `/<name>` command returns an empty or blank string (a non-string is the `must return a string` row above) | `SEA '...': description() must return a non-empty string` (raised by `/<name> help`, `sea_commands.sea_description`; `/<name> check` reports it as its text) |
 | `prompt()` returns an empty string | `prompt() of SEA '...' must return a non-empty string` |
+| a contract method is not a plain method: declared `@staticmethod`, or the name bound to a class or a non-callable (`description = "..."`) | `description of SEA '...' must be a method, got staticmethod` (`sea_commands._bound`, raised before the attribute is called, for `description`, `settings` and the hooks alike) |
 | a method `X` raises | `X() of SEA '...' raised: ...` |
 | a method returns the wrong type | `system_prompt() of SEA '...' must return a string, got ...`, `tools() of SEA '...' must return a list of tool callables (not a file path), got ...`, `llm_call_hook() of SEA '...' must return a list, got ...`, `tool_call_hook() of SEA '...' must return a Verdict (ALLOW, or refuse(text), from kiss.agents.seas.base.base_sea), got ...` |
 | a value whose own methods raise (e.g. a `str` subclass with a raising `__str__`) | `prompt() of SEA '...' returned a broken value: ...`, `SEA '...': settings()['max_budget'] returned a broken value: ...` |
@@ -1815,7 +2004,25 @@ minutes, but it is still stoppable: the SDK call runs on a worker
 thread while the task's stop event is watched, and a Stop shuts the
 pending socket and drops the client so the SDK does not re-send the
 request (`OpenAICompatibleBase._blocking_request`; a reply that
-arrived anyway is billed as a rejected response).  A safety refusal
+arrived anyway is billed as a rejected response).  The shutdown
+(`stream_abort.shutdown_pool_sockets`) reaches every httpcore pool
+the client may send through — the default transport's and each
+proxy mount's (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` or explicit
+`mounts`) — and a request still connecting or in its TLS handshake:
+each pool gets an `AbortableNetworkBackend` when the client is built
+(`make_pool_abortable`), which keeps every socket it opens, the one a
+TLS upgrade yields included, and once aborted shuts them all down
+and every later one the moment it is up, before httpcore writes the
+request on it, so the provider never sees the stopped request.  Its
+streams read in 0.5 s slices (`_READ_SLICE_SECONDS`), so a read that
+was already waiting when the shutdown landed fails within the next
+slice instead of waiting out the SDK's read timeout (30 minutes on
+the OpenAI clients).  Both steps go through private httpx/httpcore
+attributes and are best-effort: a transport without a reachable
+`_pool` (a custom or mock transport, the `None` a `NO_PROXY` pattern
+maps to) is skipped and a failed backend swap is only logged, in
+which case the shutdown reaches the connections already open and
+nothing more.  A safety refusal
 (`stop_reason="refusal"`, `ModelRefusalError`) or repeated empty
 responses switch to the fallback model when one is configured; with
 none, a refusal is retried once with `kiss_agent.REFUSAL_RETRY_MSG`
@@ -1836,6 +2043,28 @@ between sub-tasks is not persisted — and auto-merged — as a
 completed success: any other exception escaping the setup or the
 bookkeeping between sub-tasks is `Task failed: <ExceptionName>:
 <message>` with a `task_error` event.
+
+An install never interrupts a run that way: `install.sh` asks the
+daemon for its tasks in flight (`scripts/check-kiss-web-active-tasks.py`,
+which prints the `restartPendingFile` a busy daemon names) and, when
+there are any, installs the app without restarting, records the
+restart it skipped in `$KISS_HOME/.kiss-web.restart-pending` (the
+installer's path, the state directory and the work dir to serve) and
+exits.  The daemon's `_deferred_restart_loop` (`web_server.py`) looks
+for that record every 5 s; with one there, no task in flight and no
+installer of its own still running, it raises the run-admission
+barrier so no new task starts, claims the record
+(`kiss.server.deferred_restart.claim` validates and removes it, so a
+broken record is not retried) and runs the recorded `install.sh
+--restart-only`, which waits out an install still holding the update
+lock, restarts the daemon onto the app already on disk and, apart
+from retiring a legacy app directory the new one has replaced, does
+nothing else.  So a SEA run may itself run `./install.sh`: the run
+completes, and the daemon moves to the new build afterwards, taking
+the brand's `$KISS_HOME/services.d/` helpers
+(`kiss.server.services.Services`, started once the local endpoint
+file is written and stopped by process group at shutdown) down and
+up with it.
 
 ### Refusals and session hand-off
 
@@ -2001,7 +2230,90 @@ the Anthropic adapter sends it as `output_config.effort`
 `output_config.effort` wins, and an entry that rejects the parameter,
 such as Haiku 4.5 or Sonnet 4.5, carries no `thinking` and gets
 none).  A custom endpoint whose name no catalog entry matches gets no
-effort parameter.
+effort parameter.  The OpenRouter Claude twins
+(`openrouter/anthropic/claude-*`) carry the same ladder: OpenRouter
+forwards `reasoning.effort` to Anthropic unchanged, so the catalog
+updater (`update_models._thinking_scale_for`) gives such a slug, like
+a `bedrock/` id, the ladder of the Claude model behind it and
+generates the same effort aliases as the direct twin, up to that
+family's top level (`_anthropic_effort_scale`: Opus 4.5 stops at
+`-high`, Opus 4.6 and Sonnet 4.6 at `-max` without `-xhigh`, Fable
+5.1 has the full ladder, so `openrouter/anthropic/claude-fable-5.1-max`
+exists and is `alias_of` its base).  Their level cannot be probed,
+since OpenRouter answers 200 at every level for every Claude, so
+`_sync_openrouter_claude_thinking` mirrors the direct twin's level (a
+twin newly probed this run hands over its probed level, a twin
+retested this run its new level, any other the maximum recorded on
+disk) and a slug with no direct twin (`claude-opus-4.1`, the
+`:thinking` variants) keeps none.  The same twin mapping
+(`model_info.openrouter_twin`) is the automatic fallback when the
+direct provider rejects a request for a billing or availability
+reason — provided an `OPENROUTER_API_KEY` is configured and the entry
+declares no `fallback` of its own, which takes precedence
+(`get_fallback_model`); the switch is one-shot per run: a direct
+name is matched by its last path
+segment with dots and dashes treated alike, an effort alias keeps its
+level when OpenRouter's side has the matching generated alias and
+falls back to the bare twin otherwise.
+
+Long prompts are priced by one of two rules in
+`model_info.calculate_cost`.  A catalog entry with `prompt_tiers`
+(107 `openrouter/*` entries: the Claude Sonnet 4.5 and Haiku 5.5
+twins, Gemini 2.5 and 3.1 Pro, GPT-5.4 through GPT-6.1 with the
+`~openai/*-latest` aliases, Grok 4.x and `grok-build`, Qwen Plus,
+Flash and Coder Flash, Seed 1.6 and 2.0, Sakana Fugu Ultra; no
+direct or `bedrock/` entry carries any) is priced by those tiers
+alone.  Each tier is an
+integer `min_prompt_tokens` threshold plus any of the five per-1M
+prices (`PROMPT_TIER_PRICE_FIELDS`: input, output, cache read, cache
+write, 1-hour cache write); a single request whose prompt (input,
+cache read, cache write and audio input tokens together) is strictly
+longer than the threshold takes the tier's prices in place of the
+entry's own, a later tier wins per price when several apply (Qwen
+3.7 Flash steps at 32K and again at 256K), a price a tier omits
+keeps the base value, and a tier that sets its own input price gets,
+derived from that price, the same cache prices the load-time rules
+derive for the base (`_with_derived_tier_prices`).  The field
+is parsed leniently (`_parse_prompt_tiers`: a non-list value, or a
+tier with an unknown key, a missing or non-positive threshold or a
+negative or non-numeric price, is skipped with a warning, since the
+catalog is read at import time); the tiers are mirrored onto the
+generated `-<level>` aliases of a base that `MY_MODELS.json`
+overrides (`_ALIAS_MIRRORED_FIELDS`), copied into a new registry entry seeded
+from such a model (`_seed_new_custom_entry`) and scaled with the
+other prices by a Bedrock profile's premium (`_scaled_prices`).
+`update_models.py` imports them from each OpenRouter listing's
+`pricing.overrides` (`openrouter_prompt_tiers`): an override whose
+only condition is `min_prompt_tokens` becomes a tier with its
+`prompt`, `completion`, `input_cache_read`, `input_cache_write` and
+`input_cache_write_1h` prices converted to per-1M; one with any other
+condition (the `utc_*` time-of-day windows, or a key the importer
+does not know) is skipped, so the base price applies to it, and so
+is one with a non-numeric or negative price; on a later run a
+changed tier list replaces the stored one and a list OpenRouter no
+longer publishes is dropped from the entry (`_prompt_tier_changes`,
+`_REMOVABLE_PRICE_FIELDS`).
+
+An entry without tiers falls back to the name-based rule
+(`_long_context_uplift`), which bills the whole request at the
+family's multiples of its own short-context rates: Claude Sonnet 4.5
+bills a single request whose prompt exceeds 200,000 tokens at 2x the
+input and cache rates and 1.5x the output rate, Haiku 5.5 one over
+100,000 at 5x every rate, GPT-5.4 through GPT-6.1 (not the 5.4 mini
+and nano) one over 272,000 and Gemini 2.5 and 3.1 Pro one over
+200,000 at 2x input and cache and 1.5x output.  Neither rule applies
+to summed multi-request counts (`single_request=False`), which bill
+every token at the short-context rates.  The name-based rule is
+keyed on the model name after the Bedrock id, provider prefix,
+OpenRouter `anthropic/` prefix and effort alias are stripped and
+matched by prefix, so `claude-sonnet-4-5`, `claude-sonnet-4.5`, their
+dated ids and the `bedrock/` profiles all carry the Sonnet 4.5 rule,
+though their 200K context cannot reach the threshold; the OpenRouter
+twin, `openrouter/anthropic/claude-sonnet-4.5`, whose 500K context
+can, holds the same figures as a tier instead ($6 input, $22.50
+output, $0.60 cache read, $7.50 and $12 cache writes).  Sonnet 4.6
+and every other Claude model bill long prompts at their standard
+rates.
 
 `$KISS_HOME/MY_MODELS.json` is the custom-model registry the
 settings panel's Add / Edit / Delete buttons maintain
@@ -2017,8 +2329,9 @@ to — the exact name, a harbor-prefixed form such as
 entry, the one rule of `_lookup_model_info` — copying that model's
 context length and every per-million price field
 (`_PER_1M_PRICE_FIELDS`: input, output, cache read, cache write, 1-hour
-cache write, audio input, audio output, image output; a Bedrock
-profile's prices are scaled by `bedrock_price_factor`), so the entry
+cache write, audio input, audio output, image output) and its
+`prompt_tiers`, if any (a Bedrock profile's prices, tiers included,
+are scaled by `bedrock_price_factor`), so the entry
 that replaces the catalog one at the next load bills every token
 kind as the catalog did; a name no catalog model matches gets the
 generic defaults (128,000 context, $0 prices,
@@ -2291,7 +2604,7 @@ spend reported so far, so the caller can still charge it.
 
 `cost` is the exact
 figure the daemon's final `result` event carries as `cost_usd` next
-to its four-decimal `cost` display string (`daemon_client._event_cost`;
+to its four-decimal `cost` display string (`kiss.core.printer.event_cost`;
 a later `usage_info` event, say a side channel's spend that lands
 after the row was saved, updates the totals, and a delta the daemon
 has already banked on a waiting ancestor, `ancestor_charged`, is not
@@ -2363,7 +2676,7 @@ task count merge with the bare name the `llm_call` events carry.
   earlier ones, the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` come next, so a `SEAS.md` folder can shadow
   them, and the built-in `cron` (`sea_commands.BUILTIN_COMMANDS`) has
-  the lowest precedence of all.  Of the 27 bundled SEA folders, 25 register
+  the lowest precedence of all.  Of the 28 bundled SEA folders, 26 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events; its only
@@ -2390,12 +2703,13 @@ task count merge with the bare name the `llm_call` events carry.
   that will finish it; its `settings()` fixes the routing session's model to
   `autorouter_sea.ROUTER_MODEL`, `openrouter/moonshotai/kimi-k3`, with
   `auto_classify` off and `use_web_tools` and `use_memory` on), `/bestrouter` (runs a task on
-  `claude-fable-5-1` and has `gpt-6-astra` review it read-only, dispatched
+  `claude-fable-5-1-max` (`bestrouter_sea.PRIMARY_MODEL`) and has
+  `gpt-6-astra` (`REVIEW_MODEL`) review it read-only, dispatched
   with a non-blocking `run_agent(model=..., tool_profile="review",
   wait="false")` on at most 75% of the budget and collected with
   `agent_job`), `/orautorouter` and `/orbestrouter`
   (the same two routers with every candidate taken from the OpenRouter vendor:
-  `openrouter/...` tiers, and `openrouter/anthropic/claude-fable-5.1` reviewed by
+  `openrouter/...` tiers, and `openrouter/anthropic/claude-fable-5.1-max` reviewed by
   `openrouter/openai/gpt-6-astra`), the hidden
   `coding` SEA (unattended coding in a Docker container, or on a
   remote sandbox through an `exec:<url>` bridge, for benchmark
@@ -2406,15 +2720,41 @@ task count merge with the bare name the `llm_call` events carry.
   trial config's `finish_gate` on, every `finish(success=True)` goes,
   up to the first refusal, through the agent's own verifier script
   (`/tmp/kiss-verify.sh` in the container must exist and exit 0
-  within `verifier_timeout`, 900 s by default), an independent check
-  written once per trial by the config's `blind_verifier` model (or
-  the trial's own model with `"same"`) from the task statement alone,
-  without seeing the agent's work (`/tmp/kiss-blind-verify.sh`,
-  authored with a shell in the container, 40 steps and a tenth of the
-  trial's budget; a blind check its author produced nothing for is
-  skipped, not refused; the two verifiers share at most three refusals
-  per trial, after which neither is run and the finish counts as
-  unverified), the SEA's own `EvidenceGate(track_changes=True)` — the
+  within `verifier_timeout`, 900 s by default; the script is read once
+  and that text is what runs and what the reviewer sees), an
+  independent check written once per trial by the config's
+  `blind_verifier` model (or the trial's own model with `"same"`) from
+  the task statement alone, without seeing the agent's work (authored
+  with a shell in the container, 40 steps and a tenth of the trial's
+  budget; the script is kept on the host and the container's copy at
+  `/tmp/kiss-blind-verify.sh`, the agent's to read and run, is
+  rewritten before each run, so an edit or deletion there changes
+  nothing; a blind check its author produced nothing for is skipped,
+  not refused; the two verifiers share at most three refusals per
+  trial, `MAX_VERIFIER_REFUSALS`, after which neither is run and the
+  finish counts as unverified).  Both scripts run as the argument of
+  `<shell> -c` (`run_script`), with a host-saved copy of the
+  container's original bash (taken at the first model call, its
+  SHA-256 logged as `shell_baseline`) copied into the container under
+  a fresh private path right before each run and removed after it, so
+  nothing the agent left at the shell's path or in a file stands
+  between the copy and the exec; a bridged trial, or a copy that
+  failed (logged `shell_copy_failed`), runs the container's shell.
+  Next come the quotes of the summary (`quoted_evidence_verdict`,
+  `coding/quoted_evidence.py`): the text of `<pre>`, `<code>`,
+  `<samp>`, `<kbd>`, `<tt>`, `<q>` and `<blockquote>` elements and of
+  fenced or backtick spans is split into lines, shell prompts and
+  `...` elisions dropped, and every piece of at least 12 characters
+  (`MIN_QUOTE_CHARS`) must appear, whitespace-normalised, in the task
+  statement, in a tool result (unless the piece is also written inside
+  a shell command the agent ran: `echo 'All 27 tests passed'` proves
+  nothing), or at the start of a shell command the agent ran or of one
+  of its `&&` / `||` / `;` / `|` / `&` / `(` segments; a summary with an
+  unsupported quote is refused, with no cap on such refusals since the
+  quote can always be dropped or re-run, and every quote's provenance
+  (the command, and whether it names a file the agent wrote) is handed
+  to the reviewer, which is what tells a `printf` of the expected text
+  from an observed output.  Then the SEA's own `EvidenceGate(track_changes=True)` — the
   hedge check of the executor's guard (see "Refusals" above) plus a
   second reason: a file was changed (`Edit`, `Write`, or a shell
   command that writes, `evidence_gate.WRITING_COMMAND`) and no shell
@@ -2434,32 +2774,100 @@ task count merge with the bare name the `llm_call` events carry.
   does not use up a review: the first failed review refuses the
   finish, a second one (`MAX_FAILED_REVIEWS`, 2) ends the reviewing
   for the trial and lets the finish through.  As soon as
-  the verifiers that ran pass, the work tree is snapshotted
-  as the `verified` checkpoint, which the trial runner restores
-  (`submit_best_checkpoint`) when the run ends without an accepted
-  finish and the tree on disk no longer passes those checks.  With the
+  the verifiers that ran pass, the work tree is archived in the
+  container as the `verified` checkpoint (`/tmp/kiss-checkpoints/`,
+  at most 4096 MB), its SHA-256 recorded in the `checkpoint` event
+  and host copies of the scripts that passed kept next to the
+  trajectory (`verified.kiss-verify.sh`,
+  `verified.kiss-blind-verify.sh`); when the run ends without an
+  accepted finish the trial runner (`submit_best_checkpoint`) re-runs
+  those host copies with the original shell and, if the tree on disk
+  fails them, restores the checkpoint, provided the archive still has
+  the recorded digest (an archive replaced or deleted in the container
+  restores nothing, as for `rollback`).  With the
   gate on, the first `Edit` or `Write` under the workdir is refused
   (at most twice) until the agent has written its interpretation
   ledger, `/tmp/kiss-ledger.md`.  A text-only turn, the implicit
   finish that consults the hook with no arguments, is vetoed once with
   a request for an explicit `finish`, and a second one ends the run
-  (logged as `implicit_finish`; the trial runner counts it as a
-  failure).  Outside the gate, the harness's toolset drops `decide`
+  (logged as `implicit_finish`); a `finish` let through once the
+  verifier refusals are spent is logged as `unverified_finish`; either
+  way `ended_unchecked` is true for the run and the trial runner
+  counts it as a failure, then `submit_best_checkpoint` re-runs the
+  checks saved with the latest verified checkpoint against the
+  current tree: a tree that still passes is kept, one that fails a
+  saved check is replaced by the checkpoint when its archive digest
+  still matches, and a trial with no verified checkpoint is left as it
+  is (`restored` / `kept` / `none` in the metrics).
+  Outside the gate, the harness's toolset drops `decide`
   and `summary` and adds `checkpoint(name)` / `rollback(name)`
   snapshots of the workdir, answers `ask_user_question`, `talk`,
   `run_agent` and `set_model` itself, gives `Bash` a 120 s default
   timeout, refuses a foreground `sleep` of 10 s or more
   (`SLEEP_POLL`), a here-document that rewrites an existing file, and
-  a command that would kill every process or delete the workdir), `/discover` (runs the AI discovery
-  loop — baseline and held-out split, search, ideas, pairwise judging,
-  implement and evaluate, keep a Pareto frontier of the winners and
-  compose them, fresh ideas from `gpt-6-astra` or `gemini-4-argon`,
-  stop on a goal met on the held-out split or on the budget or round
-  limit — on the `bestrouter` with
-  the full toolset; the loop, `discover_sea.DISCOVERY_INSTRUCTIONS`, was
-  the `## AI discovery, auto research, and optimization` section of `SYSTEM.md`
-  and is now the SEA's alone: its `system_prompt()` appends it at the
-  end of the assembled prompt, cutting out a leftover copy first, and its
+  a command that would kill every process or delete the workdir), `/devtools`
+  (a `BaseSea` that drives a web app the way a developer does in
+  DevTools: its `system_prompt()` appends `devtools_sea.SYSTEM_PROMPT`,
+  the `## Browser DevTools workflow (devtools)` section — act, then
+  verify the effect rather than the appearance with `wait_for`,
+  `list_console_messages(clear=True)` and
+  `list_network_requests(url_filter=..., clear=True)` before and after
+  the action, `evaluate_script` recipes for inspecting or repairing
+  page state, and the user's own Chrome through `attach_to_chrome` or
+  `use_my_chrome` — once, skipping a prompt that already carries the
+  heading; its `settings()` forces `use_web_tools: True` and nothing
+  else, so the caller's model and tool profile stay; `/devtools <page
+  or app, what to do or what is broken>` in the chat or
+  `run_agent(agent="devtools", task=...)`), `/discover` (runs the AI discovery
+  loop in a git repository (`git init` one around a lone artifact) so
+  that every evaluated idea is a commit, each held by a ref
+  `refs/discover/<task id>/<id>` that outlives the resets and the
+  squash merge of the task branch: the dev / held-out split and
+  the dev command's noise floor are fixed first in `<scratch
+  dir>/split.md` (only the held-out check opens the held-out part,
+  not even profiling), the Pareto frontier lives in `<scratch
+  dir>/pareto.md` (one line per live frontier point: id, parent id,
+  commit, idea, aspect, dev metrics; the committed baseline is point
+  B), candidate ideas in `ideas.md` and every evaluated one in
+  `explored-ideas.md` (one row appended per idea, in order, with the
+  draw that led to it, its status and observations; the status lives
+  there alone, an evicted point leaves `pareto.md`); the first idea
+  comes from a web search for
+  SOTA approaches, papers, repos and issues, the candidates appended
+  to `ideas.md` with their aspect, parent frontier point and
+  rationale and the unexplored ones judged pairwise for a winner; a
+  round is `git reset --hard <parent commit>`,
+  implement the idea, run the dev evaluation, commit, and log the
+  status: `KEPT` (no frontier point dominates it; the points it
+  dominates become `DOMINATED`), `TIE` or `FAILED` (neither is ever
+  retried), and a point that meets the goal on the dev metrics gets
+  the held-out check once, `OVERFIT` and evicted when it fails; the
+  next operator is one random draw from a Bash call, recorded in
+  `explored-ideas.md`: a variant of a frontier point, reasoned from
+  its logged observations, for r < 0.33; a composition of two
+  frontier points of different aspects for 0.33 ≤ r < 0.66 (neither
+  the baseline nor a composition of the other, the second's changes
+  merged into the one better on the task's first metric, which is the
+  parent; a fresh draw when fewer than two are eligible); a fresh
+  idea from an extensive internet search or `gpt-6-astra` or
+  `gemini-4-argon` (a second draw picks which), pairwise-judged
+  against the other unexplored ideas, for r ≥ 0.66; the loop stops when a round passes
+  the held-out check or when the budget or the round limit is hit
+  (the task's, else 100 rounds), then `git reset --hard`s the working
+  tree to the best frontier point's commit and reports it with its dev
+  and held-out metrics, the status counts and the refs; a task that asks only for
+  research, ideas or a ranking still gets the loop, and one that forbids
+  changing its repository gets it in a lab (the artifact's current files
+  copied to `<scratch dir>/lab`, `git init`, `create_worktree` on it)
+  with the best point handed back as `<scratch dir>/best.patch`; its
+  `description()`, which a task naming `/discover` sees, tells that
+  task to run its improvement work through the SEA, again while the
+  goal is unmet — on
+  the `bestrouter` with the full toolset; the loop,
+  `discover_sea.DISCOVERY_INSTRUCTIONS`, was the `## AI discovery, auto
+  research, and optimization` section of `SYSTEM.md` and is now the
+  SEA's alone: its `system_prompt()` appends it at the end of the
+  assembled prompt, cutting out a leftover copy first, and its
   `settings()` is `{"model": "bestrouter", "tool_profile": "full"}`;
   `/revise_and_review_paper` puts the same text at the end of every
   `writer_task`), `/forget`
@@ -2486,7 +2894,17 @@ task count merge with the bare name the `llm_call` events carry.
   later connection goes through one persistent `ssh -N -L` port-forward
   per login (`machines.SshTunnel`, from a local loopback port to
   `127.0.0.1:<port>` on the machine, kept for the daemon's lifetime and
-  reopened on the next connection once its ssh process has died), so
+  reopened on the next connection once it is no longer alive; ssh
+  is started with `ExitOnForwardFailure=yes`, `ClearAllForwardings=no`
+  and `LocalCommand=echo kiss-forward-up`, which ssh runs only once the
+  local port is bound, and that line on ssh's output, not the port
+  answering, is what `open` waits for, and what `alive()` requires
+  besides a running ssh process and a port that accepts: another
+  program may take the port between `_free_port`'s pick and ssh's bind,
+  and the link would then have handed its TLS handshake to a stranger;
+  a port ssh reports it could not bind is given up for a freshly picked
+  one, up to `FORWARD_ATTEMPTS` (3) ports within `SSH_TIMEOUT`, and an
+  opening cut short never vouches for a port someone else may hold), so
   the daemon port need not be reachable from here, only the ssh port;
   through it this daemon presents its client certificate,
   `$KISS_HOME/tls/client.pem`, and the machine's daemon, which sniffs
@@ -2591,16 +3009,52 @@ task count merge with the bare name the `llm_call` events carry.
   and `forwarded`, a machine's `error` frame coming back as the reply's
   `error`, and a `saveConfig` that changes a password-registered
   machine's remote password to another non-empty one re-registers the
-  machine with it (an emptied password is not adopted); the sidebar's
-  Schedule, Apps, Spend and Recommendations subpanels show the machine
-  too, their commands (`getCronJobs`, `cronAction`, `getAppsStatus`,
-  `getSpendReport`, `getRecommendations` --
-  `sidebar_panels.MACHINE_PANEL_REPLIES`) forwarded the same way on a
-  link lane of their own (`machines.link_for(machine, "panels")`, so
-  the up-to-45-second app probe holds up no submit, settings or
-  Explorer request), an unreachable or refusing machine answering with
-  an empty reply of the expected type plus the `error`, while the
-  Machines subpanel is this daemon's registry and is never forwarded;
+  machine with it (an emptied password is not adopted); an open sheet
+  whose drop-down machine changes (a tab switch, the daemon's binding,
+  another surface's pick) drops an unsaved in-place custom-model
+  edit, saves the edited settings fields to the machine they were
+  made for, then loads the new machine's settings (`main.js`
+  `syncSettingsMachine`); the chat input's model picker is that
+  machine's picker too: `getModels` and `selectModel` stamped `machine`
+  (`sidebar_panels.machine_models_reply`; `selectModel` is no longer
+  in `remote_tabs.FORWARDED_COMMANDS`) bring the machine's own model
+  list and default model and make a pick the machine's default (and
+  the tab's there), this daemon's default untouched, the `models`
+  reply echoing the command's `generation` so the page keeps the
+  list of a reply asked before its latest pick but ignores its
+  `selected` value (`main.js` keeps every machine's last
+  list and default in `machineModels`, re-syncs the picker whenever
+  the drop-down's machine changes, and shows a running agent's model
+  override only on the machine its task runs on), and a `submit` to a
+  registered machine carries no `useWebTools` override, so the machine
+  applies its own setting; the `@` mention picker of a bound tab lists
+  the machine's files, its `getFiles` (with the tab's browse folder as
+  `workDir`) and `recordFileUsage` stamped `machine`
+  (`sidebar_panels.machine_files_reply`, `machine_file_usage`): a
+  folder the machine has not indexed is answered `loading` at once, so
+  the forwarder asks again at growing intervals (0.2 s doubling to
+  2 s) for up to `FILES_INDEX_WAIT` (60 s), a list echoing another
+  `prefix` or `tabId` (an earlier request's, sent after that one had
+  returned `loading`) asked past as well, the replies produced in the
+  background in the order asked per connection, tab and machine
+  (`ServerApi._spawn_after`, `_pending_files`), and `recordFileUsage`
+  has no reply (`MachineLink.request` with an empty reply type returns
+  `{}` once the command is sent; a lost count is logged); the sidebar's
+  Schedule, Machines, Apps, Spend and Recommendations subpanels show
+  the machine too, their commands (`getCronJobs`, `cronAction`,
+  `getMachines`, `machineAction`, `getAppsStatus`, `getSpendReport`,
+  `getRecommendations` -- `sidebar_panels.MACHINE_PANEL_REPLIES`)
+  forwarded the same way on a link lane of their own
+  (`machines.link_for(machine, "panels")`, so the up-to-45-second app
+  probe holds up no submit, settings or Explorer request; a `machines`
+  reply is waited for `SSH_TIMEOUT + ENROLL_TIMEOUT +
+  DNS_TIMEOUT_SECONDS` longer than the link's usual budget, since the
+  machine pings its own machines first and an `add` enrolls the new
+  one), an unreachable or refusing machine answering with an empty
+  reply of the expected type plus the `error`, so the Machines subpanel
+  shows and edits the registry of the machine it shows while the chat
+  header's drop-down keeps listing this daemon's registry (the page
+  asks an unstamped `getMachines` for it beside the forwarded one);
   the "..." menu's Git Commit (`autocommitAction` stamped `machine`,
   `sidebar_panels.machine_autocommit`) commits the machine's folder:
   its daemon stages, writes the message and commits there and sends the
@@ -2667,12 +3121,18 @@ task count merge with the bare name the `llm_call` events carry.
   `shell+edit` tools and finish with a second `git_sync` call; its
   `prompt()` supplies a default task, so a bare `/sync` runs it, and
   `/sync <remote>/<branch>` merges another remote branch; when machines
-  are registered the `prompt()` also lists them and the agent then
-  syncs each one in turn through `run_agent(agent="sync",
-  machine=<name>, task="<ref> of <the remote's URL> this machine only",
-  max_budget="2")`, with no `work_dir` option, waiting for each before
-  the next, and calls `git_sync` here once more; the sub-task runs in
-  the machine's own folder and its `git_sync(repo, ref, url)` syncs
+  are registered the `prompt()` also lists them and the agent syncs
+  each one in turn before this checkout — the repository's URL is the
+  one the task names after the ref (`/sync origin/main of <url>`),
+  else what its `remote_url` tool returns (the ref's remote URL
+  without its credentials) — through `run_agent(agent="sync", machine=<name>,
+  task="<ref> of <that URL> this machine only", max_budget="2")`, with
+  no `work_dir` option, waiting for each before the next, then calls
+  `git_sync` here, then syncs each machine once more in the same way,
+  so every checkout ends up with what the others pushed (a machine
+  whose second sync pushes commits of its own is noted in the summary,
+  since this checkout gets them at the next `/sync`); the sub-task
+  runs in the machine's own folder and its `git_sync(repo, ref, url)` syncs
   that folder (committing what is uncommitted there too) when it is a
   clone of the URL, else the clone among the
   directories the machine's daemon has opened (`config.json`'s
@@ -2683,8 +3143,8 @@ task count merge with the bare name the `llm_call` events carry.
   (what the sub-task sent to a machine says, or `/sync this machine
   only` typed by the user) keep that run on its own checkout, so the
   machines registered there are not synced in turn; the budget is
-  $2 per checkout, this one and one per machine, since a sub-task's
-  spend counts in the caller's),
+  $2 per sync, one for this checkout and two per machine, since a
+  sub-task's spend counts in the caller's),
   `/sync_history_and_memory` (`seas/sync_history_and_memory/`, a
   `WorkerSea` that brings `$KISS_HOME/history.db` — tasks, events,
   deletion records — and `$KISS_HOME/memories` of this machine and of

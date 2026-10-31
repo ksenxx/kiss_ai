@@ -85,8 +85,12 @@ def test_status_handler_anchors_t0_to_ev_start_ts():
     assert "ev.startTs" in body, (
         "case 'status' handler must consume ev.startTs"
     )
-    assert re.search(r"t0\s*=\s*ev\.startTs", body), (
-        "case 'status' must set t0 = ev.startTs"
+    # The start goes through a local (``const start = ... ev.startTs ...``)
+    # because a running status without one starts the clock now.
+    start = re.search(r"const\s+start\s*=[^;]*\bev\.startTs\b[^;]*;", body)
+    assert start, "case 'status' must read the start from ev.startTs"
+    assert re.search(r"\bt0\s*=\s*start\b", body[start.end():]), (
+        "case 'status' must set t0 from ev.startTs"
     )
 
 

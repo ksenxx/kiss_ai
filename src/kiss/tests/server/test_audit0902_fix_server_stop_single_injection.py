@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import sqlite3
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
 from unittest import TestCase
 
@@ -51,15 +53,14 @@ _SECOND_INJECTION_AT = 6.0
 _LOCK_HELD_FOR = 8.5
 
 
-def _make_remote_server() -> Any:
+def _make_remote_server(tmp: Path) -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.web_server import RemoteAccessServer
 
-    tmp = tempfile.mkdtemp(prefix="kiss-stop-once-")
     return RemoteAccessServer(
         use_tunnel=False,
-        url_file=os.path.join(tmp, "url.json"),
-        local_endpoint_file=os.path.join(tmp, "sorcar-local.json"),
+        url_file=str(tmp / "url.json"),
+        local_endpoint_file=str(tmp / "sorcar-local.json"),
     )
 
 
@@ -147,13 +148,16 @@ class TestStopInjectsOnce(TestCase):
 
     def setUp(self) -> None:
         agent_state.agent_states.clear()
-        self.work_dir = tempfile.mkdtemp(prefix="kiss-stop-once-wd-")
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-stop-once-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.work_dir = str(self.tmp / "wd")
+        os.mkdir(self.work_dir)
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
 
     def test_slow_cleanup_is_not_reinterrupted(self) -> None:
-        remote = _make_remote_server()
+        remote = _make_remote_server(self.tmp)
         agent_server = remote._agent_server
         worker, state, task_id = _start_blocked_worker(
             agent_server, "stop-once-1", self.work_dir,
@@ -212,7 +216,7 @@ class TestStopInjectsOnce(TestCase):
         not acknowledged anything, so the watchdog's second injection
         must still happen and the run must end as stopped.
         """
-        remote = _make_remote_server()
+        remote = _make_remote_server(self.tmp)
         agent_server = remote._agent_server
         agent = ChatSorcarAgent("Sorcar")
         state = AgentState(

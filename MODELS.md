@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **946 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **998 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -13,16 +13,16 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 437 |
+| OpenRouter | 489 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **905** generation-capable models
-- **749** function-calling-capable models
+- **954** generation-capable models
+- **802** function-calling-capable models
 - **7** embedding models
-- **27** decision models
+- **30** decision models
 
 Full model list:
 
@@ -550,7 +550,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (437)</strong></summary>
+<summary><strong>OpenRouter (489)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -566,20 +566,79 @@ Full model list:
 - `openrouter/anthracite-org/magnum-v4-72b`
 - `openrouter/anthropic/claude-3.7-sonnet:thinking`
 - `openrouter/anthropic/claude-fable-5`
+- `openrouter/anthropic/claude-fable-5-high`
+- `openrouter/anthropic/claude-fable-5-low`
+- `openrouter/anthropic/claude-fable-5-max`
+- `openrouter/anthropic/claude-fable-5-medium`
+- `openrouter/anthropic/claude-fable-5-xhigh`
 - `openrouter/anthropic/claude-fable-5.1`
+- `openrouter/anthropic/claude-fable-5.1-high`
+- `openrouter/anthropic/claude-fable-5.1-low`
+- `openrouter/anthropic/claude-fable-5.1-max`
+- `openrouter/anthropic/claude-fable-5.1-medium`
+- `openrouter/anthropic/claude-fable-5.1-xhigh`
 - `openrouter/anthropic/claude-haiku-4.5`
 - `openrouter/anthropic/claude-haiku-5.5`
+- `openrouter/anthropic/claude-haiku-5.5-high`
+- `openrouter/anthropic/claude-haiku-5.5-low`
+- `openrouter/anthropic/claude-haiku-5.5-max`
+- `openrouter/anthropic/claude-haiku-5.5-medium`
+- `openrouter/anthropic/claude-haiku-5.5-xhigh`
 - `openrouter/anthropic/claude-opus-4.1`
 - `openrouter/anthropic/claude-opus-4.5`
+- `openrouter/anthropic/claude-opus-4.5-high`
+- `openrouter/anthropic/claude-opus-4.5-low`
+- `openrouter/anthropic/claude-opus-4.5-medium`
 - `openrouter/anthropic/claude-opus-4.6`
+- `openrouter/anthropic/claude-opus-4.6-high`
+- `openrouter/anthropic/claude-opus-4.6-low`
+- `openrouter/anthropic/claude-opus-4.6-max`
+- `openrouter/anthropic/claude-opus-4.6-medium`
 - `openrouter/anthropic/claude-opus-4.7`
+- `openrouter/anthropic/claude-opus-4.7-high`
+- `openrouter/anthropic/claude-opus-4.7-low`
+- `openrouter/anthropic/claude-opus-4.7-max`
+- `openrouter/anthropic/claude-opus-4.7-medium`
+- `openrouter/anthropic/claude-opus-4.7-xhigh`
 - `openrouter/anthropic/claude-opus-4.8`
+- `openrouter/anthropic/claude-opus-4.8-high`
+- `openrouter/anthropic/claude-opus-4.8-low`
+- `openrouter/anthropic/claude-opus-4.8-max`
+- `openrouter/anthropic/claude-opus-4.8-medium`
+- `openrouter/anthropic/claude-opus-4.8-xhigh`
 - `openrouter/anthropic/claude-opus-5`
+- `openrouter/anthropic/claude-opus-5-high`
+- `openrouter/anthropic/claude-opus-5-low`
+- `openrouter/anthropic/claude-opus-5-max`
+- `openrouter/anthropic/claude-opus-5-medium`
+- `openrouter/anthropic/claude-opus-5-xhigh`
 - `openrouter/anthropic/claude-opus-5.5`
+- `openrouter/anthropic/claude-opus-5.5-high`
+- `openrouter/anthropic/claude-opus-5.5-low`
+- `openrouter/anthropic/claude-opus-5.5-max`
+- `openrouter/anthropic/claude-opus-5.5-medium`
+- `openrouter/anthropic/claude-opus-5.5-xhigh`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
+- `openrouter/anthropic/claude-sonnet-4.6-high`
+- `openrouter/anthropic/claude-sonnet-4.6-low`
+- `openrouter/anthropic/claude-sonnet-4.6-max`
+- `openrouter/anthropic/claude-sonnet-4.6-medium`
 - `openrouter/anthropic/claude-sonnet-5`
+- `openrouter/anthropic/claude-sonnet-5-high`
+- `openrouter/anthropic/claude-sonnet-5-low`
+- `openrouter/anthropic/claude-sonnet-5-max`
+- `openrouter/anthropic/claude-sonnet-5-medium`
+- `openrouter/anthropic/claude-sonnet-5-xhigh`
 - `openrouter/anthropic/claude-sonnet-5.5`
+- `openrouter/anthropic/claude-sonnet-5.5-high`
+- `openrouter/anthropic/claude-sonnet-5.5-low`
+- `openrouter/anthropic/claude-sonnet-5.5-max`
+- `openrouter/anthropic/claude-sonnet-5.5-medium`
+- `openrouter/anthropic/claude-sonnet-5.5-xhigh`
+- `openrouter/baseten/elephant-1`
+- `openrouter/baseten/joey-1`
+- `openrouter/baseten/mammoth-1`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -727,7 +786,6 @@ Full model list:
 - `openrouter/openai/gpt-3.5-turbo-0613`
 - `openrouter/openai/gpt-3.5-turbo-16k`
 - `openrouter/openai/gpt-4`
-- `openrouter/openai/gpt-4-turbo`
 - `openrouter/openai/gpt-4.1`
 - `openrouter/openai/gpt-4.1-mini`
 - `openrouter/openai/gpt-4.1-nano`
@@ -811,12 +869,8 @@ Full model list:
 - `openrouter/openai/gpt-oss-safeguard-20b-high`
 - `openrouter/openai/gpt-oss-safeguard-20b-low`
 - `openrouter/openai/gpt-oss-safeguard-20b-medium`
-- `openrouter/openai/o1`
 - `openrouter/openai/o3`
-- `openrouter/openai/o3-mini`
-- `openrouter/openai/o3-mini-high`
-- `openrouter/openai/o4-mini`
-- `openrouter/openai/o4-mini-high`
+- `openrouter/particle-ai/particle-1`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
 - `openrouter/perplexity/pplx-decider-flash-v1.2`
@@ -847,7 +901,6 @@ Full model list:
 - `openrouter/qwen/qwen3-coder-flash`
 - `openrouter/qwen/qwen3-coder-next`
 - `openrouter/qwen/qwen3-next-80b-a3b-instruct`
-- `openrouter/qwen/qwen3-next-80b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-30b-a3b-instruct`
 - `openrouter/qwen/qwen3-vl-30b-a3b-thinking`
@@ -910,7 +963,6 @@ Full model list:
 - `openrouter/upstage/solar-decide`
 - `openrouter/upstage/solar-decide-flash`
 - `openrouter/upstage/solar-mini4`
-- `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
 - `openrouter/writer/palmyra-x5`
 - `openrouter/x-ai/grok-4.20`

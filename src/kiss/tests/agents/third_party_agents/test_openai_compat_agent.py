@@ -275,25 +275,6 @@ def test_chat_map_store_and_lookup_persist(isolated_home: Path) -> None:
     assert _lookup_chat_id(key1) == "chat-xyz"
 
 
-def test_followup_request_maps_to_same_chat(isolated_home: Path) -> None:
-    """A client's next request (with the assistant reply appended) maps back.
-
-    Mirrors exactly what the handler stores after a successful run: the
-    daemon chat id under the full request message list AND under that
-    list plus the assistant reply, so the lookup key of the follow-up
-    request (all messages except its last user message) hits.
-    """
-    first_request = [{"role": "user", "content": "What is 2+2?"}]
-    assistant_reply = "4"
-    _store_chat_id(_conversation_key(first_request), "chat-123")
-    with_reply = first_request + [{"role": "assistant", "content": assistant_reply}]
-    _store_chat_id(_conversation_key(with_reply), "chat-123")
-
-    followup = with_reply + [{"role": "user", "content": "And 3+3?"}]
-    lookup_key = _conversation_key(followup[:-1])
-    assert _lookup_chat_id(lookup_key) == "chat-123"
-
-
 def test_poll_messages_and_send_message(isolated_home: Path) -> None:
     """poll_messages returns ([], oldest); send_message raises."""
     backend = OpenAICompatChannelBackend()
@@ -303,21 +284,34 @@ def test_poll_messages_and_send_message(isolated_home: Path) -> None:
 
 
 def test_openai_compat_status_tool(
-    api_server: tuple[str, OpenAICompatChannelBackend],
+    api_server: tuple[str, OpenAICompatChannelBackend], refusing_port: int
 ) -> None:
-    """openai_compat_status reports bound=True while serving, False after."""
+    """openai_compat_status reports the serving socket and probes it from elsewhere.
+
+    The serving backend answers from its own socket; a backend that is not
+    serving connects to the configured port and reports ``bound`` True
+    while the server listens there and False on a refused port.
+    """
     url, backend = api_server
     running = json.loads(backend.openai_compat_status())
     assert running["ok"] is True
     assert running["bound"] is True
-    assert f"127.0.0.1:{running['port']}" in url
+    port = running["port"]
+    assert url == f"http://127.0.0.1:{port}"
 
-    # A backend that is NOT running the server probes the configured
-    # port (0 in this isolated config) and reports it unbound.
-    other = OpenAICompatChannelBackend()
-    probed = json.loads(other.openai_compat_status())
-    assert probed["ok"] is True
-    assert probed["bound"] is False
+    configure = auth_tools(OpenAICompatAgent())["authenticate_openai_compat"]
+    assert json.loads(configure(_API_KEY, port=str(port)))["ok"] is True
+    probed = json.loads(OpenAICompatChannelBackend().openai_compat_status())
+    assert probed == {"ok": True, "bind_host": "127.0.0.1", "port": port, "bound": True}
+
+    assert json.loads(configure(_API_KEY, port=str(refusing_port)))["ok"] is True
+    refused = json.loads(OpenAICompatChannelBackend().openai_compat_status())
+    assert refused == {
+        "ok": True,
+        "bind_host": "127.0.0.1",
+        "port": refusing_port,
+        "bound": False,
+    }
 
 
 def test_status_tool_unconfigured(isolated_home: Path) -> None:

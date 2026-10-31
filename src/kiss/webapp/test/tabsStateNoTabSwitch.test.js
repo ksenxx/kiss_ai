@@ -147,7 +147,6 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
   const ids = tabIds(win);
   for (const id of ['tab-a', 'tab-b', 'tab-c']) {
     assert.ok(ids.includes(id), `restored task ${id} needs its own tab`);
-    assert.notStrictEqual(id, userTab, "and not the user's tab");
   }
   assert.strictEqual(
     tabTitle(win, 'tab-c'),

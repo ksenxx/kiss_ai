@@ -88,7 +88,7 @@ class TestTwitchBackendBugs:
 
     def test_search_hits_search_channels_endpoint(self) -> None:
         """Channel search must call GET /search/channels."""
-        result = json.loads(self.backend.search_third_party_agents("streamer"))
+        result = json.loads(self.backend.search_channels("streamer"))
         paths = _paths(self.server, "GET")
         assert "/search/channels" in paths, f"expected GET /search/channels, saw {paths}"
         assert not any("third_party_agents" in p for p in paths), paths

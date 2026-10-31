@@ -102,4 +102,4 @@ class TestMachineLinkLargeFrames(TestCase):
         # The request socket was not closed by the replay: the machine
         # is still reachable, with no back-off in the way.
         self.assertEqual(link.request({"type": "ping"}, "pong")["type"], "pong")
-        self.assertEqual(link._last_error, "")
+        self.assertEqual(link._health.last_error, "")

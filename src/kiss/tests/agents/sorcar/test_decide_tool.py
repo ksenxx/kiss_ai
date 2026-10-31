@@ -37,6 +37,7 @@ from kiss.agents.sorcar.mcp_servers import _RESERVED_TOOL_NAMES
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.decisions_model import DecisionsModel
 from kiss.core.models.model_info import calculate_cost, model
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
@@ -245,6 +246,13 @@ def test_decide_tool_returns_error_text_for_bad_criteria_without_a_request(
 # --------------------------------------------------------------------------
 
 
+def _decisions_model() -> DecisionsModel:
+    """The catalog's default decisions model (no request is made)."""
+    decisions_model = model(DEFAULT_DECISIONS_MODEL)
+    assert isinstance(decisions_model, DecisionsModel)
+    return decisions_model
+
+
 def test_format_decision_bills_openrouter_reported_cost_and_reports_served_model() -> None:
     """``usage.cost`` is what OpenRouter charged for the SERVED model; the
     catalog entry of the requested name is only a fallback."""
@@ -253,7 +261,7 @@ def test_format_decision_bills_openrouter_reported_cost_and_reports_served_model
         "answers": LIVE_ANSWERS,
         "usage": {"input_tokens": 410, "output_tokens": 71, "cost": 2.5e-05},
     }
-    text, cost, tokens = format_decision(DEFAULT_DECISIONS_MODEL, response)
+    text, cost, tokens = format_decision(_decisions_model(), response)
     rendered = json.loads(text)
     assert rendered["answers"] == LIVE_ANSWERS
     assert rendered["model"] == "typesafe/jev-1.13-20260917"
@@ -269,15 +277,15 @@ def test_format_decision_prices_from_catalog_when_no_cost_is_reported() -> None:
         "answers": LIVE_ANSWERS,
         "usage": {"input_tokens": 410, "output_tokens": 71},
     }
-    _text, cost, tokens = format_decision(DEFAULT_DECISIONS_MODEL, response)
+    _text, cost, tokens = format_decision(_decisions_model(), response)
     assert cost == calculate_cost(DEFAULT_DECISIONS_MODEL, 410, 71) > 0
     assert tokens == 481
     response["usage"]["cost"] = "1.7e-05"
-    assert format_decision(DEFAULT_DECISIONS_MODEL, response)[1] == cost
+    assert format_decision(_decisions_model(), response)[1] == cost
 
 
 def test_format_decision_without_usage_is_free_and_falls_back_to_catalog_name() -> None:
-    text, cost, tokens = format_decision(DEFAULT_DECISIONS_MODEL, {"answers": LIVE_ANSWERS})
+    text, cost, tokens = format_decision(_decisions_model(), {"answers": LIVE_ANSWERS})
     rendered = json.loads(text)
     assert rendered["model"] == DEFAULT_DECISIONS_MODEL
     assert rendered["usage"] == {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}

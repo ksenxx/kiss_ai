@@ -36,7 +36,7 @@ from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.conftest import seed_worktree
 from kiss.tests.server._memory_printer import MemoryPrinter
-from kiss.tests.server.conftest import run_git
+from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 TASK_ID = "task-77"
 OWNER_TAB = "owner-tab"
@@ -45,13 +45,14 @@ VIEWER_TAB = "viewer-tab"
 
 def _init_repo(repo: str) -> None:
     """Create a git repo with one committed file so HEAD exists."""
-    run_git(repo, "init", "-q", "-b", "main")
-    run_git(repo, "config", "user.email", "test@example.com")
-    run_git(repo, "config", "user.name", "Test User")
-    run_git(repo, "config", "commit.gpgsign", "false")
+    run_git_checked(repo, "init", "-q", "-b", "main")
+    assert_repo_root(repo)
+    run_git_checked(repo, "config", "user.email", "test@example.com")
+    run_git_checked(repo, "config", "user.name", "Test User")
+    run_git_checked(repo, "config", "commit.gpgsign", "false")
     Path(repo, "README.md").write_text("# Hello\n\nSome content\n")
-    run_git(repo, "add", "README.md")
-    run_git(repo, "commit", "-q", "-m", "initial commit")
+    run_git_checked(repo, "add", "README.md")
+    run_git_checked(repo, "commit", "-q", "-m", "initial commit")
 
 
 class TestSingleOwnerUiBroadcast(unittest.TestCase):

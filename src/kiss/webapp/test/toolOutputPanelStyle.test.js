@@ -30,7 +30,6 @@ const {
 function makePage() {
   return makeChatPage({
     bodyClass: 'remote-chat',
-    sourceUrl: 'toolstyle-main.js',
     beforeScripts: w => loadRemoteCss(w, true),
   });
 }

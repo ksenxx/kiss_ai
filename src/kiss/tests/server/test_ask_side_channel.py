@@ -17,9 +17,8 @@ answer arrives in the same tab.
 
 The tests exercise:
 
-* ``_split_ask_command`` — the parser that decides which typed
-  messages are ``/ask`` (word-boundary strict, empty-question
-  rejecting).
+* which typed messages are ``/ask`` — the SEA slash-command parser
+  decides (word-boundary strict, empty-question rejecting).
 * ``_cmd_append_user_message`` — an ``/ask`` prompt on a live tab
   MUST NOT touch ``pending_user_messages`` and MUST fire
   ``_dispatch_ask_side_channel`` with the owner task id, tab id,
@@ -53,7 +52,6 @@ from kiss.agents.sorcar import daemon_client, sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.commands import _split_ask_command
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
 
@@ -113,47 +111,6 @@ def _reset() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# _split_ask_command
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("prompt", "expected"),
-    [
-        ("/ask why did the last step fail?", "why did the last step fail?"),
-        ("/ask  multiple   spaces   inside  ",
-         "multiple   spaces   inside"),
-        ("/ask\twith\ttabs", "with\ttabs"),
-        ("/ask\nnewline start", "newline start"),
-    ],
-)
-def test_split_ask_command_accepts_word_boundary(
-    prompt: str, expected: str,
-) -> None:
-    """``/ask`` MUST be followed by whitespace and a non-empty tail."""
-    assert _split_ask_command(prompt) == expected
-
-
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "",
-        "/ask",
-        "/ask ",
-        "/ask   \t\n",
-        "/askme why did this fail",  # glued suffix — not /ask
-        "/askreally?",
-        "hey /ask no leading",
-        " /ask leading whitespace",  # leading space — not a slash cmd
-        "?ask alternate prefix",
-    ],
-)
-def test_split_ask_command_rejects_non_matches(prompt: str) -> None:
-    """Non-``/ask`` (or empty-question) prompts MUST return ``None``."""
-    assert _split_ask_command(prompt) is None
-
-
-# ---------------------------------------------------------------------------
 # _cmd_append_user_message routing
 # ---------------------------------------------------------------------------
 
@@ -174,6 +131,55 @@ def _install_dispatch_capture(
 
     server._dispatch_ask_side_channel = _capture  # type: ignore[assignment]
     return calls
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("/ask why did the last step fail?", "why did the last step fail?"),
+        ("/ask  multiple   spaces   inside  ",
+         "multiple   spaces   inside"),
+        ("/ask\twith\ttabs", "with\ttabs"),
+        ("/ask\nnewline start", "newline start"),
+        ("/ask\u00a0after a no-break space", "after a no-break space"),
+    ],
+)
+def test_ask_routing_accepts_word_boundary(prompt: str, expected: str) -> None:
+    """``/ask`` followed by whitespace and a non-empty tail is dispatched, stripped."""
+    server, _events = _make_server()
+    st = _register_running_task("task-abc", "tab-1")
+    calls = _install_dispatch_capture(server)
+
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": prompt})
+
+    assert [c["question"] for c in calls] == [expected]
+    assert st.pending_user_messages == []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "/ask",
+        "/ask ",
+        "/ask   \t\n",
+        "/askme why did this fail",  # glued suffix — not /ask
+        "/askreally?",
+        "/ASK upper case",
+        "hey /ask no leading",
+        " /ask leading whitespace",  # leading space — not a slash cmd
+        "?ask alternate prefix",
+    ],
+)
+def test_ask_routing_rejects_non_matches(prompt: str) -> None:
+    """A non-``/ask`` (or empty-question) prompt is queued for the agent, never dispatched."""
+    server, _events = _make_server()
+    st = _register_running_task("task-abc", "tab-1")
+    calls = _install_dispatch_capture(server)
+
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": prompt})
+
+    assert calls == []
+    assert st.pending_user_messages == [prompt]
 
 
 def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:

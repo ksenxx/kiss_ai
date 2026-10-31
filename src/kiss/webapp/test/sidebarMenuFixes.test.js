@@ -548,7 +548,8 @@ async function main() {
       !picker.hidden,
       'BUG: a plain navigation was taken as the pending Select',
     );
-    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
+    // A pick is adopted through setWorkDir: none went out.
+    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0);
     // The late /a reply is stale and picks nothing either.
     send(win, {
       type: 'dirListing',
@@ -558,7 +559,7 @@ async function main() {
       entries: [],
     });
     assert.ok(!picker.hidden);
-    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
+    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0);
     // A file-system root is refused with a note.
     input.value = '/';
     click(win, picker.querySelector('.folder-picker-select'));
@@ -566,7 +567,7 @@ async function main() {
     assert.ok(
       picker.querySelector('.folder-picker-note').textContent.includes('root'),
     );
-    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
+    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0);
   });
 
   await test('Chat header drop-down: a folder picked there re-roots the views past a content tab', async () => {
@@ -714,7 +715,8 @@ async function main() {
     rightClick(win, explorerRow(win, WD + '/a.txt'));
     const treeMenu = byId(win, 'sidebar-context-menu');
     assert.ok(treeMenu && !treeMenu.hidden, 'the tree menu opened');
-    const stillOpen = byId(win, 'sorcar-content-context-menu');
+    // Closing may remove the menu, so look it up without byId's existence check.
+    const stillOpen = win.document.getElementById('sorcar-content-context-menu');
     assert.ok(
       !stillOpen || stillOpen.hidden || stillOpen.style.display === 'none',
       'BUG: the content context menu stayed open under the tree menu',

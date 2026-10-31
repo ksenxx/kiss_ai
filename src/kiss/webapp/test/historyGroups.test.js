@@ -659,7 +659,7 @@ async function main() {
     const resumesBefore = ofType(posted, 'resumeSession').length;
     click(win, rowBefore);
     assertRowOpenedTask(win, posted, activeBefore, resumesBefore, 'a1');
-    await sleep(20);
+    await sleep(0);
     assert.notStrictEqual(
       firstRow(win),
       rowBefore,
@@ -801,7 +801,7 @@ async function main() {
     rowBefore.dispatchEvent(
       new win.MouseEvent('mousedown', {bubbles: true, cancelable: true}),
     );
-    await sleep(30);
+    await sleep(0);
     assert.strictEqual(
       firstRow(win),
       rowBefore,
@@ -810,7 +810,7 @@ async function main() {
     rowBefore.dispatchEvent(
       new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
     );
-    await sleep(30);
+    await sleep(0);
     assert.notStrictEqual(
       firstRow(win),
       rowBefore,
@@ -871,7 +871,7 @@ async function main() {
         cancelable: true,
       }),
     );
-    await sleep(20);
+    await sleep(0);
     assert.strictEqual(
       firstRow(win),
       rowBefore,
@@ -893,7 +893,7 @@ async function main() {
       'no rebuild during the keyup dispatch (the activation click is next)',
     );
     click(win, fav);
-    await sleep(20);
+    await sleep(0);
     assert.notStrictEqual(
       firstRow(win),
       rowBefore,
@@ -954,7 +954,7 @@ async function main() {
       );
       win.Date.now = () => T + 5000;
       timers[0].fn();
-      await sleep(20);
+      await sleep(0);
       assert.strictEqual(
         firstRow(win),
         rowBefore,
@@ -969,7 +969,7 @@ async function main() {
       // are dropped and the parked page finally lands.
       win.Date.now = () => T + 7100;
       timers[1].fn();
-      await sleep(20);
+      await sleep(0);
       assert.notStrictEqual(
         firstRow(win),
         rowBefore,
@@ -1053,7 +1053,7 @@ async function main() {
       configurable: true,
     });
     win.document.dispatchEvent(new win.Event('visibilitychange'));
-    await sleep(20);
+    await sleep(0);
     assert.notStrictEqual(
       firstRow(win),
       rowBefore,
@@ -1370,7 +1370,7 @@ async function main() {
       rowBefore.dispatchEvent(
         new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
       );
-      await sleep(30);
+      await sleep(0);
       assert.notStrictEqual(firstRow(win), rowBefore, 'parked page landed');
       assert.ok(
         firstRow(win)
@@ -1471,7 +1471,7 @@ async function main() {
     favBtn.dispatchEvent(
       new win.MouseEvent('mouseup', {bubbles: true, cancelable: true}),
     );
-    await sleep(20);
+    await sleep(0);
     const favAfter = firstRow(win).querySelector('.sidebar-item-favorite');
     assert.notStrictEqual(favAfter, favBtn, 'the row was rebuilt');
     assert.ok(

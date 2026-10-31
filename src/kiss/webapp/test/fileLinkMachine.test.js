@@ -193,7 +193,7 @@ function testLinksFollowTheBindingNotTheDropDown() {
   const span = wv.win.document.querySelector('#output [data-path-candidate]');
   assert.strictEqual(span.getAttribute('data-path-machine'), 'box');
   // A reply stamped with another machine (the same path and work dir)
-  // does not resolve the span; the box's reply does.
+  // does not resolve the span: the check stays outstanding.
   send(wv.win, {
     type: 'pathsExist',
     results: {'src/box.py': true},
@@ -205,21 +205,22 @@ function testLinksFollowTheBindingNotTheDropDown() {
     !linkFor(wv.win, 'src/box.py'),
     "another machine's reply is ignored",
   );
-  answer(wv.win, sent[0]);
-  const link = linkFor(wv.win, 'src/box.py');
-  assert.ok(link, "the box's reply promoted the link");
-  // The user picks this machine for the next task: the link, the
-  // re-issued check and the click still belong to the box.
+  // The user picks this machine for the next task, then the daemon
+  // drops and comes back before the box answers: the re-issued check,
+  // the link and the click still belong to the box.
   pickInDropDown(wv.win, '');
   send(wv.win, {type: 'daemonStatus', connected: false});
   send(wv.win, {type: 'daemonStatus', connected: true});
-  for (const c of checks(wv.posted)) {
-    assert.strictEqual(
-      c.machine,
-      'box',
-      'every check for the tab names the box',
-    );
-  }
+  const reissued = checks(wv.posted);
+  assert.strictEqual(reissued.length, 2, 'the unanswered check is re-issued');
+  assert.strictEqual(
+    reissued[1].machine,
+    'box',
+    'the re-issued check names the box, not the drop-down pick',
+  );
+  answer(wv.win, reissued[1]);
+  const link = linkFor(wv.win, 'src/box.py');
+  assert.ok(link, "the box's reply promoted the link");
   link.dispatchEvent(new wv.win.MouseEvent('click', {bubbles: true}));
   const open = wv.posted.filter(m => m.type === 'openFile')[0];
   assert.ok(open);

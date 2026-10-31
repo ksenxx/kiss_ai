@@ -18,7 +18,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {waitFor, settle} = require('./simplify2_harness');
+const {waitFor, settle, installXtermStub} = require('./simplify2_harness');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -27,65 +27,10 @@ function makePage() {
     runScripts: 'outside-only',
   });
   const win = dom.window;
-  const fits = [];
-  const terminals = [];
-  const observers = [];
+  const {terminals, fits, observers} = installXtermStub(win);
   const frames = [];
   const timers = new Map();
   let nextTimer = 0;
-
-  class Terminal {
-    constructor() {
-      this.cols = 80;
-      this.rows = 24;
-      this.options = {};
-      this.written = '';
-      this.focused = 0;
-      this.disposed = false;
-      terminals.push(this);
-    }
-    open() {}
-    loadAddon() {}
-    attachCustomKeyEventHandler(handler) {
-      this.keyHandler = handler;
-    }
-    write(text) {
-      this.written += text;
-    }
-    onData(cb) {
-      this.dataCb = cb;
-    }
-    onResize(cb) {
-      this.resizeCb = cb;
-    }
-    focus() {
-      this.focused++;
-    }
-    getSelection() {
-      return '';
-    }
-    dispose() {
-      this.disposed = true;
-    }
-  }
-  class FitAddon {
-    fit() {
-      fits.push(1);
-    }
-  }
-  win.Terminal = Terminal;
-  win.FitAddon = {FitAddon};
-  win.ResizeObserver = class {
-    constructor(cb) {
-      this.cb = cb;
-      this.disconnected = false;
-      observers.push(this);
-    }
-    observe() {}
-    disconnect() {
-      this.disconnected = true;
-    }
-  };
   win.requestAnimationFrame = cb => {
     frames.push(cb);
     return frames.length;

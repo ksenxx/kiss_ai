@@ -29,7 +29,11 @@ re-serves itself, as HUMAN's docs say).  Whether the vendor *accepts* a
 solution is decided on its side from the IP's and session's score: in
 two sessions on this datacenter IP the challenge stayed after two holds,
 and the page is then reported for the user, as a person stuck in the
-same loop would be.  Three groups of helpers, all consumed by
+same loop would be.  By late Oct 2026 fiverr's widget frame spanned a
+600 px column with its 310 px button at the left edge, so holds at the
+middle of ``#px-captcha`` often missed the button (fiverr blocked after
+two holds on 30 Oct); the button itself is pressed now
+(:func:`press_and_hold_box`).  Three groups of helpers, all consumed by
 :mod:`kiss.agents.sorcar.web_use_tool`:
 
 * **Engine**: :func:`playwright_api` prefers Patchright, a patched
@@ -47,8 +51,9 @@ same loop would be.  Three groups of helpers, all consumed by
   (recognise a bot-protection page so the tool can wait for it to clear,
   press its widget, and report it plainly), with
   :func:`challenge_wait_secs` / :func:`press_hold_secs` /
-  :func:`widget_presses` / :data:`PRESS_AND_HOLD_BOX_JS` describing how
-  each vendor's page is waited on and pressed.
+  :func:`widget_presses` / :data:`PRESS_AND_HOLD_BOX_JS` /
+  :func:`press_and_hold_box` describing how each vendor's page is waited
+  on and pressed.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ import threading
 import time
 from importlib import import_module
 from types import ModuleType
+from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
 
 from kiss.agents.sorcar._concurrency import locked
@@ -751,10 +757,11 @@ def hold_tremor(x: float, y: float) -> tuple[float, float]:
 # viewport pixels, as a one-element list, or an empty list (a list because
 # the tool's bounded page read waits for a truthy result).  The widget is
 # the ``#px-captcha`` element of the block page (walmart.com/blocked,
-# fiverr's "It needs a human touch", PerimeterX's stock page); its button
-# fills the element.  Content pages of those sites also carry an empty
-# ``#px-captcha`` placeholder, which is why the page text decides that a
-# check is showing and this only locates the widget.
+# fiverr's "It needs a human touch", PerimeterX's stock page); the button
+# to press is inside it (:func:`press_and_hold_box`).  Content pages of
+# those sites also carry an empty ``#px-captcha`` placeholder, which is why
+# the page text decides that a check is showing and this only locates the
+# widget.
 PRESS_AND_HOLD_BOX_JS = """() => {
   const el = document.querySelector('#px-captcha');
   if (!el) return [];
@@ -762,6 +769,79 @@ PRESS_AND_HOLD_BOX_JS = """() => {
   if (r.width < 40 || r.height < 20) return [];
   return [{x: r.x, y: r.y, width: r.width, height: r.height}];
 }"""
+
+# Smallest box taken for the bar: content pages' empty ``#px-captcha``
+# placeholders and collapsed frames are narrower or shorter.
+_MIN_BAR_WIDTH = 40.0
+_MIN_BAR_HEIGHT = 20.0
+# Buttons looked at in the widget's visible frame (the real one has one).
+_MAX_BAR_BUTTONS = 4
+
+
+def _usable_box(box: dict[str, float], within: dict[str, float]) -> bool:
+    """Whether *box* is big enough to be the bar and centred inside *within*.
+
+    Args:
+        box: A rendered element's bounding box in viewport pixels.
+        within: The box that must contain *box*'s centre.
+
+    Returns:
+        ``True`` when a person could see and press *box*.
+    """
+    if box["width"] < _MIN_BAR_WIDTH or box["height"] < _MIN_BAR_HEIGHT:
+        return False
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    return (
+        within["x"] <= cx <= within["x"] + within["width"]
+        and within["y"] <= cy <= within["y"] + within["height"]
+    )
+
+
+def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] | None:
+    """Return the box of the "Press & Hold" button inside HUMAN's widget.
+
+    HUMAN renders the button in an iframe of ``#px-captcha``.  On fiverr
+    (Oct 2026) that iframe sits in the element's closed shadow root next
+    to four ``display: none`` copies (the "multiple iframes" honeypots of
+    https://docs.humansecurity.com/applications/human-challenge) and spans
+    the whole element, a 600 px block, while its button is 310 px at the
+    left edge: holds at the middle of *widget* landed right of the button
+    on empty frame, never reached the bar, and the page stayed blocked.
+    The page's frame tree also lists frames in closed shadow roots, so the
+    widget's visible frame is found there (hidden copies have no box) and
+    the button in it by its ARIA role.
+
+    Args:
+        page: The Playwright page showing the check.
+        widget: The ``#px-captcha`` element's box
+            (:data:`PRESS_AND_HOLD_BOX_JS`), in main-frame viewport pixels.
+
+    Returns:
+        The button's box in main-frame viewport pixels, or the visible
+        frame's box when no button in it can be pressed, or ``None`` while
+        no frame of the widget shows (still rendering, or the page is
+        reloading under the read).
+    """
+    error = playwright_api().Error
+    for frame in page.frames:
+        if frame.parent_frame is None:
+            continue
+        try:
+            box: dict[str, float] | None = frame.frame_element().bounding_box()
+            if box is None or not _usable_box(box, widget):
+                continue  # a hidden copy, a collapsed frame, or one elsewhere
+            buttons = frame.get_by_role("button")
+            for i in range(min(buttons.count(), _MAX_BAR_BUTTONS)):
+                button: dict[str, float] | None = buttons.nth(i).bounding_box(timeout=1500)
+                if button is not None and _usable_box(button, box):
+                    return button
+        except error:
+            # The frame detached or navigated under the read.
+            logger.debug("press-and-hold frame unreadable", exc_info=True)
+            continue
+        return box
+    return None
 
 
 _GOOGLE_SEARCH_HOST_RE = re.compile(r"^(www\.)?google\.[a-z.]+$", re.I)

@@ -409,11 +409,11 @@ class TestEvaluateScript:
         web.go_to_url(server)
         # The state a failed capture start leaves behind for the page that
         # stays current: the tools that need the session recreate it.
-        web._console_sessions.pop(web._page)
+        web._page_records[web._page].session = None
         assert web.evaluate_script("() => 1 + 1") == "2"
-        web._console_sessions.pop(web._page)
+        web._page_records[web._page].session = None
         web.list_console_messages(clear=True)
-        assert web._page in web._console_sessions
+        assert web._page_records[web._page].console_on
         web.evaluate_script("() => console.log('after restart')")
         assert "after restart" in _eventually(lambda: _console_containing(web, "after restart"))
 
@@ -519,9 +519,9 @@ class TestListNetworkRequests:
         web.go_to_url(server)
         assert web.evaluate_script("() => { fetch('/slow'); return 1; }") == "1"
         _eventually(lambda: _network_containing(web, "/slow"))
-        assert web._network_pending.get(web._page), "pending entry missing before clear"
+        assert web._page_records[web._page].pending, "pending entry missing before clear"
         web.list_network_requests(clear=True)
-        assert web._network_pending.get(web._page) == {}
+        assert web._page_records[web._page].pending == {}
         # The request finishes (2 s server-side) AFTER the clear: its
         # retired entry must not resurrect in the listing.
         time.sleep(2.5)

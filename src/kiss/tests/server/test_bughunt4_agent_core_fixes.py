@@ -56,19 +56,20 @@ from kiss.core.models.model_info import model as _model_factory
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.conftest import seed_worktree
-from kiss.tests.server.conftest import run_git
+from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 
 def _make_repo(base: Path, name: str) -> Path:
     repo = base / name
     repo.mkdir(parents=True)
-    run_git(repo, "init", "-b", "main")
-    run_git(repo, "config", "user.email", "t@t.t")
-    run_git(repo, "config", "user.name", "t")
-    run_git(repo, "config", "commit.gpgsign", "false")
+    run_git_checked(repo, "init", "-b", "main")
+    assert_repo_root(repo)
+    run_git_checked(repo, "config", "user.email", "t@t.t")
+    run_git_checked(repo, "config", "user.name", "t")
+    run_git_checked(repo, "config", "commit.gpgsign", "false")
     (repo / "README.md").write_text("hello\n")
-    run_git(repo, "add", "-A")
-    run_git(repo, "commit", "-m", "init")
+    run_git_checked(repo, "add", "-A")
+    run_git_checked(repo, "commit", "-m", "init")
     return repo
 
 

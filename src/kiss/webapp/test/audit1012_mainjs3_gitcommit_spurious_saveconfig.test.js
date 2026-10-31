@@ -4,18 +4,20 @@
 // add your name here
 
 // Audit 2026-10-12 (mainjs-3): the Git Commit button of the "..."
-// menu runs triggerManualGitCommit(), which calls closeSettingsPanel()
-// unconditionally -- even while the settings sheet is closed.
-// closeSettingsPanel() flushes the form through
-// saveSettingsIfPopulated(), and the form used to count as populated
-// after EVERY configData reply (the daemon re-pushes one every 2 s),
-// not only the one the sheet asked for.  So every Git Commit click posted a full
-// `saveConfig` (API keys included) nobody asked for, and a stale form
-// can overwrite a change another window saved since this window's last
-// poll.
+// menu (triggerManualGitCommit) closes the settings sheet so the
+// commit's transcript line is not hidden behind it, and closing the
+// sheet flushes the config form as a full `saveConfig` (API keys
+// included).  A Git Commit click with the sheet closed used to post
+// such a saveConfig nobody asked for, and a stale form could overwrite
+// a change another window had saved.
 //
 // Expected: a Git Commit click with the sheet closed posts
-// autocommitAction and nothing else config-related.
+// autocommitAction and nothing else config-related.  Two things hold
+// that rule: triggerManualGitCommit closes the sheet only when it is
+// open, and saveSettingsIfPopulated flushes the form only after the
+// user edited a field, which every close forgets.  Closing a closed
+// sheet has no other effect to observe, so this test pins the rule,
+// not the first guard alone.
 
 'use strict';
 

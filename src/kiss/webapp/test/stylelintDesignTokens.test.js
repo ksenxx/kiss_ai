@@ -5,8 +5,8 @@
 
 // End-to-end tests for the `kiss/design-tokens` Stylelint rule
 // (scripts/stylelint-design-tokens.mjs): each case lints real CSS through
-// Stylelint's Node API with the plugin loaded, and the last case lints the
-// shipped stylesheets with the repo's own .stylelintrc.json.
+// Stylelint's Node API with the plugin loaded.  The shipped stylesheets
+// are linted with the repo's .stylelintrc.json by `npm run lint:css`.
 
 /* global require, __dirname, console, process */
 
@@ -133,36 +133,24 @@ async function testInvalidOptionIsReported() {
   console.log('  ok - invalid tokenSelectors reported, rule skipped');
 }
 
-async function testShippedStylesheetsPass() {
-  const res = await stylelint.lint({
-    files: ['media/**/*.css'],
-    cwd: ROOT,
-    ignorePattern: ['media/**/*.min.css'],
-  });
-  const problems = res.results.flatMap(r =>
-    r.warnings.map(w => `${path.relative(ROOT, r.source)}:${w.line} ${w.text}`),
-  );
-  assert.deepStrictEqual(problems, []);
-  const main = res.results.find(r => r.source.endsWith(path.join('media', 'main.css')));
-  assert.ok(main, 'main.css was linted');
-  console.log('  ok - media/*.css pass the repo Stylelint config');
-}
+const TESTS = [
+  testHexColours,
+  testRadii,
+  testZIndex,
+  testFontSize,
+  testTokenRedefinitionsOutsideTokenBlock,
+  testDefaultTokenSelectorIsRoot,
+  testInvalidOptionIsReported,
+];
 
 async function runTests() {
   stylelint = (await import('stylelint')).default;
-  await testHexColours();
-  await testRadii();
-  await testZIndex();
-  await testFontSize();
-  await testTokenRedefinitionsOutsideTokenBlock();
-  await testDefaultTokenSelectorIsRoot();
-  await testInvalidOptionIsReported();
-  await testShippedStylesheetsPass();
+  for (const t of TESTS) await t();
 }
 
 runTests().then(
   () => {
-    console.log('\n8 passed, 0 failed');
+    console.log(`\n${TESTS.length} passed, 0 failed`);
     process.exit(0);
   },
   err => {

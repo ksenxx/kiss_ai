@@ -110,15 +110,23 @@ def _make_agent(*tools: Callable[..., Any]) -> KISSAgent:
 def _leave_interrupt_pending_and_raise(exc_type: type[BaseException]) -> None:
     """Set a pending ``ToolCallInterrupted`` on this thread and raise *exc_type*.
 
-    Both happen inside one ``list(map(...))`` call through C callables,
-    so the pending exception cannot land before *exc_type* unwinds.
+    Both happen inside one ``list(map(...))`` call through C callables
+    that run no Python code in between, so the pending exception cannot
+    land before *exc_type* unwinds.  The raise is a ``throw`` into an
+    exhausted generator, not a ctypes call: ctypes raises the
+    ``ctypes.call_function`` audit event before every call, and a Python
+    audit hook (``filelock`` adds one at import, for the life of the
+    process) would be a check point for the pending exception.
     """
+    exc = exc_type()  # built first: a Python ``__init__`` is a check point too
+    finished = (None for _ in ())
+    list(finished)
     set_async = functools.partial(
         _SET_ASYNC_EXC,
         ctypes.c_ulong(threading.get_ident()),
         ctypes.py_object(ToolCallInterrupted),
     )
-    raise_now = functools.partial(ctypes.pythonapi.PyErr_SetNone, ctypes.py_object(exc_type))
+    raise_now = functools.partial(finished.throw, exc)
     list(map(operator.call, (set_async, raise_now)))
 
 

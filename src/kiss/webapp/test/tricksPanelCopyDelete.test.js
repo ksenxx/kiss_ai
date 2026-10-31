@@ -7,7 +7,7 @@
 // End-to-end (JSDOM) tests for the Inject promptlet panel's per-row
 // buttons: every row ends with a copy button that puts the promptlet on
 // the clipboard, and the first `window.__MY_TRICKS_COUNT__` rows (the
-// user's own, from ~/.kiss/MY_INJECTION.md) also carry a delete button
+// user's own, from $KISS_HOME/MY_INJECTION.md) also carry a delete button
 // that posts `deleteTrick` and drops the row at once.  Also covers the
 // `tricksData` reply's `userCount`.
 
@@ -147,7 +147,7 @@ async function runPanel() {
   // stamped for this window, and the row comes back
   send(win, {
     type: 'error',
-    text: 'Could not write ~/.kiss/MY_INJECTION.md',
+    text: 'Could not write $KISS_HOME/MY_INJECTION.md',
     connId: 'c1',
   });
   send(win, {

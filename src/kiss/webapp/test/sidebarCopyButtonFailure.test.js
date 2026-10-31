@@ -21,37 +21,21 @@ const {
   fireTimers,
   click,
 } = require('./simplify2_harness');
+const {sendHistory, makeRow} = require('./history_helpers');
 
 function makePage() {
   const {win, posted} = makeHarnessPage({bodyClass: 'remote-chat'});
   win.document.getElementById('sidebar').classList.add('open');
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const req = posted.filter(m => m && m.type === 'getHistory').pop();
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req ? req.generation : undefined,
-    sessions: [
-      {
-        id: 'chat-1',
-        task_id: 1,
-        title: 'task one',
-        timestamp: 1_700_000_000,
-        preview: 'task one',
-        has_events: true,
-        failed: false,
-        is_running: false,
-        awaiting_answer: false,
-        tokens: 1,
-        cost: 0,
-        steps: 1,
-        is_favorite: false,
-        work_dir: '',
-        startTs: 1_700_000_000_000,
-        endTs: 0,
-      },
-    ],
-  });
+  sendHistory(win, posted, [
+    makeRow({
+      task_id: 1,
+      title: 'task one',
+      has_events: true,
+      awaiting_answer: false,
+      endTs: 0,
+    }),
+  ]);
   const btn = win.document.querySelector('#history-list .sidebar-item-copy');
   assert.ok(btn, 'setup: the history row has a copy button');
   return {win, btn};
@@ -62,7 +46,7 @@ async function testFailureIsVisible() {
   // jsdom: no navigator.clipboard, execCommand undefined -> both fail.
   assert.strictEqual(win.navigator.clipboard, undefined);
   click(win, btn);
-  await sleep(5);
+  await sleep(0);
   assert.ok(btn.classList.contains('copy-failed'), btn.className);
   assert.ok(!btn.classList.contains('copied'));
   assert.ok(btn.querySelector('line'), 'a cross replaces the copy icon');
@@ -85,7 +69,7 @@ async function testSuccessFlashesAndReverts() {
   assert.strictEqual(btn.hasAttribute('title'), false, 'no native title');
   const timers = recordTimers(win, 1500);
   click(win, btn);
-  await sleep(5);
+  await sleep(0);
   assert.deepStrictEqual(copied, ['task one'], 'the row text was copied');
   assert.ok(btn.classList.contains('copied'));
   assert.ok(!btn.classList.contains('copy-failed'));

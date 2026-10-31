@@ -16,29 +16,16 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const {lastCssRule} = require('./designTokens');
 
 const CSS = fs.readFileSync(
   path.join(__dirname, '..', 'media', 'main.css'),
   'utf8',
-).replace(/\/\*[\s\S]*?\*\//g, '');
+);
 
-/** The `border` value of the top-level rule(s) that style `.ev.task-panel`. */
-function taskPanelBorder() {
-  const blockRe = /([^{}]+)\{([^{}]*)\}/g;
-  let match;
-  let border = null;
-  while ((match = blockRe.exec(CSS)) !== null) {
-    const selectors = match[1].split(',').map(s => s.trim());
-    if (!selectors.includes('.ev.task-panel')) continue;
-    const m = /(?:^|[;\s])border\s*:\s*([^;]+)/.exec(match[2]);
-    if (m) border = m[1].trim();
-  }
-  return border;
-}
-
-assert.strictEqual(
-  taskPanelBorder(),
-  '1px solid var(--accent-line)',
+assert.match(
+  lastCssRule(CSS, '.ev.task-panel'),
+  /(?:^|[;\s])border:\s*1px solid var\(--accent-line\)\s*(?:;|$)/,
   'BUG: .ev.task-panel border must be the accent hairline',
 );
 console.log('  ok - .ev.task-panel draws the accent hairline');

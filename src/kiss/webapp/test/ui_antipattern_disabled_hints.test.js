@@ -4,8 +4,8 @@
 // add your name here
 //
 // End-to-end (jsdom) tests for anti-patterns A4/A9 in media/main.js:
-// a disabled control says why (promptlet Add, working-directory Open,
-// Git Commit while a commit runs), a Max budget the form will ignore is
+// a disabled control says why (promptlet Add, Git Commit while a
+// commit runs), a Max budget the form will ignore is
 // flagged under the field, Update / Update Models progress is visible
 // inside the settings sheet, and a failed share is a sticky error toast
 // with the reason.  Each test fails on the old code.

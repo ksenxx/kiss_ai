@@ -382,6 +382,61 @@
   }
 
   /**
+   * The keyboard model of every context menu (this one and the sidebar
+   * trees' treeContextMenu.js): Escape closes, Up / Down move between
+   * the enabled *items* (wrapping), Home / End jump to the ends, Enter /
+   * Space run the focused item.
+   *
+   * @param {KeyboardEvent} e The keydown event.
+   * @param {Array<HTMLElement>} items The menu's enabled items.
+   * @param {Function} close Closes the menu.
+   */
+  function menuKeyNav(e, items, close) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (!items.length) return;
+    const idx = items.indexOf(items[0].ownerDocument.activeElement);
+    let next = -1;
+    if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = idx <= 0 ? items.length - 1 : idx - 1;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    if (next >= 0) {
+      e.preventDefault();
+      items[next].focus({preventScroll: true});
+      return;
+    }
+    if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
+      e.preventDefault();
+      items[idx].click();
+    }
+  }
+
+  /**
+   * Place the menu element *el* at (x, y), kept inside *win*'s viewport.
+   *
+   * @param {Window} win The menu's window (its viewport size).
+   * @param {HTMLElement} el The open menu.
+   * @param {number} x Pointer x (client coordinates).
+   * @param {number} y Pointer y (client coordinates).
+   * @param {number} fallbackW Width of a menu not laid out (offsetWidth 0).
+   * @param {number} fallbackH Height of a menu not laid out.
+   */
+  function clampMenu(win, el, x, y, fallbackW, fallbackH) {
+    const vw = (win && win.innerWidth) || 0;
+    const vh = (win && win.innerHeight) || 0;
+    const mw = el.offsetWidth || fallbackW;
+    const mh = el.offsetHeight || fallbackH;
+    const px = vw ? Math.min(x, vw - mw - 4) : x;
+    const py = vh ? Math.min(y, vh - mh - 4) : y;
+    el.style.left = Math.max(0, px) + 'px';
+    el.style.top = Math.max(0, py) + 'px';
+  }
+
+  /**
    * Install a Copy / Select All context menu on *doc*.
    *
    * Returns a handle with `close()` so a caller can dismiss an open menu
@@ -458,12 +513,15 @@
     function activate(item) {
       close();
       if (item.id === 'select-all') {
-        // Select All leaves a real DOM selection behind, so a following
-        // Copy simply reads it — no cached text that can go stale when the
-        // user narrows the selection afterwards.  Over a field it selects
-        // that field's contents, exactly like the native menu does.
-        // select() works on every input type; setSelectionRange throws on
-        // `number` / `email` inputs.
+        // Over a text field Select All selects that field's contents,
+        // exactly like the native menu does, and a following Copy reads
+        // that selection.  select() works on every input type;
+        // setSelectionRange throws on `number` / `email` inputs.
+        // Elsewhere it selects the visible text as one Range per stretch
+        // between hidden sources.  Chromium keeps only the first Range, so
+        // the joined text is cached with the Range left in place, and the
+        // next Copy uses that text only while the live selection is still
+        // exactly that Range (cachedSelectAllText).
         if (item.editable && isTextField(item.editable)) {
           item.editable.focus();
           item.editable.select();
@@ -534,14 +592,7 @@
         menu.appendChild(el);
       });
       (doc.body || doc.documentElement).appendChild(menu);
-      const vw = (win && win.innerWidth) || 0;
-      const vh = (win && win.innerHeight) || 0;
-      const mw = menu.offsetWidth || 180;
-      const mh = menu.offsetHeight || model.length * 24 + 8;
-      const px = vw ? Math.min(x, vw - mw - 4) : x;
-      const py = vh ? Math.min(y, vh - mh - 4) : y;
-      menu.style.left = Math.max(0, px) + 'px';
-      menu.style.top = Math.max(0, py) + 'px';
+      clampMenu(win, menu, x, y, 180, model.length * 24 + 8);
       opener = doc.activeElement;
       const first = focusableItems()[0];
       if (first) first.focus({preventScroll: true});
@@ -563,39 +614,8 @@
       close();
     }
 
-    // Same keyboard model as treeContextMenu.js: Escape closes, Up / Down
-    // move between enabled items (wrapping), Home / End jump, Enter /
-    // Space run the focused item.
     function onKeyDown(e) {
-      if (!menu) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        close();
-        return;
-      }
-      const items = focusableItems();
-      if (!items.length) return;
-      const idx = items.indexOf(doc.activeElement);
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        let next;
-        if (e.key === 'ArrowDown')
-          next = idx < 0 ? 0 : (idx + 1) % items.length;
-        else next = idx <= 0 ? items.length - 1 : idx - 1;
-        items[next].focus({preventScroll: true});
-        return;
-      }
-      if (e.key === 'Home' || e.key === 'End') {
-        e.preventDefault();
-        items[e.key === 'Home' ? 0 : items.length - 1].focus({
-          preventScroll: true,
-        });
-        return;
-      }
-      if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
-        e.preventDefault();
-        items[idx].click();
-      }
+      if (menu) menuKeyNav(e, focusableItems(), close);
     }
 
     doc.addEventListener('contextmenu', onContextMenu);
@@ -653,16 +673,17 @@
     buildMenuModel.toString() +
     insertIntoContentEditable.toString() +
     pasteInto.toString() +
+    menuKeyNav.toString() +
+    clampMenu.toString() +
     installContentContextMenu.toString() +
-    // The handle is published so the page can tell the menu is installed
-    // and close it; installing twice would otherwise be undetectable.
-    'window.__sorcarContentContextMenu=' +
     'installContentContextMenu(document,{});' +
     '})();';
 
   const api = {
     installContentContextMenu: installContentContextMenu,
     contentContextMenuBootstrapHtml: contentContextMenuBootstrapHtml,
+    menuKeyNav: menuKeyNav,
+    clampMenu: clampMenu,
   };
 
   if (root && typeof root === 'object') {

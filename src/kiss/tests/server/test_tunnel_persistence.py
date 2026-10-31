@@ -29,6 +29,7 @@ user's real ``~/.kiss/cloudflared.pid``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -176,7 +177,7 @@ def test_wait_for_remote_password_immediate() -> None:
         save_config({"remote_password": "secret"})
         assert load_config()["remote_password"] == "secret"
         t0 = time.monotonic()
-        pw = ws._wait_for_remote_password(timeout=5.0)
+        pw = asyncio.run(ws._wait_for_remote_password(timeout=5.0))
         elapsed = time.monotonic() - t0
         assert pw == "secret"
         assert elapsed < 0.5
@@ -190,7 +191,7 @@ def test_wait_for_remote_password_times_out() -> None:
     try:
         save_config({"remote_password": ""})
         t0 = time.monotonic()
-        pw = ws._wait_for_remote_password(timeout=1.0)
+        pw = asyncio.run(ws._wait_for_remote_password(timeout=1.0))
         elapsed = time.monotonic() - t0
         assert pw == ""
         assert 1.0 <= elapsed < 3.0
@@ -212,7 +213,7 @@ def test_wait_for_remote_password_picks_up_late_write() -> None:
         thread.start()
         try:
             t0 = time.monotonic()
-            pw = ws._wait_for_remote_password(timeout=5.0)
+            pw = asyncio.run(ws._wait_for_remote_password(timeout=5.0))
             elapsed = time.monotonic() - t0
             assert password_accepted("set-late", pw)
             assert 0.9 < elapsed < 3.0

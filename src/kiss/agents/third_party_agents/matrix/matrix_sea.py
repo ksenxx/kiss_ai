@@ -25,6 +25,8 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import json
 import logging
 import secrets
@@ -347,10 +349,21 @@ def _revoke(cfg: dict[str, str]) -> bool:
 
 
 def _client_from_config(cfg: dict[str, str]) -> Any:
-    """Build a matrix-nio ``AsyncClient`` from a stored config."""
-    from nio import AsyncClient
+    """Build a matrix-nio ``AsyncClient`` from a stored config.
 
-    client = AsyncClient(cfg["homeserver_url"])
+    nio's own retry is turned off (``max_limit_exceeded=0``,
+    ``max_timeouts=0``): by default it retries a 429 or a failed
+    connection forever, so a rate-limited send blocked until
+    :meth:`MatrixChannelBackend._run` timed out and kept retrying in the
+    background.  A 429 now comes back as nio's error response and a
+    failed connection raises; the channel runner's retry owns retries.
+    """
+    from nio import AsyncClient, AsyncClientConfig
+
+    client = AsyncClient(
+        cfg["homeserver_url"],
+        config=AsyncClientConfig(max_limit_exceeded=0, max_timeouts=0),
+    )
     client.access_token = cfg["access_token"]
     if cfg.get("device_id"):
         client.device_id = cfg["device_id"]
@@ -359,50 +372,121 @@ def _client_from_config(cfg: dict[str, str]) -> Any:
     return client
 
 
-def _raise_on_send_error(resp: Any, room_id: str) -> Any:
+def _raise_on_error(resp: Any, action: str) -> Any:
     """Raise ``RuntimeError`` when *resp* is a matrix-nio error response.
 
-    The shared ``ChannelRunner`` treats a ``send_message`` that returns
-    without raising as a successful delivery and deletes the reply from its
-    at-least-once ledger, but nio's ``room_send`` reports failures (rate
-    limits, auth failures) by *returning* an error response rather than
-    raising — so those responses must be converted into exceptions here or
-    the reply is silently lost.
-
-    When matrix-nio is importable, the check is
-    ``isinstance(resp, nio.ErrorResponse)``, which covers
-    ``nio.responses.RoomSendError`` and every other error subclass.  nio is
-    an optional dependency (imported lazily throughout this module), so when
-    it is missing the check falls back to the same structural contract: nio
-    error responses carry both ``message`` and ``status_code`` attributes,
-    while success responses such as ``RoomSendResponse`` carry neither.
+    nio reports a refused request (a rate limit, an auth failure, a room
+    the bot may not act in) by *returning* an ``ErrorResponse`` rather
+    than raising, and a 429 comes back that way at once because
+    :func:`_client_from_config` disables nio's internal retry.
+    ``send_message`` checks here so the shared ``ChannelRunner`` does not
+    count a refused reply as delivered and drop it from its at-least-once
+    ledger; the LLM-facing tools check here so they answer ``"ok": false``
+    instead of a success that never happened.  A response only exists
+    when nio could be imported to build the client, so the import cannot
+    fail here.
 
     Args:
-        resp: Response object returned by ``AsyncClient.room_send``.
-        room_id: Target room, included in the error message for context.
+        resp: Response object returned by an ``AsyncClient`` request.
+        action: What was attempted (``"send to !room:server"``), for the message.
 
     Returns:
         *resp* unchanged when it is not an error response.
 
     Raises:
-        RuntimeError: If *resp* is an error response; the message includes
-            the response's ``status_code`` and ``message`` details.
+        RuntimeError: If *resp* is an error response; the message is
+            ``"Matrix <action> failed: <status_code> <message>"``, with
+            ``unknown`` for a missing status code.
     """
-    try:
-        from nio import ErrorResponse
-    except ImportError:  # pragma: no cover - nio is a dev dependency, so always importable in tests
-        error_type: type | None = None
-    else:
-        error_type = ErrorResponse
-    if error_type is not None:
-        is_error = isinstance(resp, error_type)
-    else:  # pragma: no cover - see above
-        is_error = hasattr(resp, "message") and hasattr(resp, "status_code")
-    if is_error:
-        status = getattr(resp, "status_code", None) or "unknown"
-        message = getattr(resp, "message", "")
-        raise RuntimeError(f"Matrix send to {room_id} failed: {status} {message}".rstrip())
+    from nio import ErrorResponse
+
+    if isinstance(resp, ErrorResponse):
+        status = resp.status_code or "unknown"
+        raise RuntimeError(f"Matrix {action} failed: {status} {resp.message}".rstrip())
     return resp
+
+
+def _refuses_since_token(resp: Any) -> bool:
+    """Return whether a failed sync means the homeserver refused its ``since`` token.
+
+    Homeservers refuse an unknown or malformed token with HTTP 400
+    (Synapse: ``M_UNKNOWN`` "Invalid stream token"; Dendrite:
+    ``M_INVALID_PARAM``), and the token is the only part of a ``/sync``
+    request that changes between ticks.  Any other failure says nothing
+    about the token: a rate limit (``M_LIMIT_EXCEEDED``, nio's own test
+    for one, even on a 400), a proxy's 408 timeout, an auth or permission
+    error, a 5xx.
+
+    Args:
+        resp: The error response nio returned for the sync.
+
+    Returns:
+        True when re-syncing without the token is the way forward.
+    """
+    status = getattr(getattr(resp, "transport_response", None), "status", 0)
+    return status == 400 and getattr(resp, "status_code", None) != "M_LIMIT_EXCEEDED"
+
+
+async def _unless_cancelled(
+    coro: Coroutine[Any, Any, Any], future: concurrent.futures.Future[Any]
+) -> Any:
+    """Await *coro*, or close it unstarted if the caller already cancelled *future*.
+
+    This is the task's first step, so nothing runs between the check and
+    the start of *coro*: a cancel landing any time before it (even after
+    the task was created, when the cancel would queue behind this step)
+    keeps *coro* from ever starting.
+
+    Args:
+        coro: The coroutine to run.
+        future: The caller's handle on its outcome.
+
+    Returns:
+        The result of *coro*, or None when it was closed unstarted.
+    """
+    if future.cancelled():
+        coro.close()
+        return None
+    return await coro
+
+
+def _start_on_loop(coro: Coroutine[Any, Any, Any], future: concurrent.futures.Future[Any]) -> None:
+    """Start *coro* as a task of the running loop, its outcome mirrored into *future*.
+
+    Called on the loop thread by :meth:`MatrixChannelBackend._run`, which
+    created *future* before scheduling this call: a caller that gave up
+    before the task's first step (a timeout, or a Stop raised while
+    scheduling) has cancelled *future*, so *coro* is closed unstarted
+    (see :func:`_unless_cancelled`).  A later cancel of *future* cancels
+    the task.
+
+    Args:
+        coro: The coroutine to run.
+        future: The caller's handle on its outcome.
+    """
+    task = asyncio.ensure_future(_unless_cancelled(coro, future))
+    task.add_done_callback(functools.partial(_copy_task_outcome, future))
+    future.add_done_callback(functools.partial(_cancel_task, task))
+
+
+def _copy_task_outcome(future: concurrent.futures.Future[Any], task: asyncio.Future[Any]) -> None:
+    """Copy the finished *task*'s result, exception or cancellation into *future*."""
+    if task.cancelled():
+        future.cancel()
+        return
+    if not future.set_running_or_notify_cancel():
+        return
+    exc = task.exception()
+    if exc is None:
+        future.set_result(task.result())
+    else:
+        future.set_exception(exc)
+
+
+def _cancel_task(task: asyncio.Future[Any], future: concurrent.futures.Future[Any]) -> None:
+    """Cancel *task* on its loop once the caller cancelled *future* (runs on any thread)."""
+    if future.cancelled():
+        task.get_loop().call_soon_threadsafe(task.cancel)
 
 
 class MatrixChannelBackend(ToolMethodBackend):
@@ -473,14 +557,27 @@ class MatrixChannelBackend(ToolMethodBackend):
         return self._loop
 
     def _run(self, coro: Coroutine[Any, Any, Any], timeout: float = 120.0) -> Any:
-        """Run ``coro`` on the persistent background loop and return its result."""
+        """Run ``coro`` on the persistent background loop and return its result.
+
+        A call that times out (or is stopped) cancels ``coro``, so a send
+        the caller reports as failed cannot still deliver later.  The
+        future exists before ``coro`` is handed to the loop, so a Stop
+        landing while it is being scheduled cancels it as well (see
+        :func:`_start_on_loop`).
+        """
         try:
             self.refresh_if_needed()
         except RuntimeError:
             coro.close()
             raise
-        future = asyncio.run_coroutine_threadsafe(coro, self._ensure_loop())
-        return future.result(timeout=timeout)
+        loop = self._ensure_loop()
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        try:
+            loop.call_soon_threadsafe(_start_on_loop, coro, future)
+            return future.result(timeout=timeout)
+        except BaseException:
+            future.cancel()
+            raise
 
     def connect(self) -> bool:
         """Authenticate with Matrix using stored config and validate the token."""
@@ -556,13 +653,15 @@ class MatrixChannelBackend(ToolMethodBackend):
         ``since=None`` there would re-deliver recent room timelines on
         every tick.
 
-        When the homeserver rejects a supplied ``since`` token (nio
-        returns an error response without ``next_batch`` — e.g. a
-        stale or invalidated token), the sync is retried ONCE with
+        When the homeserver refuses a supplied ``since`` token (a 400
+        error response other than a rate limit, e.g. a stale or
+        invalidated token), the sync is retried ONCE with
         ``since=None``: the runner's nonempty-cursor guard would
-        otherwise retain the rejected token forever, permanently
-        bricking the poll.  If the full-sync retry also fails, the
-        tick is a transient no-op (``([], oldest)``).
+        otherwise retain the refused token forever, permanently
+        bricking the poll.  Any other failed sync (a 429, a proxy's 408,
+        a 401/403, a 5xx), or a failed full-sync retry, makes the tick a transient no-op
+        (``([], oldest)``): adopting a fresh cursor then would skip
+        every message after the kept one.
         """
         if not self._client:  # pragma: no branch
             return [], oldest
@@ -570,21 +669,18 @@ class MatrixChannelBackend(ToolMethodBackend):
             from nio import RoomMessageText
 
             since = oldest if oldest not in ("", "0") else (self._next_batch or None)
-
-            async def _sync(since_token: str | None) -> Any:
-                return await self._client.sync(since=since_token, timeout=0)
-
-            resp = self._run(_sync(since))
-            if since is not None and not hasattr(resp, "next_batch"):
+            resp = self._run(self._client.sync(since=since, timeout=0))
+            if not hasattr(resp, "next_batch"):
+                if since is None or not _refuses_since_token(resp):
+                    return [], oldest
                 logger.warning(
                     "Matrix sync rejected since-token %r; retrying with a full sync",
                     since,
                 )
-                resp = self._run(_sync(None))
+                resp = self._run(self._client.sync(since=None, timeout=0))
                 if not hasattr(resp, "next_batch"):
                     return [], oldest
-            if hasattr(resp, "next_batch"):  # pragma: no branch
-                self._next_batch = resp.next_batch
+            self._next_batch = resp.next_batch
             messages: list[dict[str, Any]] = []
             if channel_id and hasattr(resp, "rooms"):  # pragma: no branch
                 room = resp.rooms.join.get(channel_id)
@@ -608,21 +704,33 @@ class MatrixChannelBackend(ToolMethodBackend):
 
         Raises:
             RuntimeError: If the homeserver rejects the send (nio returns an
-                error response such as ``RoomSendError`` instead of raising),
-                so the channel runner's at-least-once delivery ledger does
-                not count the reply as delivered and can redeliver it.
+                error response such as ``RoomSendError`` instead of raising;
+                a 429 included, since the client disables nio's internal
+                retry), so the channel runner's at-least-once delivery
+                ledger does not count the reply as delivered and can
+                redeliver it.
         """
-        if not self._client:  # pragma: no branch
-            return
+        if self._client:  # pragma: no branch
+            self._room_send(channel_id, "m.text", text)
 
-        async def _send() -> Any:
-            return await self._client.room_send(
-                channel_id,
+    def _room_send(self, room_id: str, msgtype: str, text: str) -> Any:
+        """Send *text* to *room_id* as an ``m.room.message`` of *msgtype*.
+
+        Returns:
+            nio's ``RoomSendResponse``.
+
+        Raises:
+            RuntimeError: If the homeserver refused the send (see
+                :func:`_raise_on_error`).
+        """
+        resp = self._run(
+            self._client.room_send(
+                room_id,
                 message_type="m.room.message",
-                content={"msgtype": "m.text", "body": text},
+                content={"msgtype": msgtype, "body": text},
             )
-
-        _raise_on_send_error(self._run(_send()), channel_id)
+        )
+        return _raise_on_error(resp, f"send to {room_id}")
 
     def send_typing(self, channel_id: str, thread_ts: str = "") -> None:
         """Send a Hermes-style typing indicator to a Matrix room.
@@ -683,11 +791,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _get() -> Any:
-                return await self._client.joined_rooms()
-
-            resp = self._run(_get())
+            resp = _raise_on_error(self._run(self._client.joined_rooms()), "room list")
             rooms = [{"id": r} for r in getattr(resp, "rooms", [])]
             return json.dumps({"ok": True, "rooms": rooms}, indent=2)[:8000]
         except Exception as e:
@@ -705,11 +809,9 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _join() -> Any:
-                return await self._client.join(room_id_or_alias)
-
-            resp = self._run(_join())
+            resp = _raise_on_error(
+                self._run(self._client.join(room_id_or_alias)), f"join of {room_id_or_alias}"
+            )
             return json.dumps({"ok": True, "room_id": getattr(resp, "room_id", room_id_or_alias)})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -726,11 +828,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _leave() -> None:
-                await self._client.room_leave(room_id)
-
-            self._run(_leave())
+            _raise_on_error(self._run(self._client.room_leave(room_id)), f"leave of {room_id}")
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -748,15 +846,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _send() -> Any:
-                return await self._client.room_send(
-                    room_id,
-                    message_type="m.room.message",
-                    content={"msgtype": "m.text", "body": text},
-                )
-
-            resp = self._run(_send())
+            resp = self._room_send(room_id, "m.text", text)
             return json.dumps({"ok": True, "event_id": getattr(resp, "event_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -774,15 +864,7 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _send() -> Any:
-                return await self._client.room_send(
-                    room_id,
-                    message_type="m.room.message",
-                    content={"msgtype": "m.notice", "body": text},
-                )
-
-            resp = self._run(_send())
+            resp = self._room_send(room_id, "m.notice", text)
             return json.dumps({"ok": True, "event_id": getattr(resp, "event_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -799,11 +881,9 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _get() -> Any:
-                return await self._client.joined_members(room_id)
-
-            resp = self._run(_get())
+            resp = _raise_on_error(
+                self._run(self._client.joined_members(room_id)), f"member list of {room_id}"
+            )
             members = [
                 {"user_id": m.user_id, "display_name": m.display_name or ""}
                 for m in getattr(resp, "members", [])
@@ -825,11 +905,10 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _invite() -> None:
-                await self._client.room_invite(room_id, user_id)
-
-            self._run(_invite())
+            _raise_on_error(
+                self._run(self._client.room_invite(room_id, user_id)),
+                f"invite of {user_id} to {room_id}",
+            )
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -848,11 +927,10 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _kick() -> None:
-                await self._client.room_kick(room_id, user_id, reason=reason)
-
-            self._run(_kick())
+            _raise_on_error(
+                self._run(self._client.room_kick(room_id, user_id, reason=reason)),
+                f"kick of {user_id} from {room_id}",
+            )
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -880,16 +958,14 @@ class MatrixChannelBackend(ToolMethodBackend):
         try:
             from nio import RoomVisibility
 
-            async def _create() -> Any:
-                return await self._client.room_create(
-                    name=name,
-                    topic=topic,
-                    is_direct=False,
-                    visibility=RoomVisibility.public if is_public else RoomVisibility.private,
-                    alias=alias or None,
-                )
-
-            resp = self._run(_create())
+            created = self._client.room_create(
+                name=name,
+                topic=topic,
+                is_direct=False,
+                visibility=RoomVisibility.public if is_public else RoomVisibility.private,
+                alias=alias or None,
+            )
+            resp = _raise_on_error(self._run(created), "room creation")
             return json.dumps({"ok": True, "room_id": getattr(resp, "room_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -906,11 +982,9 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
-
-            async def _get() -> Any:
-                return await self._client.get_profile(user_id)
-
-            resp = self._run(_get())
+            resp = _raise_on_error(
+                self._run(self._client.get_profile(user_id)), f"profile lookup of {user_id}"
+            )
             return json.dumps(
                 {
                     "ok": True,

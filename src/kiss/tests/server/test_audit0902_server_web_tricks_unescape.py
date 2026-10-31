@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,8 @@ class _TricksEnv(TestCase):
             k: os.environ.get(k)
             for k in ("KISS_HOME", "KISS_INJECTIONS_PATH")
         }
-        kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_tricks_unescape_")) / ".kiss"
+        self.home = Path(tempfile.mkdtemp(prefix="kiss_tricks_unescape_"))
+        kiss_dir = self.home / ".kiss"
         kiss_dir.mkdir(parents=True)
         self.kiss_dir = kiss_dir
         fake_path = kiss_dir / "fake_INJECTIONS.md"
@@ -80,6 +82,7 @@ class _TricksEnv(TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        shutil.rmtree(self.home, ignore_errors=True)
 
 
 class TestReadTricksUnescapes(_TricksEnv):
@@ -134,8 +137,10 @@ class TestRemoteWebappTricksJsonUnescaped(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         self._env = _TricksEnv()
         self._env.setUp()
+        work_dir = self._env.home / "work"
+        work_dir.mkdir()
         self.server = RemoteAccessServer(
-            host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
+            host="127.0.0.1", port=self.port, work_dir=str(work_dir),
         )
         await self.server.start_async()
 

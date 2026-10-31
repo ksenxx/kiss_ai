@@ -110,9 +110,10 @@ from kiss.agents.sorcar.sea_commands import (
     registered_entries,
     sea_script_in,
 )
-from kiss.agents.sorcar.sea_docs import GENERATED_FILES, REPO_ROOT
+from kiss.agents.sorcar.sea_docs import BLOCK, GENERATED_FILES, REPO_ROOT
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
+    PARSE_ERRORS,
     RENAMED_SETTINGS,
     SEA_BASES,
     SeaError,
@@ -224,7 +225,7 @@ def lint_all(
         for script in scripts:
             try:
                 fixed = fix_sea(script)
-            except (OSError, SyntaxError):
+            except (OSError, *PARSE_ERRORS):
                 continue  # lint_sea reports it below as ``broken: cannot parse``
             for line in fixed:
                 print(f"fixed {line}")
@@ -269,8 +270,6 @@ _DECLARES_CLAIM = re.compile(
     r"|`(\{[^`]*\})` \(what `/([A-Za-z0-9_-]+)` declares\)"
 )
 """A prose claim about a command's ``settings()`` literal, in either word order."""
-
-_GENERATED_BLOCK = re.compile(r"<!-- sea-docs: \w+ -->.*?<!-- /sea-docs -->", re.DOTALL)
 
 
 def _stale_declares_claim(match: re.Match[str]) -> str:
@@ -319,7 +318,7 @@ def lint_prose(root: Path | None = None) -> list[Finding]:
         path = root / rel
         if not path.is_file():
             continue
-        text = _GENERATED_BLOCK.sub(_blank_lines, path.read_text("utf-8"))
+        text = BLOCK.sub(_blank_lines, path.read_text("utf-8"))
         for number, line in enumerate(text.splitlines(), 1):
             for pattern, message in STALE_PROSE:
                 if pattern.search(line):
@@ -356,7 +355,7 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
-    except (OSError, SyntaxError) as exc:
+    except (OSError, *PARSE_ERRORS) as exc:
         return [Finding(path, "broken", f"cannot parse: {exc}")]
     findings.extend(_lint_source(path, source, tree))
     if any(f.code in ("renamed-key", "base-class", "removed-key") for f in findings):

@@ -568,14 +568,15 @@ _RELIC_STATUS: dict[str, Any] = {"ok": True, "services": []}
 
 
 def _start_fake_daemon(
-    status: dict[str, Any], honors_stop: bool
+    *statuses: dict[str, Any], honors_stop: bool
 ) -> tuple[threading.Thread, threading.Event]:
     """Emulate a daemon on the real socket path.
 
-    It answers ``status`` with *status* and acknowledges ``stop``.  With
-    *honors_stop* the serve loop ends on ``stop`` like the real daemon
-    (a pre-upgrade relic answers ``status`` without a protocol field);
-    without it the listener lingers on the socket after the
+    It answers each ``status`` request with the next of *statuses* (the
+    last one answers every later request) and acknowledges ``stop``.
+    With *honors_stop* the serve loop ends on ``stop`` like the real
+    daemon (a pre-upgrade relic answers ``status`` without a protocol
+    field); without it the listener lingers on the socket after the
     acknowledgement, which is what a daemon that failed to exit looks
     like to :func:`teardown_muse_env`.
 
@@ -591,6 +592,7 @@ def _start_fake_daemon(
     server.bind(str(path))
     server.listen(4)
     stopped = threading.Event()
+    replies = list(statuses)
 
     def serve() -> None:
         try:
@@ -604,13 +606,16 @@ def _start_fake_daemon(
                         request = recv_frame(conn)
                     except Exception:
                         continue
-                    is_stop = request.get("op") == "stop"
-                    if is_stop and honors_stop:
-                        stopped.set()
+                    if request.get("op") == "stop":
+                        reply = {"ok": True}
+                        if honors_stop:
+                            stopped.set()
+                    else:
+                        reply = replies.pop(0) if len(replies) > 1 else replies[0]
                     # A client that hung up without reading the reply
                     # (a stop with no wait) must not kill the listener.
                     with contextlib.suppress(OSError):
-                        send_frame(conn, {"ok": True} if is_stop else status)
+                        send_frame(conn, reply)
         finally:
             # Unlink BEFORE close: connects to an unlinked-but-bound UDS
             # fail immediately (what ensure_daemon polls for), and a late
@@ -625,23 +630,20 @@ def _start_fake_daemon(
 
 
 @contextlib.contextmanager
-def _stopping_listener(
-    thread: threading.Thread, stopped: threading.Event | None = None
-) -> Iterator[None]:
+def _stopping_listener(thread: threading.Thread, stopped: threading.Event) -> Iterator[None]:
     """Run the body, then make a fake listener still blocked in ``accept()`` exit and join it.
 
     Closing a listening socket from another thread does not wake
     ``accept()``; a throw-away connection does.  The listener's loop then
-    sees it has been stopped (*stopped* is set first) or fails to read a
-    frame, and unlinks its socket path, so a body that fails half-way
-    leaves nothing behind.  The listener-exited check runs only when the
-    body passed, so a failure in the body is reported as is.
+    sees it has been stopped (*stopped* is set first) and unlinks its
+    socket path, so a body that fails half-way leaves nothing behind.
+    The listener-exited check runs only when the body passed, so a
+    failure in the body is reported as is.
     """
     try:
         yield
     finally:
-        if stopped is not None:
-            stopped.set()
+        stopped.set()
         if thread.is_alive():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
@@ -726,32 +728,10 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
     """Listeners answering garbage classify as protocol 0 (incompatible)."""
     from kiss.agents.third_party_agents.muse_auth import client as muse_client
 
-    path = socket_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        path.unlink()
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(path))
-    server.listen(4)
-    replies = [{"ok": False, "error": "boom"}, {"ok": True, "protocol": "nope"}]
-
-    def serve_garbage() -> None:
-        try:
-            for reply in replies:
-                conn, _ = server.accept()
-                with conn:
-                    try:
-                        recv_frame(conn)
-                    except Exception:
-                        return  # woken by _stopping_listener after a failed assert
-                    send_frame(conn, reply)
-        finally:
-            server.close()
-            path.unlink(missing_ok=True)
-
-    thread = threading.Thread(target=serve_garbage, daemon=True)
-    thread.start()
-    with _stopping_listener(thread):
+    listener, stopped = _start_fake_daemon(
+        {"ok": False, "error": "boom"}, {"ok": True, "protocol": "nope"}, honors_stop=False
+    )
+    with _stopping_listener(listener, stopped):
         assert muse_client._daemon_protocol() == 0  # error reply
         assert muse_client._daemon_protocol() == 0  # non-integer protocol
     assert muse_client._daemon_protocol() is None  # nothing listening

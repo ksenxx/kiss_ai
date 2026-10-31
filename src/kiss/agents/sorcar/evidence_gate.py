@@ -18,7 +18,7 @@ Two reasons are mechanical enough to check from the tool calls alone:
 * the summary hedges (:data:`HEDGE_PHRASES`): it says the result was
   guessed, untested or unverified while ``success=True`` says it was;
 * a file was changed (``Edit``, ``Write`` or a shell command that writes,
-  :data:`WRITING_COMMAND`) and no shell command ran after the last change,
+  :func:`writes_files`) and no shell command ran after the last change,
   so whatever was verified was verified before the final edit.
 
 The interactive Sorcar agent (:meth:`SorcarAgent._guard_tool_call`) applies
@@ -30,6 +30,7 @@ one else to notice an unchecked final edit.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from typing import Any
 
@@ -50,16 +51,61 @@ HEDGE_PHRASES: tuple[str, ...] = (
     "left open", "remains ambiguous", "still ambiguous",
 )
 
+#: A word after ``make``/``cmake``/``ninja`` that builds nothing: a check
+#: target, an option or a variable assignment.
+_MAKE_WORD = r"(?:(?:test|check)\b|-\S+|\w+=\S*)"
+#: The rest of a Make (CMake, Ninja) command when it builds nothing: only
+#: such words up to the end of the command, one a check target (``make test``,
+#: ``make -k check V=1``).
+_ONLY_CHECKS = (
+    rf"(?=(?:\s+{_MAKE_WORD})*?\s+(?:test|check)\b)"
+    rf"(?:\s+{_MAKE_WORD})+\s*(?:[;&|)#\n]|\d*[<>]|\Z)"
+)
+
 #: Shell commands that change files: redirections (not to ``/dev/null``), here
-#: documents, copy/move/patch and in-place editors, package and build tools.
+#: documents, copy/move/patch and in-place editors, ``--fix`` runs and builds
+#: (Make, CMake, Ninja), unless every Make target is a check (``make test``).
+#: Package tools are read word by word instead (:data:`WRITING_SUBCOMMANDS`).
 WRITING_COMMAND = re.compile(
     r"(?<![<>&\d])>{1,2}(?!&)\s*(?!/dev/null)\S"
     r"|<<"
+    r"|--fix\b"
     r"|\b(?:tee|cp|mv|rsync|install|patch|touch|mkdir|dd|truncate|chmod|chown)\b"
     r"|\bsed\s+(?:-[a-zA-Z]*i|--in-place)"
-    r"|\bgit\s+(?:apply|checkout|stash|reset|revert|cherry-pick|merge|rebase|pull)\b"
-    r"|\b(?:pip|pip3|uv|npm|yarn|pnpm|cargo|apt|apt-get|make|cmake|ninja)\b"
+    rf"|\b(?:make|cmake|ninja)\b(?!{_ONLY_CHECKS})"
 )
+
+_PIP = re.compile(r"(?:install|uninstall)\b")
+_NODE = re.compile(r"(?:install|i|ci|add|remove|uninstall|update|build)\b")
+_APT = re.compile(r"(?:install|remove|purge|upgrade)\b")
+#: Package tools, by program name, and the start of their subcommands that
+#: change files (``git checkout-index`` too); their other subcommands (``uv
+#: run pytest``, ``npm test``, ``git diff``) are checks.  ``npm run build``
+#: (Yarn's, pnpm's) builds too.
+WRITING_SUBCOMMANDS: dict[str, re.Pattern[str]] = {
+    "git": re.compile(r"(?:apply|checkout|stash|reset|revert|cherry-pick|merge|rebase|pull)\b"),
+    "pip": _PIP,
+    "pip3": _PIP,
+    "uv": re.compile(r"(?:add|remove|sync|lock|build)\b"),
+    "npm": _NODE,
+    "yarn": _NODE,
+    "pnpm": _NODE,
+    "cargo": re.compile(r"(?:build|install|add|remove|update|fmt|fix)\b"),
+    "apt": _APT,
+    "apt-get": _APT,
+}
+_RUN_BUILD = frozenset({"npm", "yarn", "pnpm"})
+_BUILD = re.compile(r"build\b")
+#: A shell word (unquoted characters, escapes and whole quoted strings, so a
+#: quoted value with blanks is one word) or a character that ends a command.
+_SHELL_TOKEN = re.compile(
+    r"""(?:[^\s"'\\;&|()`]++|\\.|"(?:[^"\\]|\\.)*+"?|'[^']*+'?)++|[;&|()`\n]""", re.DOTALL)
+_COMMAND_ENDS = frozenset(";&|()`\n")
+#: What one level of quote removal changes: an escape, a ``"..."`` or a ``'...'`` string.
+_QUOTING = re.compile(r"""\\(.)|"((?:[^"\\]|\\.)*+)"?|'([^']*+)'?""", re.DOTALL)
+#: The escapes a ``"..."`` string keeps special.
+_DOUBLE_QUOTED_ESCAPE = re.compile(r'\\([$`"\\])')
+_BLANK = re.compile(r"\s")
 
 #: Tool names that change files outright.
 EDIT_TOOLS = frozenset({"Edit", "Write"})
@@ -95,6 +141,57 @@ def hedges_in(text: str) -> list[str]:
     return [phrase for phrase in HEDGE_PHRASES if phrase in lowered]
 
 
+def _unquote_match(match: re.Match[str]) -> str:
+    """Return what one escape or quoted string of :data:`_QUOTING` stands for."""
+    escaped, double, single = match.groups()
+    if escaped is not None:
+        return escaped
+    if double is not None:
+        return _DOUBLE_QUOTED_ESCAPE.sub(r"\1", double)
+    return single
+
+
+def _runs_writing_subcommand(text: str) -> bool:
+    """Return whether the shell *text* runs a subcommand of :data:`WRITING_SUBCOMMANDS`.
+
+    Every word naming a package tool starts a scan of the words after it,
+    to the end of its command: an option (``-C``, ``--prefix``, Cargo's
+    ``+stable``) may take the next word as its value, and the first word
+    that is neither is the subcommand.  Words are split as the shell splits
+    them, so a quoted or escaped value with blanks is one word, and a word
+    with blanks after quote removal (``bash -c "npm ci"``) is read as
+    commands too.  The scans of one tool in one state go on alike, so one
+    pass keeps only the tools whose next plain word is the subcommand
+    (*expect*) and those whose next plain word may be an option's value
+    (*optioned*): the time is linear in the words, however options repeat.
+    """
+    expect: set[str] = set()
+    optioned: set[str] = set()
+    after_run = False  # the last word was a Node tool's ``run``
+    for token in _SHELL_TOKEN.findall(text.replace("\\\n", " ")):
+        if token in _COMMAND_ENDS:
+            expect, optioned, after_run = set(), set(), False
+            continue
+        word = _QUOTING.sub(_unquote_match, token)
+        # Blanks are left only by quotes or escapes, which quote removal
+        # drops: *word* is shorter than *token*, so the recursion ends.
+        if _BLANK.search(word) and _runs_writing_subcommand(word):
+            return True
+        if word.startswith(("-", "+")):
+            expect, optioned, after_run = set(), expect | optioned, False
+        else:
+            tools = expect | optioned
+            if (after_run and _BUILD.match(word)) or any(
+                    WRITING_SUBCOMMANDS[tool].match(word) for tool in tools):
+                return True
+            after_run = word == "run" and not tools.isdisjoint(_RUN_BUILD)
+            expect, optioned = optioned, set()
+        name = posixpath.basename(word)
+        if name in WRITING_SUBCOMMANDS:
+            expect.add(name)
+    return False
+
+
 def writes_files(args: dict[str, Any]) -> bool:
     """Whether a ``Bash`` / ``run_commands_parallel`` call looks like it changes files.
 
@@ -113,7 +210,7 @@ def writes_files(args: dict[str, Any]) -> bool:
                 parsed, list) else commands
         else:
             text = ""
-    return bool(WRITING_COMMAND.search(text))
+    return bool(WRITING_COMMAND.search(text)) or _runs_writing_subcommand(text)
 
 
 class EvidenceGate:

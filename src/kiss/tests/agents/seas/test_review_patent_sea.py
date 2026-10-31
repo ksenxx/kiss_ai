@@ -19,7 +19,12 @@ from kiss.agents.seas.review_patent import review_patent_sea
 from kiss.agents.seas.write_patent import write_patent_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.tests.agents.seas.conftest import gate, run_sea
-from kiss.tests.agents.seas.sea_contract import system_message, tool_names, tool_results
+from kiss.tests.agents.seas.sea_contract import (
+    assert_no_removed_getters,
+    system_message,
+    tool_names,
+    tool_results,
+)
 from kiss.tests.agents.seas.test_write_patent_sea import _CLEAN_DRAFT, _write
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
@@ -186,10 +191,8 @@ def test_check_patent_review_flags_the_sloppy_review(tmp_path: Path) -> None:
     assert report.endswith("summary: 1 gate(s) failed")
 
 
-@pytest.mark.skipif(
-    not (shutil.which("pdflatex") and shutil.which("pdftotext")),
-    reason="pdflatex and poppler are needed to build and read the PDF",
-)
+@pytest.mark.usefixtures("tex_bin")
+@pytest.mark.skipif(not shutil.which("pdftotext"), reason="poppler is needed to read the PDF")
 def test_read_patent_returns_pages_of_a_built_pdf_and_a_draft(tmp_path: Path) -> None:
     """A draft is one page as is; the built PDF comes back as ``=== page N ===`` blocks."""
     path = _write(tmp_path, _CLEAN_DRAFT, figures=2)
@@ -229,6 +232,7 @@ def test_sea_description_prompt_tools_and_settings() -> None:
         "timeout": review_patent_sea.DISPATCH_TIMEOUT_SECONDS,
         "model": "bestrouter",
     }
+    assert_no_removed_getters(review_patent_sea)
 
 
 def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: Path) -> None:

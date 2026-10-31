@@ -11,6 +11,9 @@ const {send: sendHostMessage} = require('./simplify2_harness');
 const {makeBareVoiceWindow} = require('./voice_page_helpers');
 const {test, report} = makeRunner();
 
+// A page with no microphone, so no wake word ever opens a round: every
+// voiceSpeech here takes the no-round path, which types the text into
+// the composer.  The round path is covered by conc2026_voice_rounds.
 function makeWindow() {
   const inputEvents = {count: 0};
   const win = makeBareVoiceWindow({}, w => {
@@ -21,7 +24,7 @@ function makeWindow() {
   return {win, inputEvents};
 }
 
-test('voiceSpeech after a wake types only the translated text', () => {
+test('voiceSpeech types only the translated text', () => {
   const {win, inputEvents} = makeWindow();
   const inp = win.document.getElementById('task-input');
   assert.strictEqual(inp.value, '');
@@ -45,7 +48,7 @@ test('voiceSpeech trims surrounding whitespace from the translation', () => {
   assert.strictEqual(inp.value, 'Bonjour to you');
 });
 
-test('empty voiceSpeech after a wake leaves the input empty', () => {
+test('empty voiceSpeech leaves the input empty', () => {
   const {win, inputEvents} = makeWindow();
   const inp = win.document.getElementById('task-input');
   assert.strictEqual(inp.value, '');
@@ -71,14 +74,6 @@ test('non-string voiceSpeech payloads are treated as no speech', () => {
   sendHostMessage(win, {type: 'voiceSpeech'});
   assert.strictEqual(inp.value, '');
   assert.strictEqual(inputEvents.count, 0);
-});
-
-test('translated text can be inserted again after a new wake', () => {
-  const {win} = makeWindow();
-  const inp = win.document.getElementById('task-input');
-  sendHostMessage(win, {type: 'voiceSpeech', text: 'first sentence'});
-  sendHostMessage(win, {type: 'voiceSpeech', text: 'second sentence'});
-  assert.strictEqual(inp.value, 'first sentence second sentence');
 });
 
 report('voiceSpeechInsert');

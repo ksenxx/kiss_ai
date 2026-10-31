@@ -34,6 +34,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
+    enroll_credential,
     save_json_config,
 )
 from kiss.agents.third_party_agents._device_auth import (
@@ -606,7 +607,11 @@ def _muse_authenticate(
     goes straight into the vault as a header-kind Basic credential
     bound to the configured server origin, atomically replacing any
     previous entry, and is never written to ``config.json`` (only the
-    non-secret ``url``/``username`` metadata is).  A daemon failure is
+    non-secret ``url``/``username`` metadata is, by
+    :func:`enroll_credential` under the config lock together with the
+    store: a failed metadata write leaves the vault untouched, and a
+    refused store puts the old metadata back, so the old credential
+    stays paired with the old server and login).  A daemon failure is
     reported without clearing the vault: whichever credential it holds
     at that point (the untouched old one or the just-validated new
     one) is worth keeping.
@@ -624,18 +629,17 @@ def _muse_authenticate(
         insecure_origin_hosts,
         origin_hosts,
     )
-    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     try:
-        save_json_config(_config.path, {"url": url, "username": username})
-        store_credentials(
+        enroll_credential(
+            _config.path,
+            {"url": url, "username": username},
             "nextcloud",
             {
                 "kind": "header",
                 "header": "Authorization",
                 "token": _basic_credential(username, password),
             },
-            [],
             hosts=origin_hosts(url),
             insecure_hosts=insecure_origin_hosts(url),
         )

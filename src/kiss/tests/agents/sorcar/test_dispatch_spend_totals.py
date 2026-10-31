@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -136,9 +137,11 @@ class _ScriptedDaemon:
             pass
 
     def close(self) -> None:
-        """Stop serving and close every connection."""
+        """Stop serving, close every connection and remove the endpoint folder."""
         self._loop.call_soon_threadsafe(self._closed.set)
         self._thread.join(timeout=10)
+        # Before the loop close, which raises if the thread outlived the join.
+        shutil.rmtree(self.tmp, ignore_errors=True)
         self._loop.close()
 
 
@@ -299,7 +302,9 @@ def test_dropped_connection_charges_the_spend_seen_so_far(
         )
     finally:
         daemon.close()
-    assert "could not run" in out
+    # The run was sent before the drop: the child may still be running
+    # (audit 2026-10-30 S6), not "could not run".
+    assert "MAY STILL BE RUNNING" in out
     assert "closed the connection" in out
     assert parent.budget_used == pytest.approx(0.5)
     assert (parent.total_tokens_used, parent.total_steps) == (1000, 2)

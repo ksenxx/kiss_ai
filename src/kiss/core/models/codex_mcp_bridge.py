@@ -31,6 +31,12 @@ Wire protocol (one request per TCP connection, newline-terminated JSON):
   the failure text as the tool's result, which is what every KISS model
   sees (the agent loop never hands a model an error flag either).
 
+Every request also carries ``"token"``, the bridge's secret: any local
+user can connect to a loopback port, so a request without it is refused.
+The proxy gets the secret from its environment (:data:`BRIDGE_TOKEN_ENV`,
+which Codex forwards to it, see :meth:`ToolBridge.codex_env`), never
+from its command line, which other users can read.
+
 A loopback port is used instead of a Unix socket because the bridge must
 also run on Windows and macOS caps Unix socket paths at 104 bytes.  Tool
 executions are serialized with a lock: the KISS tool loop runs one tool
@@ -41,8 +47,11 @@ interrupted and the wait is bounded (:meth:`ToolBridge._wait_for_calls`).
 """
 
 import asyncio
+import hmac
 import json
 import logging
+import os
+import secrets
 import socket
 import socketserver
 import sys
@@ -58,6 +67,9 @@ logger = logging.getLogger(__name__)
 
 KISS_MCP_SERVER_NAME = "kiss"
 
+# The proxy's environment variable holding the bridge's secret.
+BRIDGE_TOKEN_ENV = "KISS_MCP_BRIDGE_TOKEN"
+
 # How long a Stop waits for the interrupted calls before abandoning them:
 # the interrupt's grace period, the injection's delivery, and some slack.
 STOP_WAIT_SECONDS = 5.0
@@ -66,6 +78,9 @@ ToolExecutor = Callable[[dict[str, Any]], tuple[str, str]]
 
 # The reply of a call the bridge refused because it is closing.
 _REFUSED = {"error": "KISSError: the KISS tool bridge is closed"}
+
+# The reply to a request without the bridge's secret.
+_UNAUTHENTICATED = {"error": "KISSError: unauthenticated KISS tool bridge request"}
 
 
 class ServedCall(NamedTuple):
@@ -120,12 +135,12 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
     (``running``) so it can interrupt them on a Stop and bound the wait.
     """
 
-    allow_reuse_address = True
     daemon_threads = True
     block_on_close = False
 
     def __init__(self, tools_schema: list[dict[str, Any]], execute: ToolExecutor):
         super().__init__(("127.0.0.1", 0), _BridgeHandler)
+        self.token = secrets.token_hex(32)
         self.tools = _function_schemas(tools_schema)
         self.tool_names = frozenset(tool["name"] for tool in self.tools)
         self.execute = execute
@@ -227,6 +242,10 @@ class _BridgeHandler(socketserver.StreamRequestHandler):
         if not line:  # the client connected and hung up without asking
             return
         request = json.loads(line.decode("utf-8"))
+        token = str(request.get("token", "")).encode("utf-8")
+        if not hmac.compare_digest(token, server.token.encode("utf-8")):
+            _send_line(self.connection, _UNAUTHENTICATED)
+            return
         if request.get("op") == "tools":
             _send_line(self.connection, {"tools": server.tools})
             return
@@ -302,6 +321,9 @@ class ToolBridge:
             ``default_tools_approval_mode="approve"`` pre-approves every
             call: ``codex exec`` runs with ``approval_policy=never`` and
             would otherwise refuse the call instead of asking.
+            ``env_vars`` forwards :data:`BRIDGE_TOKEN_ENV` from Codex's
+            environment (:meth:`codex_env`) to the proxy, whose
+            environment Codex otherwise clears.
         """
         prefix = f"mcp_servers.{KISS_MCP_SERVER_NAME}"
         return [
@@ -310,10 +332,21 @@ class ToolBridge:
             "-c",
             f"{prefix}.args={toml_value(['-m', __name__, str(self.port)])}",
             "-c",
+            f"{prefix}.env_vars={toml_value([BRIDGE_TOKEN_ENV])}",
+            "-c",
             f"{prefix}.tool_timeout_sec={int(tool_timeout_seconds)}",
             "-c",
             f"{prefix}.default_tools_approval_mode={toml_value('approve')}",
         ]
+
+    def codex_env(self) -> dict[str, str]:
+        """Return the variables Codex's environment must hold for the proxy.
+
+        Returns:
+            :data:`BRIDGE_TOKEN_ENV` set to the bridge's secret, which
+            every request must carry.
+        """
+        return {BRIDGE_TOKEN_ENV: self._server.token}
 
     def __enter__(self) -> "ToolBridge":
         try:
@@ -371,24 +404,37 @@ class ToolBridge:
         the interrupt is retried on every poll; and since :meth:`_close`
         marked the bridge closing first, a queued call is refused the
         moment it is first in line (:meth:`_BridgeServer.serve_call`).
+
+        A ``KeyboardInterrupt`` raised in this thread meanwhile (the
+        daemon's forced Stop, injected a second after the stop event;
+        a Ctrl+C) is a Stop too: it is held until the bounded wait ends
+        and then re-raised, so it cannot cut the wait short and leave
+        an interrupted tool working after the run has returned.
         """
         deadline: float | None = None
+        forced_stop: KeyboardInterrupt | None = None
         while True:
-            running = locked_call(self._server.state_lock, self._server.running_handlers)
-            if not running:
-                return
-            if deadline is None and stop_signal.stop_requested():
-                deadline = time.monotonic() + STOP_WAIT_SECONDS
-            if deadline is not None:
-                for ident, _thread in running:  # idempotent on an interrupted call
-                    tool_interrupt.interrupt_tool_call(ident)
-            if deadline is not None and time.monotonic() >= deadline:
-                logger.warning(
-                    "KISS MCP bridge: %d tool call(s) still running after the Stop; abandoned",
-                    len(running),
-                )
-                return
-            running[0][1].join(0.1)
+            try:
+                running = locked_call(self._server.state_lock, self._server.running_handlers)
+                if not running:
+                    break
+                if deadline is None and (forced_stop is not None or stop_signal.stop_requested()):
+                    deadline = time.monotonic() + STOP_WAIT_SECONDS
+                if deadline is not None:
+                    for ident, _thread in running:  # idempotent on an interrupted call
+                        tool_interrupt.interrupt_tool_call(ident)
+                    if time.monotonic() >= deadline:
+                        logger.warning(
+                            "KISS MCP bridge: %d tool call(s) still running after the Stop; "
+                            "abandoned",
+                            len(running),
+                        )
+                        break
+                running[0][1].join(0.1)
+            except KeyboardInterrupt as e:
+                forced_stop = e
+        if forced_stop is not None:
+            raise forced_stop
 
 
 def _spawned(thread: threading.Thread) -> bool:
@@ -411,15 +457,15 @@ def _spawned(thread: threading.Thread) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _bridge_request(port: int, payload: dict[str, Any]) -> dict[str, Any]:
-    """Send one request to the bridge on *port* and return its decoded reply."""
+def _bridge_request(port: int, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Send one request with the secret *token* to the bridge on *port*; return its reply."""
     with socket.create_connection(("127.0.0.1", port)) as sock:
-        _send_line(sock, payload)
+        _send_line(sock, {**payload, "token": token})
         with sock.makefile("rb") as reply:
             return dict(json.loads(reply.readline().decode("utf-8")))
 
 
-async def _serve_stdio(port: int) -> None:
+async def _serve_stdio(port: int, token: str) -> None:
     """Run the MCP stdio server, forwarding every request to the bridge on *port*."""
     import anyio
     from mcp import types
@@ -430,7 +476,9 @@ async def _serve_stdio(port: int) -> None:
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        reply = await anyio.to_thread.run_sync(_bridge_request, port, {"op": "tools"})
+        reply = await anyio.to_thread.run_sync(_bridge_request, port, token, {"op": "tools"})
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
         return [
             types.Tool(
                 name=tool["name"],
@@ -443,7 +491,7 @@ async def _serve_stdio(port: int) -> None:
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
         payload = {"op": "call", "name": name, "arguments": arguments}
-        reply = await anyio.to_thread.run_sync(_bridge_request, port, payload)
+        reply = await anyio.to_thread.run_sync(_bridge_request, port, token, payload)
         if "error" in reply:
             raise RuntimeError(reply["error"])
         return [types.TextContent(type="text", text=reply["text"])]
@@ -455,12 +503,14 @@ async def _serve_stdio(port: int) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Entry point of the proxy: ``python -m kiss.core.models.codex_mcp_bridge <port>``.
 
+    The bridge's secret is read from :data:`BRIDGE_TOKEN_ENV`.
+
     Args:
         argv: Command-line arguments without the program name; defaults
             to ``sys.argv[1:]``.  The only argument is the bridge port.
     """
     args = sys.argv[1:] if argv is None else argv
-    asyncio.run(_serve_stdio(int(args[0])))
+    asyncio.run(_serve_stdio(int(args[0]), os.environ.get(BRIDGE_TOKEN_ENV, "")))
 
 
 if __name__ == "__main__":

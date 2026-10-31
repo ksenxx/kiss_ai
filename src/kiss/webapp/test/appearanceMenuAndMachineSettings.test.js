@@ -304,21 +304,27 @@ function testSettingsOpenForTheSelectedMachine() {
   assert.strictEqual(line.hidden, false, 'the sheet names its machine');
   assert.strictEqual(line.textContent, 'Settings of gpu-box');
 
-  // This daemon's own poll does not touch the form; gpu-box's
-  // forwarded reply fills it (a stray reply for another machine is
-  // pinned by audit1017SettingsSheetRemoteMachine.test.js).
+  // This daemon's own poll (its config carries the pick it persisted)
+  // does not touch the form; gpu-box's forwarded reply fills it (a
+  // stray reply for another machine is pinned by
+  // audit1017SettingsSheetRemoteMachine.test.js).
   send(win, {
     type: 'configData',
-    config: {remote_password: 'laptop-pw', max_budget: 3, work_dir: '/laptop'},
+    config: {
+      remote_password: 'laptop-pw',
+      max_budget: 3,
+      work_dir: '/laptop',
+      last_machine: 'gpu-box',
+    },
     apiKeys: {OPENAI_API_KEY: 'sk-laptop'},
     machine: 'laptop',
   });
   assert.strictEqual(byId(win, 'cfg-remote-password').value, '');
   assert.strictEqual(byId(win, 'cfg-key-OPENAI_API_KEY').value, '');
   assert.strictEqual(
-    byId(win, 'meta-workdir').textContent,
-    '/laptop',
-    'the work dir is still adopted (the TASK INFO Workdir row shows it)',
+    byId(win, 'chat-machine').value,
+    'gpu-box',
+    "the daemon's pick keeps the chat header (and the sheet) on gpu-box",
   );
   send(win, {
     type: 'configData',
@@ -332,11 +338,6 @@ function testSettingsOpenForTheSelectedMachine() {
   assert.strictEqual(byId(win, 'cfg-key-OPENAI_API_KEY').value, 'sk-gpu');
   assert.strictEqual(byId(win, 'cfg-key-AWS_REGION').value, 'us-west-2');
   assert.strictEqual(byId(win, 'cfg-use-web-tools').checked, false);
-  assert.strictEqual(
-    byId(win, 'meta-workdir').textContent,
-    '/laptop',
-    "gpu-box's config does not move this daemon's work dir",
-  );
 
   // Custom models: only gpu-box's forwarded list is painted, and
   // the Add / Delete commands carry the machine.
@@ -404,6 +405,11 @@ function testSettingsOpenForTheSelectedMachine() {
     'and for its custom models',
   );
   assert.strictEqual(line.hidden, true);
+  // This daemon's work dir was adopted all along, and gpu-box's config
+  // did not move it: the TASK INFO Workdir row shows it once the chat
+  // is headed here.
+  pickMachine(win, '');
+  assert.strictEqual(byId(win, 'meta-workdir').textContent, '/laptop');
   send(win, {
     type: 'configData',
     config: {remote_password: 'laptop-pw'},
@@ -422,8 +428,8 @@ function testSettingsOpenForTheSelectedMachine() {
   });
   assert.strictEqual(byId(win, 'cfg-remote-password').value, 'laptop-pw');
 
-  // A tab on this daemon opens this daemon's settings: no machine.
-  pickMachine(win, '');
+  // A tab on this daemon (still headed here since the pick above)
+  // opens this daemon's settings: no machine.
   const beforeLocal = posted.length;
   click(win, byId(win, 'settings-btn'));
   const local = lastMsg(posted.slice(beforeLocal), 'getConfig');

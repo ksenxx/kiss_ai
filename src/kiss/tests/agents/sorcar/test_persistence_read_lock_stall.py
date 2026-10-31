@@ -10,22 +10,30 @@ for the SQL fetch.
 
 Each test below builds one task whose events are cheap to fetch but
 expensive to decode, runs a loader back to back on a helper thread,
-and counts from the main thread how often a writer gets the write lock
-while the loads run.  With the decode under the read lock a writer only
-gets in between two loads (at most two acquisitions per gap, so at most
-``2 * LOADS``); with the decode outside it the writer gets in hundreds
-of times during every load.  A count, not a wall-time ratio, so the
-test holds under a loaded CI box.
+and counts from the main thread how often a writer holds the write lock
+while the loader thread is inside ``json.loads`` (a ``sys.setprofile``
+hook on that thread tells).  With the decode under the read lock that
+never happens, however the threads are scheduled; with the decode
+outside it the writer gets in hundreds of times.  The writer only yields
+between tries (``time.sleep(0)``) and the GIL switch interval is cut to
+:data:`SWITCH_INTERVAL` while it probes: on an idle Mac timer coalescing
+stretches every timed wait ninefold, so ``sleep(0.001)`` lasts 9 ms and
+the default 5 ms switch interval hands the GIL back only every 45 ms,
+which leaves the writer about one try per load.  A count, not a
+wall-time ratio, so the test holds under a loaded CI box.
 
 Everything is real: the real database, lock, writer thread and loaders.
 """
 
 from __future__ import annotations
 
+import json
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -34,9 +42,11 @@ from kiss.agents.sorcar import persistence
 
 EVENTS = 1500
 LOADS = 3
-#: Writer acquisitions that prove the lock was free during the loads:
-#: a decode under the lock allows at most ``2 * LOADS``.
+#: Writer acquisitions during a ``json.loads`` of the loader that prove the
+#: lock was free during the decode: a decode under the lock allows none.
 MIN_WRITER_ACQUISITIONS = 5 * LOADS
+#: GIL switch interval while the writer probes (the default is 5 ms).
+SWITCH_INTERVAL = 0.0005
 
 
 @pytest.fixture
@@ -70,26 +80,53 @@ def add_heavy_task(chat_id: str, extra: dict[str, object] | None = None) -> tupl
     return task_id, chat_id
 
 
-def run_loads(load: Callable[[], Any], loaded: list[Any]) -> None:
-    """Thread body: run *load* ``LOADS`` times back to back, collecting the results."""
-    for _ in range(LOADS):
-        loaded.append(load())
+class DecodeWatch:
+    """``sys.setprofile`` hook of the loader thread: ``active`` while ``json.loads`` runs."""
+
+    def __init__(self) -> None:
+        self.active = False
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        """Track the ``call`` and ``return`` events of ``json.loads`` frames."""
+        if frame.f_code is json.loads.__code__ and event in ("call", "return"):
+            self.active = event == "call"
+
+
+def run_loads(load: Callable[[], Any], loaded: list[Any], watch: DecodeWatch) -> None:
+    """Thread body: run *load* ``LOADS`` times back to back under *watch*, collecting results."""
+    sys.setprofile(watch)
+    try:
+        for _ in range(LOADS):
+            loaded.append(load())
+    finally:
+        sys.setprofile(None)
 
 
 def writer_acquisitions_during(load: Callable[[], Any]) -> tuple[int, float, list[Any]]:
-    """Return ``(acquisitions, longest wait, results)`` of a probing writer while *load* runs."""
+    """Return ``(acquisitions, longest wait, results)`` of a probing writer while *load* runs.
+
+    Only the acquisitions made while the loader is inside ``json.loads``
+    count: a loader that decodes under the read lock keeps the writer out
+    for the whole decode, so for it the count is zero whatever the timing.
+    """
     loaded: list[Any] = []
-    loader = threading.Thread(target=run_loads, args=(load, loaded))
-    loader.start()
+    watch = DecodeWatch()
+    loader = threading.Thread(target=run_loads, args=(load, loaded, watch))
     acquisitions = 0
     longest = 0.0
-    while loader.is_alive():
-        start = time.perf_counter()
-        with persistence._rw_lock.write_lock():
-            acquisitions += 1
-        longest = max(longest, time.perf_counter() - start)
-        time.sleep(0.001)
-    loader.join()
+    default_interval = sys.getswitchinterval()
+    sys.setswitchinterval(SWITCH_INTERVAL)
+    try:
+        loader.start()
+        while loader.is_alive():
+            start = time.perf_counter()
+            with persistence._rw_lock.write_lock():
+                acquisitions += watch.active
+            longest = max(longest, time.perf_counter() - start)
+            time.sleep(0)
+        loader.join()
+    finally:
+        sys.setswitchinterval(default_interval)
     return acquisitions, longest, loaded
 
 
@@ -97,7 +134,7 @@ def assert_lock_released_for_decode(load: Callable[[], Any]) -> list[Any]:
     """Run *load* under a probing writer and assert the lock covers only the SQL."""
     acquisitions, longest, loaded = writer_acquisitions_during(load)
     assert acquisitions >= MIN_WRITER_ACQUISITIONS, (
-        f"a writer got the lock only {acquisitions} times during {LOADS} loads "
+        f"a writer got the lock only {acquisitions} times while {LOADS} loads decoded JSON "
         f"(longest wait {longest:.3f}s): the read lock is held while the "
         "transcript is decoded"
     )

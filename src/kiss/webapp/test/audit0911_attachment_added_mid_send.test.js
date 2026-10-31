@@ -25,6 +25,7 @@
 const assert = require('assert');
 const {
   makePage,
+  parkSendOnLateHeic,
   paste,
   typeAndEnter,
   submits,
@@ -33,44 +34,16 @@ const {
 } = require('./attachment_helpers');
 
 async function main() {
-  const {win, posted, decodes} = makePage();
-  win._testApi.endLaunch();
-  const tabA = win._testApi.getActiveTabId();
+  const page = makePage();
+  const {win, posted, decodes} = page;
 
-  // 1. Attachment A: a PNG whose FileReader is still running when Enter
-  //    arrives (paste and Enter happen in the same tick, so the send parks
-  //    while A is pending).
-  const png = new win.File([new Uint8Array([137, 80, 78, 71])], 'shot.png', {
-    type: 'image/png',
-  });
-  paste(win, png);
-  typeAndEnter(win, 'prompt with two photos');
-  assert.strictEqual(submits(posted).length, 0, 'the send is waiting on A');
-
-  // 2. While the send waits, attachment B (a camera HEIC) is added; its
-  //    decode is parked in the test's decoder.
-  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0002.HEIC', {
-    type: 'image/heic',
-  });
-  paste(win, heic);
-
-  // 3. A finishes (FileReader completes during settle) while B is still
-  //    decoding.  The one-time snapshot resolved here and posted the
-  //    submit without B, then reset the composer and discarded B.
-  await settle(() => decodes.length >= 1);
-  assert.strictEqual(decodes.length, 1, 'B reached the decoder');
-  assert.strictEqual(
-    submits(posted).length,
-    0,
-    'the submit was posted while attachment B was still converting: B ' +
-      'was silently omitted from the message',
-  );
+  // 1-3. A (shot.png) is still reading at Enter (paste and Enter happen
+  //      in the same tick), B (IMG_0002.HEIC) is added while the send
+  //      waits and its decode is parked; A finishes while B is still
+  //      decoding.  The one-time snapshot resolved here and posted the
+  //      submit without B, then reset the composer and discarded B.
+  const tabA = await parkSendOnLateHeic(page, 'prompt with two photos');
   const chips = win.document.getElementById('file-chips');
-  assert.match(
-    chips.textContent,
-    /IMG_0002\.HEIC/,
-    "B's chip must still be visible while the send waits for it",
-  );
 
   // 4. B's conversion fails: the submit must be dropped (sending without
   //    the photo is the silent loss to avoid) and A must be RETAINED in

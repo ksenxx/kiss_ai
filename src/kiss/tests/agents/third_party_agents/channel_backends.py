@@ -29,7 +29,6 @@ class RecordingBackend(ToolMethodBackend):
         self.sent: list[tuple[str, str, str]] = []
         self.typing: list[tuple[str, str]] = []
         self.connect_calls = 0
-        self.poll_calls = 0
         self.polled_oldest: list[str] = []
         self._connection_info = "recording backend"
 
@@ -42,7 +41,6 @@ class RecordingBackend(ToolMethodBackend):
         self, channel_id: str, oldest: str, limit: int = 50
     ) -> tuple[list[dict[str, Any]], str]:
         """Return the configured message list and cursor, recording *oldest*."""
-        self.poll_calls += 1
         self.polled_oldest.append(oldest)
         return list(self.messages), self.cursor
 

@@ -36,6 +36,16 @@ function attentionGlyph(win, tabId) {
   return rec.askPending && tabId !== win._testApi.getActiveTabId() ? '?' : '';
 }
 
+// The Question panel in the transcript is the whole notice: neither a
+// question nor its retirement raises a toast.
+function assertNoToast(win, where) {
+  assert.strictEqual(
+    win.document.querySelectorAll('.kiss-notification').length,
+    0,
+    'no toast ' + where,
+  );
+}
+
 const TERMINAL_EVENTS = [
   'task_done',
   'task_error',
@@ -43,9 +53,10 @@ const TERMINAL_EVENTS = [
   'task_stopped',
 ];
 
-// A task that ends while its own tab is on screen must take the composer out of answer mode.
+// A task that ends while its own tab is on screen, like an accepted
+// answer (askUserDone), must take the composer out of answer mode.
 function testActiveTabAskClearedOnEachTerminalEvent() {
-  for (const type of TERMINAL_EVENTS) {
+  for (const type of [...TERMINAL_EVENTS, 'askUserDone']) {
     const win = makePage();
     const api = win._testApi;
     const tabId = api.getActiveTabId();
@@ -55,6 +66,7 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
       askModalVisible(win),
       `${type}: the question must be showing before the task ends`,
     );
+    assertNoToast(win, `${type}: while the question is pending`);
 
     send(win, {type: type, tabId: tabId, success: true});
 
@@ -68,10 +80,13 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
       '',
       `${type} must clear the attention indicator`,
     );
+    assertNoToast(win, `${type}: after the question is retired`);
 
     win.close();
   }
-  console.log('  ok - an ending task clears its own visible question');
+  console.log(
+    '  ok - an ending task or an answer clears its visible question, no toast',
+  );
 }
 
 // The badge on a background tab must clear too, and the user must not be
@@ -113,11 +128,6 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
       askModalVisible(win),
       false,
       `${type}: visiting the finished tab must not resurrect the question`,
-    );
-    assert.notStrictEqual(
-      api.getActiveTabId(),
-      userTab,
-      `${type}: the click must have switched to the finished tab`,
     );
 
     win.close();

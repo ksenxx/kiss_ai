@@ -275,7 +275,8 @@ function testSecondSummaryStopsAtEarlierSummaryBoundary() {
     name: 'summary',
     content: 'Summary recorded.',
   });
-  sendToolPanels(win, 2, 100);
+  // Nine panels after the first summary: more than the old six-panel cap.
+  sendToolPanels(win, 9, 100);
   send(win, {
     type: 'tool_call',
     name: 'summary',
@@ -294,8 +295,8 @@ function testSecondSummaryStopsAtEarlierSummaryBoundary() {
   );
   assert.strictEqual(
     nested.length,
-    2,
-    'the second summary must adopt exactly the 2 panels emitted after ' +
+    9,
+    'the second summary must adopt exactly the 9 panels emitted after ' +
       'the first summary — got ' +
       nested.length,
   );
@@ -341,35 +342,6 @@ function testSummaryImmediatelyAfterSummaryNestsNothing() {
   assert.ok(second.classList.contains('collapsed'), 'still collapses');
   win.close();
   console.log('  ok - back-to-back summaries nest nothing');
-}
-
-function testManyPanelsBetweenSummariesAllNest() {
-  const {win} = makePage();
-  send(win, {type: 'prompt', text: 'go'});
-  sendToolPanels(win, 2);
-  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
-  send(win, {
-    type: 'tool_result',
-    name: 'summary',
-    content: 'Summary recorded.',
-  });
-  sendToolPanels(win, 9, 200);
-  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
-  const panels = summaryPanels(win);
-  const second = panels[1];
-  assert.strictEqual(
-    second.querySelector(':scope > .summary-sub').children.length,
-    9,
-    'ALL 9 panels since the previous summary must nest',
-  );
-  const after = topLevel(win);
-  assert.strictEqual(
-    after.length,
-    2,
-    'no stranded panels: first summary (with the prompt) + second summary',
-  );
-  win.close();
-  console.log('  ok - all 9 panels between summaries nest (no 6 cap)');
 }
 
 function testToolResultLandsInsideCollapsedSummaryPanel() {
@@ -672,32 +644,31 @@ function testRcResultPanelIsBoundary() {
   console.log('  ok - .rc result panels are a boundary');
 }
 
-function runTests() {
-  testSummaryPanelCreatedAndCollapsed();
-  testDescriptionIsDirectChildWithFullText();
-  testNestsAllPanelsBackToPromptInOrder();
-  testAdjacentTaskIsBoundarySystemPromptIsNot();
-  testWelcomeBlockNeverAdopted();
-  testNoPrecedingPanels();
-  testDescriptionFullyVisibleWhileCollapsedViaCss();
-  testCollapsePreviewSuppressedForSummary();
-  testHeaderClickTogglesAndKeepsChildren();
-  testSecondSummaryStopsAtEarlierSummaryBoundary();
-  testSummaryImmediatelyAfterSummaryNestsNothing();
-  testManyPanelsBetweenSummariesAllNest();
-  testToolResultLandsInsideCollapsedSummaryPanel();
-  testNonSummaryToolCallUnaffected();
-  testReplayPathNestsAndCollapses();
-  testReplayedSummaryStaysVisibleInsideTrajectory();
-  testAdoptedPanelsRevealAfterManualExpandPostReplay();
-  testAdoptedPanelKeepsOwnCollapsePreview();
-  testReplayWithTwoSummariesSegmentsCorrectly();
-  testRcResultPanelIsBoundary();
-}
+const TESTS = [
+  testSummaryPanelCreatedAndCollapsed,
+  testDescriptionIsDirectChildWithFullText,
+  testNestsAllPanelsBackToPromptInOrder,
+  testAdjacentTaskIsBoundarySystemPromptIsNot,
+  testWelcomeBlockNeverAdopted,
+  testNoPrecedingPanels,
+  testDescriptionFullyVisibleWhileCollapsedViaCss,
+  testCollapsePreviewSuppressedForSummary,
+  testHeaderClickTogglesAndKeepsChildren,
+  testSecondSummaryStopsAtEarlierSummaryBoundary,
+  testSummaryImmediatelyAfterSummaryNestsNothing,
+  testToolResultLandsInsideCollapsedSummaryPanel,
+  testNonSummaryToolCallUnaffected,
+  testReplayPathNestsAndCollapses,
+  testReplayedSummaryStaysVisibleInsideTrajectory,
+  testAdoptedPanelsRevealAfterManualExpandPostReplay,
+  testAdoptedPanelKeepsOwnCollapsePreview,
+  testReplayWithTwoSummariesSegmentsCorrectly,
+  testRcResultPanelIsBoundary,
+];
 
 try {
-  runTests();
-  console.log('\n20 passed, 0 failed');
+  for (const t of TESTS) t();
+  console.log(`\n${TESTS.length} passed, 0 failed`);
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

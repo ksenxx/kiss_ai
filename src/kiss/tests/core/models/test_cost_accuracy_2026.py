@@ -552,6 +552,58 @@ class TestClaudeHaiku55LongPromptTier:
             assert calculate_cost(name, 300_000, 1_000) == pytest.approx(expected), name
 
 
+class TestClaudeSonnet45LongPromptTier:
+    """Sonnet 4.5 bills prompts over 200K tokens at 2x input/cache and 1.5x output.
+
+    OpenRouter's ``anthropic/claude-sonnet-4.5`` listing: $3/$15, read
+    $0.30, 5m write $3.75, 1h write $6 up to 200K prompt tokens; a
+    ``min_prompt_tokens: 200000`` override of $6/$22.50, $0.60, $7.50, $12
+    above.  The 500K OpenRouter entry is the route that can reach it.
+    """
+
+    OR = "openrouter/anthropic/claude-sonnet-4.5"
+
+    def test_tier_is_registered_for_every_sonnet_45_name(self):
+        for name in (
+            self.OR,
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-5-20250929",
+            "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        ):
+            assert _long_context_uplift(name) == (200_000, 2.0, 1.5), name
+        assert MODEL_INFO[self.OR].context_length > 200_000
+
+    def test_exactly_200k_prompt_tokens_is_still_the_short_tier(self):
+        assert calculate_cost(self.OR, 200_000, 1_000) == pytest.approx(
+            (200_000 * 3.0 + 1_000 * 15.0) / 1e6
+        )
+
+    def test_prompt_over_200k_bills_the_published_override(self):
+        assert calculate_cost(self.OR, 200_001, 1_000) == pytest.approx(
+            (200_001 * 6.0 + 1_000 * 22.5) / 1e6
+        )
+
+    def test_cache_buckets_count_toward_the_tier_and_bill_the_override(self):
+        assert calculate_cost(self.OR, 0, 1_000, 200_001) == pytest.approx(
+            (200_001 * 0.60 + 1_000 * 22.5) / 1e6
+        )
+        assert calculate_cost(self.OR, 0, 1_000, 0, 200_001) == pytest.approx(
+            (200_001 * 7.50 + 1_000 * 22.5) / 1e6
+        )
+        assert calculate_cost(
+            self.OR, 0, 1_000, num_cache_write_1h_tokens=200_001
+        ) == pytest.approx((200_001 * 12.0 + 1_000 * 22.5) / 1e6)
+
+    def test_summed_cli_usage_gets_no_tier(self):
+        assert calculate_cost(self.OR, 300_000, 1_000, single_request=False) == pytest.approx(
+            (300_000 * 3.0 + 1_000 * 15.0) / 1e6
+        )
+
+    def test_sonnet_46_has_no_long_prompt_tier(self):
+        for name in ("claude-sonnet-4-6", "openrouter/anthropic/claude-sonnet-4.6"):
+            assert _long_context_uplift(name) is None, name
+
+
 class TestGpt6LongContextTier:
     """gpt-6-sol $2/$0.20/$2.50/$10 -> $4/$0.40/$5/$15 above 272k prompt tokens;
     gpt-6-luna $0.10/$0.01/$0.125/$0.50 -> $0.20/$0.02/$0.25/$0.75

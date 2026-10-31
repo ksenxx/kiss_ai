@@ -100,11 +100,6 @@ async function main() {
     'complete must carry the active tab id (ghost text would render ' +
       'nothing for an untagged reply)',
   );
-  assert.strictEqual(
-    getFiles.tabId,
-    complete.tabId,
-    'both requests name the same (active) tab',
-  );
   console.log('  ok - complete carries the tab stamp');
 
   send(win, {

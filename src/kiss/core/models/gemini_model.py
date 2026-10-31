@@ -294,21 +294,30 @@ class GeminiModel(Model):
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
         # The pool behind ``client``, kept so a stream abort can reach the
-        # live response; built with the client by _build_client.
+        # live response; built with the client, and closed when the client
+        # is replaced, by _build_client.
         self._http_client: _ResponseTrackingHttpxClient
 
     def _build_client(self) -> genai.Client:
-        """Return a new ``genai.Client`` over a fresh tracking pool.
+        """Return a new ``genai.Client`` over a fresh tracking pool; close the previous pool.
 
-        ``genai.Client.close()`` closes the httpx client it was given, so
-        the pool belongs to one client: the replaced client takes its old
-        pool with it when :meth:`Model._reuse_client` closes it.
+        Each client sends through a pool of its own, and
+        ``genai.Client.close()`` leaves an httpx client it was handed open
+        (the SDK leaves it to the caller), so :meth:`Model._reuse_client`
+        closing the replaced client does not release that client's pool.
+        It is closed here instead, once the replacement exists, rather than
+        left with its keep-alive sockets to the garbage collector.
         """
-        self._http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
-        return genai.Client(
+        http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
+        client = genai.Client(
             api_key=self.api_key,
-            http_options=types.HttpOptions(httpx_client=self._http_client),
+            http_options=types.HttpOptions(httpx_client=http_client),
         )
+        if self.client is not None:
+            # The client being replaced was built here too: this is its pool.
+            self._http_client.close()
+        self._http_client = http_client
+        return client
 
     def reset_conversation(self) -> None:
         """Reset conversation state including thought signatures.

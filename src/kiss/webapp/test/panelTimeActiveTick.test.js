@@ -5,31 +5,32 @@
 
 // A thinking_start with no thought tokens yet shows the Thoughts panel
 // at once, with a live .panel-time footer (the panel's last child) that
-// advances once a second.  The page runs on a frozen clock and its 1 s
-// intervals are recorded instead of scheduled, so the elapsed labels
-// are exact and the test does not wait on wall-clock time.
+// advances once a second, and stops ticking when the task stops.  The
+// page runs on a frozen clock and its intervals on a virtual one
+// (fakeIntervals), so the elapsed labels are exact and the test does not
+// wait on wall-clock time.
 
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, parsePanelTimeMs} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  fakeIntervals,
+  parsePanelTimeMs,
+} = require('./simplify2_harness');
 
 const clock = {now: 1_700_000_000_000};
-const ticks = [];
+let intervals;
 
 function seedClock(win) {
   win.Date.now = () => clock.now;
-  const realSetInterval = win.setInterval;
-  win.setInterval = function (fn, ms, ...args) {
-    if (ms !== 1000) return realSetInterval(fn, ms, ...args);
-    ticks.push(fn);
-    return ticks.length;
-  };
+  intervals = fakeIntervals(win);
 }
 
 function advance(ms) {
   clock.now += ms;
-  for (const tick of ticks) tick();
+  intervals.tick(ms);
 }
 
 function footers(panel) {
@@ -49,7 +50,13 @@ function runTests() {
 
   send(win, {type: 'clear', chat_id: 'chat-active-tick', tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: clock.now});
+  const before = new Set(intervals.intervals);
   send(win, {type: 'thinking_start', tabId: TAB});
+  const panelTick = intervals.intervals.find(iv => !before.has(iv));
+  assert.ok(
+    panelTick && panelTick.ms === 1000,
+    'the active panel starts the shared 1 s tick',
+  );
 
   const output = win.document.getElementById('output');
   const panels = output.querySelectorAll('.llm-panel');
@@ -113,6 +120,16 @@ function runTests() {
     'the Thoughts panel must still have zero thought tokens while its ' +
       'live time footer is ticking',
   );
+
+  // The task stops: the last active panel pauses, the shared 1 s tick
+  // ends and the footer keeps the time it showed.
+  send(win, {type: 'status', running: false, tabId: TAB});
+  assert.ok(
+    !intervals.intervals.includes(panelTick),
+    'the shared panel tick must stop with the last active panel',
+  );
+  advance(1000);
+  assert.strictEqual(panelTimeMs(panel), 2000, 'the paused footer is frozen');
 
   win.close();
 }

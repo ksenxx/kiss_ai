@@ -175,7 +175,7 @@ class TestClientsSkipHeartbeatsBeforeAuthOk(IsolatedAsyncioTestCase):
             try:
                 reply = await asyncio.to_thread(link.request, {"type": "ping"}, "pong", 5.0)
                 self.assertEqual(reply["type"], "pong")
-                self.assertEqual(link._retry_at, 0.0)
+                self.assertEqual(link._health.retry_at, 0.0)
             finally:
                 link.close()
 
@@ -192,7 +192,7 @@ class TestClientsSkipHeartbeatsBeforeAuthOk(IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(mach.MachineError, "did not complete the handshake"):
                 await asyncio.to_thread(link.request, {"type": "ping"}, "pong", 0.5)
             self.assertLess(time.monotonic() - started, 5.0)
-            self.assertGreater(link._retry_at, 0.0)
+            self.assertGreater(link._health.retry_at, 0.0)
 
     async def test_a_heartbeat_flood_cannot_extend_the_auth_deadline(self) -> None:
         """Heartbeats arriving faster than the per-frame floor still end at the deadline.

@@ -290,7 +290,7 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
             baseline_commit=None,
         ))
 
-        result = agent._finalize_worktree()
+        result = agent._finalize_worktree(agent.worktrees[0])
 
         assert result is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, (
             "_finalize_worktree should report COMMITTED_AND_REMOVED on successful cleanup"

@@ -45,10 +45,9 @@ function shareWithTasks(wv, tasks, replyExtra) {
 
 /**
  * Load share.js into a fresh page whose #app holds `bodyHtml`, the
- * exact document shape _build_share_page writes.  `sourceUrl` labels
- * the script in stack traces.
+ * exact document shape _build_share_page writes.
  */
-function makeSharePage(bodyHtml, sourceUrl = 'share.js') {
+function makeSharePage(bodyHtml) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><div id="app">' +
       bodyHtml +
@@ -57,7 +56,7 @@ function makeSharePage(bodyHtml, sourceUrl = 'share.js') {
   );
   const win = dom.window;
   win.scrollTo = function () {};
-  win.eval(SHARE_JS + '\n//# sourceURL=' + sourceUrl);
+  win.eval(SHARE_JS + '\n//# sourceURL=share.js');
   return win;
 }
 

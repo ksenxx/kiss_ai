@@ -7,8 +7,9 @@
 
 // Chat page event panels (user requirements, 2026-10-07):
 //   - a Thoughts panel is never collapsed or hidden by any automatic
-//     pass (streaming sweep, replay, finished-task digest, summary
-//     adoption); only a click on its header folds it;
+//     pass (streaming sweep, replay, finished-task digest) except a
+//     summary tool call, which adopts it with the steps it recounts;
+//     otherwise only a click on its header folds it;
 //   - a collapsed Bash panel's header reads "Bash <description>", with
 //     no "description:" label;
 //   - a collapsed Read or Write panel's header reads "<Tool> <path>",

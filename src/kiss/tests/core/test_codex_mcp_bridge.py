@@ -68,6 +68,7 @@ def _proxy_session(bridge: ToolBridge) -> Any:
     return stdio_client(StdioServerParameters(
         command=sys.executable,
         args=["-m", "kiss.core.models.codex_mcp_bridge", str(bridge.port)],
+        env=bridge.codex_env(),
     ))
 
 
@@ -137,7 +138,8 @@ def test_leaving_the_block_waits_for_a_call_still_executing() -> None:
     bridge = ToolBridge(ADD_SCHEMA, execute).__enter__()
     assert bridge.tool_names == {"add"}
     with socket.create_connection(("127.0.0.1", bridge.port)) as client:
-        client.sendall(b'{"op": "call", "name": "add", "arguments": {}}\n')
+        request = {"op": "call", "name": "add", "arguments": {}, "token": bridge._server.token}
+        client.sendall(json.dumps(request).encode() + b"\n")
         assert started.wait(5)
         assert bridge.calls_in_flight == 1  # what pauses the CLI stall timeout
         threading.Timer(0.3, release.set).start()
@@ -185,8 +187,9 @@ FINISH_BLOCK = "```json\n" + json.dumps({
 # ``{names}`` stands for the sorted MCP tool list, ``{result}`` for the
 # first tool result and ``{results}`` for all of them.  ``thread.started``
 # goes out before anything else so the model's stall timeout starts from
-# a line, as with Codex.  It records argv, the stdin prompt and the
-# instructions file per call.
+# a line, as with Codex.  Like Codex, it hands the proxy only the
+# ``env_vars`` the server config names (the bridge's secret).  It records
+# argv, the stdin prompt and the instructions file per call.
 _FAKE_CODEX = """#!{python}
 import json, os, pathlib, sys
 print(json.dumps({{"type": "thread.started", "thread_id": "t-1"}}), flush=True)
@@ -209,7 +212,8 @@ kiss = overrides["mcp_servers"]["kiss"]
 
 async def main():
     results = []
-    params = StdioServerParameters(command=kiss["command"], args=kiss["args"])
+    env = {{name: os.environ[name] for name in kiss.get("env_vars", [])}}
+    params = StdioServerParameters(command=kiss["command"], args=kiss["args"], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
