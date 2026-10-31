@@ -70,6 +70,7 @@ async function run() {
       assert.deepStrictEqual(frames(a.sockets[0]).at(-1), {
         type: 'auth',
         password: 'typo',
+        parts: true,
       });
       assert.strictEqual(
         storage.getItem(KEY),
@@ -83,7 +84,7 @@ async function run() {
       b.sockets[1].fireOpen();
       assert.deepStrictEqual(
         frames(b.sockets[1]),
-        [{type: 'auth', password: ''}],
+        [{type: 'auth', password: '', parts: true}],
         "tab B's reconnect probes with the uncounted empty password",
       );
       ok(
@@ -105,7 +106,7 @@ async function run() {
     a.sockets[1].fireOpen();
     try {
       assert.deepStrictEqual(frames(a.sockets[1]), [
-        {type: 'auth', password: ''},
+        {type: 'auth', password: '', parts: true},
       ]);
       assert.strictEqual(storage.getItem(KEY), null);
       ok('the refused guess is not re-sent by the reconnect');
@@ -136,7 +137,7 @@ async function run() {
       reconnect(b, 1);
       b.sockets[2].fireOpen();
       assert.deepStrictEqual(frames(b.sockets[2]), [
-        {type: 'auth', password: 'right'},
+        {type: 'auth', password: 'right', parts: true},
       ]);
       ok(
         'the accepted password is stored on auth_ok and shared with the other tab',
@@ -166,7 +167,7 @@ async function run() {
       assert.strictEqual(storage.getItem(KEY), null);
       tab.sockets[1].fireOpen();
       assert.deepStrictEqual(frames(tab.sockets[1]), [
-        {type: 'auth', password: 'typed-late'},
+        {type: 'auth', password: 'typed-late', parts: true},
       ]);
       tab.sockets[1].fireMessage({type: 'auth_ok'});
       await settle();
@@ -199,7 +200,7 @@ async function run() {
       assert.strictEqual(tab.sockets.length, 5, 'Enter reconnects at once');
       tab.sockets[4].fireOpen();
       assert.deepStrictEqual(frames(tab.sockets[4]), [
-        {type: 'auth', password: 'after-drop'},
+        {type: 'auth', password: 'after-drop', parts: true},
       ]);
       ok('Enter on a dead socket reconnects with the typed password');
     } catch (err) {

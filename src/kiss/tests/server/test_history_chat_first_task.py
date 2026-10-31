@@ -79,7 +79,7 @@ class TestChatFirstTask:
         server._get_history(query="needle")
 
         sessions = _history_sessions(events)
-        assert [s["preview"] for s in sessions] == ["needle in A"]
+        assert [s["title"] for s in sessions] == ["needle in A"]
         assert sessions[0]["chat_first_task"] == "first task of A"
 
     def test_subagent_rows_never_name_the_chat(self) -> None:
@@ -94,7 +94,7 @@ class TestChatFirstTask:
         server._get_history(query=None)
 
         sessions = _history_sessions(events)
-        assert [s["preview"] for s in sessions] == ["real first task"]
+        assert [s["title"] for s in sessions] == ["real first task"]
         assert sessions[0]["chat_first_task"] == "real first task"
 
     def test_first_task_text_is_bounded(self) -> None:

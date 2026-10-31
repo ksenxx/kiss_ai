@@ -1459,6 +1459,17 @@ body.ask-answering #input-container {
 }
 .tr-img.tr-img-full { max-height: none; cursor: zoom-out; }
 
+/* A replayed picture not fetched yet (loadReplayImageWhenShown): a
+   box of its own, so it has a place on screen to come into view at,
+   on the backing the picture then fills.  One the daemon could not
+   serve shows its alt text in a dashed box. */
+.tr-img.tr-img-lazy { min-width: 160px; min-height: 90px; cursor: default; }
+
+.tr-img.inline-img-missing {
+  min-width: 0; min-height: 0; padding: var(--space-1) var(--space-2);
+  border-style: dashed; color: var(--dim); font-size: var(--fs-sm);
+}
+
 .tr-img-cap {
   font-size: var(--fs-sm); color: var(--dim);
   word-break: break-all;

@@ -410,6 +410,36 @@
     }
   }
 
+  // The parts of a big frame the server sends in pieces (its
+  // ``frame_parts``: a replayed transcript of megabytes goes out as
+  // separate ``part`` frames of 64 KiB, numbered ``seq``, every one
+  // but the last flagged ``more``), joined here so the page sees the
+  // frame whole.  Each part is a frame, so the stale check above
+  // counts the transfer as life however long it takes; one fragmented
+  // WebSocket message would be silence until it was complete.
+  let _parts = [];
+
+  /**
+   * Return *data* when it is an ordinary frame, the joined frame when
+   * it is the last part of one, else null (a part, more to come).  A
+   * part out of sequence (the connection is fresh and the start was
+   * never seen) is dropped with what was gathered.
+   */
+  function _joinPart(data) {
+    if (typeof data !== 'string' || data.indexOf('{"type": "part"') !== 0)
+      return data;
+    const part = JSON.parse(data);
+    if (part.seq !== _parts.length) {
+      _parts = [];
+      if (part.seq !== 0) return null;
+    }
+    _parts.push(part.data); // join() reads a missing one as ''
+    if (part.more === true) return null;
+    const whole = _parts.join('');
+    _parts = [];
+    return whole;
+  }
+
   function _checkStale() {
     _staleTimer = null;
     if (!_ws || _ws.readyState !== WebSocket.OPEN) return;
@@ -744,7 +774,7 @@
     _authPassword = pwd;
     if (_ws && _ws.readyState === WebSocket.OPEN) {
       _sessionPassword = pwd;
-      _ws.send(JSON.stringify({type: 'auth', password: pwd}));
+      _ws.send(JSON.stringify({type: 'auth', password: pwd, parts: true}));
     } else {
       // The server dropped the idle socket while the user typed;
       // ``_authPassword`` goes out in ``onopen`` of the reconnect.
@@ -943,14 +973,18 @@
         } catch (_e) {}
       }
       _sessionPassword = pwd;
-      _ws.send(JSON.stringify({type: 'auth', password: pwd}));
+      // `parts`: this page joins the parts of a big frame (_joinPart).
+      _ws.send(JSON.stringify({type: 'auth', password: pwd, parts: true}));
       _lastFrameAt = Date.now();
+      _parts = [];
       _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
     };
 
     _ws.onmessage = function (event) {
-      const msg = JSON.parse(event.data);
       _lastFrameAt = Date.now();
+      const text = _joinPart(event.data);
+      if (text === null) return;
+      const msg = JSON.parse(text);
       if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
         // An interactive login the server accepted: store it for the

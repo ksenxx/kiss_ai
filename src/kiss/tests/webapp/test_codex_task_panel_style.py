@@ -415,6 +415,8 @@ _INJECT_HISTORY_JS = r"""
     id: 'chat-abc123',
     task_id: 42,
     title: 'Test task',
+    // A daemon before 2026-10-31 sent the text a second time as
+    // `preview`; the page reads `title` first.
     preview: 'Test task preview',
     steps: 3,
     tokens: 1234,
@@ -760,7 +762,7 @@ def test_live_task_panel_typography_and_history_rows(
                 assert group_probe["rowHidden"] is True, (
                     "a collapsed chat panel must hide its task rows: " + repr(group_probe)
                 )
-                assert group_probe["headerText"] == "Test task preview", (
+                assert group_probe["headerText"] == "Test task", (
                     "the chat header shows the chat's first task text: " + repr(group_probe)
                 )
                 assert group_probe["whiteSpace"] == "nowrap", (

@@ -646,6 +646,26 @@ def machine_task_update_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     return _machine_reply(name, cmd, "taskUpdate", refused, lane="panels")
 
 
+def machine_replay_image_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward a chat page's ``getReplayImage`` *cmd* to registered machine *name*.
+
+    A tab bound to a machine shows the machine's transcript, replayed
+    over the tab's stream with its pictures left out as ``lazy``
+    handles; the machine's daemon holds the pictures, so it answers
+    the page's fetch of one.  The command goes on the ``panels`` link
+    lane, like the other per-view fetches, so a submit to the machine
+    never waits behind it.
+
+    Returns:
+        The machine's ``replayImage``, or one with ``error`` (the page
+        marks the picture unavailable) carrying the command's
+        ``taskId``, ``index`` and ``token`` when the machine is not
+        registered or unreachable.
+    """
+    refused: dict[str, Any] = {k: cmd[k] for k in ("taskId", "index", "token") if k in cmd}
+    return _machine_reply(name, cmd, "replayImage", refused, lane="panels")
+
+
 FILES_INDEX_WAIT = 60.0
 """Seconds a forwarded ``getFiles`` keeps asking while the machine indexes the folder."""
 
@@ -734,6 +754,7 @@ MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | N
     **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
     "getTaskUpdate": machine_task_update_reply,
+    "getReplayImage": machine_replay_image_reply,
     "getFiles": machine_files_reply,
     "recordFileUsage": machine_file_usage,
     "getModels": machine_models_reply,

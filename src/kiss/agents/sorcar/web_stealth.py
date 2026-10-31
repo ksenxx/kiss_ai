@@ -33,8 +33,22 @@ same loop would be.  By late Oct 2026 fiverr's widget frame spanned a
 600 px column with its 310 px button at the left edge, so holds at the
 middle of ``#px-captcha`` often missed the button (fiverr blocked after
 two holds on 30 Oct); the button itself is pressed now
-(:func:`press_and_hold_box`).  Three groups of helpers, all consumed by
-:mod:`kiss.agents.sorcar.web_use_tool`:
+(:func:`press_and_hold_box`).  On 30 Oct 2026 semanticscholar.org, which
+had served paper and search pages all September, began answering them
+with AWS WAF's CAPTCHA action (HTTP 405, title "Human Verification",
+"Let's confirm you are human", a "Begin" button opening a picture
+puzzle; https://docs.aws.amazon.com/waf/latest/developerguide/waf-captcha-and-challenge.html).
+An un-automated Google Chrome with a fresh profile gets the same puzzle
+from this machine, so it rates the network's IP address, not the
+browser: the page is recognised (by its wording, or by its title and
+``captcha.awswaf.com`` script for other languages) and reported after a
+3 s grace -- nothing is pressed, since the puzzle needs a person.  AWS WAF's
+*Challenge* action (HTTP 202) is a blank interstitial whose
+``token.awswaf.com/.../challenge.js`` acquires a token and reloads the
+page in about a second; read before that, it was an "(empty page)" three
+times in the task history, so a blank page carrying that script is now
+waited out like a Cloudflare challenge.  Three groups of helpers, all
+consumed by :mod:`kiss.agents.sorcar.web_use_tool`:
 
 * **Engine**: :func:`playwright_api` prefers Patchright, a patched
   Playwright driver that does not send the ``Runtime.enable`` CDP command
@@ -72,7 +86,7 @@ import time
 from importlib import import_module
 from types import ModuleType
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse, urlsplit
 
 from kiss.agents.sorcar._concurrency import locked
 from kiss.core.processes import terminate_process_group
@@ -587,6 +601,12 @@ def typing_duration_secs(chunks: list[tuple[str, int]]) -> float:
 CLOUDFLARE_CHALLENGE = "Cloudflare challenge"
 ANUBIS_CHECK = "Anubis proof-of-work check"
 PERIMETERX_CHECK = "PerimeterX press-and-hold check"
+# AWS WAF's two interstitials (https://docs.aws.amazon.com/waf/latest/developerguide/waf-captcha-and-challenge-actions.html):
+# the Challenge action's blank page (HTTP 202) that acquires a token in
+# the browser and reloads on its own, and the CAPTCHA action's picture
+# puzzle (HTTP 405), which only a person solves.
+AWS_WAF_CHALLENGE = "AWS WAF challenge"
+AWS_WAF_CAPTCHA = "AWS WAF CAPTCHA puzzle"
 
 _TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Cloudflare block", re.compile(r"^Attention Required! \| Cloudflare$", re.I)),
@@ -652,15 +672,72 @@ _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
             re.I,
         ),
     ),
+    (
+        # The stock puzzle page's heading and its own sentence (title
+        # "Human Verification", too generic on its own), as semanticscholar
+        # served it on 30 Oct 2026.
+        AWS_WAF_CAPTCHA,
+        re.compile(r"Let.s confirm you are human", re.I),
+        re.compile(
+            r"Complete the security check before continuing|verifies that you are not a bot",
+            re.I,
+        ),
+    ),
 )
+# AWS WAF's interstitials carry no vendor name in their text: the
+# Challenge action's page has an empty title and no text at all, only the
+# token script, and the CAPTCHA page's wording is rendered by its puzzle
+# script in the browser's language under the fixed title "Human
+# Verification".  Both scripts are also embedded by sites that use the
+# AWS WAF SDK on their own pages
+# (https://docs.aws.amazon.com/waf/latest/developerguide/waf-js-challenge-api.html),
+# which have their own titles and text -- hence the blank-page and title
+# requirements in :func:`challenge_vendor`.
+_AWS_WAF_SCRIPTS = frozenset({"challenge.js", "captcha.js"})
+_AWS_WAF_CAPTCHA_TITLE = "human verification"
 
 
-def challenge_vendor(title: str, body_head: str) -> str | None:
+def _aws_waf_scripts(scripts: str) -> set[str]:
+    """The AWS WAF interstitial scripts among *scripts*, by file name.
+
+    A script counts when served over HTTPS from a host under
+    ``awswaf.com`` (the vendor's own, not ``awswaf.com.evil.example``)
+    and named ``challenge.js`` or ``captcha.js`` (not ``captcha.js.map``,
+    nor a URL that merely mentions one in its query string).  Chromium
+    keeps a malformed ``src`` as written; one that does not parse (a bad
+    port, an unclosed ``[``) is skipped, not raised on.
+
+    Args:
+        scripts: Space-separated script URLs.
+
+    Returns:
+        A subset of ``{"challenge.js", "captcha.js"}``.
+    """
+    seen: set[str] = set()
+    for url in scripts.split():
+        try:
+            # ``urlsplit`` keeps ``;params`` in the path, so the file name
+            # is exact; reading ``port`` validates it.
+            parts = urlsplit(url)
+            host = parts.hostname or ""
+            parts.port  # noqa: B018 — raises ValueError on a bad port
+        except ValueError:
+            continue
+        if parts.scheme == "https" and (host == "awswaf.com" or host.endswith(".awswaf.com")):
+            name = parts.path.rsplit("/", 1)[-1]
+            if name in _AWS_WAF_SCRIPTS:
+                seen.add(name)
+    return seen
+
+
+def challenge_vendor(title: str, body_head: str, scripts: str = "") -> str | None:
     """Recognise a bot-protection interstitial from what the page shows.
 
     Args:
         title: ``document.title``.
         body_head: The first ~1500 characters of ``document.body.innerText``.
+        scripts: The ``src`` URLs of the page's ``<script>`` elements,
+            space-separated (empty when the caller has not read them).
 
     Returns:
         A short vendor label (``"Cloudflare challenge"``, ``"Akamai
@@ -673,6 +750,11 @@ def challenge_vendor(title: str, body_head: str) -> str | None:
     for label, first, second in _BODY_PATTERNS:
         if first.search(body_head) and second.search(body_head):
             return label
+    aws = _aws_waf_scripts(scripts)
+    if "captcha.js" in aws and stripped.lower() == _AWS_WAF_CAPTCHA_TITLE:
+        return AWS_WAF_CAPTCHA
+    if "challenge.js" in aws and not stripped and not body_head.strip():
+        return AWS_WAF_CHALLENGE
     return None
 
 
@@ -684,6 +766,11 @@ def challenge_vendor(title: str, body_head: str) -> str | None:
 # longer than 12 s on this loaded VM six times in the task history.
 _CHALLENGE_WAIT_SECS = 12.0
 _ANUBIS_WAIT_SECS = 45.0
+# AWS WAF's CAPTCHA page renders its "Begin" button only after its token
+# script has run, so once its wording shows nothing is pending: the
+# puzzle stays until a person solves it.  A short grace for a page in
+# the middle of reloading itself, then it is reported.
+_PUZZLE_WAIT_SECS = 3.0
 
 
 def challenge_wait_secs(vendor: str) -> float:
@@ -693,9 +780,14 @@ def challenge_wait_secs(vendor: str) -> float:
         vendor: A label returned by :func:`challenge_vendor`.
 
     Returns:
-        Seconds; longer for Anubis, whose proof-of-work is CPU-bound.
+        Seconds; longer for Anubis, whose proof-of-work is CPU-bound,
+        shorter for AWS WAF's puzzle, which no wait clears.
     """
-    return _ANUBIS_WAIT_SECS if vendor == ANUBIS_CHECK else _CHALLENGE_WAIT_SECS
+    if vendor == ANUBIS_CHECK:
+        return _ANUBIS_WAIT_SECS
+    if vendor == AWS_WAF_CAPTCHA:
+        return _PUZZLE_WAIT_SECS
+    return _CHALLENGE_WAIT_SECS
 
 
 def press_hold_secs(vendor: str) -> float:

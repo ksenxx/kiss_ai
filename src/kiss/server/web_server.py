@@ -71,6 +71,7 @@ import signal
 import socket
 import ssl
 import stat as stat_module
+import struct
 import subprocess
 import sys
 import threading
@@ -369,13 +370,106 @@ _SHUTDOWN_SIGNALS: tuple[int, ...] = tuple(
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None))
     if sig is not None
 )
+if sys.platform != "win32":
+    import fcntl
+    import termios
+
+
+_SO_NWRITE = 0x1024
+"""macOS ``SOL_SOCKET`` option: bytes queued in a socket's send buffer (not in :mod:`socket`)."""
+
+
+def _unsent_bytes(transport: asyncio.WriteTransport) -> int:
+    """Return how many bytes written to *transport* its peer has not taken yet.
+
+    The event loop's own write buffer plus, on Linux and macOS, the
+    kernel's TCP send queue (what is still unsent or unacknowledged:
+    ``TIOCOUTQ`` on Linux, ``SO_NWRITE`` on macOS, where that ioctl is
+    for terminals only and fails with ``ENXIO`` on a socket); the
+    loop's buffer alone shrinks only once the kernel reports the
+    socket writable, which on Linux takes a third of the send buffer
+    to drain, while the queue shrinks with every acknowledgement the
+    peer sends as it reads.  The kernel's count is left out where it
+    cannot be read.
+
+    Args:
+        transport: The peer's connection transport.
+    """
+    unsent = transport.get_write_buffer_size()
+    sock = transport.get_extra_info("socket")
+    if sock is None or sys.platform == "win32":
+        return unsent
+    try:
+        if sys.platform == "darwin":
+            return unsent + int(sock.getsockopt(socket.SOL_SOCKET, _SO_NWRITE))
+        queued = fcntl.ioctl(sock.fileno(), termios.TIOCOUTQ, b"\0\0\0\0")
+    except (OSError, ValueError, AttributeError):
+        return unsent
+    return unsent + int(struct.unpack("i", queued)[0])
+
+
+class _DrainWatch:
+    """Drop a peer that takes nothing of the frame being sent to it for a whole deadline.
+
+    Armed by :meth:`WebPrinter._send_while_draining` around one send
+    and disarmed when the send returns.  While the send is pending the
+    watch looks at the peer's unsent bytes (:func:`_unsent_bytes`)
+    once a tick and, once they have not shrunk for *timeout* seconds,
+    aborts the transport, which ends the pending send; ``expired``
+    then tells the sender a dropped peer from one that closed by
+    itself.  It is a timer callback, not a task: a frame the socket
+    takes at once (nearly every one) costs one ``call_later`` and its
+    cancel, with no extra turn of the event loop.
+
+    Args:
+        transport: The peer's connection transport.
+        timeout: Seconds the unsent bytes may stay put before the
+            peer is dropped; a quarter of it, at most a second, is
+            the tick between two looks.
+        loop: The event loop the send runs on.
+    """
+
+    def __init__(
+        self, transport: asyncio.WriteTransport, timeout: float, loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self.transport = transport
+        self.timeout = timeout
+        self.loop = loop
+        self.tick = min(1.0, timeout / 4)
+        self.unsent = -1
+        self.shrank_at = loop.time()
+        self.expired = False
+        self.handle = loop.call_later(self.tick, self.look)
+
+    def look(self) -> None:
+        """Restart the deadline on a shrink since the last look; drop the peer once it is over."""
+        # A keepalive ping written meanwhile grows the count; only a
+        # shrink is the peer reading.
+        now_unsent = _unsent_bytes(self.transport)
+        if now_unsent < self.unsent:
+            self.shrank_at = self.loop.time()
+        elif self.loop.time() - self.shrank_at >= self.timeout:
+            self.expired = True
+            self.transport.abort()
+            return
+        self.unsent = now_unsent
+        self.handle = self.loop.call_later(self.tick, self.look)
+
+    def cancel(self) -> None:
+        """Disarm the watch: the send has returned."""
+        self.handle.cancel()
+
+
 _SEND_TIMEOUT = 30.0
 """Seconds a client may leave its socket unread before it is dropped.
 
 The watchdog's 15 s ping only detects a dead peer, not one that merely
 stops reading, so such a peer would otherwise hold its send lock forever
 while every later broadcast queues another pending send for it without
-bound.
+bound.  The deadline restarts whenever the peer's socket took some of
+what is being sent (:meth:`WebPrinter._send_while_draining`): a peer
+on a slow network gets a transcript of megabytes however long that
+takes, while one that reads nothing is dropped after this long.
 """
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
@@ -2873,6 +2967,9 @@ class WebPrinter(JsonPrinter):
         # replayed by someone's history click) that ``broadcast`` fans
         # out to every other peer.
         self._link_clients: set[ServerConnection] = set()
+        # The peers (of any set above) that join the parts of a big
+        # frame; see ``add_client`` and ``_timed_send``.
+        self._parts_clients: set[ServerConnection] = set()
         # Which local connection addressed which tab ids (keyed by
         # connection id); see ``register_local_tab``.
         self._local_tab_sets: dict[str, set[str]] = {}
@@ -3526,16 +3623,27 @@ class WebPrinter(JsonPrinter):
         hold its send lock forever while every later broadcast queued
         one more pending send for it without bound (the watchdog's
         15 s ping only detects a dead peer, not one that merely stops
-        reading).  A send that does not complete within
-        :attr:`_send_timeout` removes the peer from both client sets
-        and aborts its transport, which also ends its handler.
+        reading).  A peer whose socket takes nothing for
+        :attr:`_send_timeout` seconds (:meth:`_send_while_draining`)
+        is removed from both client sets and its transport aborted,
+        which also ends its handler.  A frame bigger than
+        :data:`~kiss.agents.sorcar.local_endpoint.PART_CHARS` (a
+        replayed transcript) goes out as separate ``part`` frames
+        (:func:`~kiss.agents.sorcar.local_endpoint.frame_parts`) to a
+        peer that joins them (``parts`` in :meth:`add_client`): a
+        browser on a slow network sees each part land (its stale
+        check would take a single big frame's minutes of silence for
+        a dead socket).  Any other peer gets the frame whole, as
+        before.
 
         Args:
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``).
         """
+        parts = local_endpoint.frame_parts(data) if endpoint in self._parts_clients else [data]
         try:
-            await asyncio.wait_for(endpoint.send(data), self._send_timeout)
+            for part in parts:
+                await self._send_while_draining(endpoint, part)
         except Exception:
             logger.debug("Failed to write to client", exc_info=True)
             self.remove_client(endpoint)
@@ -3543,8 +3651,48 @@ class WebPrinter(JsonPrinter):
             if transport is not None:
                 transport.abort()
 
+    async def _send_while_draining(self, endpoint: ServerConnection, text: str) -> None:
+        """Send *text* to *endpoint*; give up once its socket took nothing for a whole deadline.
+
+        ``ServerConnection.send`` hands the frame to the transport at
+        once and then waits for the write buffer to drain, so a
+        deadline on the send as a whole measured the frame's delivery,
+        not the peer's reading: a part of 64 KiB outlasted the 30 s on
+        a link slower than 2 KB/s though every byte of it was being
+        read.  Here a :class:`_DrainWatch` timer looks at the peer's
+        unsent bytes while the send is pending, a second apart (a
+        quarter of the deadline when that is shorter), and aborts the
+        transport once they did not shrink for the whole deadline, so
+        a peer is given up on only when it read nothing for that long,
+        however slow its link.  The send itself is awaited in place: a
+        frame the socket takes at once, which is nearly every one,
+        costs no extra turn of the event loop (a task and a waiter per
+        frame made a stream of small deltas several times slower on
+        Windows, where each turn is milliseconds).
+
+        Args:
+            endpoint: The client connection to write to.
+            text: One frame, or one part of a big one.
+
+        Raises:
+            TimeoutError: When the peer's write buffer did not shrink
+                for :attr:`_send_timeout` seconds.
+        """
+        transport = getattr(endpoint, "transport", None)
+        if transport is None:
+            await endpoint.send(text)
+            return
+        watch = _DrainWatch(transport, self._send_timeout, asyncio.get_running_loop())
+        try:
+            await endpoint.send(text)
+        finally:
+            watch.cancel()
+        if watch.expired:
+            raise TimeoutError(f"peer read nothing for {self._send_timeout:g}s")
+
     def add_client(
         self, ws: ServerConnection, local: bool = False, link: bool = False,
+        parts: bool = False,
     ) -> None:
         """Register a WebSocket client for event broadcasting.
 
@@ -3561,12 +3709,18 @@ class WebPrinter(JsonPrinter):
                 task-event copy (a transcript replayed by a history
                 click on this daemon used to close such a socket with
                 1009 and show this machine as unreachable).
+            parts: ``True`` for a peer that joins the parts of a big
+                frame (``"parts": true`` in its ``auth`` frame), which
+                :meth:`_timed_send` then sends as separate ``part``
+                frames; any other peer gets every frame whole.
         """
         with self._ws_lock:
             if link:
                 self._link_clients.add(ws)
             else:
                 (self._local_clients if local else self._remote_clients).add(ws)
+            if parts:
+                self._parts_clients.add(ws)
             self._pending_sends.setdefault(ws, set())
 
     def remove_client(self, ws: ServerConnection) -> None:
@@ -3584,6 +3738,7 @@ class WebPrinter(JsonPrinter):
             self._remote_clients.discard(ws)
             self._local_clients.discard(ws)
             self._link_clients.discard(ws)
+            self._parts_clients.discard(ws)
             pending = self._pending_sends.pop(ws, set())
             self._send_locks.pop(ws, None)
         for fut in pending:
@@ -5358,7 +5513,7 @@ class RemoteAccessServer:
             return
         is_local = auth.kind == "local" and not auth.link
 
-        self._printer.add_client(websocket, local=is_local, link=auth.link)
+        self._printer.add_client(websocket, local=is_local, link=auth.link, parts=auth.parts)
         # ``link``: a daemon-link peer, told only global events and the
         # replies to its own requests (see ``WebPrinter.add_client``).
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
@@ -7045,6 +7200,45 @@ class RemoteAccessServer:
         }
         await self._reply_direct(endpoint, reply, "checkPaths")
 
+    async def _handle_get_replay_image(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Serve a picture a replayed transcript left out.
+
+        A replay sends each picture embedded in a ``tool_result`` as a
+        ``lazy: {taskId, index}`` handle instead of its base64 bytes
+        (:func:`kiss.server.server._lazy_replay_images`); ``media/main.js``
+        sends ``getReplayImage`` with that handle when the picture
+        comes into view.  The reply goes to the requesting *endpoint*
+        only, with the shape::
+
+            {"type": "replayImage", "taskId": ..., "index": ...,
+             "token": <echo>, "mime": ..., "b64": ...}
+
+        or, when the task or the picture is unknown, the same without
+        ``mime``/``b64`` and with an ``error``.
+
+        Args:
+            cmd: The parsed ``getReplayImage`` command (``taskId``,
+                ``index``, optional ``token``).
+            endpoint: The requesting connection.
+        """
+        task_id = self._cmd_str(cmd, "taskId")
+        index = cmd.get("index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            index = -1
+        reply: dict[str, Any] = {
+            "type": "replayImage", "taskId": task_id, "index": index,
+            "token": self._cmd_str(cmd, "token"),
+        }
+        image = await asyncio.to_thread(self._agent_server.replay_image, task_id, index)
+        if image is None:
+            reply["error"] = "no such picture"
+        else:
+            reply["mime"] = str(image.get("mime") or "image/png")
+            reply["b64"] = image["b64"]
+        await self._reply_direct(endpoint, reply, "getReplayImage")
+
     async def _reply_direct(
         self, endpoint: Any, reply: dict[str, Any], what: str,
     ) -> None:
@@ -8191,10 +8385,15 @@ class RemoteAccessServer:
         # The page's ``ready`` carries no ``workDir`` (``main.js`` sends
         # ``{tabId, restoredTabs}``): the fan-out resolves the daemon's
         # configured folder, which ``setWorkDir`` pins before ``ready``.
-        for init_cmd in (
-            "getModels", "getInputHistory", "getConfig", "getMyModels",
-            "getSeaCommands",
-        ):
+        # A page that reconnects with the composer history on hand
+        # names its newest text (``inputHistorySince``) and gets only
+        # what was typed since, not the whole list again.
+        await self._run_cmd({"type": "getModels", "connId": conn_id})
+        await self._run_cmd({
+            "type": "getInputHistory", "connId": conn_id,
+            "since": cmd.get("inputHistorySince"),
+        })
+        for init_cmd in ("getConfig", "getMyModels", "getSeaCommands"):
             await self._run_cmd({"type": init_cmd, "connId": conn_id})
         await self._reply_direct(websocket, {"type": "tasks_updated"}, "ready tasks_updated nudge")
         # A browser tab is open on every surface while its page lives
