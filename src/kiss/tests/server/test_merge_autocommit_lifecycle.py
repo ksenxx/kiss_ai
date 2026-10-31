@@ -32,18 +32,19 @@ from pathlib import Path
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.tests.server.conftest import run_git
+from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 
 def _init_repo(repo: str) -> None:
     """Create a git repo with one committed file so HEAD exists."""
-    run_git(repo, "init", "-q")
-    run_git(repo, "config", "user.email", "test@example.com")
-    run_git(repo, "config", "user.name", "Test User")
-    run_git(repo, "config", "commit.gpgsign", "false")
+    run_git_checked(repo, "init", "-q")
+    assert_repo_root(repo)
+    run_git_checked(repo, "config", "user.email", "test@example.com")
+    run_git_checked(repo, "config", "user.name", "Test User")
+    run_git_checked(repo, "config", "commit.gpgsign", "false")
     Path(repo, "README.md").write_text("# Hello\n\nSome content\n")
-    run_git(repo, "add", "README.md")
-    run_git(repo, "commit", "-q", "-m", "initial commit")
+    run_git_checked(repo, "add", "README.md")
+    run_git_checked(repo, "commit", "-q", "-m", "initial commit")
 
 
 def _register_tab(tab_id: str) -> agent_state.AgentState:

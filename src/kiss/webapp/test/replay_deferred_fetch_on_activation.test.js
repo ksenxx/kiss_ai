@@ -16,12 +16,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send} = require('./simplify2_harness');
+const {makePage, send} = require('./simplify2_harness');
 const {sendHistory, makeRow} = require('./history_helpers');
-
-function makePage() {
-  return makeChatPage({sourceUrl: 'replay-deferred-main.js'});
-}
 
 function scopedFetches(posted, tabId) {
   return posted.filter(

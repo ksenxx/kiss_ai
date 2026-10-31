@@ -153,8 +153,7 @@ function assertInputDrawer(win, collapsed, why) {
   );
 }
 
-// The shipped defaults: task panel folded into its slim header, composer
-// reachable.
+// The shipped defaults: no task drawer, composer reachable.
 function testDefaults() {
   const {win, posted} = makePage();
   showTaskPanel(win, posted);

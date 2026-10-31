@@ -38,13 +38,12 @@
 //          and was typed into whatever chat was on screen: words spoken
 //          in chat A submitted into chat B.
 //
-//  REV-2   retireRound charged the cancelled credit BEFORE the live
-//          rounds. A reply lost with its socket connection has no
-//          transcript on its way, so the credit a later mic-off turned it
-//          into ate the next valid dictation and left that round's owner
-//          queued against the one after. The page cannot tell a cancelled
-//          round whose reply is still coming from one whose reply was
-//          lost, so a live round must always be answered first.
+//  REV-2   A reply lost with its socket connection has no transcript on
+//          its way, so the credit a later mic-off turned it into must not
+//          eat the next valid dictation. The daemon echoes each round's
+//          tag, so the next round's reply names its round and never
+//          touches that credit. (An untagged reply cannot tell the two
+//          apart, so it is charged to the credit and fails closed.)
 //
 // jsdom provides no speech engine, audio graph, or microphone, so the
 // harness supplies the minimal window.Vosk / AudioContext / mediaDevices
@@ -65,7 +64,8 @@ const {
   startPipeline,
   feed,
   lastProcessor,
-  fireWake,
+  wake,
+  speak,
   fireTimer,
 } = require('./voice_page_helpers');
 
@@ -86,11 +86,7 @@ async function main() {
       clickTab(win, first); // tab A on screen
 
       await startPipeline(page);
-      fireWake(page); // capture begins: round owned by tab A
-      assert.ok(
-        micBtn(win).classList.contains('voice-triggered'),
-        'the wake must have fired',
-      );
+      wake(page); // capture begins: round owned by tab A
 
       // The user turns the mic off mid-capture: the capture's audio dies
       // with the pipeline (no voiceTranscribe was posted), so its round
@@ -105,15 +101,8 @@ async function main() {
       // Mic back on, move to tab B, and speak a full round there.
       await startPipeline(page);
       clickTab(win, second); // tab B on screen
-      fireWake(page); // round B begins on tab B
-      feed(lastProcessor(page), true, 2); // speech...
-      feed(lastProcessor(page), false, 8); // ...then 2 s of silence
-      const transcribes = posted.filter(m => m.type === 'voiceTranscribe');
-      assert.strictEqual(
-        transcribes.length,
-        1,
-        'round B must have posted its audio: ' + JSON.stringify(posted),
-      );
+      wake(page); // round B begins on tab B
+      speak(page); // its audio is posted
 
       // The daemon answers round B. Its words belong to tab B, the tab on
       // screen — never to the abandoned round's tab A.
@@ -142,24 +131,17 @@ async function main() {
       clickTab(win, first); // tab A on screen
 
       await startPipeline(page);
-      const proc = lastProcessor(page);
 
       // Round A: wake, speech, 2 s silence -> audio posted, transcript
       // pending. Its owner (tab A) must stay queued until the reply.
-      fireWake(page);
-      feed(proc, true, 2);
-      feed(proc, false, 8);
-      assert.strictEqual(
-        posted.filter(m => m.type === 'voiceTranscribe').length,
-        1,
-        "round A's audio must be in flight",
-      );
+      wake(page);
+      speak(page);
 
       // Round B begins on tab B while A transcribes, then the user says
       // nothing for 5 s: the no-audio branch must retire round B itself.
       clickTab(win, second);
-      fireWake(page);
-      feed(proc, false, 20); // 5.12 s of silence, no speech ever started
+      wake(page);
+      feed(lastProcessor(page), false, 20); // 5.12 s, no speech ever started
       assert.strictEqual(
         posted.filter(m => m.type === 'voiceTranscribe').length,
         1,
@@ -194,7 +176,7 @@ async function main() {
       clickTab(win, first);
 
       await startPipeline(page);
-      fireWake(page); // capture begins: one round
+      wake(page); // capture begins: one round
       // The 45 s wake-flash safety timer fires mid-capture (the audio clock
       // stalled); voice.js cancels every outstanding round. The capture
       // itself lives on and ends in the no-audio branch, which now has
@@ -245,15 +227,8 @@ async function main() {
       clickTab(win, first); // chat A on screen
 
       await startPipeline(page);
-      const proc = lastProcessor(page);
-      fireWake(page); // round A begins on chat A
-      feed(proc, true, 2);
-      feed(proc, false, 8); // audio posted, transcript pending
-      assert.strictEqual(
-        posted.filter(m => m.type === 'voiceTranscribe').length,
-        1,
-        "round A's audio must be in flight",
-      );
+      wake(page); // round A begins on chat A
+      speak(page); // audio posted, transcript pending
 
       // The user moves to chat B; the daemon is slow and the 60 s
       // transcribing flash runs out before its reply lands.
@@ -293,14 +268,8 @@ async function main() {
       clickTab(win, first); // chat A on screen
 
       await startPipeline(page);
-      fireWake(page); // round A begins on chat A
-      feed(lastProcessor(page), true, 2);
-      feed(lastProcessor(page), false, 8); // audio posted
-      assert.strictEqual(
-        posted.filter(m => m.type === 'voiceTranscribe').length,
-        1,
-        "round A's audio must be in flight",
-      );
+      wake(page); // round A begins on chat A
+      speak(page); // audio posted
 
       // The socket drops while the daemon transcribes: its reply to
       // round A is lost for good. The user turns the mic off and on
@@ -310,21 +279,19 @@ async function main() {
       send(win, {type: 'daemonStatus', connected: true});
       await startPipeline(page);
       clickTab(win, second);
-      fireWake(page); // round B begins on chat B
-      feed(lastProcessor(page), true, 2);
-      feed(lastProcessor(page), false, 8);
-      assert.strictEqual(
-        posted.filter(m => m.type === 'voiceTranscribe').length,
-        2,
-        "round B's audio must have been posted",
-      );
+      wake(page); // round B begins on chat B
+      speak(page);
+      const audio = posted.filter(m => m.type === 'voiceTranscribe');
+      assert.strictEqual(audio.length, 2, 'only rounds A and B ever posted audio');
 
-      // Only round B's reply ever arrives. It belongs to the live round,
-      // never to the credit the lost round left behind.
+      // Only round B's reply ever arrives, with the tag the daemon echoes.
+      // It belongs to the live round, never to the credit the lost round
+      // left behind.
       posted.length = 0;
       send(win, {
         type: 'voiceSpeech',
         text: 'valid words spoken in chat B QR2',
+        round: audio[1].round,
       });
       assert.deepStrictEqual(
         submits(posted).map(m => ({onB: m.tabId === second, prompt: m.prompt})),

@@ -52,7 +52,8 @@ class MachineStream:
 
         Raises:
             MachineError: When the machine is unreachable or rejects the
-                password.
+                password, or the relay thread cannot start (the socket
+                is closed then).
         """
         self.machine = machine
         self.lock = threading.RLock()
@@ -61,7 +62,13 @@ class MachineStream:
         self._closed = False
         self._ws: ClientConnection = link_for(machine).open_connection()
         self._thread = threading.Thread(target=self._relay, name=name, daemon=True)
-        self._thread.start()
+        try:
+            self._thread.start()
+        except RuntimeError as exc:
+            # Thread exhaustion: nothing would ever read or close the
+            # socket, and the machine would keep its state for it.
+            self._close_socket()
+            raise MachineError(f"{machine.name}: the stream could not start: {exc}") from exc
 
     def _dropped_fields(self, cmd: dict[str, Any]) -> tuple[str, ...]:
         """The fields of *cmd* :meth:`send` leaves out (:data:`DROPPED_FIELDS`)."""

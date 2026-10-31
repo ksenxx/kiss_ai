@@ -51,17 +51,14 @@ const ATTACH_DEADLINE_MS = 60 * 1000;
  * the deadline main.js recorded for the oldest pending slot (asserting
  * one exists).  Await `settle()` afterwards for the rejection to land.
  *
- * @param {string} sourceUrl Name for the eval'd main.js (a `*.coverage.js`
- *   gate keys on it).
  * @returns {{win: object, posted: Array<object>, decodeCount: Function,
  *   fireDeadline: Function}} The page, the messages it posted and a
  *   counter of decodes asked for.
  */
-function makeHeldDeadlinePage(sourceUrl) {
+function makeHeldDeadlinePage() {
   let decodes = 0;
   let deadlines;
   const {win, posted} = harness.makePage({
-    sourceUrl,
     beforeScripts(w) {
       w.createImageBitmap = function () {
         decodes += 1;
@@ -150,6 +147,66 @@ async function failDecode(decodes, first, reason) {
   await settle();
 }
 
+/**
+ * Click the x on the composer chip whose label contains `name`.
+ *
+ * @param {object} win The page window.
+ * @param {string} name Text of the chip's label.
+ * @throws {Error} When no chip carries `name`.
+ */
+function removeChip(win, name) {
+  const chips = win.document.querySelectorAll('#file-chips .file-chip');
+  for (const chip of chips) {
+    if (chip.textContent.indexOf(name) >= 0) {
+      chip.querySelector('.fc-rm').click();
+      return;
+    }
+  }
+  throw new Error('no chip found for ' + name);
+}
+
+/**
+ * Park a send on a late attachment: PNG `shot.png` is still reading when
+ * `prompt` is entered, so the send waits; a camera HEIC
+ * `IMG_0002.HEIC` is pasted meanwhile and its decode parks in the page's
+ * decoder (`decodes[0]`).  Asserts the send is still waiting, with the
+ * HEIC's chip on screen, once the PNG has finished.
+ *
+ * @param {{win: object, posted: Array<object>, decodes: Array}} page A
+ *   makePage page.
+ * @param {string} prompt The prompt sent.
+ * @returns {Promise<string>} The id of the tab the send belongs to.
+ */
+async function parkSendOnLateHeic(page, prompt) {
+  const {win, posted, decodes} = page;
+  win._testApi.endLaunch();
+  const tabId = win._testApi.getActiveTabId();
+  const png = new win.File([new Uint8Array([137, 80, 78, 71])], 'shot.png', {
+    type: 'image/png',
+  });
+  paste(win, png);
+  typeAndEnter(win, prompt);
+  assert.strictEqual(submits(posted).length, 0, 'the send is waiting on the PNG');
+  const heic = new win.File([new Uint8Array([1, 2, 3])], 'IMG_0002.HEIC', {
+    type: 'image/heic',
+  });
+  paste(win, heic);
+  await settle(() => decodes.length >= 1);
+  assert.strictEqual(decodes.length, 1, 'the HEIC reached the decoder');
+  assert.strictEqual(
+    submits(posted).length,
+    0,
+    'the send must keep waiting while the HEIC converts (posting now ' +
+      'silently omits it from the message)',
+  );
+  assert.match(
+    win.document.getElementById('file-chips').textContent,
+    /IMG_0002\.HEIC/,
+    "the HEIC's chip stays visible while the send waits for it",
+  );
+  return tabId;
+}
+
 module.exports = {
   makePage,
   makeHeldDeadlinePage,
@@ -158,4 +215,6 @@ module.exports = {
   submits,
   settle,
   failDecode,
+  removeChip,
+  parkSendOnLateHeic,
 };

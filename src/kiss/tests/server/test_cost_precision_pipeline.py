@@ -192,13 +192,13 @@ def test_terminal_result_builders_carry_exact_cost() -> None:
 def test_recovery_and_report_readers_prefer_exact_cost() -> None:
     """Killed-task recovery and the cost report read ``cost_usd`` first."""
     from kiss.agents.sorcar.persistence import _structured_usage_totals
-    from kiss.scripts.cost_report import _event_cost
+    from kiss.core.printer import event_cost
 
     exact = {"type": "usage_info", "cost": "$0.0000", "cost_usd": TINY,
              "total_tokens": 5, "total_steps": 1}
     legacy = {"type": "usage_info", "cost": "$0.1235", "total_tokens": 5, "total_steps": 1}
     assert _structured_usage_totals(exact) == {"steps": 1, "tokens": 5, "cost": TINY}
     assert _structured_usage_totals(legacy)["cost"] == 0.1235
-    assert _event_cost(exact) == TINY
-    assert _event_cost(legacy) == 0.1235
-    assert _event_cost({"cost": "N/A"}) == 0.0
+    assert event_cost(exact) == TINY
+    assert event_cost(legacy) == 0.1235
+    assert event_cost({"cost": "N/A"}) is None

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``_result_interruptible`` must not busy-spin on a finished future whose result is a TimeoutError.
+"""``result_interruptible`` must not busy-spin on a finished future whose result is a TimeoutError.
 
 Review 2026-10-12 (core).  ``concurrent.futures.TimeoutError`` is
 ``builtins.TimeoutError``, so ``future.result(timeout=slice)`` raises
@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from kiss.agents.sorcar.mcp_servers import _result_interruptible
+from kiss.core.tool_interrupt import result_interruptible
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def test_finished_future_raising_timeout_error_is_returned_at_once(
     future = asyncio.run_coroutine_threadsafe(_times_out_after_10ms(), loop)
     started, cpu = time.monotonic(), time.process_time()
     with pytest.raises(TimeoutError) as info:
-        _result_interruptible(future, 5.0)
+        result_interruptible(future, 5.0)
     elapsed, cpu_used = time.monotonic() - started, time.process_time() - cpu
     assert future.done()
     assert elapsed < 2.0, f"spun until the outer deadline: {elapsed:.2f}s"
@@ -75,14 +75,14 @@ def test_finished_future_raising_timeout_error_is_returned_at_once(
 
 def test_unfinished_future_is_still_waited_for(loop: asyncio.AbstractEventLoop) -> None:
     future = asyncio.run_coroutine_threadsafe(_answers_after_10ms(), loop)
-    assert _result_interruptible(future, 5.0) == "ok"
+    assert result_interruptible(future, 5.0) == "ok"
 
 
 def test_outer_deadline_still_raises_timeout_error(loop: asyncio.AbstractEventLoop) -> None:
     future = asyncio.run_coroutine_threadsafe(asyncio.sleep(5), loop)
     try:
         with pytest.raises(TimeoutError):
-            _result_interruptible(future, 0.5)
+            result_interruptible(future, 0.5)
         assert not future.done()
     finally:
         future.cancel()

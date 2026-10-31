@@ -124,7 +124,7 @@ class TestThinkingScaleSelection:
             "gpt-5.6-sol",
             "o4-mini",
             "openrouter/openai/gpt-5.5",
-            "openrouter/anthropic/claude-opus-4.7",
+            "openrouter/~anthropic/claude-opus-latest",
             "gemini-3.6-flash",
             "glm-4.6",
         ):

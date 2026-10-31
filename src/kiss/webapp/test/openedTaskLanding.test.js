@@ -32,16 +32,13 @@ const {
   clickTab,
   twoTabs,
   ofType,
+  stackOutputLayout,
 } = require('./simplify2_harness');
 const {historyRows, makeRow} = require('./history_helpers');
 
 const ROW_H = 100;
 const RESULT_H = 1000;
 const VIEW_H = 500;
-
-function isOutput(el) {
-  return el.id === 'output';
-}
 
 function rowHeight(el) {
   if (el.id === 'welcome' || el.id === 'adjacent-loader') return 0;
@@ -51,45 +48,7 @@ function rowHeight(el) {
 
 /** Install the layout model into `win` before the page scripts run. */
 function stubLayout(win) {
-  const proto = win.Element.prototype;
-  function rows(O) {
-    return Array.from(O.children);
-  }
-  function totalHeight(O) {
-    return rows(O).reduce((h, el) => h + rowHeight(el), 0);
-  }
-  function rowTop(O, el) {
-    let y = 0;
-    for (const row of rows(O)) {
-      if (row === el) return y;
-      y += rowHeight(row);
-    }
-    throw new Error('not a transcript row');
-  }
-  Object.defineProperty(proto, 'scrollHeight', {
-    configurable: true,
-    get() {
-      return isOutput(this) ? totalHeight(this) : 0;
-    },
-  });
-  Object.defineProperty(proto, 'clientHeight', {
-    configurable: true,
-    get() {
-      return isOutput(this) ? VIEW_H : 0;
-    },
-  });
-  proto.getBoundingClientRect = function () {
-    if (isOutput(this)) {
-      return {top: 0, bottom: VIEW_H, left: 0, right: 400, height: VIEW_H};
-    }
-    const O = this.parentNode;
-    if (O && O.nodeType === 1 && isOutput(O)) {
-      const top = rowTop(O, this) - O.scrollTop;
-      const h = rowHeight(this);
-      return {top, bottom: top + h, left: 0, right: 400, height: h};
-    }
-    return {top: 0, bottom: 0, left: 0, right: 0, height: 0};
-  };
+  stackOutputLayout(win, rowHeight, VIEW_H);
 }
 
 function setupPage() {
@@ -466,7 +425,10 @@ function testNewTaskDropsThePendingRequest() {
   replay(win, tabId, '44', 'New task');
   assert.strictEqual(O.scrollTop, 100, 'the reading position is kept');
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
-  assert.ok(second, 'the other tab is still open');
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === second),
+    'the other tab is still open',
+  );
   win.close();
   console.log('  ok - a new task drops the pending request');
 }

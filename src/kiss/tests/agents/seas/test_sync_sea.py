@@ -18,6 +18,7 @@ merges and pushes.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -51,13 +52,18 @@ _SEA_PATH = Path(sync_sea.__file__).resolve()
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch) -> None:
+def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Run the git commands :func:`sync` spawns under :data:`HERMETIC_GIT_WITH_IDENTITY` too.
 
     The test's own :func:`git` calls read the environment on every call,
     so both sides commit as ``t <t@t>`` with no user or system config.
+    ``GIT_CEILING_DIRECTORIES`` keeps git's repository search inside
+    *tmp_path*: under an in-repo ``--basetemp`` a plain folder of the test
+    would otherwise resolve to the enclosing checkout, which a real
+    :func:`sync` commits and pushes.
     """
     hermetic_git_env(monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
 
 
 def set_known_work_dirs(work_dir: str, recent: Sequence[str]) -> None:
@@ -141,8 +147,15 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "ASSEMBLED" not in prompt
     assert "`git_sync`" in prompt
     # The sub-task sent to a machine names the repository by URL, never by this
-    # machine's path (the checkout lives elsewhere there).
+    # machine's path (the checkout lives elsewhere there); when the message names
+    # none, the URL comes from `remote_url`, since the machines are synced before
+    # this checkout is.
     assert f'{sync_sea.THIS_MACHINE_ONLY}"' in prompt
+    assert "`remote_url`" in prompt
+    assert prompt.index("`remote_url`") < prompt.index("`git_sync` once")
+    # A URL the message names (`/sync origin/main of <url>`) is the one the machines
+    # get; `remote_url` is for a message that names none.
+    assert re.search(r"when it names\s+none, what `remote_url` returns", prompt)
     assert sea.settings({"model": "m"}) == {
         "model": "m",
         "tool_profile": "shell+edit+agents",
@@ -162,10 +175,14 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert {"Bash", "Read", "Edit", "Write", "run_agent"} <= profile
 
     # The chained ``tools``: the worker drops the worktree tools, the
-    # subclass adds ``git_sync``.
+    # subclass adds ``git_sync`` and ``remote_url``.
     def create_worktree() -> None: ...
 
-    assert sea_commands.base_tools([sea], [print, create_worktree]) == [print, sync_sea.git_sync]
+    assert sea_commands.base_tools([sea], [print, create_worktree]) == [
+        print,
+        sync_sea.git_sync,
+        sync_sea.remote_url,
+    ]
     assert_no_removed_getters(sync_sea)
 
 
@@ -180,7 +197,7 @@ def test_slash_sync_resolves_bare() -> None:
 def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> None:
     """With machines registered the task names them in order, unless it says
     "this machine only" (what the sub-task sent to a machine says); the budget
-    is one share per checkout."""
+    is one share for this checkout and two per machine (synced before and after it)."""
     sea = SyncSea()
     save_machines([Machine("box", url="https://box:8787"), Machine("lab", ssh="u@lab")])
     listed = f"\n\n{sync_sea.ADD_TO_PROMPT}\n\n{sync_sea.MACHINES_PROMPT}box, lab."
@@ -194,10 +211,10 @@ def test_prompt_lists_the_registered_machines_and_the_budget_covers_them() -> No
     )
     assert sync_sea.machine_names("") == ["box", "lab"]
     assert sync_sea.machine_names(local) == []
-    assert sea.settings({})["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+    assert sea.settings({})["max_budget"] == 5 * sync_sea.MAX_BUDGET_USD
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "")
     assert run.prompt == listed.strip()
-    assert run.settings["max_budget"] == 3 * sync_sea.MAX_BUDGET_USD
+    assert run.settings["max_budget"] == 5 * sync_sea.MAX_BUDGET_USD
     save_machines([])
     assert sea.prompt("") == sync_sea.ADD_TO_PROMPT
     assert sea.settings({})["max_budget"] == sync_sea.MAX_BUDGET_USD
@@ -576,7 +593,9 @@ def test_agent_run_calls_git_sync_and_reports(tmp_path: Path) -> None:
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
         names = tool_names(request)
-        assert {"git_sync", "Bash", "Read", "Edit", "Write", "run_agent", "finish"} <= names, names
+        assert {
+            "git_sync", "remote_url", "Bash", "Read", "Edit", "Write", "run_agent", "finish",
+        } <= names, names
         assert not {"create_worktree", "commit_and_merge", "go_to_url", "memory_search"} & names
         system = system_message(request)
         assert system.startswith(sync_sea.SYSTEM_PROMPT), system[:200]
@@ -592,6 +611,42 @@ def test_git_sync_tool_returns_the_failure_report_instead_of_raising(tmp_path: P
     """The tool hands the model the error text (conflicts included) as its result."""
     missing = tmp_path / "missing"
     assert sync_sea.git_sync(str(missing)) == f"{missing} is not a directory"
+
+
+def test_remote_url_tool_names_the_repository_without_its_credentials(tmp_path: Path) -> None:
+    """What the sub-task sent to a machine names: the ref's remote URL, token dropped.
+
+    The agent calls it before the first machine is synced (the local
+    ``git_sync``, whose report also names the URL, comes after the
+    machines now); a failure is returned as text, like ``git_sync``'s.
+    """
+    (mine,) = remote_and_clones(tmp_path, "mine")
+    origin = git(mine, "remote", "get-url", "origin")
+    assert sync_sea.remote_url(str(mine)) == origin
+    assert sync_sea.remote_url(str(mine), "origin/dev") == origin
+    # From a subdirectory of the checkout too (the work dir of a tab opened there).
+    (mine / "sub").mkdir()
+    assert sync_sea.remote_url(str(mine / "sub")) == origin
+    git(mine, "remote", "add", "upstream", "https://oauth2:TOKEN@host/me/kiss.git")
+    assert sync_sea.remote_url(str(mine), "upstream/main") == "https://host/me/kiss.git"
+    assert git_sync.remote_url(str(mine), "upstream/main") == "https://host/me/kiss.git"
+    assert sync_sea.remote_url(str(mine), "nosuch/main") == (
+        f"{mine} is not a git checkout with a remote 'nosuch'"
+    )
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert sync_sea.remote_url(str(plain)) == (
+        f"{plain} is not a git checkout with a remote 'origin'"
+    )
+    missing = tmp_path / "missing"
+    assert sync_sea.remote_url(str(missing)) == (
+        f"{missing} is not a git checkout with a remote 'origin'"
+    )
+    assert sync_sea.remote_url(str(mine), "main") == (
+        "the ref to merge must be <remote>/<branch>, not 'main'"
+    )
+    with pytest.raises(GitSyncError, match="not a git checkout with a remote 'origin'"):
+        git_sync.remote_url(str(plain))
 
 
 def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Path) -> None:

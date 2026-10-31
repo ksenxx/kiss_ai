@@ -42,6 +42,7 @@ function testEchoedPromptRendersInSubagentTrajectory() {
     'the injected prompt must appear as a Prompt panel in the ' +
       'sub-agent tab trajectory',
   );
+  win.close();
   console.log('ok - echoed prompt renders in the sub-agent trajectory');
 }
 
@@ -63,6 +64,7 @@ function testInjectedPromptSurvivesTabSwitch() {
     'the injected prompt must still be in the sub-agent trajectory ' +
       'after switching tabs away and back',
   );
+  win.close();
   console.log('ok - injected prompt survives a tab switch');
 }
 
@@ -84,10 +86,12 @@ function testReplayRendersRecordedPrompt() {
       },
     ],
   });
-  assert.ok(
-    promptPanels(win, 'HELLO SUBAGENT INJECTION').length >= 1,
-    'a task_events replay must re-render the recorded injected prompt',
+  assert.strictEqual(
+    promptPanels(win, 'HELLO SUBAGENT INJECTION').length,
+    1,
+    'a task_events replay must re-render the recorded injected prompt once',
   );
+  win.close();
   console.log('ok - task_events replay renders the recorded prompt');
 }
 
@@ -99,4 +103,3 @@ function main() {
 }
 
 main();
-process.exit(0);

@@ -77,13 +77,18 @@
   let voiceGen = 0;
 
   // tableak-coverage:start
-  // The conversation that was on screen when each outstanding round began,
-  // oldest first. A transcript arrives seconds after the words were spoken
-  // and the user may have moved to a different task in the meantime, so
-  // submitting it against whatever tab is visible on arrival would put one
-  // task's words into another task's conversation. The page captures,
-  // transcribes and answers its rounds in order, so the owners queue.
-  const roundOwners = [];
+  // The outstanding rounds, oldest first, as `{owner, id}`. `owner` is the
+  // conversation that was on screen when the round began: a transcript
+  // arrives seconds after the words were spoken and the user may have
+  // moved to a different task in the meantime, so submitting it against
+  // whatever tab is visible on arrival would put one task's words into
+  // another task's conversation. `id` is null while the round is still
+  // capturing and becomes the round's tag once its audio is posted (see
+  // finishCapture). Only the newest round can still be capturing.
+  const rounds = [];
+
+  // The tag of the round posted last.
+  let lastRoundId = 0;
 
   // Owner recorded for a round that began in a page with no conversations at
   // all (a page without the tab machinery). Such a round has nothing to leak
@@ -96,8 +101,8 @@
   const CANCELLED = {cancelled: true};
 
   // Rounds cancelled while their transcript may still be on its way. They
-  // are only counted: a late transcript that no live round claims is
-  // charged to them and fails closed.
+  // are only counted: an untagged late transcript is charged to them and
+  // fails closed.
   let cancelledRounds = 0;
 
   /**
@@ -111,9 +116,11 @@
     return owner && owner.tabId ? owner : null;
   }
 
-  /** Record the owner of an utterance that is starting now. */
+  /** Record and return a round starting now, owned by the tab on screen. */
   function markSpeechStart() {
-    roundOwners.push(currentOwner() || UNSCOPED);
+    const round = {owner: currentOwner() || UNSCOPED, id: null};
+    rounds.push(round);
+    return round;
   }
 
   /**
@@ -123,28 +130,40 @@
    * the late words fail closed.
    */
   function cancelSpeechRounds() {
-    cancelledRounds += roundOwners.length;
-    roundOwners.length = 0;
+    cancelledRounds += rounds.length;
+    rounds.length = 0;
   }
 
   /**
-   * Close the oldest round and hand back the owner it was started with:
-   * the live rounds in order, then CANCELLED while the cancelled credit
-   * lasts.  A live round always wins: the page cannot tell a cancelled
-   * round whose reply is still coming from one whose reply was lost (a
-   * socket that dropped mid-transcription), and charging the credit
-   * first would let a lost reply eat the next valid dictation for good.
-   * With nothing outstanding at all the result is undefined: this
-   * transcript belongs to no round this page ever saw, so it was never
-   * tied to a moment in time and there is no tab switch to detect.
+   * Close the round a transcript answers and hand back the owner it was
+   * started with.
+   *
+   * The daemon echoes the round tag `id`, which names the round: a tag
+   * no longer outstanding belongs to a round this page cancelled, so its
+   * words are CANCELLED. An untagged transcript (a daemon that does not
+   * echo the tag) can only be paired by position, and fails closed while
+   * a cancelled round may own it: it is CANCELLED while the cancelled
+   * credit lasts, and only then answers the oldest round whose audio was
+   * posted (a round still capturing has no reply on its way). The daemon
+   * answers a connection's dictations in order, so a cancelled round's
+   * late reply comes before a later round's; a reply lost with its
+   * connection costs the next dictation instead of typing it into
+   * another chat. With nothing outstanding at all the result is
+   * undefined: this transcript belongs to no round this page ever saw,
+   * so it was never tied to a moment in time and there is no tab switch
+   * to detect.
    */
-  function retireRound() {
-    if (roundOwners.length) return roundOwners.shift();
+  function retireRound(id) {
+    if (typeof id === 'number') {
+      const at = rounds.findIndex(r => r.id === id);
+      return at === -1 ? CANCELLED : rounds.splice(at, 1)[0].owner;
+    }
     if (cancelledRounds > 0) {
       cancelledRounds--;
       return CANCELLED;
     }
-    return undefined;
+    const at = rounds.findIndex(r => r.id !== null);
+    return at === -1 ? undefined : rounds.splice(at, 1)[0].owner;
   }
 
   /**
@@ -178,18 +197,14 @@
   // tableak-coverage:end
 
   /**
-   * Retire the NEWEST round — the one begun most recently.
-   *
-   * Used when a just-begun capture is abandoned before its audio was ever
-   * posted (silence timeout, or the pipeline stopping mid-capture): no
-   * transcript will ever answer that round, and the round to close is the
-   * one beginCapture just recorded — the LAST entry, not the oldest,
-   * which may still be awaiting its own words. When the rounds were
-   * reset in the meantime there is nothing left to retire.
+   * Forget `round`, a capture abandoned before its audio was posted
+   * (silence timeout, or the pipeline stopping mid-capture): no
+   * transcript will ever answer it. When the rounds were cancelled in
+   * the meantime it is gone already.
    */
-  function retireNewestRound() {
-    if (!roundOwners.length) return;
-    roundOwners.pop();
+  function dropRound(round) {
+    const at = rounds.indexOf(round);
+    if (at !== -1) rounds.splice(at, 1);
   }
 
   let model = null;
@@ -204,33 +219,6 @@
   let sourceNode = null;
   let processorNode = null;
   let voskLoadPromise = null;
-
-  let lastUiState = 'off';
-  let lastUiTip = "Voice trigger: listen for the word 'Abracadabra'";
-  let lastFlashCls = null;
-
-  function applyUiClasses() {
-    btn.classList.remove(
-      'voice-off',
-      'voice-loading',
-      'voice-listening',
-      'voice-error',
-      'active',
-    );
-    btn.classList.add('voice-' + lastUiState);
-    if (lastUiState === 'listening') btn.classList.add('active');
-    // The toggle's on/off state for assistive tech, not just a CSS class.
-    btn.setAttribute(
-      'aria-pressed',
-      lastUiState === 'listening' ? 'true' : 'false',
-    );
-    btn.setAttribute('data-tooltip', lastUiTip);
-  }
-
-  function applyFlashClasses() {
-    btn.classList.remove('voice-triggered', 'voice-transcribing');
-    if (lastFlashCls) btn.classList.add(lastFlashCls);
-  }
 
   // The one toast id every voice failure reuses, so a repeated failure
   // updates the visible notification instead of stacking a second one,
@@ -315,9 +303,18 @@
     } else {
       tip = "Voice trigger: listen for the word 'Abracadabra'";
     }
-    lastUiState = state;
-    lastUiTip = tip;
-    applyUiClasses();
+    btn.classList.remove(
+      'voice-off',
+      'voice-loading',
+      'voice-listening',
+      'voice-error',
+      'active',
+    );
+    btn.classList.add('voice-' + state);
+    if (state === 'listening') btn.classList.add('active');
+    // The toggle's on/off state for assistive tech, not just a CSS class.
+    btn.setAttribute('aria-pressed', state === 'listening' ? 'true' : 'false');
+    btn.setAttribute('data-tooltip', tip);
   }
 
   function normalize(text) {
@@ -392,7 +389,7 @@
    * way.
    */
   function flashPendingRounds() {
-    if (roundOwners.length > 0) flash('voice-transcribing', 60000);
+    if (rounds.length > 0) flash('voice-transcribing', 60000);
     else flash(null);
   }
 
@@ -401,15 +398,12 @@
       clearTimeout(flashTimer);
       flashTimer = null;
     }
-    lastFlashCls = cls || null;
-    applyFlashClasses();
+    btn.classList.remove('voice-triggered', 'voice-transcribing');
+    if (cls) btn.classList.add(cls);
     showListening(cls === 'voice-triggered');
     if (!cls) return;
     flashTimer = setTimeout(() => {
-      flashTimer = null;
-      lastFlashCls = null;
-      applyFlashClasses();
-      showListening(false);
+      flash(null);
       cancelSpeechRounds();
     }, timeoutMs);
   }
@@ -560,8 +554,8 @@
   }
 
   function beginCapture() {
-    markSpeechStart();
     capture = {
+      round: markSpeechStart(),
       preamble: preambleChunks.map(entry => entry.chunk),
       chunks: [],
       sinceWakeMs: 0,
@@ -619,16 +613,12 @@
     capture = null;
     if (!done.speechStarted) {
       // This round produced no audio, so no transcript will ever come back
-      // for it. Retire its owner with it, or the next transcript would be
-      // paired with this abandoned utterance's conversation. Rounds
-      // overlap — this capture may have begun while an earlier round's
-      // audio was still being transcribed — so the round to close is the
-      // NEWEST one (this capture's own), never the oldest, which
-      // is still waiting for its words.
-      retireNewestRound();
+      // for it: forget it, never an earlier round still awaiting its words.
+      dropRound(done.round);
       flashPendingRounds();
       return;
     }
+    done.round.id = ++lastRoundId;
     flash('voice-transcribing', 60000);
     // The wake word's own audio goes first: the server-side transcript
     // check (wakePrefixed) re-confirms the wake word before accepting
@@ -644,6 +634,8 @@
       audio: pcmBase64(done.preamble.concat(done.chunks)),
       wakePrefixed: true,
       wakeSamples: wakeSamples,
+      // The daemon echoes the tag on the transcript (see retireRound).
+      round: done.round.id,
     });
   }
 
@@ -670,16 +662,39 @@
     }
   }
 
+  // How long the speech engine (vosk.js) or a speech-model load may take
+  // before it is declared failed.  The engine's script tag settles on
+  // `load` or `error`, and the vendored createModel when its worker posts
+  // 'load' or fires a Worker 'error' event; a load that does neither (a
+  // stalled response, a service worker that never answers, the model
+  // fetch hanging on a dead tunnel, WASM init stalling) stays pending for
+  // ever, so without a bound `busy` stays true for the page lifetime and
+  // the mic is wedged on 'loading' with every re-enable deferring to
+  // `busy`.  The server never sets `cfg.modelLoadTimeoutMs`; it is a test
+  // override of the 30 s bound.
+  const MODEL_LOAD_TIMEOUT_MS =
+    typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
+      ? cfg.modelLoadTimeoutMs
+      : 30000;
+
+  /**
+   * Load the speech engine bundle once.  A load that fails, or does not
+   * settle within MODEL_LOAD_TIMEOUT_MS, removes its tag and is
+   * forgotten, so the next attempt injects a fresh one.
+   */
   function loadVosk() {
     if (window.Vosk) return Promise.resolve();
     if (voskLoadPromise) return voskLoadPromise;
     voskLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
+      const timer = setTimeout(() => s.onerror(), MODEL_LOAD_TIMEOUT_MS);
       s.src = cfg.voskSrc;
       s.onload = () => {
+        clearTimeout(timer);
         resolve();
       };
       s.onerror = () => {
+        clearTimeout(timer);
         s.remove();
         voskLoadPromise = null;
         reject(new Error('failed to load speech engine'));
@@ -688,19 +703,6 @@
     });
     return voskLoadPromise;
   }
-
-  // How long a speech-model load may take before it is declared failed.
-  // The vendored createModel settles when its worker posts 'load' or
-  // fires a Worker 'error' event; a worker that does neither (the model
-  // fetch hangs on a dead tunnel, WASM init stalls) leaves the promise
-  // pending for ever, so without a bound `busy` stays true for the page
-  // lifetime and the mic is wedged on 'loading' with every re-enable
-  // deferring to `busy`.  The server never sets `cfg.modelLoadTimeoutMs`;
-  // it is a test override of the 30 s bound.
-  const MODEL_LOAD_TIMEOUT_MS =
-    typeof cfg.modelLoadTimeoutMs === 'number' && cfg.modelLoadTimeoutMs > 0
-      ? cfg.modelLoadTimeoutMs
-      : 30000;
 
   // The one createModel in flight (or done) for the page: the model is a
   // 50 MB download and a worker, so every attempt shares it rather than
@@ -784,10 +786,8 @@
     if (capture) {
       // An active capture dies with the pipeline before its audio was
       // posted (the mic was turned off mid-utterance), so no
-      // transcript will ever answer its round. Retire it, or the NEXT
-      // transcript would be paired with this abandoned utterance's
-      // conversation and typed into (or dropped for) the wrong task.
-      retireNewestRound();
+      // transcript will ever answer its round.
+      dropRound(capture.round);
       capture = null;
     }
     clearPreamble();
@@ -830,9 +830,10 @@
   }
 
   function startBrowserPipeline() {
-    // The generation this start belongs to. A later toggle or hide/show
-    // bumps voiceGen; every continuation below re-checks it and stands
-    // down instead of acting on a superseded intent.
+    // The generation this start belongs to. A later toggle (setEnabled)
+    // or a lost microphone (onMicEnded) bumps voiceGen; every
+    // continuation below re-checks it and stands down instead of acting
+    // on a superseded intent.
     const gen = voiceGen;
     // Whether the catch below painted the red error state (and turned the
     // mic off): the settle handler at the end must not repaint it as a
@@ -1075,9 +1076,14 @@
   // Remote-web clients can have the same chat open in several same-origin
   // tabs; keep them in step with the tab that changed the setting.
   window.addEventListener('storage', event => {
-    if (!event || event.key !== AUTO_SUBMIT_KEY) return;
-    autoSubmit = event.newValue !== 'off';
-    renderAutoSubmit();
+    if (!event) return;
+    if (event.key === AUTO_SUBMIT_KEY) {
+      autoSubmit = event.newValue !== 'off';
+      renderAutoSubmit();
+    } else if (event.key === SENSITIVITY_KEY) {
+      sensitivity = storedSensitivity();
+      renderSensitivity();
+    }
   });
 
   function setEnabled(next) {
@@ -1119,10 +1125,10 @@
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceSpeech' && typeof msg.text === 'string') {
       // tableak-coverage:start
-      const owner = retireRound();
+      const owner = retireRound(msg.round);
       insertSpeech(
         msg.text,
-        roundOwners.length > 0,
+        rounds.length > 0,
         msg.speaker,
         msg.language,
         owner,

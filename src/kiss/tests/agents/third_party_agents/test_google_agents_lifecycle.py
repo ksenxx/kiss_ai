@@ -6,10 +6,11 @@
 
 Calendar, Docs, Drive and Sheets wire ``make_google_auth_tools`` the
 same way; one parametrised test per lifecycle step pins each agent's
-wiring (display name, auth tool names, backend tool names, SEA ``tools``
-method and CLI usage line) against a real local Composio API emulator
-(``composio_test_utils``) -- no mocks or patches.  The per-agent test
-modules cover the REST tools behind the unlocked backend.
+wiring (display name, auth tool names, backend tool names) against a
+real local Composio API emulator (``composio_test_utils``) -- no mocks
+or patches.  The per-agent test modules cover the REST tools behind the
+unlocked backend; ``test_base_channel_agent.py`` covers every agent
+module's SEA ``tools()`` and CLI usage line.
 
 The service ids and tool names in ``_AGENTS`` are literals, deliberately
 not read from the implementation modules, so a wrong ``_SERVICE`` in one

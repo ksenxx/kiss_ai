@@ -68,7 +68,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         super().setUp()
         self.addCleanup(super().tearDown)
         saved_endpoint = cron_agent._daemon_endpoint_file
-        # _dispatch goes through this daemon.
+        # dispatch_result reaches the daemon through this endpoint file.
         cron_agent._daemon_endpoint_file = str(self.endpoint_file)
         self.addCleanup(setattr, cron_agent, "_daemon_endpoint_file", saved_endpoint)
         self.requests: list[dict[str, Any]] = []

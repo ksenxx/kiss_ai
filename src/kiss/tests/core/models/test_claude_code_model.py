@@ -9,7 +9,7 @@ import shutil
 
 import pytest
 
-from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.core.models.claude_code_model import ClaudeCodeModel, _system_prompt_file
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
@@ -110,12 +110,14 @@ class TestBuildCliArgs:
         assert "--bare" not in args  # --bare would also disable OAuth login
 
     def test_system_instruction_replaces_the_cli_system_prompt(self) -> None:
-        """KISS's system prompt goes to ``--system-prompt`` (replace), not
+        """KISS's system prompt goes to ``--system-prompt-file`` (replace), not
         ``--append-system-prompt``, and never into the user prompt."""
         m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "be terse"})
         m.initialize("do it")
-        args = m._build_cli_args()
-        assert args[args.index("--system-prompt") + 1] == "be terse"
+        with _system_prompt_file(m.system_instruction_text()) as path:
+            args = m._build_cli_args(path)
+            with open(args[args.index("--system-prompt-file") + 1], encoding="utf-8") as f:
+                assert f.read() == "be terse"
         assert "--append-system-prompt" not in args
         assert m._build_prompt() == "do it"
 

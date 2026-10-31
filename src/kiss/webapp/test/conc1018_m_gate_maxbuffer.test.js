@@ -6,9 +6,9 @@
 // End-to-end test for coverage_gate.js's `runCovered`: a gated suite
 // that passes but prints more than spawnSync's default 1 MiB maxBuffer
 // must still be collected (before the fix the child was SIGKILLed with
-// ENOBUFS and the gate blamed "the functional test itself FAILED"), and
-// a suite that overruns even the raised 64 MiB bound must be reported
-// with the real spawn error instead of that misleading line.
+// ENOBUFS and the gate blamed "the functional test itself FAILED").  The
+// suite now writes straight to the gate's stdout, so there is no output
+// bound at all: a suite past the old 64 MiB bound passes too.
 //
 // `runCovered` exits the process on failure, so each case runs a tiny
 // gate script in a child node process.
@@ -79,16 +79,15 @@ function main() {
     console.log('ok - a 2 MiB suite output no longer fails the gate');
 
     const huge = runGate(dir, writeChattySuite(dir, 'huge.test.js', 66));
-    assert.strictEqual(huge.status, 1, 'an overrun is still a gate failure');
-    assert.ok(
-      huge.stderr.includes('ENOBUFS'),
-      `the real spawn error is reported\n${huge.stderr.slice(-500)}`,
+    assert.strictEqual(
+      huge.status,
+      0,
+      `a passing suite with 66 MiB of output passes the gate\n${huge.stderr}`,
     );
-    assert.ok(
-      !huge.stderr.includes('the functional test itself FAILED'),
-      `the suite is not blamed for the overrun\n${huge.stderr.slice(-500)}`,
-    );
-    console.log('ok - an overrun past 64 MiB names ENOBUFS, not the suite');
+    assert.ok(huge.stdout.includes('huge.test.js done'), 'output forwarded');
+    assert.match(huge.stdout, /reports=[1-9]/, 'coverage reports collected');
+    assert.strictEqual(huge.stderr, '', 'nothing is reported as an error');
+    console.log('ok - a 66 MiB suite output passes the gate too');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }

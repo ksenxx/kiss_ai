@@ -91,11 +91,23 @@ function makeThreeTabs() {
   return ctx;
 }
 
+// makeThreeTabs plus sub-agent s1 under t1, so t1's group strip is
+// shown (a hidden strip scrolls nothing, which would make every "must
+// not scroll" check pass whatever renderTabBar does).  Clears the
+// scroll log again afterwards.
+function makeGroupStrip() {
+  const ctx = makeThreeTabs();
+  openSubagent(ctx.win, 's1', 0);
+  assert.ok(stripShown(ctx.win), 'setup: a group of two shows the strip');
+  ctx.tabScrolls.length = 0;
+  return ctx;
+}
+
 function testStatusRerenderDoesNotScroll() {
   // Task status events (running started/stopped, for the active tab or
   // a background tab) re-render the tab bar; none of them is a tab
   // switch, so none may scroll the bar.
-  const {win, tabScrolls} = makeThreeTabs();
+  const {win, tabScrolls} = makeGroupStrip();
 
   send(win, {type: 'status', running: true, tabId: 't2', startTs: 1000});
   send(win, {type: 'status', running: true, tabId: 't1', startTs: 1001});
@@ -114,7 +126,7 @@ function testStatusRerenderDoesNotScroll() {
 function testTitleUpdateDoesNotScroll() {
   // A tabs_state snapshot that only renames tabs (the agent updating a
   // task title) re-renders the bar without a switch: no scroll.
-  const {win, tabScrolls} = makeThreeTabs();
+  const {win, tabScrolls} = makeGroupStrip();
 
   send(win, {
     type: 'tabs_state',
@@ -137,10 +149,7 @@ function testTitleUpdateDoesNotScroll() {
 function testSwitchingTabsScrollsExactlyTheNewActiveTab() {
   // Clicking another entry on the strip IS a switch: the newly active
   // tab must be scrolled into view (and only it).
-  const {win, tabScrolls} = makeThreeTabs();
-  openSubagent(win, 's1', 0);
-  assert.ok(stripShown(win), 'setup: a group of two shows the strip');
-  tabScrolls.length = 0;
+  const {win, tabScrolls} = makeGroupStrip();
 
   clickEl(win, tabEl(win, 's1'));
   assert.strictEqual(activeTabId(win), 's1', 's1 must become active');
@@ -177,7 +186,7 @@ function testSwitchingTabsScrollsExactlyTheNewActiveTab() {
 function testClickingActiveTabDoesNotScroll() {
   // Clicking the tab that is already active is not a switch; the user
   // may have scrolled the bar away on purpose.
-  const {win, tabScrolls} = makeThreeTabs();
+  const {win, tabScrolls} = makeGroupStrip();
 
   clickEl(win, tabEl(win, 't1'));
   assert.strictEqual(activeTabId(win), 't1', 't1 must stay active');

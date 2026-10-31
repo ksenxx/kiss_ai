@@ -5,10 +5,11 @@
 //
 // End-to-end (jsdom) tests for Enter inside an IME composition
 // (media/main.js): the Enter that commits a Japanese / Chinese / Korean
-// composition arrives as a keydown with `isComposing` (keyCode 229) and
-// must not act as a submit.  The composer and the chat search already
-// honour that; so must the Tricks "add" box, the history chat-rename
-// box and the model picker's search box.
+// composition arrives as a keydown with `isComposing` or with keyCode
+// 229 (some browsers send only one of them) and must not act as a
+// submit; each case below sends both forms.  The composer and the chat
+// search already honour that; so must the Tricks "add" box, the history
+// chat-rename box and the model picker's search box.
 
 'use strict';
 
@@ -22,13 +23,12 @@ const {
 } = require('./simplify2_harness');
 const {sendHistory, makeRow} = require('./history_helpers');
 
-function imeEnter(win, el) {
+const IME_FORMS = [{isComposing: true}, {keyCode: 229}];
+
+/** Dispatch *key* as a keydown inside an IME composition (*form*). */
+function imeKey(win, el, key, form) {
   el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: 'Enter',
-      isComposing: true,
-      bubbles: true,
-    }),
+    new win.KeyboardEvent('keydown', {key, bubbles: true, ...form}),
   );
 }
 
@@ -44,12 +44,14 @@ function testTricksAddBox() {
   win.document.getElementById('tricks-btn').click();
   const addInput = win.document.getElementById('tricks-add-input');
   typeInto(win, addInput, '日本語の促進');
-  imeEnter(win, addInput);
-  assert.strictEqual(
-    ofType(posted, 'addTrick').length,
-    0,
-    'IME Enter does not add',
-  );
+  for (const form of IME_FORMS) {
+    imeKey(win, addInput, 'Enter', form);
+    assert.strictEqual(
+      ofType(posted, 'addTrick').length,
+      0,
+      'IME Enter does not add: ' + JSON.stringify(form),
+    );
+  }
   plainEnter(win, addInput);
   assert.strictEqual(
     ofType(posted, 'addTrick').length,
@@ -74,28 +76,25 @@ function testHistoryRenameBox() {
   const input = titleEl.querySelector('input');
   assert.ok(input, 'the pencil opened the rename box');
   input.value = 'ログイン修正';
-  imeEnter(win, input);
-  assert.ok(
-    titleEl.querySelector('input'),
-    'IME Enter keeps the rename box open',
-  );
-  assert.strictEqual(
-    ofType(posted, 'setChatSummary').length,
-    0,
-    'nothing renamed yet',
-  );
-  // Escape inside the composition belongs to the IME too.
-  input.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: 'Escape',
-      isComposing: true,
-      bubbles: true,
-    }),
-  );
-  assert.ok(
-    titleEl.querySelector('input'),
-    'IME Escape keeps the rename box open',
-  );
+  for (const form of IME_FORMS) {
+    const label = JSON.stringify(form);
+    imeKey(win, input, 'Enter', form);
+    assert.ok(
+      titleEl.querySelector('input'),
+      'IME Enter keeps the rename box open: ' + label,
+    );
+    assert.strictEqual(
+      ofType(posted, 'setChatSummary').length,
+      0,
+      'nothing renamed yet: ' + label,
+    );
+    // Escape inside the composition belongs to the IME too.
+    imeKey(win, input, 'Escape', form);
+    assert.ok(
+      titleEl.querySelector('input'),
+      'IME Escape keeps the rename box open: ' + label,
+    );
+  }
   plainEnter(win, input);
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(ofType(posted, 'setChatSummary'))),
@@ -126,12 +125,15 @@ function testModelSearchBox() {
   search.value = 'g';
   search.dispatchEvent(new win.Event('input', {bubbles: true}));
   const picked = () => ofType(posted, 'selectModel').map(m => m.model);
-  imeEnter(win, search);
-  assert.deepStrictEqual(picked(), [], 'IME Enter picks no model');
-  assert.ok(
-    win.document.getElementById('model-list').querySelector('.model-item'),
-    'the picker is still open',
-  );
+  for (const form of IME_FORMS) {
+    const label = JSON.stringify(form);
+    imeKey(win, search, 'Enter', form);
+    assert.deepStrictEqual(picked(), [], 'IME Enter picks no model: ' + label);
+    assert.ok(
+      win.document.getElementById('model-list').querySelector('.model-item'),
+      'the picker is still open: ' + label,
+    );
+  }
   plainEnter(win, search);
   assert.deepStrictEqual(
     picked(),

@@ -20,7 +20,7 @@
 const RECONNECT_ALARM = 'kiss-bridge-reconnect';
 const PING_INTERVAL_MS = 25000;
 const QUICK_RETRY_MS = 3000;
-const COMMAND_DEADLINE_MS = 30000;
+const COMMAND_DEADLINE_MS = 30000; // when KISS sends no timeout_ms (an older KISS)
 // Commands that move focus or tabs around must not interleave (two
 // concurrent screenshots would both capture whichever tab lost the race).
 const FOCUS_MUTATING = new Set(['open_tab', 'navigate', 'activate_tab', 'close_tab', 'screenshot']);
@@ -491,8 +491,12 @@ const COMMANDS = {
 
 // A command gets a hard deadline: a never-settling page promise (or a wedged
 // debugger attach) must fail the command and free the queue, not pin the
-// debugger to the tab forever.
-function withDeadline(promise, onTimeout) {
+// debugger to the tab forever. The deadline is the caller's: KISS sends how
+// long it still waits for the reply (timeout_ms, a little less than its own
+// timeout), counted from the command's arrival, so the "exceeded" reply
+// reaches KISS while it listens instead of KISS timing out and dropping the
+// connection with every other command in flight.
+function withDeadline(promise, onTimeout, limit) {
   let timer = null;
   return Promise.race([
     // Cancel the timer when the work settles: a completed command's
@@ -502,18 +506,18 @@ function withDeadline(promise, onTimeout) {
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         if (onTimeout) onTimeout();
-        reject(new Error(`command exceeded its ${COMMAND_DEADLINE_MS / 1000}s deadline`));
-      }, COMMAND_DEADLINE_MS);
+        reject(new Error(`command exceeded its ${limit.ms / 1000}s deadline`));
+      }, Math.max(limit.at - Date.now(), 0));
     }),
   ]);
 }
 
 // The deadline is applied INSIDE the queue slot: a wedged command fails
-// after 30s and releases the FIFO, instead of stalling every later
+// at its deadline and releases the FIFO, instead of stalling every later
 // command behind it while its own function never even starts.
-function enqueue(key, fn, onTimeout) {
+function enqueue(key, fn, onTimeout, limit) {
   const prev = key === 'focus' ? focusQueue : tabChains.get(key) || Promise.resolve();
-  const next = prev.then(() => withDeadline(fn(), onTimeout));
+  const next = prev.then(() => withDeadline(fn(), onTimeout, limit));
   const kept = next.catch(() => {});
   if (key === 'focus') {
     focusQueue = kept;
@@ -535,13 +539,18 @@ async function handleCommand(sock, msg) {
   const fn = COMMANDS[msg.cmd];
   try {
     const args = msg.args || {};
+    const budget = Number.isFinite(msg.timeout_ms) ? msg.timeout_ms : COMMAND_DEADLINE_MS;
+    const limit = { at: Date.now() + budget, ms: budget };
     // A command whose socket closed while it waited in a queue (KISS timed
-    // it out and dropped the connection) must not run: its effect (a
-    // navigation, a click) would land after the caller gave up on it,
-    // and nobody is listening for its reply.
+    // it out and dropped the connection), or whose deadline passed there,
+    // must not run: its effect (a navigation, a click) would land after the
+    // caller gave up on it, and nobody is listening for its reply.
     const run = () => {
       if (sock.readyState !== WebSocket.OPEN) {
         throw new Error('connection closed before the command ran');
+      }
+      if (Date.now() >= limit.at) {
+        throw new Error(`command waited out its ${budget / 1000}s deadline in the queue`);
       }
       return fn(args);
     };
@@ -550,15 +559,17 @@ async function handleCommand(sock, msg) {
     // free but still under the deadline.
     let work;
     if (FOCUS_MUTATING.has(msg.cmd)) {
-      work = enqueue('focus', run, null);
+      work = enqueue('focus', run, null, limit);
     } else if (msg.cmd === 'evaluate' || msg.cmd === 'snapshot' || msg.cmd === 'click' || msg.cmd === 'type_text') {
       work = enqueue(args.tabId || 0, run, () => {
         chrome.debugger.detach({ tabId: args.tabId }).catch(() => {});
-      });
+      }, limit);
     } else {
-      work = withDeadline(Promise.resolve().then(run), null);
+      work = Promise.resolve().then(run);
     }
-    const result = await work;
+    // Raced here as well as inside the queue slot: a command still waiting
+    // in a queue at its deadline is answered then, not once its slot starts.
+    const result = await withDeadline(work, null, limit);
     sendOn(sock, { id: msg.id, ok: true, result: result === undefined ? null : result });
   } catch (e) {
     sendOn(sock, { id: msg.id, ok: false, error: String((e && e.message) || e) });

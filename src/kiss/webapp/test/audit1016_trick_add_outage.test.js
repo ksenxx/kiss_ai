@@ -83,10 +83,10 @@ function testRejectionStillShowsWithoutOutage() {
   const doc = win.document;
   win.__TRICKS__ = [];
   doc.getElementById('tricks-btn').click();
-  submitAdd(win, '');
   submitAdd(win, 'Echo promptlet');
-  send(win, {type: 'error', text: 'Promptlet must not be empty'});
-  assert.strictEqual(addErrorText(doc), 'Promptlet must not be empty');
+  const duplicate = 'That promptlet is already in MY_INJECTION.md';
+  send(win, {type: 'error', text: duplicate});
+  assert.strictEqual(addErrorText(doc), duplicate);
   win.close();
   console.log('  ok - a rejection without an outage shows under the box');
 }

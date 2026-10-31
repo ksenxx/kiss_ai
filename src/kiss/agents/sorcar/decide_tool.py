@@ -41,7 +41,6 @@ from kiss.core.models.decisions_model import (
     DecisionsModel,
     choice,
     noul,
-    reported_cost,
     score,
 )
 from kiss.core.models.model_info import MODEL_INFO, calculate_cost, model
@@ -170,12 +169,16 @@ def _is_choice_criteria(criteria: Any) -> TypeGuard[dict[str, str] | list[str]]:
     return isinstance(criteria, list) and bool(criteria) and all(_is_text(c) for c in criteria)
 
 
-def decision_usage(model_name: str, response: dict[str, Any]) -> tuple[float, int, int]:
+def decision_usage(
+    decisions_model: DecisionsModel, response: dict[str, Any]
+) -> tuple[float, int, int]:
     """Price a decisions response.
 
     Args:
-        model_name: The catalog name the request was made with (its catalog
-            prices are used only when the response carries no ``usage.cost``).
+        decisions_model: The model the request was made with: its usage
+            and cost readers parse *response*, and the catalog prices of
+            its name are used only when the response carries no
+            ``usage.cost``.
         response: The dict returned by :meth:`DecisionsModel.decide`, or a
             charged reply it rejected (see ``take_partial_usage_response``).
 
@@ -184,22 +187,22 @@ def decision_usage(model_name: str, response: dict[str, Any]) -> tuple[float, in
         OpenRouter's reported ``usage.cost`` when present (the served
         model's actual bill), else the catalog estimate.
     """
-    usage: dict[str, Any] = {}
-    if isinstance(response.get("usage"), dict):
-        usage = response["usage"]
-    input_tokens = int(usage.get("input_tokens") or 0)
-    output_tokens = int(usage.get("output_tokens") or 0)
-    cost = reported_cost(response)
+    input_tokens, output_tokens = (
+        decisions_model.extract_input_output_token_counts_from_response(response)[:2]
+    )
+    cost = decisions_model.extract_cost_from_response(response)
     if cost is None:
-        cost = calculate_cost(model_name, input_tokens, output_tokens)
+        cost = calculate_cost(decisions_model.model_name, input_tokens, output_tokens)
     return cost, input_tokens, output_tokens
 
 
-def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, float, int]:
+def format_decision(
+    decisions_model: DecisionsModel, response: dict[str, Any]
+) -> tuple[str, float, int]:
     """Render a decisions response for the agent and price it.
 
     Args:
-        model_name: The catalog name the request was made with (see
+        decisions_model: The model the request was made with (see
             :func:`decision_usage`).
         response: The dict returned by :meth:`DecisionsModel.decide`.
 
@@ -208,11 +211,11 @@ def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, flo
         returns: ``{"answers": ..., "model": <served id>, "usage":
         {"input_tokens", "output_tokens", "cost_usd"}}``.
     """
-    cost, input_tokens, output_tokens = decision_usage(model_name, response)
+    cost, input_tokens, output_tokens = decision_usage(decisions_model, response)
     text = json.dumps(
         {
             "answers": response["answers"],
-            "model": response.get("model", model_name),
+            "model": response.get("model", decisions_model.model_name),
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -261,14 +264,13 @@ def make_decide_tool(
             # A 2xx reply without ``answers`` was still charged for.
             charged = decisions_model.take_partial_usage_response()
             if isinstance(charged, dict):
-                cost, input_tokens, output_tokens = decision_usage(model_name, charged)
+                cost, input_tokens, output_tokens = decision_usage(decisions_model, charged)
                 attribute(cost, input_tokens + output_tokens)
             return f"Error: {e.args[0]}"
-        text, cost, tokens = format_decision(model_name, response)
+        text, cost, tokens = format_decision(decisions_model, response)
         attribute(cost, tokens)
         return text
 
-    decide.__name__ = "decide"
     decide.__doc__ = (
         f"Classify, route or score text with the {model_name} decisions model: "
         "ask typed questions about a piece of text and get calibrated probabilities "

@@ -382,7 +382,7 @@ class TestAgentMergeCarriesPromptAndResult:
             agent._last_user_prompt = PROMPT
             agent._last_result_summary = RESULT
             head_before = GitWorktreeOps.head_sha(wt_dir)
-            assert agent._commit_worktree() is False
+            assert agent._commit_worktree(agent.worktrees[0]) is False
             assert GitWorktreeOps.head_sha(wt_dir) == head_before
 
             out = agent.merge()

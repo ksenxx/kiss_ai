@@ -36,6 +36,7 @@ const {
   startMic,
   wake,
   speak,
+  fireTimer,
 } = require('./voice_page_helpers');
 
 const SOURCE_URL = {
@@ -1115,29 +1116,20 @@ test('a reply lost in the transcribe window never eats the next transcript', asy
 
   clickTab(win, first);
   await startMic(page);
-  // Record the page's timers so the transcribe-flash safety timer can
-  // be fired by hand: the daemon's reply to round A never comes (the
-  // socket dropped mid-transcription), and 60 s later the page cancels
-  // the round. The credit it leaves must not be charged to the next
-  // words: a live round is always answered first.
-  const timers = [];
-  const realSetTimeout = win.setTimeout;
-  win.setTimeout = (fn, ms) => {
-    timers.push({fn, ms});
-    return realSetTimeout(() => {}, 0);
-  };
+  // The daemon's reply to round A never comes (the socket dropped
+  // mid-transcription), and 60 s later the transcribe-flash safety
+  // timer cancels the round. The credit it leaves must not be charged
+  // to the next words, whose reply names its round by the echoed tag.
   wake(page);
   speak(page); // round A: audio posted, the reply is lost
-  win.setTimeout = realSetTimeout;
-  const safety = timers.find(t => t.ms === 60000);
-  assert.ok(safety, 'posting the audio arms the 60 s safety timer');
-  safety.fn();
+  fireTimer(page, 60000);
   assert.ok(!micBtn(win).classList.contains('voice-transcribing'));
 
   wake(page);
   speak(page); // round B, same tab
+  const roundB = posted.filter(m => m.type === 'voiceTranscribe').pop().round;
   posted.length = 0;
-  send(win, {type: 'voiceSpeech', text: 'after lost reply QK93'});
+  send(win, {type: 'voiceSpeech', text: 'after lost reply QK93', round: roundB});
 
   const submits = posted.filter(m => m.type === 'submit');
   assert.strictEqual(

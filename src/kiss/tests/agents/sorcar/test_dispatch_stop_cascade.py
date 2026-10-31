@@ -38,16 +38,21 @@ abort path:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import shutil
+import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
 import pytest
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import ClientConnection
 
 from kiss.agents.sorcar import daemon_client
 from kiss.server.task_runner import inject_keyboard_interrupt
@@ -81,6 +86,9 @@ class _RecordingDaemon:
         self.endpoint_file = Path(tempfile.mkdtemp(prefix="kiss_cascade_")) / "sorcar-local.json"
         self.commands: list[dict[str, Any]] = []
         self.run_cmd: dict[str, Any] | None = None
+        # Set once the recorder saw the client close: every command the
+        # client sent before closing is recorded by then.
+        self.disconnected = threading.Event()
         self._ready = threading.Event()
         self._loop = asyncio.new_event_loop()
         self._closed = asyncio.Event()
@@ -105,6 +113,8 @@ class _RecordingDaemon:
                 self.commands.append(json.loads(message))
         except ConnectionClosed:
             pass
+        finally:
+            self.disconnected.set()
 
     async def _handle(self, ws: ServerConnection) -> None:
         """Serve one authenticated client connection."""
@@ -160,16 +170,19 @@ class _RecordingDaemon:
         return False
 
     def close(self) -> None:
-        """Stop serving and close every connection."""
+        """Stop serving, close every connection and remove the endpoint folder."""
         self._loop.call_soon_threadsafe(self._closed.set)
         self._thread.join(timeout=10)
+        # Before the loop close, which raises if the thread outlived the join.
+        shutil.rmtree(self.endpoint_file.parent, ignore_errors=True)
         self._loop.close()
 
 
 class TestStopCascadeOnInterrupt:
     """The incident path: parent stopped mid-dispatch → child stopped."""
 
-    def test_keyboard_interrupt_sends_stop_then_closetab(self) -> None:
+    @pytest.mark.parametrize("parent_task_id", ["", "parent-task-1"])
+    def test_keyboard_interrupt_sends_stop(self, parent_task_id: str) -> None:
         """An injected KeyboardInterrupt must cascade a ``stop``.
 
         Reproduces the 2026-09-02 incident: the calling task's thread
@@ -178,6 +191,11 @@ class TestStopCascadeOnInterrupt:
         Before the fix the daemon received only ``closeTab`` and the
         dispatched task kept running, keeping the repository flagged
         busy for the manual Git Commit button.
+
+        The stop is unconfirmed when the client leaves, so a top-level
+        run keeps its tab (the task may still be running), while a
+        sub-agent run, whose tab no surface shows, closes it after the
+        stop.
         """
         daemon = _RecordingDaemon(mode="stream")
         outcome: dict[str, Any] = {}
@@ -186,6 +204,7 @@ class TestStopCascadeOnInterrupt:
             try:
                 daemon_client.run(
                     "long child task", endpoint_file=daemon.endpoint_file, timeout=60.0,
+                    parent_task_id=parent_task_id,
                 )
                 outcome["exc"] = None
             except BaseException as exc:  # noqa: BLE001 — capture for assert
@@ -207,15 +226,20 @@ class TestStopCascadeOnInterrupt:
             # handshake waits up to the library's 10 s close_timeout
             # when the daemon's loop is slow (a loaded 8-split run).
             worker.join(timeout=30)
-            assert not worker.is_alive(), "client wait never aborted"
+            assert not worker.is_alive(), (
+                "client wait never aborted; the worker is at:\n"
+                + "".join(traceback.format_stack(sys._current_frames()[tid]))
+            )
             assert isinstance(outcome["exc"], KeyboardInterrupt)
             assert daemon.wait_for_command("stop"), (
                 "the interrupted dispatch never sent a stop for its "
                 "child task — the orphan keeps the repo busy"
             )
-            assert daemon.wait_for_command("closeTab")
+            assert daemon.disconnected.wait(10)
             types = [c.get("type") for c in daemon.commands]
-            assert types.index("stop") < types.index("closeTab")
+            assert ("closeTab" in types) == bool(parent_task_id), types
+            if parent_task_id:
+                assert types.index("stop") < types.index("closeTab")
             stop_cmd = next(
                 c for c in daemon.commands if c.get("type") == "stop"
             )
@@ -233,18 +257,26 @@ class TestStopCascadeOnInterrupt:
 class TestNoStopOnTimeout:
     """A timeout keeps the documented fire-and-forget contract."""
 
-    def test_timeout_sends_only_closetab(self) -> None:
-        """``TimeoutError`` must NOT stop the still-running child."""
+    @pytest.mark.parametrize("parent_task_id", ["", "parent-task-1"])
+    def test_timeout_sends_no_stop(self, parent_task_id: str) -> None:
+        """``TimeoutError`` must NOT stop the still-running child.
+
+        The task keeps running, so a top-level run keeps its tab on
+        every surface; only a sub-agent run (no surface shows its tab)
+        closes it.
+        """
         daemon = _RecordingDaemon(mode="silent")
         try:
             with pytest.raises(TimeoutError):
                 daemon_client.run(
                     "slow child task", endpoint_file=daemon.endpoint_file, timeout=0.5,
+                    parent_task_id=parent_task_id,
                 )
-            assert daemon.wait_for_command("closeTab")
-            assert not any(
-                c.get("type") == "stop" for c in daemon.commands
-            ), "a timeout must leave the dispatched task running"
+            assert daemon.disconnected.wait(10)
+            types = [c.get("type") for c in daemon.commands]
+            assert types == (["closeTab"] if parent_task_id else []), (
+                "a timeout must leave the dispatched task running"
+            )
         finally:
             daemon.close()
 
@@ -272,19 +304,110 @@ class TestNoStopOnSuccess:
 class TestConnectionDropStillRaises:
     """A dead daemon connection must not mask the ``ConnectionError``."""
 
-    def test_connection_error_propagates_despite_failed_stop(self) -> None:
+    @pytest.mark.parametrize("parent_task_id", ["", "parent-task-1"])
+    def test_connection_error_propagates_despite_failed_stop(
+        self, parent_task_id: str,
+    ) -> None:
         """EOF mid-wait → ``ConnectionError``; failed sends swallowed.
 
-        Covers the ``except OSError: pass`` branch of the stop send:
-        the daemon closed the connection, so both the cascade ``stop``
-        and the ``closeTab`` hit a dead connection, and the original
-        ``ConnectionError`` must still reach the caller.
+        Covers the ``except OSError: pass`` branches of the stop and
+        ``closeTab`` sends: the daemon closed the connection, so the
+        cascade ``stop`` (and, for a sub-agent run, the ``closeTab``)
+        hit a dead connection, and the original ``ConnectionError``
+        must still reach the caller.
         """
         daemon = _RecordingDaemon(mode="drop")
         try:
             with pytest.raises(ConnectionError, match="closed the connection"):
                 daemon_client.run(
                     "doomed child task", endpoint_file=daemon.endpoint_file, timeout=10.0,
+                    parent_task_id=parent_task_id,
                 )
+        finally:
+            daemon.close()
+
+
+def _run_capturing(endpoint_file: Path, outcome: dict[str, Any]) -> None:
+    """Run a dispatch with a *cancel* event (0.5 s wakes); store how it ended."""
+    try:
+        daemon_client.run(
+            "long child task", endpoint_file=endpoint_file, timeout=60.0,
+            cancel=threading.Event(),
+        )
+        outcome["exc"] = None
+    except BaseException as exc:  # noqa: BLE001 — capture for assert
+        outcome["exc"] = exc
+
+
+def _new_client_connection(before: list[ClientConnection]) -> ClientConnection:
+    """Return the live websockets client connection not in *before*."""
+    for obj in gc.get_objects():
+        if isinstance(obj, ClientConnection) and all(obj is not old for old in before):
+            return obj
+    raise AssertionError("the client never connected")
+
+
+def _blocked_in_assembler_get(tid: int, assembler: object) -> bool:
+    """Whether thread *tid*'s innermost frame is *assembler*'s ``get``."""
+    frame = sys._current_frames().get(tid)
+    return (
+        frame is not None
+        and frame.f_code.co_name == "get"
+        and frame.f_locals.get("self") is assembler
+    )
+
+
+class TestStopWhileReadingAFrame:
+    """A Stop that lands while the client takes a frame must not hang it.
+
+    CPython raises an injected async exception at the first check after
+    a call returns, which can fall between a lock's ``__enter__``
+    returning and the ``with`` block's cleanup being armed.  When the
+    daemon's Stop landed while the task thread was acquiring the
+    websockets frame-assembler mutex inside ``ws.recv()``, the mutex
+    stayed held: ``run``'s ``finally`` then blocked for ever in
+    ``ws.close()``, which takes the same mutex (seen as a load-only
+    failure of ``test_keyboard_interrupt_sends_stop``).
+    """
+
+    def test_stop_while_waiting_for_the_frame_mutex(self) -> None:
+        """The run aborts and sends its ``stop`` though the Stop met the mutex.
+
+        Forces the interleaving with the real objects: the test holds
+        the client connection's assembler mutex until the thread running
+        ``daemon_client.run`` is blocked on it in ``Assembler.get`` (or
+        2 s pass, when only a helper thread reads the socket), injects
+        the Stop into that thread, and releases the mutex.
+        """
+        daemon = _RecordingDaemon(mode="stream")
+        outcome: dict[str, Any] = {}
+        before = [o for o in gc.get_objects() if isinstance(o, ClientConnection)]
+        worker = threading.Thread(
+            target=_run_capturing, args=(daemon.endpoint_file, outcome), daemon=True,
+        )
+        worker.start()
+        try:
+            deadline = time.monotonic() + 5
+            while daemon.run_cmd is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert daemon.run_cmd is not None, "client never sent run"
+            assembler = _new_client_connection(before).recv_messages
+            tid = worker.ident
+            assert tid is not None
+            with assembler.mutex:
+                deadline = time.monotonic() + 2
+                while (
+                    not _blocked_in_assembler_get(tid, assembler)
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                assert inject_keyboard_interrupt(tid) == 1
+            worker.join(timeout=30)
+            assert not worker.is_alive(), (
+                "the stopped client never finished; the worker is at:\n"
+                + "".join(traceback.format_stack(sys._current_frames()[tid]))
+            )
+            assert isinstance(outcome["exc"], KeyboardInterrupt)
+            assert daemon.wait_for_command("stop")
         finally:
             daemon.close()

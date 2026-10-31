@@ -21,6 +21,7 @@ Every test uses a REAL temporary SQLite database via a private
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -44,7 +45,8 @@ def _redirect(tmpdir: Path) -> tuple:
 
 
 def _restore(saved: tuple) -> None:
-    """Undo :func:`_redirect`."""
+    """Undo :func:`_redirect`, closing the liveness marker minted in the private home."""
+    th._release_owner_marker()
     th._close_db()
     (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state) = saved
 
@@ -59,6 +61,7 @@ class _BackfillTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         _restore(self.saved)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _insert_orphan_row(self, *, steps: int = 0, tokens: int = 0,
                            cost: float = 0.0, end_ts: int = 0) -> str:

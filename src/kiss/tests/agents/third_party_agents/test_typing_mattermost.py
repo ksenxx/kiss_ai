@@ -11,6 +11,7 @@ actual wire behavior with no mocks or test doubles.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 import pytest
@@ -74,11 +75,17 @@ def test_send_typing_swallows_unreachable_server(refusing_port: int) -> None:
     backend.send_typing("chan1")
 
 
-def test_send_typing_without_base_url_is_noop(mm_server) -> None:
-    """Without a configured base URL, send_typing must not raise or send anything."""
-    backend = MattermostChannelBackend()
-    backend.send_typing("chan1")
-    assert mm_server.requests == []
+def test_send_typing_without_base_url_is_noop(caplog: pytest.LogCaptureFixture) -> None:
+    """Without a configured base URL, send_typing returns before attempting a request.
+
+    No server can see a request that has no URL, so the observable no-op is
+    the absence of the "typing indicator failed" record that a doomed POST
+    to a scheme-less ``/api/v4/users/me/typing`` would log.
+    """
+    backend = MattermostChannelBackend(token="test-token")
+    with caplog.at_level(logging.DEBUG, logger=MattermostChannelBackend.__module__):
+        backend.send_typing("chan1")
+    assert "typing indicator failed" not in caplog.text
 
 
 def test_send_typing_without_channel_id_is_noop(mm_server) -> None:

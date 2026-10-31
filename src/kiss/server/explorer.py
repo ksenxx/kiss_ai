@@ -282,9 +282,7 @@ def git_status(work_dir: str) -> dict[str, Any]:
     repo = repo_root(work_dir)
     if not repo:
         return {"error": f"Not a git repository: {work_dir}"}
-    status = _git(
-        "status", "--porcelain=v1", "-z", "--untracked-files=all", cwd=repo,
-    )
+    status = _porcelain_status(repo)
     if status.returncode != 0:
         return {"error": status.stderr.strip() or "git status failed"}
     # symbolic-ref names the branch even before its first commit (an
@@ -300,10 +298,7 @@ def git_status(work_dir: str) -> dict[str, Any]:
         if wt["current"]:
             wt["changes"] = changes
             continue
-        other = _git(
-            "status", "--porcelain=v1", "-z", "--untracked-files=all",
-            cwd=wt["path"],
-        )
+        other = _porcelain_status(wt["path"])
         if other.returncode != 0:
             wt["error"] = other.stderr.strip() or "git status failed"
             continue
@@ -314,6 +309,21 @@ def git_status(work_dir: str) -> dict[str, Any]:
         "changes": changes,
         "worktrees": worktrees,
     }
+
+
+def _porcelain_status(worktree: str) -> subprocess.CompletedProcess[str]:
+    """Run ``git status --porcelain=v1 -z`` in *worktree* without taking ``index.lock``.
+
+    A plain ``git status`` refreshes stale index entries and writes the
+    index back under ``index.lock``; from this background poll that
+    lock would make a task's concurrent ``git add`` or ``git commit``
+    in the same worktree fail with "index.lock: File exists".
+    ``--no-optional-locks`` skips the write (the output is the same).
+    """
+    return _git(
+        "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        cwd=worktree,
+    )
 
 
 def parse_porcelain_status(text: str, repo: str) -> list[dict[str, Any]]:
@@ -595,7 +605,9 @@ _GIT_STDERR_MAX_BYTES = 64 * 1024
 """Stderr kept of a streamed git command, for its error message."""
 
 
-def _git_head(*args: str, cwd: str) -> tuple[str, bool, str]:
+def _git_head(
+    *args: str, cwd: str, env: dict[str, str] | None = None,
+) -> tuple[str, bool, str]:
     """Run ``git *args*`` whose output may be huge; keep the first :data:`GIT_SHOW_MAX_BYTES`.
 
     Stdout is streamed and git is killed once the cap is read
@@ -606,19 +618,21 @@ def _git_head(*args: str, cwd: str) -> tuple[str, bool, str]:
     non-UTF-8 file come back equal, and the text encodes back to at
     most the cap (see :func:`_truncate`).  Git's stderr and status are
     kept too: a git that failed is reported, a git the cap killed is
-    not a failure.
+    not a failure.  *env* adds variables for this call (as in
+    :func:`~kiss.agents.sorcar.git_worktree._git`).
 
     Returns:
         ``(text, truncated, error)``; *error* is git's (bounded) stderr,
         a timeout, or why git could not start, and then *text* is empty.
     """
-    cmd, env = _git_command(args, cwd)
+    cmd, full_env = _git_command(args, cwd)
+    full_env.update(env or {})
     try:
         out = run_capped(
             cmd,
             limit=GIT_SHOW_MAX_BYTES,
             timeout=_GIT_TIMEOUT_SECONDS,
-            env=env,
+            env=full_env,
             keep_stderr=_GIT_STDERR_MAX_BYTES,
         )
     except OSError as exc:
@@ -633,6 +647,12 @@ def _git_head(*args: str, cwd: str) -> tuple[str, bool, str]:
 def _valid_sha(sha: str) -> bool:
     """Whether *sha* looks like an object name or a short prefix of one."""
     return bool(re.match(r"^[0-9a-fA-F]{4,64}$", sha))
+
+
+def _commit_of(repo: str, rev: str) -> str:
+    """Return the full name of the commit *rev* resolves to, or ``""`` when it names none."""
+    result = _git("rev-parse", "--verify", "--quiet", rev + "^{commit}", cwd=repo)
+    return _chomp(result.stdout) if result.returncode == 0 else ""
 
 
 def _repo_and_sha(work_dir: str, sha: str) -> tuple[str, dict[str, Any] | None]:
@@ -774,13 +794,25 @@ def _blob_text(repo: str, spec: str) -> tuple[str | None, bool, str]:
     other git failure.  Streamed: a 1 GiB blob costs the daemon the
     cap, not the blob.
     """
-    text, truncated, err = _git_head("show", spec, cwd=repo)
+    # A missing path is told from a failure by git's message, which only
+    # the C locale keeps untranslated.
+    text, truncated, err = _git_head("show", spec, cwd=repo, env={"LC_ALL": "C"})
     if err:
         if "does not exist" in err or "exists on disk, but not in" in err:
             return None, False, ""
         return None, False, err
-    if "\0" in text[:8192]:
-        return None, False, f"Cannot display binary file: {spec.split(':', 1)[-1]}"
+    return _text_side(text, truncated, spec.split(":", 1)[-1])
+
+
+def _text_side(text: str, truncated: bool, path: str) -> tuple[str | None, bool, str]:
+    """Return *text* as one side of a diff (see :func:`_blob_text`), or *path*'s binary error.
+
+    Binary means a NUL among the first 8 KiB of bytes, git's own test.
+    *text* was decoded with ``surrogateescape``, so its first 8192
+    characters encode back to at least its first 8192 bytes, exactly.
+    """
+    if b"\0" in text[:8192].encode("utf-8", "surrogateescape")[:8192]:
+        return None, False, f"Cannot display binary file: {path}"
     return text, truncated, ""
 
 
@@ -804,10 +836,8 @@ def _worktree_file_text(repo: str, path: str) -> tuple[str | None, bool, str]:
             data = fh.read(GIT_SHOW_MAX_BYTES + 1)
     except OSError as exc:
         return None, False, f"Cannot read {path}: {exc}"
-    if b"\0" in data[:8192]:
-        return None, False, f"Cannot display binary file: {path}"
     text = data[:GIT_SHOW_MAX_BYTES].decode("utf-8", "surrogateescape")
-    return text, len(data) > GIT_SHOW_MAX_BYTES, ""
+    return _text_side(text, len(data) > GIT_SHOW_MAX_BYTES, path)
 
 
 def _repo_relative(path: str) -> bool:
@@ -860,16 +890,14 @@ def git_file_diff(
     if sha:
         if not _valid_sha(sha):
             return {"error": f"Not a commit id: {sha}"}
-        check = _git("rev-parse", "--verify", "--quiet", sha + "^{commit}", cwd=repo)
-        if check.returncode != 0:
+        if not _commit_of(repo, sha):
             return {"error": f"Unknown commit: {sha}"}
         base_rev = sha + "^"
     else:
         base_rev = "HEAD"
     # A root commit (or an unborn HEAD) has no parent: the left side is
     # empty.
-    parent = _git("rev-parse", "--verify", "--quiet", base_rev + "^{commit}", cwd=repo)
-    parent_sha = _chomp(parent.stdout) if parent.returncode == 0 else ""
+    parent_sha = _commit_of(repo, base_rev)
     original, cut_original, err = (
         _blob_text(repo, f"{parent_sha}:{orig_path}") if parent_sha else (None, False, "")
     )
@@ -913,11 +941,9 @@ def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
         return error
     if not base or base.startswith("-") or not _REVISION_RE.match(base):
         return {"error": f"Not a revision: {base}"}
-    check = _git("rev-parse", "--verify", "--quiet", base + "^{commit}", cwd=repo)
-    if check.returncode != 0:
+    if not _commit_of(repo, base):
         return {"error": f"Unknown revision: {base}"}
-    check = _git("rev-parse", "--verify", "--quiet", sha + "^{commit}", cwd=repo)
-    if check.returncode != 0:
+    if not _commit_of(repo, sha):
         return {"error": f"Unknown commit: {sha}"}
     # Streamed: the diff costs the daemon the cap however far apart
     # the two ends are.

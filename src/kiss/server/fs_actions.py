@@ -146,20 +146,55 @@ def _rename(path: str, dest: str, overwrite: bool) -> dict[str, Any]:
     if not dest:
         return {"error": "Not a valid name: ''"}
     target = Path(dest)
-    if target == src:
+    # Compared as spelled: Windows paths compare case-insensitively, and
+    # a rename that changes only the case of a name must still rename.
+    if str(target) == str(src):
         return {"ok": True, "path": str(target)}
     if target.parent != src.parent or target.name in ("", ".", ".."):
         return {"error": f"Not a valid name: {target.name!r}"}
     if not os.path.lexists(target):
         os.rename(src, target)
-        return {"ok": True, "path": str(target)}
-    if not overwrite:
+    elif _is_same_entry(src, target):
+        _rename_case(src, target)
+    elif not overwrite:
         return {
             "error": f"A file or folder {target.name} already exists",
             "exists": True,
         }
-    _replace(target, os.rename, src)
+    else:
+        _replace(target, os.rename, src)
     return {"ok": True, "path": str(target)}
+
+
+def _is_same_entry(src: Path, target: Path) -> bool:
+    """Whether the existing *target* is *src* itself, its name spelled in another case.
+
+    On a case-insensitive file system (macOS, Windows, a Linux
+    ``casefold`` folder) ``A.txt`` finds ``a.txt``: the rename of
+    ``a.txt`` to ``A.txt`` then finds its own source at the destination,
+    while the folder holds no entry named exactly ``A.txt``.  An entry
+    with that exact name is another entry, even when it is a hard link
+    of the same file.
+    """
+    return os.path.samestat(os.lstat(src), os.lstat(target)) and (
+        target.name not in os.listdir(target.parent)
+    )
+
+
+def _rename_case(src: Path, target: Path) -> None:
+    """Rename *src* to *target*, the same entry's name in another case.
+
+    Through a temporary name in the same folder: a Linux ``casefold``
+    folder takes the direct rename of an entry onto itself as a no-op.
+    A failed second step puts the entry back under *src*.
+    """
+    aside = src.with_name(f".{src.name}.renaming-{uuid.uuid4().hex}")
+    os.rename(src, aside)
+    try:
+        os.rename(aside, target)
+    except BaseException:
+        os.rename(aside, src)
+        raise
 
 
 def _remove(target: Path) -> None:

@@ -9,20 +9,24 @@ mail without a Message-ID (thread caching by ts + RuntimeError on a
 bogus recipient), RFC 5322 Date/Message-ID on outbound mail, HTML-only
 body extraction, JSON validity of truncated large bodies, IMAP STORE
 failure reporting, and mailbox-name quoting.  All tests exercise real
-code paths on real ``email.message`` objects — no network, no mocks.
+code paths on real ``email.message`` objects, no mocks; the large-body
+test reads the mail from a loopback IMAP-over-TLS stand-in.
 """
 
 from __future__ import annotations
 
 import email
 import json
+import ssl
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import pytest
 
 from kiss.agents.third_party_agents.email.email_sea import (
     EmailChannelBackend,
     _build_outbound,
+    _config,
     _message_body_text,
     _normalize_mail,
     _quote_mailbox,
@@ -30,6 +34,8 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _truncate_text,
 )
 from kiss.tests.agents.third_party_agents.email_test_utils import raw_plain
+from kiss.tests.agents.third_party_agents.test_rr_area_g_email_ack import _ImapLiteServer
+from kiss.tests.local_ws import make_test_tls
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -175,16 +181,33 @@ class TestHtmlOnlyBody:
 class TestJsonTruncation:
     """Fix 6: bodies are truncated as text so tool JSON always parses."""
 
-    def test_truncated_large_body_stays_valid_json(self) -> None:
-        """A >8000-char body, truncated then dumped, survives json.loads."""
-        raw = raw_plain().replace(b"Hi bot, please help.", b"x" * 20000 + b'"quote')
-        normalized = _normalize_mail(email.message_from_bytes(raw), "INBOX")
-        normalized["text"] = _truncate_text(normalized["text"], 8000)
-        payload = json.dumps({"ok": True, "email": normalized}, indent=2)
-        parsed = json.loads(payload)
-        assert parsed["ok"] is True
-        assert parsed["email"]["text"].endswith("... [truncated]")
-        assert len(parsed["email"]["text"]) <= 8000 + len("... [truncated]")
+    def test_read_email_truncates_a_large_body_as_text(self, tmp_path: Path) -> None:
+        """read_email of a 20 000-char body returns JSON that parses, the text cut at 8000."""
+        certfile, keyfile, _ca = make_test_tls(tmp_path)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile, keyfile)
+        imap = _ImapLiteServer(context)
+        try:
+            raw = raw_plain().replace(b"Hi bot, please help.", b"x" * 20000)
+            imap.add_message(raw, "<abc123@example.com>")
+            _config.save(
+                {
+                    "imap_host": "127.0.0.1",
+                    "imap_port": str(imap.port),
+                    "smtp_host": "127.0.0.1",
+                    "email_address": "bot@example.com",
+                    "password": "app-password",
+                }
+            )
+            backend = EmailChannelBackend()
+            assert backend.connect()
+            result = json.loads(backend.read_email("<abc123@example.com>"))
+        finally:
+            imap.close()
+        assert result["ok"] is True
+        text = result["email"]["text"]
+        assert text.endswith("x... [truncated]")
+        assert len(text) == 8000 + len("... [truncated]")
 
     def test_short_text_is_untouched(self) -> None:
         """Short bodies are returned verbatim without a truncation marker."""

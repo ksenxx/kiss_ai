@@ -107,8 +107,7 @@ function testSubCentSpendIsNotShownAsFree() {
 // A result whose exact cost is the number 0 is a free run, not an
 // unknown one: the header must say "$0.00", not "N/A".  And an event
 // whose display string is "N/A" but carries a finite cost_usd must
-// still update the header, while one with neither leaves the last known
-// figure in place.
+// still update the header.
 function testZeroAndNaCostsResolveFromCostUsd() {
   const win = makePage();
   send(win, {
@@ -140,34 +139,8 @@ function testZeroAndNaCostsResolveFromCostUsd() {
     'Cost: $0.0012',
     'N/A string yields to cost_usd',
   );
-
-  send(win, {
-    type: 'usage_info',
-    text: '',
-    total_tokens: 30,
-    cost: 'N/A',
-    total_steps: 2,
-    taskId: 'free-task',
-  });
-  assert.strictEqual(
-    headerCost(win),
-    'Cost: $0.0012',
-    'a cost-less event keeps the header',
-  );
-
-  send(win, {
-    type: 'result',
-    text: 'unknown',
-    total_tokens: 40,
-    cost: 'N/A',
-    step_count: 2,
-    taskId: 'free-task',
-  });
-  assert.strictEqual(
-    headerCost(win),
-    'Cost: $0.0012',
-    'a cost-less result does not clobber the header',
-  );
+  // An N/A cost without cost_usd keeps the header: metricFormatting
+  // (usage_info) and liveParentCostHeader (result) pin that.
   win.close();
   console.log('  ok - zero and N/A costs resolve from cost_usd');
 }

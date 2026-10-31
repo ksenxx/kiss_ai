@@ -199,23 +199,14 @@ function testIdsLineOrderingAndContainer(win, rows) {
     );
 
     // main.css: the info block drops onto its own line of the
-    // .sidebar-item flex row and stacks its three lines flush (a
-    // collapsed row hides it, so `display` is not checked here).
+    // .sidebar-item flex row (remote-codex.css runs its lines together
+    // as one " • "-separated text block).
     const style = win.getComputedStyle(info);
     assert.strictEqual(style.flexBasis, '100%', `row ${label}: own line`);
-    assert.strictEqual(
-      style.flexDirection,
-      'column',
-      `row ${label}: lines stack vertically`,
-    );
-    assert.ok(
-      ['0', '0px'].includes(style.gap) || ['0', '0px'].includes(style.rowGap),
-      `row ${label}: no gap between the lines, got ${style.gap}/${style.rowGap}`,
-    );
   }
 
   console.log(
-    '  ok - metrics / workspace / ids stack flush inside .running-item-info',
+    '  ok - metrics / workspace / ids share the .running-item-info line',
   );
 }
 

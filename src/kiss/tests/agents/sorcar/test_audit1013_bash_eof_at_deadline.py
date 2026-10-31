@@ -33,7 +33,9 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell sem
 def test_shell_exiting_just_past_the_deadline_after_eof_is_not_a_timeout(tmp_path: Path) -> None:
     tools = UsefulTools(work_dir=str(tmp_path))
     code, out = tools._bash_streaming(
-        "echo started; exec >/dev/null 2>&1; sleep 0.3; touch done", timeout_seconds=0.1,
+        "echo started; exec >/dev/null 2>&1; sleep 0.3; touch done",
+        timeout_seconds=0.1,
+        cwd=str(tmp_path),
     )
     assert out == "started\n"
     assert code == 0
@@ -44,7 +46,9 @@ def test_shell_running_long_past_the_deadline_after_eof_is_a_timeout(tmp_path: P
     """The floor is short: a shell still running well after the deadline times out."""
     tools = UsefulTools(work_dir=str(tmp_path))
     code, out = tools._bash_streaming(
-        "echo started; exec >/dev/null 2>&1; sleep 30; touch done", timeout_seconds=0.1,
+        "echo started; exec >/dev/null 2>&1; sleep 30; touch done",
+        timeout_seconds=0.1,
+        cwd=str(tmp_path),
     )
     assert out == "started\n"
     assert code is None

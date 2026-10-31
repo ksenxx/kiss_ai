@@ -11,13 +11,6 @@
 const assert = require('assert');
 const {ofType, lastMsg} = require('./simplify2_harness');
 
-/** Dispatch a bubbling click on the element with id `id`. */
-function click(win, id) {
-  win.document
-    .getElementById(id)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
 /** Whether the meta drawer is open. */
 function drawerOpen(win) {
   return win.document.getElementById('meta-panel').classList.contains('open');
@@ -45,4 +38,4 @@ function lastPoll(wv) {
   return poll;
 }
 
-module.exports = {click, drawerOpen, overlayOpen, polls, pollCount, lastPoll};
+module.exports = {drawerOpen, overlayOpen, polls, pollCount, lastPoll};

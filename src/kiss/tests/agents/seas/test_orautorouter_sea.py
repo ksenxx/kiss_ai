@@ -24,7 +24,7 @@ from kiss.agents.seas.orautorouter.orautorouter_sea import OrautorouterSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.core.models.model_info import MODEL_INFO
 from kiss.tests.agents.seas.conftest import registered, run_sea, runnable_candidates
 from kiss.tests.agents.seas.sea_contract import (
     assert_no_removed_getters,
@@ -67,12 +67,6 @@ def test_sea_methods_follow_the_contract_and_share_the_autorouter_protocol() -> 
     assert_no_removed_getters(orautorouter_sea)
 
 
-def test_orautorouter_is_a_model_picker_sea() -> None:
-    """Registered under its command name in the picker registry."""
-    assert sea_commands.model_seas()["orautorouter"] == _SEA_PATH
-    assert sea_commands.model_sea("orautorouter") == _SEA_PATH
-
-
 def test_agent_file_loader_stages_the_openrouter_router() -> None:
     """The daemon-side loader applies the settings and stages the prompt and tools hooks."""
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "toolProfile": "full", "model": "x"}
@@ -108,37 +102,42 @@ def test_every_tier_candidate_is_a_distinct_openrouter_catalog_model() -> None:
 
 
 def test_menu_and_pick_only_ever_name_openrouter_models() -> None:
-    """The menu lists this module's tiers; the pick is the first runnable one, minus excludes."""
+    """The menu lists this module's tiers; the pick is the first runnable one, minus excludes.
+
+    The ``runnable`` flag and the pricing are the shared ``tier_menu`` /
+    ``tier_pick`` logic, pinned through the autorouter in ``test_autorouter_sea.py``;
+    the costs and excludes checked here pin this module's wrappers passing on
+    the caller's token counts and ``exclude``.
+    """
     menu = json.loads(orautorouter_sea.model_menu(100_000, 10_000))
     assert tuple(menu) == autorouter_sea.TIER_NAMES
-    runnable = set(get_available_models())
+    estimates: dict[str, float] = {}
     for tier, rows in menu.items():
         assert [r["model"] for r in rows] == [m for m, _ in orautorouter_sea.TIERS[tier]]
         for row in rows:
             assert row["model"].startswith(orautorouter_sea.VENDOR_PREFIX)
-            assert row["runnable"] is (row["model"] in runnable)
             info = MODEL_INFO[row["model"]]
-            assert row["estimated_usd"] == round(
+            estimates[row["model"]] = round(
                 (100_000 * info.input_price_per_1M + 10_000 * info.output_price_per_1M) / 1e6, 4
             )
+            assert row["estimated_usd"] == estimates[row["model"]]
     assert orautorouter_sea.pick_model("huge").startswith("Error: unknown tier 'huge'")
     for tier in autorouter_sea.TIER_NAMES:
         usable = runnable_candidates(orautorouter_sea.TIERS, tier)
-        picked = orautorouter_sea.pick_model(tier)
-        if not usable:
+        picked = orautorouter_sea.pick_model(tier, 100_000, 10_000)
+        # Without an OpenRouter key nothing is runnable, and the refusal names the exclude.
+        skip = usable[0] if usable else orautorouter_sea.TIERS[tier][0][0]
+        rest = orautorouter_sea.pick_model(tier, exclude=skip)
+        if usable:
+            chosen = json.loads(picked)
+            assert chosen["model"] == usable[0]
+            assert chosen["estimated_usd"] == estimates[usable[0]]
+        else:
             assert picked.startswith(f"Error: no runnable model in tier {tier!r}")
-            continue
-        chosen = json.loads(picked)
-        assert chosen["model"] == usable[0] and chosen["tier"] == tier
-        assert "runnable" not in chosen
-        rest = orautorouter_sea.pick_model(tier, exclude=usable[0])
         if len(usable) > 1:
             assert json.loads(rest)["model"] == usable[1]
         else:
-            assert rest.startswith(f"Error: no runnable model in tier {tier!r}")
-        # The autorouter's pick of the same tier may differ: it also lists direct vendor models.
-        theirs = autorouter_sea.pick_model(tier)
-        assert theirs.startswith("Error") or json.loads(theirs)["model"] in MODEL_INFO
+            assert rest.startswith(f"Error: no runnable model in tier {tier!r} (excluded: {skip})")
 
 
 def test_agent_run_offers_the_openrouter_tools_and_logs_to_the_shared_ledger(

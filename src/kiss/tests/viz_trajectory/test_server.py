@@ -12,6 +12,7 @@ that :func:`load_job_trajectories` resolves jobs stored in those extra roots.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -48,6 +49,7 @@ class TestJobDiscovery(TestCase):
 
     def setUp(self) -> None:
         self.project = Path(tempfile.mkdtemp(prefix="kiss_viz_test_"))
+        self.addCleanup(shutil.rmtree, self.project, True)
         self.main_jobs = self.project / ".kiss.artifacts" / "jobs"
         self.main_jobs.mkdir(parents=True)
 
@@ -124,8 +126,10 @@ class TestJobDiscovery(TestCase):
 
     def test_non_standard_root_only_scans_directly(self) -> None:
         """A jobs dir not under ``.kiss.artifacts`` is scanned directly only."""
-        plain = Path(tempfile.mkdtemp(prefix="kiss_viz_plain_")) / "jobs"
-        plain.mkdir(parents=True)
+        plain_dir = tempfile.mkdtemp(prefix="kiss_viz_plain_")
+        self.addCleanup(shutil.rmtree, plain_dir, True)
+        plain = Path(plain_dir) / "jobs"
+        plain.mkdir()
         _write_trajectory(plain, "job_2024_05_05_00_00_00_5", "Plain")
         names = {j["name"] for j in list_jobs(plain)}
         self.assertEqual(names, {"job_2024_05_05_00_00_00_5"})

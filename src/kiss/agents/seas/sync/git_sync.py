@@ -34,10 +34,13 @@ nothing is ever forced.
 A sync sent to another machine names the repository by its remote URL
 rather than by a path: the checkout lives wherever that machine keeps
 it (``/home/me/kiss`` on a Linux box, ``/Users/me/work/kiss`` on a
-Mac).  With a *url*, :func:`sync` checks that the checkout it was
-pointed at (the machine's working directory) is a clone of that
-repository and, when it is not, syncs the clone among the directories
-the machine's daemon has opened (:func:`locate_checkout`) instead.
+Mac).  :func:`remote_url` (the ``remote_url`` tool) is how the agent
+learns that URL from its own checkout before the first machine is
+synced, without the credentials the remote's URL may carry.  With a
+*url*, :func:`sync` checks that the checkout it was pointed at (the
+machine's working directory) is a clone of that repository and, when
+it is not, syncs the clone among the directories the machine's daemon
+has opened (:func:`locate_checkout`) instead.
 """
 
 from __future__ import annotations
@@ -367,6 +370,26 @@ def _remote_url(path: Path, remote: str) -> str | None:
         return None
     proc = _git(path, "remote", "get-url", remote)
     return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def remote_url(repo: str, ref: str = "origin/main") -> str:
+    """Return the URL of the remote *ref* names in the checkout at *repo*, credentials dropped.
+
+    What names the repository to another machine (the ``<ref> of <url>``
+    task of the sync sent to it): the URL of ``<remote>`` in *ref*
+    (``<remote>/<branch>``) as :func:`public_url` shows it, so a token
+    in the checkout's remote URL travels neither in the sub-task nor in
+    the transcripts.
+
+    Raises:
+        GitSyncError: When *ref* is not ``<remote>/<branch>``, or *repo*
+            is not a directory inside a git checkout with that remote.
+    """
+    remote, _ = _split_ref(ref)
+    url = _remote_url(Path(repo), remote)
+    if url is None:
+        raise GitSyncError(f"{repo} is not a git checkout with a remote {remote!r}")
+    return public_url(url)
 
 
 def known_work_dirs() -> list[str]:

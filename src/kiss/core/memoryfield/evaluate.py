@@ -73,6 +73,31 @@ _FAILURE_EXACT = frozenset(
         "Task stopped by user",
     }
 )
+TASK_ERROR_RE = re.compile(
+    r"^(<p>|<h3>Partial result: )?(Task failed:|KISSError:|ModelRefusalError:|KISS Error:)"
+    r"\s*(KISS Error:)?\s*"
+)
+"""In-process task errors (budget, consecutive model errors, stalls) as persisted in ``result``."""
+
+
+def is_failed_result(result: str, success: object = None) -> bool:
+    """Return True when a ``task_history`` row records a failed task.
+
+    A row fails by the agent's own verdict (``success == 0``, a
+    ``finish(success=False)`` run), by how it ended (``Task failed`` /
+    ``Task interrupted`` prefixes, a stop, a killed process), or by an
+    in-process error persisted as its result (:data:`TASK_ERROR_RE`).
+
+    Args:
+        result: The row's ``result`` text.
+        success: The row's ``success`` column (``0``, ``1`` or ``None``).
+    """
+    return (
+        success == 0
+        or result.startswith(_FAILURE_PREFIXES)
+        or result in _FAILURE_EXACT
+        or TASK_ERROR_RE.match(result) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -116,14 +141,16 @@ def load_past_tasks(db_path: Path, limit: int, min_result_chars: int = 300) -> l
     uri = db_path.expanduser().resolve().as_uri() + "?mode=ro"
     tasks: list[PastTask] = []
     with closing(sqlite3.connect(uri, uri=True)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(task_history)")}
+        success = "success" if "success" in columns else "NULL"
         rows = conn.execute(
-            "SELECT id, timestamp, task, result FROM task_history"
+            f"SELECT id, timestamp, task, result, {success} FROM task_history"
             " WHERE (parent_task_id IS NULL OR parent_task_id = '') AND length(result) >= ?"
             " ORDER BY timestamp DESC",
             (min_result_chars,),
         )
-        for task_id, timestamp, task, result in rows:
-            if result.startswith(_FAILURE_PREFIXES) or result in _FAILURE_EXACT:
+        for task_id, timestamp, task, result, verdict in rows:
+            if is_failed_result(result, verdict):
                 continue
             tasks.append(PastTask(task_id=task_id, timestamp=timestamp, task=task, result=result))
             if len(tasks) >= limit:

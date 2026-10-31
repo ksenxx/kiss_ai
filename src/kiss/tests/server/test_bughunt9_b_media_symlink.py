@@ -15,6 +15,7 @@ thread executing ``resolve()``.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -47,15 +48,18 @@ class TestMediaSymlinkLoop(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
+        work_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work_dir, True)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=work_dir,
         )
         await self.server.start_async()
         self._loop_thread = threading.get_ident()
 
         self._media_dir = Path(tempfile.mkdtemp(prefix="kiss_media_loop_"))
+        self.addCleanup(shutil.rmtree, self._media_dir, True)
         (self._media_dir / "ok.txt").write_text("hello media")
         (self._media_dir / "loop").symlink_to(self._media_dir / "loop")
         self._orig_media_dir = web_server.MEDIA_DIR
@@ -108,7 +112,9 @@ class TestMediaSymlinkLoop(IsolatedAsyncioTestCase):
         this pins the behaviour of the single-resolve path.
         """
         (self._media_dir / "alias.txt").symlink_to(self._media_dir / "ok.txt")
-        outside = Path(tempfile.mkdtemp(prefix="kiss_media_outside_")) / "secret.txt"
+        outside_dir = tempfile.mkdtemp(prefix="kiss_media_outside_")
+        self.addCleanup(shutil.rmtree, outside_dir, True)
+        outside = Path(outside_dir) / "secret.txt"
         outside.write_text("not yours")
         (self._media_dir / "escape.txt").symlink_to(outside)
         status, body = await self._http_get("/media/alias.txt")

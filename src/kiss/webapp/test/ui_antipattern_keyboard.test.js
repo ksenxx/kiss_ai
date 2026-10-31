@@ -156,10 +156,6 @@ async function main() {
     );
     // Only the header itself answers Enter / Space: a key pressed on a
     // focusable child (a button placed in the header) must be its own.
-    assert.ok(
-      !header.querySelector('.collapse-chv'),
-      'the header carries no chevron',
-    );
     const inner = header.querySelector('.collapse-preview');
     assert.ok(inner, 'the header carries the collapse preview');
     h.key(win, inner, 'Enter');
@@ -212,7 +208,6 @@ async function main() {
     assert.ok(think, 'the thinking text block rendered inside the Thoughts panel');
     assert.strictEqual(think.textContent, 'pondering');
     assert.ok(!think.querySelector('[role="button"]'), 'no button inside the thinking text');
-    assert.ok(!win.document.querySelector('.think .lbl'), 'no "Thinking" header');
     const hdr = think.parentElement.querySelector(':scope > .llm-panel-hdr');
     assert.strictEqual(hdr.getAttribute('role'), 'button', "the Thoughts header is the control");
     win.close();

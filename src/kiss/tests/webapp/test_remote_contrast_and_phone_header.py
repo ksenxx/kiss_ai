@@ -58,6 +58,28 @@ _HEADER_JS = """() => {
   };
 }"""
 
+# Fills the chat header with one machine name and a long directory and
+# measures it in the same task.  The page rebuilds both drop-downs when a
+# daemon reply such as ``machines`` arrives, so a measurement taken by a
+# later ``evaluate`` can see the page's own options instead of these.
+_PHONE_HEADER_JS = (
+    """machine => {
+  const fill = (id, text) => {
+    const select = document.getElementById(id);
+    select.textContent = '';
+    const option = document.createElement('option');
+    option.textContent = text;
+    select.appendChild(option);
+  };
+  fill('chat-machine', machine);
+  fill('chat-workdir', '/home/someone/projects/a-very-long-directory-name/deeper');
+  document.getElementById('chat-header-sep').textContent = ': ';
+  return ("""
+    + _HEADER_JS
+    + """)();
+}"""
+)
+
 
 def test_page_inlines_the_high_contrast_palettes_once() -> None:
     page = _build_html()
@@ -132,26 +154,10 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
                 # with the directory; a long one sends the directory to
                 # a second line.  Both stay inside the viewport.
                 page.set_viewport_size({"width": 390, "height": 844})
-                page.evaluate(
-                    "() => {"
-                    " const m = document.getElementById('chat-machine');"
-                    " m.textContent = '';"
-                    " const o = document.createElement('option');"
-                    " o.textContent = 'koushik-sorcar'; m.appendChild(o);"
-                    " const w = document.getElementById('chat-workdir');"
-                    " w.textContent = '';"
-                    " const d = document.createElement('option');"
-                    " d.textContent = '/home/someone/projects/a-very-long-directory-name/deeper';"
-                    " w.appendChild(d);"
-                    " document.getElementById('chat-header-sep').textContent = ': ';"
-                    "}"
+                short_name = page.evaluate(_PHONE_HEADER_JS, "koushik-sorcar")
+                long_name = page.evaluate(
+                    _PHONE_HEADER_JS, "a-machine-with-a-very-long-registered-name-indeed"
                 )
-                short_name = page.evaluate(_HEADER_JS)
-                page.evaluate(
-                    "() => { document.querySelector('#chat-machine option').textContent ="
-                    " 'a-machine-with-a-very-long-registered-name-indeed'; }"
-                )
-                long_name = page.evaluate(_HEADER_JS)
             finally:
                 browser.close()
     finally:

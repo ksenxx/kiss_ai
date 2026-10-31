@@ -214,7 +214,8 @@ def config_file_lock(path: Path) -> Iterator[None]:
     read-compare-replace cycle, making that cycle a true compare-and-
     swap — a newer value another writer lands can only arrive before
     the cycle's read (so the comparison sees it) or after its write
-    (so it survives), never in between.
+    (so it survives), never in between.  :func:`enroll_credential`
+    holds it across a whole vault enrollment the same way.
 
     The lock is NOT reentrant across separate opens, even in one
     thread: code already holding this lock must write with the raw
@@ -270,6 +271,41 @@ def save_json_config(path: Path, data: dict[str, str]) -> None:
         write_private_file(path, json.dumps(data, indent=2))
 
 
+def probe_credential(
+    url: str, headers: dict[str, str], params: dict[str, str] | None = None
+) -> tuple[Any, str]:
+    """Check a new credential with one direct ``GET``, before anything stores it.
+
+    A Muse-auth enrollment probes the credential first, so one the
+    service rejects leaves the previous enrollment and config as they
+    were.  The request bypasses ambient proxy/netrc settings and never
+    follows a redirect (the credential must not reach another origin).
+
+    Args:
+        url: A read endpoint that answers an accepted credential.
+        headers: The request headers (carrying a header credential).
+        params: Query parameters (carrying a URL credential), if any.
+
+    Returns:
+        ``(decoded JSON body, "")`` on HTTP 200, else ``(None, detail)``
+        where *detail* never contains the credential.
+    """
+    import requests
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        with session:
+            resp = session.get(
+                url, params=params, headers=headers, timeout=30, allow_redirects=False
+            )
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}"
+            return resp.json(), ""
+    except Exception as e:
+        return None, f"{type(e).__name__} while validating the credential"
+
+
 def clear_json_config(path: Path) -> None:
     """Delete a JSON config file if it exists.
 
@@ -282,6 +318,78 @@ def clear_json_config(path: Path) -> None:
     with config_file_lock(path):
         if path.exists():
             path.unlink()
+
+
+def enroll_credential(
+    path: Path,
+    metadata: dict[str, str] | None,
+    service: str,
+    credential: dict[str, Any],
+    hosts: tuple[str, ...] = (),
+    insecure_hosts: tuple[str, ...] = (),
+) -> None:
+    """Store a Muse vault credential and its ``config.json`` metadata as one enrollment.
+
+    The connector's :func:`config_file_lock` is held across both steps,
+    so competing enrollments in any process (and every other config
+    writer) serialize: one enrollment's metadata never ends up next to
+    another's credential.  The metadata is written first, so a failure
+    to take the lock or to write the file leaves the vault untouched.
+    If anything fails or is interrupted (a Stop) after that, the vault's
+    credential generation decides: unchanged means the store did not
+    land, so the previous file is put back (no other writer can have
+    replaced it while the lock was held); changed means it landed even
+    if its reply was lost, so the new metadata stays.
+
+    Args:
+        path: The connector's ``config.json``.
+        metadata: The non-secret settings to write, or ``None`` to
+            delete the file.
+        service: The Muse vault service name.
+        credential: The credential to store.
+        hosts: Origins the credential may be injected into.
+        insecure_hosts: The subset of *hosts* allowed over plain HTTP.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import (
+        credential_generation,
+        store_credentials,
+    )
+
+    with config_file_lock(path):
+        try:
+            previous: str | None = path.read_text()
+        except FileNotFoundError:
+            previous = None
+        generation = credential_generation(service)
+        try:
+            _replace_config(path, None if metadata is None else json.dumps(metadata, indent=2))
+            store_credentials(service, credential, [], hosts=hosts, insecure_hosts=insecure_hosts)
+        except BaseException:
+            if not _vault_moved_on(service, generation):
+                _replace_config(path, previous)
+            raise
+
+
+def _vault_moved_on(service: str, generation: str) -> bool:
+    """Return whether *service*'s vault credential is no longer *generation*.
+
+    A daemon that cannot be asked counts as "no": the failure that left
+    it unreachable most likely kept the store from landing too.
+    """
+    from kiss.agents.third_party_agents.muse_auth.client import credential_generation
+
+    try:
+        return credential_generation(service) != generation
+    except Exception:
+        return False
+
+
+def _replace_config(path: Path, text: str | None) -> None:
+    """Write *text* to *path* privately, or delete *path* when *text* is ``None``."""
+    if text is None:
+        path.unlink(missing_ok=True)
+    else:
+        write_private_file(path, text)
 
 
 class ChannelConfig:

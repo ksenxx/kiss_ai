@@ -49,6 +49,7 @@ import asyncio
 import json
 import os
 import random
+import shutil
 import tempfile
 import threading
 import unittest
@@ -97,7 +98,9 @@ class TestJobTrajectoriesAuthorization(unittest.TestCase):
 
     def setUp(self) -> None:
         """Seed a jobs root with one legit job plus decoy targets."""
-        self._root = Path(tempfile.mkdtemp(prefix="kiss_f3_jobs_")) / "jobs"
+        jobs_tmp = Path(tempfile.mkdtemp(prefix="kiss_f3_jobs_"))
+        self.addCleanup(shutil.rmtree, jobs_tmp, True)
+        self._root = jobs_tmp / "jobs"
         self._root.mkdir(parents=True)
         _write_trajectory(
             self._root / "job_2024_01_01_00_00_00_1", "Legit Agent",
@@ -106,6 +109,7 @@ class TestJobTrajectoriesAuthorization(unittest.TestCase):
         _write_trajectory(self._root / "private", "Private Agent")
         # A ``job_*``-named symlink escaping the jobs tree entirely.
         self._outside = Path(tempfile.mkdtemp(prefix="kiss_f3_outside_"))
+        self.addCleanup(shutil.rmtree, self._outside, True)
         _write_trajectory(self._outside / "leak", "Outside Agent")
         os.symlink(self._outside / "leak", self._root / "job_evil")
         self._orig_get_jobs_root = web_server.get_jobs_root
@@ -233,6 +237,7 @@ class TestOversizedResultFraming(unittest.TestCase):
         # the buggy client would split and discard the terminal frame.
         big_text = "R" * (16 * 1024 * 1024 + 4096)
         tmpdir = Path(tempfile.mkdtemp(prefix="kiss_f3_local_"))
+        self.addCleanup(shutil.rmtree, tmpdir, True)
 
         async def handler(ws: ServerConnection) -> None:
             await _replay_scripted_result(ws, big_text)
@@ -268,10 +273,12 @@ class TestAuthRateLimitRace(IsolatedAsyncioTestCase):
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": _PASSWORD})
+        work_dir = tempfile.mkdtemp(prefix="kiss_f3_work_")
+        self.addCleanup(shutil.rmtree, work_dir, True)
         self._server = RemoteAccessServer(
             host="127.0.0.1",
             port=self._port,
-            work_dir=tempfile.mkdtemp(),
+            work_dir=work_dir,
             use_tunnel=False,
         )
         await self._server.start_async()
@@ -374,6 +381,7 @@ class TestConcurrentApiKeySave(unittest.TestCase):
     def setUp(self) -> None:
         """Redirect ``$HOME`` to a temp dir and force a bash RC."""
         self._home = tempfile.mkdtemp(prefix="kiss_f3_home_")
+        self.addCleanup(shutil.rmtree, self._home, True)
         self._saved_home = os.environ.get("HOME")
         self._saved_shell = os.environ.get("SHELL")
         os.environ["HOME"] = self._home

@@ -26,6 +26,9 @@ function makeDom() {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  // The tree menu's keyboard model and clamp are contentContextMenu.js's,
+  // loaded first as in chat.html.
+  win.eval(fs.readFileSync(path.join(MEDIA, 'contentContextMenu.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'treeContextMenu.js'), 'utf8'));
   assert.ok(
     win.TreeContextMenu,

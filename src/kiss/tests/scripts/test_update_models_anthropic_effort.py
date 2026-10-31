@@ -76,8 +76,25 @@ def test_anthropic_ladder_per_generation(name: str, ladder: tuple[str, ...]) -> 
 
 def test_non_claude_keys_keep_their_own_ladders() -> None:
     assert mod._thinking_scale_for("gpt-6.1-sol") == mod._THINKING_LEVELS
-    assert mod._thinking_scale_for("openrouter/anthropic/claude-opus-5.5") == mod._THINKING_LEVELS
     assert mod._thinking_scale_for("cc/claude-opus-5-5") == mod._THINKING_LEVELS
+    rolling = "openrouter/~anthropic/claude-opus-latest"  # no fixed Claude model behind it
+    assert mod._thinking_scale_for(rolling) == mod._THINKING_LEVELS
+
+
+def test_openrouter_claude_slugs_use_the_twin_ladder() -> None:
+    """A dotted OpenRouter slug gets the ladder of the hyphenated Claude id behind it."""
+    assert mod._thinking_scale_for("openrouter/anthropic/claude-opus-5.5") == FULL
+    assert mod._thinking_scale_for("openrouter/anthropic/claude-opus-4.5") == (
+        "low",
+        "medium",
+        "high",
+    )
+    assert mod._thinking_scale_for("openrouter/anthropic/claude-sonnet-4.6") == (
+        "low",
+        "medium",
+        "high",
+        "max",
+    )
 
 
 def test_detect_probes_direct_claude_descending(monkeypatch: pytest.MonkeyPatch) -> None:

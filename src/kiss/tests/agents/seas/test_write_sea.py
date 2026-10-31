@@ -5,14 +5,16 @@
 """End-to-end tests of the bundled ``/write`` agent (:mod:`kiss.agents.seas.write.write_sea`).
 
 The SEA class defines ``description()``, a ``system_prompt()`` that appends
-its protocol and a ``settings()`` with ``timeout`` only, so the tests check
-the things that matter: the slash command resolves to this file, a
-``run_agent`` dispatch of it waits one hour by default (a shorter default
-wait once stopped a README rewrite before it was returned), the daemon-side
-loader stages its protocol as a system-prompt hook that appends, and a real
-:class:`ChatSorcarAgent` run configured that way (against the scripted local
-chat-completions server) sends the default system prompt with the protocol
-added, never replaced.
+its protocol and a ``settings()`` with ``timeout`` and ``model``, so the
+tests check the things that matter: ``/write help`` answers with the
+description, a ``run_agent`` dispatch of it waits one hour by default (a
+shorter default wait once stopped a README rewrite before it was returned),
+the daemon-side loader stages its protocol as a system-prompt hook that
+appends, and a real :class:`ChatSorcarAgent` run configured that way
+(against the scripted local chat-completions server) sends the default
+system prompt with the protocol added, never replaced.  That ``/write``
+resolves to this file is pinned for every public SEA by
+``test_bundled_seas.py``.
 """
 
 from __future__ import annotations

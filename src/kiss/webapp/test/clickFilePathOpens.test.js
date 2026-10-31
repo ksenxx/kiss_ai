@@ -216,13 +216,26 @@ function testSentenceTrailingPunctuationNotIncluded() {
 
 function testFilePathInsideExistingAnchorNotDoubleLinkified() {
   const {win} = makePage();
+  // A result summary renders its HTML, so the anchor is a real element
+  // (a prompt would show the same markup as escaped text).
   send(win, {
-    type: 'prompt',
-    text: '<a href="https://x.com/foo">https://x.com/foo</a>',
+    type: 'result',
+    summary:
+      '<p><a href="https://x.com/foo">see /tmp/x/y.py</a> and /tmp/x/z.py</p>',
+    success: true,
   });
-  const links = findLinks(win, '/foo');
+  const out = win.document.getElementById('output');
+  assert.ok(
+    out.querySelector('a[href="https://x.com/foo"]'),
+    'the anchor in the summary must render as an element',
+  );
   assert.strictEqual(
-    links.length,
+    findLinks(win, '/tmp/x/z.py').length,
+    1,
+    'a path next to the anchor must still be linkified',
+  );
+  assert.strictEqual(
+    out.querySelectorAll('a [data-path]').length,
     0,
     'no data-path span inside an existing anchor',
   );

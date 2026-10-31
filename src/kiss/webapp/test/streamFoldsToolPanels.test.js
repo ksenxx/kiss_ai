@@ -10,8 +10,7 @@
 // event.  A tool-call panel starts folded the moment it renders (its
 // header carries the call) and only a click of the user unfolds it,
 // however new it is; a Thoughts panel (the agent's own words) is never
-// folded by the pass.  (The file name predates the pass folding every
-// tool call: the "newest two" allowance no longer exists.)
+// folded by the pass.
 //
 // Covered here, on the visible tab and on a tab that ran while hidden:
 //   * after every event, every tool-call panel is folded unless the
@@ -107,7 +106,7 @@ function run() {
   ];
 }
 
-function testVisibleStreamKeepsNewestTwoOpen() {
+function testVisibleStreamFoldsToolPanels() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
@@ -180,7 +179,7 @@ function testUserPinnedPanelStaysOpen() {
   console.log('  ok - a user-pinned panel is never folded by the stream');
 }
 
-function testHiddenTabComesBackWithNewestTwoOpen() {
+function testHiddenTabComesBackFolded() {
   const {win} = makePage();
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
@@ -212,10 +211,10 @@ function testHiddenTabComesBackWithNewestTwoOpen() {
 }
 
 function main() {
-  testVisibleStreamKeepsNewestTwoOpen();
+  testVisibleStreamFoldsToolPanels();
   testUserPinnedPanelStaysOpen();
-  testHiddenTabComesBackWithNewestTwoOpen();
-  console.log('streamKeepsTwoPanelsOpen.test.js: all tests passed');
+  testHiddenTabComesBackFolded();
+  console.log('streamFoldsToolPanels.test.js: all tests passed');
 }
 
 main();

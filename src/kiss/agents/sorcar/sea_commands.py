@@ -67,7 +67,8 @@ Locking: two module locks, always acquired in the order
 subscriber list; ``_notify_lock`` wraps the publish-and-notify section
 of :func:`refresh_registry` so subscribers see snapshots in the order
 they were published.  Nothing calls :func:`refresh_registry` while
-holding ``_lock``.
+holding ``_lock``.  The folders are read under no lock; a rescan that
+started before the last published one is dropped instead of published.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import inspect
+import itertools
 import json
 import logging
 import operator
@@ -83,7 +85,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -121,6 +123,13 @@ _COMMAND_NAME_RE = re.compile(rf"^{_COMMAND_NAME_CHARS}$")
 # A prompt that invokes a command: ``/<name>`` at the very first character,
 # then whitespace (or the end) and the sub-task text.
 _SLASH_RE = re.compile(rf"/({_COMMAND_NAME_CHARS})(?:\s+(.*))?\Z", re.S)
+# A text that names a command: ``/<name>`` at its start or after whitespace,
+# an opening bracket, a quote or Markdown emphasis, and not a path, a URL or
+# a Markdown link target (``~/x``, ``a/x``, ``/x/``, ``/x.py``, ``/x?q=1``,
+# ``/x#a``, ``[t](/x)``).
+_MENTION_RE = re.compile(
+    rf"(?<![^\s(\[\"'`*\u201c\u2018])(?<!\]\()/({_COMMAND_NAME_CHARS})(?![\w/-]|[.?#]\w)"
+)
 
 # Poll interval for the background watcher, in seconds.
 _WATCHER_POLL_SECONDS = 2.0
@@ -153,6 +162,13 @@ _subscribers: list[Callable[[list[str]], None]] = []
 # Last snapshot broadcast to subscribers.  Deduplicates identical
 # rescans so the daemon does not spam clients with unchanged lists.
 _last_broadcast: tuple[str, ...] = ()
+
+# Numbers the rescans in the order they start (``next`` of the C counter
+# is atomic), and the number of the last rescan published (guarded by
+# ``_lock``): a rescan that started before the published one is stale
+# and is dropped, so the registry never goes back to an older scan.
+_scan_numbers = itertools.count(1)
+_published_scan = 0
 
 # ``register_as_model()`` verdict per SEA script, keyed by path and
 # stamped with the file's (mtime_ns, size, inode) so an edited or
@@ -291,20 +307,29 @@ def _builtin_commands() -> dict[str, Path]:
     return out
 
 
-def bundled_commands() -> dict[str, Path]:
-    """Return ``{command_name: script_path}`` for every command the package ships.
+def _scan_sources(user_folders: Iterable[Path]) -> dict[str, Path]:
+    """Return ``{command_name: script_path}`` merged from every source, in registry precedence.
 
     The built-in scripts (:data:`BUILTIN_COMMANDS`), the bundled
-    ``seas/`` folder and the bundled ``third_party_agents/`` folder, in
-    the registry's precedence (a later source overwrites an earlier
-    one), without the user's ``SEAS.md`` folders: the deterministic
-    list ``sea docs`` renders.
+    ``seas/`` folder, *user_folders* (the ``SEAS.md`` folders, top line
+    first) and the bundled ``third_party_agents/`` folder, each source
+    overwriting the ones before it (:func:`refresh_registry`).
     """
     merged = _builtin_commands()
-    for folder in (_seas_dir(), _third_party_dir()):
+    for folder in (_seas_dir(), *user_folders, _third_party_dir()):
         if folder is not None:
             merged.update(_scan_folder(folder))
     return merged
+
+
+def bundled_commands() -> dict[str, Path]:
+    """Return ``{command_name: script_path}`` for every command the package ships.
+
+    The registry's sources and precedence (:func:`_scan_sources`)
+    without the user's ``SEAS.md`` folders: the deterministic list
+    ``sea docs`` renders.
+    """
+    return _scan_sources(())
 
 
 def _read_seas_md_folders() -> list[Path]:
@@ -360,9 +385,16 @@ def refresh_registry() -> list[str]:
     3. ``src/kiss/agents/seas/`` (the bundled Sorcar-extending SEAs).
 
     Concretely: the merge walks the sources from LOWEST precedence to
-    HIGHEST (bundled ``seas/`` first, then top-of-file SEAS.md entries,
-    third-party last) and lets each source overwrite the previous one,
-    so the highest source ends up in the registry.
+    HIGHEST (the built-in scripts, bundled ``seas/``, then top-of-file
+    SEAS.md entries, third-party last) and lets each source overwrite
+    the previous one (:func:`_scan_sources`), so the highest source
+    ends up in the registry.
+
+    Rescans run concurrently and hold no lock while they read the
+    folders, so one stuck on a slow folder delays no other.  Each is
+    numbered when it starts and published only if no later-started
+    rescan was published first (:func:`_publish`): an older scan never
+    replaces a newer one.
 
     Returns:
         The sorted list of command names now installed.  Subscribers
@@ -370,44 +402,28 @@ def refresh_registry() -> list[str]:
         ``_notify_lock``, outside ``_lock``) when the list differs
         from the previous broadcast, in publish order.
     """
-    sources: list[dict[str, Path]] = []
-    # Built-in SEAs and the bundled ``seas/`` first: any
-    # SEAS.md folder may shadow them.
-    sources.append(_builtin_commands())
-    seas_dir = _seas_dir()
-    if seas_dir is not None:
-        sources.append(_scan_folder(seas_dir))
-    # SEAS.md folders: top to bottom.  We want bottom to WIN, so
-    # iterate top-first and let the bottom entries overwrite.
-    for folder in _read_seas_md_folders():
-        sources.append(_scan_folder(folder))
-    # Third-party agents last: they override everything.
-    third_party_dir = _third_party_dir()
-    if third_party_dir is not None:
-        sources.append(_scan_folder(third_party_dir))
-
-    merged: dict[str, Path] = {}
-    for src in sources:
-        merged.update(src)
-    return _publish(merged)
+    scan = next(_scan_numbers)
+    return _publish(scan, _scan_sources(_read_seas_md_folders()))
 
 
 @locked(_notify_lock)
-def _publish(merged: dict[str, Path]) -> list[str]:
-    """Install *merged* as the registry and notify the subscribers of a change.
+def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
+    """Install rescan number *scan*'s *merged* as the registry; notify the subscribers of a change.
 
-    Compare-and-swap under ``_lock`` so two concurrent rescans can
-    never both observe the old ``_last_broadcast`` and fire the
-    same notification twice.  The whole publish-and-notify section
-    runs under ``_notify_lock`` (order: ``_notify_lock`` -> ``_lock``)
-    so snapshots reach subscribers in publish order; ``_lock`` itself
-    is released before the callbacks run so a subscriber that calls
-    back into the module — e.g. :func:`list_commands` — cannot
-    deadlock.  Both locks are taken through :func:`locked` because a
-    task thread rescans too (:func:`get_command` on a miss) and the
-    runner's Stop injection must not leak them.
+    Compare-and-swap under ``_lock`` (:func:`_swap_registry`) so two
+    concurrent rescans can never both observe the old
+    ``_last_broadcast`` and fire the same notification twice, and a
+    rescan older than the one last published is dropped.  The whole
+    publish-and-notify section runs under ``_notify_lock`` (order:
+    ``_notify_lock`` -> ``_lock``) so snapshots reach subscribers in
+    publish order; ``_lock`` itself is released before the callbacks
+    run so a subscriber that calls back into the module — e.g.
+    :func:`list_commands` — cannot deadlock.  Both locks are taken
+    through :func:`locked` because a task thread rescans too
+    (:func:`get_command` on a miss) and the runner's Stop injection
+    must not leak them.
     """
-    snapshot, callbacks = locked_call(_lock, _swap_registry, merged)
+    snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged)
     for cb in callbacks:
         try:
             cb(list(snapshot))
@@ -416,9 +432,18 @@ def _publish(merged: dict[str, Path]) -> list[str]:
     return snapshot
 
 
-def _swap_registry(merged: dict[str, Path]) -> tuple[list[str], list[Callable[[list[str]], None]]]:
-    """Replace the registry with *merged*; return the snapshot and the callbacks to notify."""
-    global _last_broadcast
+def _swap_registry(
+    scan: int, merged: dict[str, Path]
+) -> tuple[list[str], list[Callable[[list[str]], None]]]:
+    """Replace the registry with rescan *scan*'s *merged*; return the snapshot and the callbacks.
+
+    A rescan that started before the last published one is stale: the
+    registry is kept and nobody is notified.
+    """
+    global _last_broadcast, _published_scan
+    if scan < _published_scan:
+        return sorted(_registry), []
+    _published_scan = scan
     _registry.clear()
     _registry.update(merged)
     snapshot = sorted(_registry)
@@ -550,7 +575,10 @@ def load_sea(sea_path: Path) -> BaseSea:
         SeaError: When the file cannot be read, compiled or
             executed (whatever it raises), defines no or several
             subclasses of :class:`BaseSea`, or its class cannot be
-            instantiated without arguments.
+            instantiated without arguments.  A Stop landing in the
+            import or the instantiation
+            (:func:`~kiss.agents.sorcar.sea_settings.is_stop`) is
+            re-raised unchanged instead.
     """
     namespace = execute_python_file(str(sea_path))
     classes = [
@@ -567,6 +595,8 @@ def load_sea(sea_path: Path) -> BaseSea:
     try:
         sea = classes[0]()
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        if is_stop(exc):
+            raise
         raise SeaError(
             f"SEA {str(sea_path)!r}: {classes[0].__name__}() raised: {safe_message(exc)}"
         ) from exc
@@ -610,7 +640,9 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
     return type(load_sea(path.resolve()))
 
 
-def sea_layers(sea_path: Path, base: Path | None = None) -> list[BaseSea]:
+def sea_layers(
+    sea_path: Path, base: Path | None = None, loaded: Iterable[BaseSea] = (),
+) -> list[BaseSea]:
     """Load the SEA at *sea_path*, under the model-picker SEA *base* when there is one.
 
     Args:
@@ -618,6 +650,8 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[BaseSea]:
         base: Path of a SEA whose methods apply before *sea_path*'s
             (the model-picker SEA of the tab a run was submitted from),
             or ``None``.
+        loaded: SEAs already loaded: one whose :attr:`BaseSea.path` is
+            a layer's file is reused instead of executing it again.
 
     Returns:
         The loaded SEAs, *base* first; one entry when *base* is
@@ -628,9 +662,10 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[BaseSea]:
             settings fail in :func:`evaluate_sea`, which every caller
             runs next.
     """
-    seas = [load_sea(sea_path)]
+    by_path = {sea.path: sea for sea in loaded}
+    seas = [by_path.get(sea_path) or load_sea(sea_path)]
     if base is not None and base != sea_path:
-        seas.insert(0, load_sea(base))
+        seas.insert(0, by_path.get(base) or load_sea(base))
     return seas
 
 
@@ -687,7 +722,7 @@ def _file_of(obj: Any) -> Path | None:
 def _bound(sea: BaseSea, cls: type, name: str) -> Callable[..., Any]:
     """Return the method *name* of *cls* bound to *sea*; a non-function attribute is an error."""
     attr = vars(cls)[name]
-    if not callable(attr) or isinstance(attr, type):
+    if not callable(attr) or isinstance(attr, (type, staticmethod)):
         raise SeaError(
             f"{name} of SEA {str(sea.path)!r} must be a method, "
             f"got {type(attr).__name__}"
@@ -736,11 +771,6 @@ def _call(method: Callable[..., Any], *args: Any) -> Any:
         raise SeaError(f"{_label(method)} raised: {safe_message(exc)}") from exc
 
 
-def _fold[T](seas: list[BaseSea], name: str, value: T, check: Callable[[str, Any], T]) -> T:
-    """Thread *value* through every *name* method of *seas*, checking each result with *check*."""
-    return _fold_methods(_chain(seas, name), value, check)
-
-
 def _fold_methods[T](
     methods: list[Callable[..., Any]], value: T, check: Callable[[str, Any], T]
 ) -> T:
@@ -762,7 +792,7 @@ def declared_settings(seas: list[BaseSea]) -> dict[str, Any]:
     Raises:
         SeaError: When a ``settings`` method raises or returns no dict.
     """
-    return _fold(seas, "settings", {}, _check_dict)
+    return _fold_methods(_chain(seas, "settings"), {}, _check_dict)
 
 
 def own_settings(sea: BaseSea) -> dict[str, Any]:
@@ -1009,6 +1039,8 @@ def _check_text(label: str, value: Any) -> str:
     try:
         return str(value)
     except BaseException as exc:  # noqa: BLE001 — an untrusted str subclass may raise
+        if is_stop(exc):
+            raise
         raise SeaError(f"{label} returned a broken value: {safe_message(exc)}") from exc
 
 
@@ -1032,6 +1064,8 @@ def _check_tools(label: str, value: Any) -> list[Callable[..., Any]]:
         if isinstance(value, list) and all(callable(tool) for tool in value):
             return value
     except BaseException as exc:  # noqa: BLE001 — an untrusted list may raise while iterated
+        if is_stop(exc):
+            raise
         raise SeaError(f"{label} returned a broken list: {safe_message(exc)}") from exc
     raise _reject(label, value, "a list of tool callables (not a file path)")
 
@@ -1332,7 +1366,7 @@ def sea_check(name: str, sea_path: Path) -> str:
     lines = [
         f"/{name}: {check.description}",
         "classes: " + " > ".join(classes),
-        "settings: " + (json.dumps(settings, sort_keys=True, default=str) or "{}"),
+        "settings: " + json.dumps(settings, sort_keys=True, default=str),
         f"model: {model}",
         "tools added: " + (", ".join(_tool_name(tool) for tool in check.tools) or "none"),
         "methods defined: " + (", ".join(defined) or "none"),
@@ -1381,6 +1415,56 @@ def help_text_if_command(prompt: str) -> str | None:
     if parsed[1].lower() == "check":
         return sea_check(parsed[0], sea_path)
     return sea_description(load_sea(sea_path))
+
+
+NAMED_COMMANDS_HEADING = "# Slash commands the user named"
+"""The heading of the block :func:`named_commands_help` returns."""
+
+
+def named_commands_help(task: str, earlier: Iterable[str] = ()) -> str:
+    """Return the ``/xxx help`` text of every registered command *task* or *earlier* name.
+
+    A task told to "use /discover" otherwise sees only the name.  A text
+    names command ``xxx`` with ``/xxx`` at its start or after whitespace,
+    an opening bracket, a quote or Markdown emphasis; ``~/xxx``,
+    ``a/xxx``, ``/xxx/``, ``/xxx.py``, ``/xxx?q=1``, ``/xxx#a`` and the
+    Markdown link target ``[t](/xxx)`` do not.
+
+    Args:
+        task: The task.  One that invokes a registered command itself (a
+            bare ``/xxx`` that fell back to a plain prompt) gets no
+            block, so that SEA file stays executed once.
+        earlier: Earlier tasks of the chat.
+
+    Returns:
+        A prompt block: :data:`NAMED_COMMANDS_HEADING`, how to run a
+        command, and one ``- `/xxx`: <description()>`` line per named
+        command in order of first mention; ``""`` when none is named.
+        A command whose SEA fails to load is left out.
+    """
+    texts = [task, *earlier]
+    names = dict.fromkeys(name for text in texts for name in _MENTION_RE.findall(text))
+    if not names:
+        return ""
+    registry = dict(registered_entries())
+    invoked = _split_slash_command(task)
+    if invoked is not None and invoked[0] in registry:
+        return ""
+    lines = []
+    for name in names:
+        if name in registry:
+            try:
+                lines.append(f"- `/{name}`: {sea_description(load_sea(registry[name]))}")
+            except SeaError:
+                continue
+    if not lines:
+        return ""
+    return "\n".join([
+        NAMED_COMMANDS_HEADING,
+        'Each is an agent; run one with run_agent(agent="<name>", task="...") when the '
+        "task calls for it.  What each does:",
+        *lines,
+    ])
 
 
 def slash_command(prompt: str) -> tuple[str, Path] | None:

@@ -2,247 +2,85 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression test: creating a new tab while a task is running in the
-current tab must NOT leave the new tab's input textbox and send button
-disabled.
+"""Regression test: "+" while a task runs in the current chat opens a chat
+whose composer is ready for a new task.
 
-Root cause: ``createNewTab()`` delegates reset to ``restoreTab(tab)``
-which ends with ``updateInputDisabled()``.  ``updateInputDisabled`` reads
-the *module-global* ``isRunning`` (not ``tab.isRunning``), so when the
-previous tab had ``isRunning=true`` the flag stays true across the tab
-switch and the new tab's ``inp`` / ``sendBtn`` appear blocked.
+``createNewTab()`` shows the new tab through ``restoreTab(tab)``, which
+leaves the page's running state alone, so it must then call
+``setRunningState(false)``.  Without that call the busy chat's running
+state carried over to the new chat: its input and Send were blocked
+(the input lock of the time) and Stop stayed on screen.
 
-``switchToTab`` and ``closeTab`` compensate by calling
-``setRunningState(tab.isRunning)`` after ``restoreTab``; ``createNewTab``
-must do the same.
+The test drives the real chat page (``media/chat.html`` with ``api.js``
+and ``main.js`` in jsdom, built by
+``src/kiss/webapp/test/simplify2_harness.js``): a ``status`` event marks
+the first chat running, a click on the "+" button opens the new chat,
+and the test reads the composer controls of both.
 """
 
 from __future__ import annotations
 
-import re
+import json
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
 
-_MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "kiss"
-    / "webapp"
-    / "media"
-    / "main.js"
-)
-_API_JS = _MAIN_JS.with_name("api.js")
+_WEBAPP_DIR = Path(__file__).resolve().parents[2] / "webapp"
+_HARNESS = _WEBAPP_DIR / "test" / "simplify2_harness.js"
+_JSDOM_PKG = _WEBAPP_DIR / "node_modules" / "jsdom" / "package.json"
 
-
-def _extract_fn_body(src: str, header: str) -> str:
-    """Return the source of a top-level ``function name() { ... }`` block
-    whose header matches ``header`` (e.g. ``function createNewTab(``).
-    Braces are matched by counting; string/comment handling is minimal
-    and sufficient for main.js."""
-    start = src.index(header)
-    brace = src.index("{", start)
-    depth = 0
-    i = brace
-    while i < len(src):
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
-        i += 1
-    raise AssertionError(f"unterminated function body for {header}")
-
-
-def _run_node(script: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["node", "-e", script],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+_SCRIPT = r"""
+const {makePage, send, click, byId, stubRaf, readyTabId} = require(%s);
+const {win, posted} = makePage({bodyClass: 'remote-chat', beforeScripts: stubRaf});
+function controls() {
+  return {
+    tab: win._testApi.getActiveTabId(),
+    runningTabs: win._testApi.openTabs().filter(t => t.isRunning).map(t => t.id),
+    inputDisabled: byId(win, 'task-input').disabled,
+    sendDisabled: byId(win, 'send-btn').disabled,
+    sendDisplay: byId(win, 'send-btn').style.display,
+    stopDisplay: byId(win, 'stop-btn').style.display,
+  };
+}
+const boot = readyTabId(posted);
+send(win, {type: 'status', running: true, tabId: boot});
+const busy = controls();
+click(win, byId(win, 'new-chat-btn'));
+process.stdout.write(JSON.stringify({boot, busy, fresh: controls()}));
+win.close();
+"""
 
 
 class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
-    """End-to-end-ish behavioural test: load the real ``createNewTab``
-    source from main.js, stub its DOM/transport dependencies, simulate a
-    running task, invoke ``createNewTab``, and assert that the new tab's
-    input controls are not disabled."""
+    """The new chat opened from a busy chat is idle; the busy chat keeps running."""
 
-    js: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_new_tab_does_not_disable_input_when_prior_tab_running(
-        self,
-    ) -> None:
-        create_new_tab_src = _extract_fn_body(self.js, "function createNewTab(")
-        assert "saveCurrentTab()" in create_new_tab_src
-        assert "makeTab(" in create_new_tab_src
-        assert "restoreTab(tab)" in create_new_tab_src
-
-        preamble = r"""
-            var isRunning = false;
-            var isMerging = false;
-            var inp = { value: '', disabled: false, style: {} };
-            var sendBtn = { disabled: false, style: {} };
-            var stopBtn = { style: {} };
-            var uploadBtn = { disabled: false };
-            var worktreeToggleBtn = { disabled: false };
-            var parallelToggleBtn = { disabled: false };
-            var modelBtn = { disabled: false };
-            var tabs = [];
-            var activeTabId = '';
-            var t0 = null;
-            var _idCounter = 0;
-            var _postedMessages = [];
-            var transport = { postMessage: function(m) { _postedMessages.push(m); } };
-
-            function clearGhost() {}
-            function hideAC() {}
-            function closeModelDD() {}
-            // Opening a chat ends the launch tab switch; irrelevant here.
-            function closeLaunchSwitch() {}
-            // The real one announces the tab to the daemon's shared tab
-            // registry; keep the announce observable via api.openTab.
-            function registerTab(tab) {
-                api.openTab({
-                    tabId: tab.id,
-                    title: tab.title || 'new chat',
-                    workDir: tab.workDir || '',
-                });
-            }
-            function startTimer() {}
-            function stopTimer() {}
-            function removeSpinner() {}
-            function focusInputWithRetry() {}
-            function renderTabBar() {}
-            function persistTabState() {}
-            function syncAskModalToActiveTab() {}
-            function resetAdjacentState() {}
-            function renderFileChips() {}
-            function syncClearBtn() {}
-            function updateChevronIcon() {}
-            function applyChevronState() {}
-
-            // Mirror main.js exactly:
-            function updateInputDisabled() {
-                var blocked = isRunning || isMerging;
-                inp.disabled = blocked;
-                sendBtn.disabled = blocked;
-            }
-            function setRunningState(running) {
-                isRunning = running;
-                sendBtn.style.display = running ? 'none' : 'flex';
-                stopBtn.style.display = running ? 'flex' : 'none';
-                uploadBtn.disabled = running;
-                worktreeToggleBtn.disabled = running;
-                parallelToggleBtn.disabled = running;
-                modelBtn.disabled = running;
-                updateInputDisabled();
-                if (running) startTimer();
-            }
-
-            function makeTab(title) {
-                return {
-                    id: 'tab-' + (++_idCounter),
-                    title: title || 'new chat',
-                    isRunning: false,
-                    isMerging: false,
-                    inputValue: '',
-                    attachments: [],
-                    selectedModel: 'claude-opus-4-6',
-                    panelsExpanded: false,
-                };
-            }
-
-            // saveCurrentTab's only relevant side effect for this test is
-            // persisting the running flag onto the current tab — which
-            // does NOT clear the module-global isRunning.
-            function saveCurrentTab() {
-                var tab = tabs.find(function(t) { return t.id === activeTabId; });
-                if (!tab) return;
-                tab.isRunning = isRunning;
-                tab.isMerging = isMerging;
-                tab.inputValue = inp.value;
-            }
-
-            // restoreTab mirrors main.js: restores isMerging from tab but
-            // NOT isRunning, then calls updateInputDisabled() — which
-            // reads the stale module-global isRunning.
-            function restoreTab(tab) {
-                activeTabId = tab.id;
-                inp.value = tab.inputValue || '';
-                isMerging = tab.isMerging || false;
-                updateInputDisabled();
-            }
-
-            // Seed: tab 1 is running.
-            var tab1 = makeTab('running task');
-            tabs.push(tab1);
-            activeTabId = tab1.id;
-            setRunningState(true);
-
-            // Invariant check on seed state:
-            if (inp.disabled !== true || sendBtn.disabled !== true) {
-                process.stdout.write('SEED_FAIL');
-                process.exit(1);
-            }
-
-            // The REAL createNewTab from main.js is appended after this
-            // preamble, followed by the harness invocation.
-            """
-        harness = r"""
-            // Exercise the bug:
-            createNewTab();
-
-            // The freshly-created tab is not running.  Its input must be
-            // enabled.
-            if (inp.disabled === false && sendBtn.disabled === false) {
-                process.stdout.write('PASS');
-            } else {
-                process.stdout.write(
-                    'FAIL inp.disabled=' + inp.disabled
-                    + ' sendBtn.disabled=' + sendBtn.disabled);
-            }
-            """
-        script = (
-            preamble
-            + "\n" + _API_JS.read_text()
-            + "\nvar api = createSorcarApi(function(m) { transport.postMessage(m); });\n"
-            + create_new_tab_src + "\n" + harness
+    def test_new_tab_does_not_disable_input_when_prior_tab_running(self) -> None:
+        if shutil.which("node") is None:
+            self.skipTest("node is not available on PATH")
+        if not _JSDOM_PKG.is_file():
+            self.skipTest(f"jsdom is not installed under {_JSDOM_PKG.parents[1]}")
+        result = subprocess.run(
+            ["node", "-e", _SCRIPT % json.dumps(str(_HARNESS))],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(_WEBAPP_DIR),
         )
-        result = _run_node(script)
-        assert result.returncode == 0, (
-            f"node error: {result.stderr}\nstdout: {result.stdout}"
-        )
-        assert result.stdout == "PASS", (
-            f"createNewTab left input blocked: {result.stdout}"
-        )
+        assert result.returncode == 0, f"node error: {result.stderr}\nstdout: {result.stdout}"
+        out = json.loads(result.stdout)
+        boot, busy, fresh = out["boot"], out["busy"], out["fresh"]
 
+        assert busy["tab"] == boot and busy["runningTabs"] == [boot], busy
+        assert busy["stopDisplay"] == "flex", busy
 
-class TestCreateNewTabStructural(unittest.TestCase):
-    """Static guard: ``createNewTab`` must sync the module-global running
-    state with the new tab's ``isRunning`` (which is false for fresh
-    tabs).  Mirrors the explicit ``setRunningState(tab.isRunning)`` call
-    that ``switchToTab`` and ``closeTab`` already make after
-    ``restoreTab``."""
-
-    js: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_create_new_tab_syncs_running_state(self) -> None:
-        body = _extract_fn_body(self.js, "function createNewTab(")
-        assert re.search(r"setRunningState\(\s*(false|tab\.isRunning)\s*\)", body), (
-            "createNewTab() must call setRunningState(false) or "
-            "setRunningState(tab.isRunning) after restoreTab(tab); otherwise "
-            "the previous tab's running state persists and blocks input."
+        assert fresh["tab"] != boot, fresh
+        assert fresh["runningTabs"] == [boot], "the busy chat keeps running"
+        assert fresh["inputDisabled"] is False, fresh
+        assert fresh["sendDisabled"] is False, fresh
+        assert fresh["sendDisplay"] == "flex", fresh
+        assert fresh["stopDisplay"] == "none", (
+            f"the new chat shows the busy chat's Stop button: {fresh}"
         )
 
 

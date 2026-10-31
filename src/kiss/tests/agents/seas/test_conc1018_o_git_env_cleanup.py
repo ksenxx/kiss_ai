@@ -78,8 +78,9 @@ def test_failed_async_set_up_restores_the_git_environment(tmp_path: Path) -> Non
         timeout=300,
     )
     report = f"{proc.stdout}\n{proc.stderr}"
-    # pytest reports a unittest set-up failure as a failed test, not an error.
+    # pytest reports a unittest set-up failure as a failed test, not an error.  Every test
+    # TestSetUpFails inherits fails in its set-up, however many TestSyncOnMachines holds.
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAILED ")]
-    assert len(failed) == 1 and "::TestSetUpFails::" in failed[0], report
+    assert failed and all("::TestSetUpFails::" in line for line in failed), report
     assert "FileExistsError" in proc.stdout, report
-    assert "1 failed, 1 passed" in proc.stdout.splitlines()[-1], report
+    assert f"{len(failed)} failed, 1 passed" in proc.stdout.splitlines()[-1], report

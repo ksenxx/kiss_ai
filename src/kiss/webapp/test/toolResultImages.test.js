@@ -12,42 +12,26 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-const {makePage, send, stubRaf, MEDIA} = require('./simplify2_harness');
+const {
+  makePage,
+  send,
+  stubRaf,
+  startRunningTask,
+  shareTranscript,
+  PNG_B64,
+} = require('./simplify2_harness');
 
-// A real, valid 1x1 transparent PNG.
-const PNG_B64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg' +
-  'YGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==';
-
-function startTask(wv, chatId) {
-  const ready = wv.posted.find(m => m.type === 'ready');
-  assert.ok(ready && ready.tabId, 'page must post ready with a tabId');
-  send(wv.win, {type: 'clear', chat_id: chatId, tabId: ready.tabId});
-  send(wv.win, {
-    type: 'status',
-    running: true,
-    tabId: ready.tabId,
-    startTs: Date.now(),
-  });
-  return ready.tabId;
-}
-
-function testImagesRenderInToolPanel() {
+/** A page running a task whose screenshot tool call embedded the PNG. */
+function renderScreenshot() {
   const wv = makePage({beforeScripts: stubRaf});
-  const win = wv.win;
-  const TAB = startTask(wv, 'chat-img-1');
-  const output = win.document.getElementById('output');
-
-  send(win, {
+  const TAB = startRunningTask(wv.win, wv.posted);
+  send(wv.win, {
     type: 'tool_call',
     name: 'screenshot',
     path: 'shot.png',
     tabId: TAB,
   });
-  send(win, {
+  send(wv.win, {
     type: 'tool_result',
     content: 'Screenshot saved to /w/shot.png',
     is_error: false,
@@ -55,6 +39,12 @@ function testImagesRenderInToolPanel() {
     images: [{path: '/w/shot.png', mime: 'image/png', b64: PNG_B64}],
     tabId: TAB,
   });
+  return wv.win;
+}
+
+function testImagesRenderInToolPanel() {
+  const win = renderScreenshot();
+  const output = win.document.getElementById('output');
 
   const tc = output.querySelector('.ev.tc');
   assert.ok(tc, 'tool_call panel must exist');
@@ -103,7 +93,7 @@ function testImagesRenderInToolPanel() {
 function testImagesRenderOnStreamedBashPath() {
   const wv = makePage({beforeScripts: stubRaf});
   const win = wv.win;
-  const TAB = startTask(wv, 'chat-img-2');
+  const TAB = startRunningTask(win, wv.posted);
   const output = win.document.getElementById('output');
 
   send(win, {
@@ -143,7 +133,7 @@ function testImagesRenderOnStreamedBashPath() {
 function testNoImagesNoPanelAndBadEntriesSkipped() {
   const wv = makePage({beforeScripts: stubRaf});
   const win = wv.win;
-  const TAB = startTask(wv, 'chat-img-3');
+  const TAB = startRunningTask(win, wv.posted);
   const output = win.document.getElementById('output');
 
   // 1. A result without images must not create a .tr-images wrapper.
@@ -203,28 +193,11 @@ function testNoImagesNoPanelAndBadEntriesSkipped() {
 
 // Exported share pages serialize the live DOM's outerHTML, which drops
 // per-element listeners; share.js must re-wire click-to-zoom through
-// its delegated document click handler.
+// its delegated document click handler, on the markup main.js renders.
 function testSharePageClickToZoom() {
-  const shareJs = fs.readFileSync(path.join(MEDIA, 'share.js'), 'utf8');
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><head>' +
-      '<style id="hljs-style-dark">.hljs{color:#fff}</style>' +
-      '<style id="hljs-style-light" media="not all">.hljs{color:#000}' +
-      '</style></head><body>' +
-      '<button id="share-theme-btn" type="button"></button>' +
-      '<div id="app"><div id="output">' +
-      '<div class="ev tc"><div class="tr-images"><div class="tr-img-box">' +
-      '<img class="tr-img" src="data:image/png;base64,' +
-      PNG_B64 +
-      '" alt="/w/shot.png">' +
-      '<div class="tr-img-cap">/w/shot.png</div>' +
-      '</div></div></div>' +
-      '</div></div></body></html>',
-    {runScripts: 'dangerously', pretendToBeVisual: true, url: 'https://x/'},
-  );
-  const win = dom.window;
-  win.eval(shareJs + '\n//# sourceURL=share.js');
+  const win = shareTranscript(renderScreenshot());
   const img = win.document.querySelector('img.tr-img');
+  assert.ok(img, 'the shared transcript carries the rendered image');
   const clickOpts = {bubbles: true, cancelable: true};
   img.dispatchEvent(new win.MouseEvent('click', clickOpts));
   assert.ok(

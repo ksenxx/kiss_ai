@@ -363,7 +363,7 @@ class TestWorktreeCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = _notification_events(printer)
             assert len(notifs) == 2
@@ -404,7 +404,7 @@ class TestWorktreeCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is False
+                assert agent._commit_worktree(agent.worktrees[0]) is False
 
             assert _notification_events(printer) == []
             assert _head_sha(wt_dir) == head_before
@@ -420,7 +420,7 @@ class TestWorktreeCommitBroadcasts:
             agent.printer = None  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             assert _head_message(wt_dir).startswith(
                 "kiss: auto-commit agent work"
@@ -440,7 +440,7 @@ class TestWorktreeCommitBroadcasts:
             agent.printer = _NoBroadcast()  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
     def test_worktree_generating_and_committed_share_id(self) -> None:
         """Bug 2 (gpt-5.5 review): the "generating" and "committed"
@@ -459,7 +459,7 @@ class TestWorktreeCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = _notification_events(printer)
             assert len(notifs) == 2
@@ -493,7 +493,7 @@ class TestWorktreeCommitBroadcasts:
             sa._generate_commit_message = spy  # type: ignore[assignment]
             try:
                 with _LLMUnavailable():
-                    assert agent._commit_worktree() is False
+                    assert agent._commit_worktree(agent.worktrees[0]) is False
             finally:
                 sa._generate_commit_message = original  # type: ignore[assignment]
 

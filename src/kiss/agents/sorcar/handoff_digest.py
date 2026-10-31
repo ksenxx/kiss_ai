@@ -28,6 +28,7 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from kiss.agents.sorcar.task_digest import clip
@@ -92,21 +93,49 @@ def _parse_call(source: str) -> ToolCall | None:
     return ToolCall(name, args)
 
 
-def _attach_results(calls: list[ToolCall], text: str) -> None:
-    """Fill ``call.result`` of *calls* from the ``[name]: text`` paragraphs of *text*."""
+def _result_spans(names: list[str], text: str) -> list[tuple[int, int]] | None:
+    """Return the span of each name's ``[name]: text`` paragraph body in *text*, in order.
+
+    ``None`` when a name's paragraph is missing.
+    """
+    spans = []
     position = 0
-    for index, call in enumerate(calls):
-        marker = f"[{call.name}]: "
-        start = text.find(marker, position)
+    for index, name in enumerate(names):
+        start = text.find(f"[{name}]: ", position)
         if start < 0:
-            return
-        start += len(marker)
+            return None
+        start += len(name) + 4
         end = len(text)
-        if index + 1 < len(calls):
-            next_marker = text.find(f"\n\n[{calls[index + 1].name}]: ", start)
-            end = next_marker if next_marker >= 0 else end
-        call.result = text[start:end]
+        if index + 1 < len(names):
+            end = text.find(f"\n\n[{names[index + 1]}]: ", start)
+            if end < 0:
+                return None
+        spans.append((start, end))
         position = end
+    return spans
+
+
+def _attach_results(calls: list[ToolCall], text: str) -> list[ToolCall]:
+    """Fill ``call.result`` of *calls* from the ``[name]: text`` paragraphs of *text*.
+
+    The executor appends the reprs of the calls it ran after the model's
+    prose, so a prose snippet that parses as a call comes before them
+    and has no paragraph: the results belong to the longest run of
+    trailing calls whose paragraphs all appear in order, and the calls
+    before that run are dropped.  When no run matches (*text* is not a
+    results message), every call is kept without a result.
+
+    Returns:
+        The calls that ran.
+    """
+    for first in range(len(calls)):
+        ran = calls[first:]
+        spans = _result_spans([call.name for call in ran], text)
+        if spans is not None:
+            for call, (start, end) in zip(ran, spans, strict=True):
+                call.result = text[start:end]
+            return ran
+    return calls
 
 
 def parse_tool_calls(messages: list[dict[str, Any]]) -> list[ToolCall]:
@@ -122,13 +151,13 @@ def parse_tool_calls(messages: list[dict[str, Any]]) -> list[ToolCall]:
         if not isinstance(content, str):
             continue
         if message.get("role") == "model":
+            calls.extend(pending)
             parsed = (_parse_call(block) for block in _CALL_BLOCK.findall(content))
             pending = [call for call in parsed if call is not None]
-            calls.extend(pending)
         elif message.get("role") == "user" and pending:
-            _attach_results(pending, content)
+            calls.extend(_attach_results(pending, content))
             pending = []
-    return calls
+    return calls + pending
 
 
 def _python_symbols(path: Path) -> list[str]:
@@ -153,10 +182,16 @@ def describe_written_files(paths: Collection[Path]) -> list[str]:
     """
     lines: list[str] = []
     for path in sorted(paths)[:MAX_WRITTEN_FILES]:
-        if not path.is_file():
+        # One stat call: a file can vanish between an existence check and a
+        # second stat (a background job or a sibling sub-agent deleting it).
+        try:
+            info = path.stat()
+        except OSError:
+            info = None
+        if info is None or not S_ISREG(info.st_mode):
             lines.append(f"- {path} (no longer exists)")
             continue
-        line = f"- {path} ({path.stat().st_size:,} bytes)"
+        line = f"- {path} ({info.st_size:,} bytes)"
         if path.suffix == ".py":
             symbols = _python_symbols(path)
             if symbols:

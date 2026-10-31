@@ -171,7 +171,9 @@ def test_fetch_compute_apply_writes_cache_prices(
 
     # The written catalog prices cache tokens exactly as OpenRouter bills them.
     monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
-    monkeypatch.setenv("HOME", str(tmp_path))  # keep the developer's MY_MODELS.json out
+    # Keep the developer's MY_MODELS.json out: its path is fixed at import,
+    # so HOME alone does not isolate the load.
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
     loaded = model_info._load_model_info()
     ds_info = loaded["openrouter/deepseek/deepseek-v4-flash"]
     assert ds_info.cache_read_price_per_1M == pytest.approx(0.008288)
@@ -252,7 +254,7 @@ def test_image_output_price_flows_to_openrouter_and_direct_gemini_entries(
     assert written["openrouter/google/gemini-nano-banana-9"]["cache_read_price_per_1M"] == 0.15
 
     monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
     loaded = model_info._load_model_info()
     monkeypatch.setattr(model_info, "MODEL_INFO", loaded)
     # A 1K image (1120 tokens) costs Google's advertised $0.0336, not $0.0084.
@@ -316,7 +318,7 @@ def test_backfill_of_unpriced_gemini_image_model_copies_image_rate(
     assert "cache_read_price_per_1M" not in written
 
     monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
     monkeypatch.setattr(model_info, "MODEL_INFO", model_info._load_model_info())
     assert model_info.calculate_cost(
         "gemini-nano-banana-9", 0, 0, num_image_output_tokens=1120
@@ -353,7 +355,7 @@ def test_get_current_model_info_reports_only_stored_cache_prices(
     )
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
     monkeypatch.setenv("KISS_MODEL_INFO_PATH", str(catalog))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
     loaded = model_info._load_model_info()
     for name, info in loaded.items():
         model_info._apply_cache_pricing(name, info)

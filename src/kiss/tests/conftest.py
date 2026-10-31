@@ -119,7 +119,7 @@ def _seed_voice_models(test_home: str, real_home: Path) -> None:
             (test_models / entry.name).symlink_to(entry)
 
 
-def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
+def _remove_test_kiss_home(home: str, owner_pid: int, tmp_root: str | None = None) -> None:
     """Delete the session ``KISS_HOME`` when the process that made it exits.
 
     Every pytest process (each split of a parallel run, each
@@ -150,9 +150,13 @@ def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
     Errors are ignored: a still-open ``history.db`` on Windows is not
     worth failing the exit for.
 
+    The session temp root (see ``_make_session_tmp_root``) goes last,
+    once the reaper has stopped the children that write into it.
+
     Args:
         home: The temporary ``KISS_HOME`` created at import.
         owner_pid: The pid of the process that created it.
+        tmp_root: The session temp root, or None when there is none.
     """
     if os.getpid() != owner_pid:
         return
@@ -160,10 +164,124 @@ def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
     _th._drain_events_at_exit()
     _th._release_owner_marker()
     shutil.rmtree(home, ignore_errors=True)
+    if tmp_root is not None:
+        _remove_session_tmp_root(tmp_root)
 
 
+# Every pytest process routes its temp files into one directory with
+# this prefix in the system temp dir (see ``_make_session_tmp_root``).
+_SESSION_TMP_PREFIX = "kiss-pt-"
+
+
+def _remove_session_tmp_root(root: str) -> None:
+    """Delete the session temp root, except a live multiprocessing dir.
+
+    multiprocessing's own exit finalizer deletes its ``pymp-*`` dir
+    and prints a traceback when the dir is already gone, so such a dir
+    stays, together with the root and its ``.lock``.  The lock dies
+    with this process, and the next session's sweep deletes the rest.
+
+    Args:
+        root: The session temp root.
+    """
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    keep_root = False
+    for entry in entries:
+        if entry.name.startswith("pymp-"):
+            keep_root = True
+        elif entry.name != ".lock":
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.path)
+    if not keep_root:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _sweep_stale_session_tmp_roots(parent: str) -> None:
+    """Delete the temp roots that dead pytest processes left in *parent*.
+
+    ``pytest-timeout`` ends a hung session with ``os._exit`` and a
+    parallel runner may SIGKILL a split; neither runs atexit.  An owner
+    holds an exclusive ``flock`` on its root's ``.lock`` for life, so a
+    lock this process can take means the owner is gone.  A root without
+    ``.lock`` is still being created unless it is a day old.
+
+    Args:
+        parent: The directory the roots are created in.
+    """
+    import fcntl
+
+    try:
+        entries = [e for e in os.scandir(parent) if e.name.startswith(_SESSION_TMP_PREFIX)]
+    except OSError:
+        return
+    day_ago = time.time() - 24 * 3600
+    for entry in entries:
+        try:
+            fd = os.open(os.path.join(entry.path, ".lock"), os.O_RDWR)
+        except FileNotFoundError:
+            with contextlib.suppress(OSError):
+                if entry.is_dir(follow_symlinks=False) and entry.stat().st_mtime < day_ago:
+                    shutil.rmtree(entry.path, ignore_errors=True)
+            continue
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        try:
+            shutil.rmtree(entry.path, ignore_errors=True)
+        finally:
+            os.close(fd)
+
+
+def _make_session_tmp_root() -> tuple[str | None, int | None]:
+    """Route this process's temp files, and its children's, into one root.
+
+    Tests leaked ``tempfile`` trees into the shared temp dir faster than
+    anyone deleted them (one hammer loop left 1,200 per run, and Chrome
+    and Playwright leave fetcher and profile dirs whenever a test kills
+    a browser).  On 2026-10-30 they had used 960,000 of the 1,048,576
+    inodes of the ``/tmp`` tmpfs, and 2,500 tests of the full run failed
+    at setup with ``ENOSPC``.  Now ``tempfile``, pytest's ``tmp_path``
+    (pass ``--basetemp`` to keep it for a post-mortem) and every child
+    that inherits ``TMPDIR`` write into a ``kiss-pt-*`` root that
+    ``_remove_test_kiss_home`` deletes at exit, and the next session
+    deletes a root whose owner died without running atexit.
+
+    POSIX only: Windows has no ``flock`` to tell a dead owner, and its
+    260-character path limit leaves no room for a longer temp prefix.
+
+    Returns:
+        The root and the descriptor that holds its lock, or two Nones.
+    """
+    if os.name != "posix":
+        return None, None
+    import fcntl
+
+    parent = tempfile.gettempdir()
+    _sweep_stale_session_tmp_roots(parent)
+    root = tempfile.mkdtemp(prefix=_SESSION_TMP_PREFIX, dir=parent)
+    staged = os.path.join(root, ".lock.staged")
+    lock_fd = os.open(staged, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    # Renamed only once locked, so a sweeper never finds ``.lock`` free.
+    os.replace(staged, os.path.join(root, ".lock"))
+    os.environ["TMPDIR"] = root
+    tempfile.tempdir = root
+    return root, lock_fd
+
+
+_session_tmp_root, _session_tmp_lock_fd = _make_session_tmp_root()
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
-atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid())
+atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid(), _session_tmp_root)
 _seed_voice_models(_test_kiss_home, Path(os.environ.get("KISS_HOME") or Path.home() / ".kiss"))
 os.environ["KISS_HOME"] = _test_kiss_home
 # The chat page auto-opens the Tips window once per version in every
@@ -1129,3 +1247,35 @@ def add_numbers(a: int, b: int) -> str:
         The sum as a string.
     """
     return str(a + b)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep every git call of the session inside the session's temp roots.
+
+    Tests take each folder under the system temp dir (and under
+    ``--basetemp``) to be outside any repository: a "non-git" folder
+    must make the product answer "Not a git repository", and a
+    throwaway repository whose ``git init`` failed must resolve to
+    nothing.  With ``TMPDIR`` or ``--basetemp`` inside a checkout, git
+    walked up into the checkout instead, and the commit-flow tests ran
+    ``git add -A`` + commit on the developer's work in progress (seven
+    commits on 2026-10-30).  ``GIT_CEILING_DIRECTORIES`` stops that walk
+    at the temp roots for the tests' own git calls, the product's and
+    every child process's.  The repository-scoping variables a git hook
+    exports (``GIT_DIR``, ``GIT_INDEX_FILE``, ...) are dropped for the
+    same reason: whatever the working directory, they aim every git call
+    at the hook's repository.
+
+    Args:
+        config: The pytest configuration (for ``--basetemp``).
+    """
+    from kiss.agents.sorcar.git_worktree import _REPO_SCOPED_GIT_ENV
+
+    for name in _REPO_SCOPED_GIT_ENV:
+        os.environ.pop(name, None)
+    roots = [tempfile.gettempdir(), config.getoption("basetemp", None)]
+    ceilings = [os.path.realpath(root) for root in roots if root]
+    inherited = os.environ.get("GIT_CEILING_DIRECTORIES")
+    if inherited:
+        ceilings.append(inherited)
+    os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)

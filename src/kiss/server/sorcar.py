@@ -115,7 +115,7 @@ from kiss.agents.sorcar.daemon_client import (
 from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
-from kiss.agents.sorcar.machines import local_machine_name
+from kiss.agents.sorcar.machines import default_name, local_machine_name
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.config import kiss_home
 from kiss.core.remote_password import password_accepted
@@ -730,11 +730,13 @@ class ServerApi:
         self._background_replies: set[asyncio.Task[None]] = set()
         # Machine registry changes and work-dir round trips run as
         # background tasks (so a slow handshake never holds up the
-        # connection's other commands) but in command order: the tasks
-        # start in the order the commands arrived and this lock hands
-        # itself on first come, first served, so two ``setWorkDir``
-        # for one machine apply, and answer, in the order they were sent.
-        self._machine_lock = asyncio.Lock()
+        # connection's other commands) but, per machine, in command
+        # order: the tasks start in the order the commands arrived and
+        # the machine's lock (made on first use) hands itself on first
+        # come, first served, so two ``setWorkDir`` for one machine
+        # apply, and answer, in the order they were sent, while an
+        # unreachable machine holds up no other machine's.
+        self._machine_locks: dict[str, asyncio.Lock] = {}
         # The subpanel forward in flight per (connection, command,
         # machine): a poll repeated while its predecessor is still
         # waiting on the machine is dropped (see ``_spawn_panel_reply``).
@@ -749,6 +751,14 @@ class ServerApi:
         # The latest history page asked for per connection (see
         # ``get_history``): the connection's next one is answered after it.
         self._pending_history: dict[str, asyncio.Task[None]] = {}
+        # The latest ``@``-mention file list asked of a machine per
+        # (connection, tab, machine) (see ``dispatch``): the next one
+        # with the same key is answered after it.
+        self._pending_files: dict[tuple[str, str, str], asyncio.Task[None]] = {}
+        # The latest Git or file action forwarded to a machine per
+        # (connection, machine) (see ``dispatch``): the next one with
+        # the same key runs after it.
+        self._pending_actions: dict[tuple[str, str], asyncio.Task[None]] = {}
         # The brand's running ``signin login`` (see ``signin_login``).
         self.signin = SigninLogin()
         # Set by ``cancel_background_replies``: from then on no reply
@@ -877,12 +887,13 @@ class ServerApi:
         # The Explorer, Source Control view, folder picker and file
         # editor of such a tab browse the machine's working directory,
         # the settings sheet opened for the machine shows and saves
-        # its config, API keys and custom models, and the Schedule,
+        # its config, API keys and custom models, the model picker
+        # lists and sets its models, and the Schedule, Machines,
         # Apps, Spend and Recommendations subpanels show the machine
         # the chat header has picked, and the task-info panel's Task
         # update subpanel reports on the task the tab runs there: a
-        # workspace, settings, subpanel or task-update command stamped
-        # ``machine`` is answered by that machine's daemon.  The
+        # workspace, settings, model, subpanel or task-update command
+        # stamped ``machine`` is answered by that machine's daemon.  The
         # subpanels poll, and a machine's app probe takes
         # seconds, as does its Codex device login: their replies are
         # produced in the background (and travel on link lanes of
@@ -896,7 +907,7 @@ class ServerApi:
         forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
         if forwarder is not None:
             forwarded = self._forwarded_reply(ctx.endpoint, forwarder, machine, cmd)
-            if name in ("cronAction", "startCodexLogin") or (
+            if name in ("cronAction", "machineAction", "startCodexLogin", "recordFileUsage") or (
                 name == "getTaskUpdate" and cmd.get("refresh")
             ):
                 # A user's own action (the Task update's refresh button
@@ -913,9 +924,42 @@ class ServerApi:
                 # not repeated.
                 key = (cmd["connId"], f"{name}:{cmd.get('tabId', '')}", machine)
                 self._spawn_panel_reply(key, forwarded)
-            elif name in sidebar_panels.MACHINE_PANEL_REPLIES:
+            elif name == "getFiles":
+                # Asked at every keystroke of a mention, and answered
+                # only once the machine has indexed the folder: in the
+                # background, so a ``submit`` sent meanwhile is not
+                # held up, and in the order asked per tab and machine,
+                # so an outdated list never lands after the current
+                # one while a slow scan holds up no other tab's list.
+                # Of the keystrokes typed while one list is on its way
+                # only the last is asked next: the page shows no list
+                # but the one for the mention on screen.
+                key = (cmd["connId"], str(cmd.get("tabId") or ""), machine)
+                self._spawn_after(self._pending_files, key, forwarded, newest_only=True)
+            elif name in sidebar_panels.MACHINE_PANEL_REPLIES or name in (
+                "getModels", "getClaudeCodeStatus", "getCodexStatus",
+            ):
+                # A poll, the model picker's list asked anew at every
+                # switch to the machine, or the settings sheet's CLI
+                # status probe (up to the machine's 20 s / 30 s CLI
+                # bound; the Codex login polls it every 5 s): a repeat
+                # while one is on its way is not asked again.
                 self._spawn_panel_reply((cmd["connId"], name, machine), forwarded)
+            elif name in ("gitAction", "fsAction"):
+                # A Source Control or Explorer action, waited for up to
+                # MACHINE_COMMIT_TIMEOUT (the machine may wait minutes
+                # for the repository's lock, or copy a whole folder):
+                # in the background, so none of the sender's later
+                # commands (a stop, a submit, a tab switch) is held up
+                # behind it, and one after another per connection and
+                # machine in the order sent, as inline: a paste then a
+                # delete apply in that order.
+                self._spawn_after(self._pending_actions, (cmd["connId"], machine), forwarded)
             else:
+                # A settings command, a model pick or a workspace read
+                # (REQUEST_TIMEOUT at most): in order with the sender's
+                # later commands, so two quick picks land in the order
+                # made and a list asked after a pick shows it.
                 await forwarded
             return
         await getattr(self, API[name].handler)(cmd, ctx)
@@ -950,6 +994,7 @@ class ServerApi:
 
     def _spawn_after(
         self, pending: dict[K, asyncio.Task[None]], key: K, reply: Coroutine[Any, Any, None],
+        newest_only: bool = False,
     ) -> None:
         """Run *reply* in the background once the task *pending* holds under *key* is done.
 
@@ -965,11 +1010,16 @@ class ServerApi:
             pending: The latest task per key.
             key: The key *reply* queues under.
             reply: The coroutine that sends the reply.
+            newest_only: Close *reply* unrun instead when, by the time
+                its predecessor is done, a newer reply queued under
+                *key*: of the replies waiting together only the last
+                is sent.
         """
         if self._closing:
             reply.close()
             return
-        task = self._spawn_reply(self._after(pending.get(key), reply))
+        superseding = pending if newest_only else None
+        task = self._spawn_reply(self._after(pending.get(key), reply, superseding, key))
         assert task is not None
         pending[key] = task
         task.add_done_callback(functools.partial(self._forget_pending, pending, key))
@@ -982,10 +1032,18 @@ class ServerApi:
     @staticmethod
     async def _after(
         previous: asyncio.Task[None] | None, reply: Coroutine[Any, Any, None],
+        superseding: dict[K, asyncio.Task[None]] | None, key: K,
     ) -> None:
-        """Await *reply* once *previous* (if any) is done, however it ended."""
+        """Await *reply* once *previous* (if any) is done, however it ended.
+
+        *reply* is skipped (``_close_reply`` closes it) when
+        *superseding* is given and holds a newer task than this one
+        under *key* by then.
+        """
         if previous is not None:
             await asyncio.wait({previous})
+        if superseding is not None and superseding.get(key) is not asyncio.current_task():
+            return
         await reply
 
     @staticmethod
@@ -1098,10 +1156,12 @@ class ServerApi:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _forwarded_reply(
-        self, endpoint: Any, forwarder: Callable[[str, dict[str, Any]], dict[str, Any]],
+        self, endpoint: Any, forwarder: Callable[[str, dict[str, Any]], dict[str, Any] | None],
         machine: str, cmd: dict[str, Any],
     ) -> None:
         """Answer *cmd*, stamped *machine*, with the reply of *forwarder* (run in a thread).
+
+        A forwarder of a command without a reply returns ``None``.
 
         Args:
             endpoint: The requesting client's transport endpoint.
@@ -1111,7 +1171,8 @@ class ServerApi:
         """
         try:
             reply = await asyncio.to_thread(forwarder, machine, cmd)
-            await self._backend._reply_direct(endpoint, reply, str(cmd["type"]))
+            if reply is not None:
+                await self._backend._reply_direct(endpoint, reply, str(cmd["type"]))
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("forwarding %s to %s failed", cmd.get("type"), machine, exc_info=True)
 
@@ -1168,10 +1229,9 @@ class ServerApi:
         """
         if not isinstance(msg, dict) or msg.get("type") != "auth":
             return False
-        token = msg.get("token", "")
+        token = _frame_token(msg)
         return (
-            isinstance(token, str)
-            and bool(token)
+            bool(token)
             and self._backend._peer_is_loopback(websocket)
             and passwords_equal(self._backend.local_token, token)
         )
@@ -1801,9 +1861,11 @@ class ServerApi:
         job ``jobId``, applied by
         :func:`kiss.agents.sorcar.cron_agent.apply_job_action`.  The
         direct reply is a ``cronJobs`` message (as for ``getCronJobs``)
-        carrying the ``action`` and an ``error`` text when it was
-        refused, so the subpanel re-renders either way (and closes its
-        in-place form only when its own create or update went through).
+        carrying the ``action``, the ``jobId`` it named and an ``error``
+        text when it was refused, so the subpanel re-renders either way
+        (closes its in-place form only when its own create or update
+        went through, and re-arms a refused removal's Delete only on
+        the reply naming that job).
 
         Args:
             cmd: The ``cronAction`` command (``action``, optional
@@ -1819,7 +1881,10 @@ class ServerApi:
         jobs = await asyncio.to_thread(sidebar_panels.cron_jobs_report)
         await self._backend._reply_direct(
             ctx.endpoint,
-            {"type": "cronJobs", "jobs": jobs, "action": str(cmd["action"]), "error": error},
+            {
+                "type": "cronJobs", "jobs": jobs, "action": str(cmd["action"]),
+                "jobId": str(cmd.get("jobId") or ""), "error": error,
+            },
             "cronAction",
         )
 
@@ -1840,9 +1905,9 @@ class ServerApi:
         (the local machine first, then every registered one with its
         reachability; ``refresh: true`` pings again).  The direct reply
         is ``{"type": "machines", "machines": [...], "checkedAt": <epoch
-        ms>, "action": "", "error": ""}``, produced by a background task like
-        ``appsStatus`` so the pings never hold up the connection's other
-        commands.
+        ms>, "action": "", "name": "", "error": ""}``, produced by a
+        background task like ``appsStatus`` so the pings never hold up
+        the connection's other commands.
 
         Args:
             cmd: The ``getMachines`` command (optional ``refresh``).
@@ -1853,7 +1918,8 @@ class ServerApi:
         )
 
     async def _reply_machines(
-        self, endpoint: Any, refresh: bool, action: str, error: str, command: str
+        self, endpoint: Any, refresh: bool, action: str, error: str, command: str,
+        name: str = "",
     ) -> None:
         """Ping (or read the cache) and send the ``machines`` reply.
 
@@ -1863,22 +1929,33 @@ class ServerApi:
             action: The ``machineAction`` the reply answers (``""`` for a poll).
             error: The error text of that action when it was refused.
             command: The command being answered (for the reply log).
+            name: The machine that action named (``""`` for a poll).
         """
         try:
-            ip, port = await asyncio.to_thread(self._local_machine_address)
-            rows, checked_at = await asyncio.to_thread(
-                sidebar_panels.machines_report, ip, port, refresh
-            )
-            await self._backend._reply_direct(
-                endpoint,
-                {
-                    "type": "machines", "machines": rows, "checkedAt": checked_at,
-                    "action": action, "error": error,
-                },
-                command,
-            )
+            event = await asyncio.to_thread(self._machines_event, refresh, action, error, name)
+            await self._backend._reply_direct(endpoint, event, command)
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("%s reply failed", command, exc_info=True)
+
+    def _machines_event(
+        self, refresh: bool, action: str, error: str, name: str = "",
+    ) -> dict[str, Any]:
+        """Return the ``machines`` event (blocking: pings when asked to or the cache is stale).
+
+        Args:
+            refresh: Ping again even when the cache is fresh.
+            action: The ``machineAction`` the event answers (``""`` otherwise).
+            error: The error text of that action when it was refused.
+            name: The machine that action named (``""`` otherwise): the
+                subpanel re-arms a refused removal's Delete only on the
+                reply naming that machine.
+        """
+        ip, port = self._local_machine_address()
+        rows, checked_at = sidebar_panels.machines_report(ip, port, refresh)
+        return {
+            "type": "machines", "machines": rows, "checkedAt": checked_at,
+            "action": action, "name": name, "error": error,
+        }
 
     async def broadcast_machines(self) -> None:
         """Send a fresh ``machines`` reply (pinged anew) to every connection.
@@ -1889,14 +1966,9 @@ class ServerApi:
         once -- and unfolds for a new machine -- instead of at its next
         poll.  The reply's ``action`` is ``""`` as for a poll.
         """
-        ip, port = await asyncio.to_thread(self._local_machine_address)
-        rows, checked_at = await asyncio.to_thread(
-            sidebar_panels.machines_report, ip, port, True
+        self._backend._printer.broadcast(
+            await asyncio.to_thread(self._machines_event, True, "", ""),
         )
-        self._backend._printer.broadcast({
-            "type": "machines", "machines": rows, "checkedAt": checked_at,
-            "action": "", "error": "",
-        })
 
     async def machine_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Add or remove a machine for the MACHINES subpanel and send the fresh list.
@@ -1925,19 +1997,28 @@ class ServerApi:
         An exception the action lets through (``machine_action`` turns
         only ``MachineError`` into its error text) becomes the reply's
         ``error`` instead of killing this background task unanswered.
+        The reply goes out under the machine's lock too: a request for
+        that machine queued behind the action (its work dirs) must not
+        be answered while the reply still pings the machines.
         """
         action = str(cmd["action"])
+        name = str(cmd["name"])
+        address = str(cmd.get("address") or "")
         try:
-            async with self._machine_lock:
+            # An ``add`` without a name registers the address's host.
+            machine = name.strip() or default_name(address)
+        except ValueError:  # a malformed address: the action refuses it below
+            machine = ""
+        async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+            try:
                 error = await asyncio.to_thread(
                     sidebar_panels.machine_action,
-                    action, str(cmd["name"]), str(cmd.get("address") or ""),
-                    str(cmd.get("machinePassword") or ""),
+                    action, name, address, str(cmd.get("machinePassword") or ""),
                 )
-        except Exception as exc:  # noqa: BLE001 - a background task must not die silently
-            logger.warning("machineAction %s failed", action, exc_info=True)
-            error = str(exc) or type(exc).__name__
-        await self._reply_machines(endpoint, True, action, error, "machineAction")
+            except Exception as exc:  # noqa: BLE001 - a background task must not die silently
+                logger.warning("machineAction %s failed", action, exc_info=True)
+                error = str(exc) or type(exc).__name__
+            await self._reply_machines(endpoint, True, action, error, "machineAction", name)
 
     async def get_machine_work_dirs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the working directories of a registered machine.
@@ -1977,7 +2058,7 @@ class ServerApi:
             command: The command being answered (for the reply log).
         """
         try:
-            async with self._machine_lock:
+            async with self._machine_locks.setdefault(machine, asyncio.Lock()):
                 if work_dir is None:
                     reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, machine)
                 else:
@@ -2284,11 +2365,11 @@ class ServerApi:
         speaker model's download), so it runs in the background: a
         ``stop`` or ``submit`` the page sends meanwhile is not held up
         behind it.  The page's dictations are answered in the order
-        they were sent, though: ``voice.js`` pairs each ``voiceSpeech``
-        with the oldest of its outstanding rounds (the conversation
-        the words were spoken into), so a short dictation answered
-        before a longer earlier one would put each transcript into the
-        other's conversation.
+        they were sent, though: ``voice.js`` pairs a ``voiceSpeech``
+        that carries no ``round`` tag with the oldest of its
+        outstanding rounds (the conversation the words were spoken
+        into), so a short dictation answered before a longer earlier
+        one would put each transcript into the other's conversation.
 
         Args:
             cmd: The ``voiceTranscribe`` command carrying the audio.

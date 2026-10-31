@@ -16,9 +16,10 @@ repositories (no mocks, patches, fakes, or test doubles):
   porcelain-status parsing with ``splitlines()``, which splits inside
   an unquoted filename containing a raw unicode line separator
   (U+2028) when ``core.quotepath=false`` is in force (as it always is
-  via the module's ``_git`` wrapper).  It now routes through the
-  shared ``_porcelain_entries`` parser (which splits on ``\\n`` only)
-  — the same parser backing ``merge_flow._porcelain_paths``.
+  via the module's ``_git`` wrapper).  It now reads the NUL-separated
+  ``git status --porcelain -z`` through the shared
+  ``_porcelain_entries`` parser, the one the merge flow's
+  changed-files fallback uses too.
 
 * The canonical ``User prompt:`` / ``Result:`` commit-message blocks
   are written and recognised by one function,

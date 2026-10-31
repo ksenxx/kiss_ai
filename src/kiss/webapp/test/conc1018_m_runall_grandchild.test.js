@@ -25,8 +25,8 @@
 // helper cannot wait for was reaped by the runner, its parent.
 //
 // The runner is copied into a scratch directory holding one suite, with
-// its 2-minute SUITE_TIMEOUT_MS lowered to 2 s (the constant is not
-// configurable, by design: the copy is the only knob).
+// its 2-minute SUITE_TIMEOUT_MS lowered to SHORT_TIMEOUT_MS, 1 s (the
+// constant is not configurable, by design: the copy is the only knob).
 
 'use strict';
 

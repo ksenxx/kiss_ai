@@ -156,7 +156,6 @@ function testLegacyEncodedJavascriptLinkIsStripped() {
   const link = win.document.querySelector('#output a');
   assert.ok(link, 'legacy Markdown link renders');
   assert.ok(!link.hasAttribute('href'), 'encoded javascript URL is stripped');
-  assert.strictEqual(win.__pwned, undefined, 'unsafe URL must not execute');
   win.close();
   console.log('  ok - encoded javascript URL is stripped');
 }

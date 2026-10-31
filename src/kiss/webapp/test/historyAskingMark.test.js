@@ -16,9 +16,9 @@ const {
   send,
   stubRaf,
   sendEmptyWorkDir,
+  loadMainCss,
   settle: tick,
 } = require('./simplify2_harness');
-const {installTokenisedCss} = require('./designTokens');
 const {
   makeRow,
   rowByTitle,
@@ -30,9 +30,7 @@ function makePage() {
   return buildPage({
     beforeScripts: win => {
       stubRaf(win);
-      // Tokens inlined (jsdom resolves no var()), so the "?" mark's
-      // computed display can be asserted.
-      installTokenisedCss(win, 'main.css');
+      loadMainCss(win);
     },
   });
 }

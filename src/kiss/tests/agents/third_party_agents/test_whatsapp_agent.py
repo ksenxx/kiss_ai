@@ -329,6 +329,8 @@ class TestChannelProtocol:
     ) -> None:
         messages, cursor = db_backend.poll_messages("+1 415 555 0001", "", limit=10)
         assert [m["id"] for m in messages] == ["m1", "m2", "m3"]
+        # ``user`` is each row's sender, not the chat JID (m2 is the bot's own "me" row).
+        assert [m["user"] for m in messages] == [_ALICE, "me", _ALICE]
         assert cursor == "2026-09-10 10:00:03+00:00"
         newer, cursor2 = db_backend.poll_messages(_ALICE, cursor, limit=10)
         assert newer == [] and cursor2 == cursor
@@ -374,6 +376,7 @@ class TestChannelProtocol:
             port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             backend.send_message("+1 (415) 555-0001", "hello")
+            assert len(server.requests) == 1
             request = server.requests[0]
             assert (request["method"], request["path"]) == ("POST", "/api/send")
             assert request["json"] == {"recipient": "14155550001", "message": "hello"}

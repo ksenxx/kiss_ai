@@ -3,16 +3,17 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end page tests: the top status bar (the one showing
-// tokens, cost and steps) shows the server's machine name in its
-// middle.  The daemon stamps `machine` into every configData reply
+// End-to-end page tests: the top status bar (the one holding
+// tokens, cost and steps; hidden on the remote page, whose task-info
+// panel mirrors it) carries the server's machine name.  The daemon
+// stamps `machine` into every configData reply
 // (src/kiss/server/commands.py _cmd_get_config), which reaches
 // media/main.js in the remote webapp.
 
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, loadMainCss} = require('./simplify2_harness');
+const {makePage, send} = require('./simplify2_harness');
 
 function testMachineNameLandsInTheStatusBar() {
   const {win} = makePage();
@@ -40,57 +41,11 @@ function testConfigDataWithoutMachineLeavesTheNameAlone() {
   win.close();
 }
 
-function testMachineNameSitsMidBarWithoutOverlapRisk() {
-  // chat.html links main.css; jsdom does not fetch links, so the real
-  // stylesheet is inlined and the layout intent is verified through
-  // the computed style — the same cascade a browser resolves.  The
-  // name must be a normal flex item (its auto margin pairing with
-  // #status-tokens's splits the free space evenly around it), NOT an
-  // absolutely-positioned overlay that would paint over the Tokens /
-  // Cost metrics on a narrow pane; on overflow it gives way first
-  // (huge flex-shrink, min-width 0) and ellipsizes.  A real-browser
-  // geometry check lives in
-  // src/kiss/tests/webapp/test_status_machine_layout.py.
-  const {win} = makePage({beforeScripts: loadMainCss});
-  const el = win.document.getElementById('status-machine');
-  const cs = win.getComputedStyle(el);
-  assert.strictEqual(cs.position, 'static', 'a flex item, not an overlay');
-  assert.strictEqual(cs.minWidth, '0px', 'allowed to shrink');
-  assert.strictEqual(cs.textOverflow, 'ellipsis');
-  // The flanking side groups: equal flex shares, floored at their own
-  // content so the machine name shrinks first.
-  const left = el.previousElementSibling;
-  const right = el.nextElementSibling;
-  assert.ok(
-    left.classList.contains('status-side') &&
-      left.contains(win.document.getElementById('status-text')),
-    'the status text flanks the name on the left',
-  );
-  assert.ok(
-    right.classList.contains('status-side') &&
-      right.contains(win.document.getElementById('status-tokens')) &&
-      right.contains(win.document.getElementById('status-budget')) &&
-      right.contains(win.document.getElementById('status-steps')),
-    'the tokens/cost/steps metrics flank the name on the right',
-  );
-  for (const side of [left, right]) {
-    const scs = win.getComputedStyle(side);
-    // jsdom's cssstyle cannot resolve the `flex: 1 1 0` shorthand, so
-    // the equal-share geometry (and no-overlap at 300-1000px) is
-    // asserted in a real browser by test_status_machine_layout.py;
-    // here only the longhand floor is verifiable.
-    assert.strictEqual(scs.minWidth, 'max-content', 'sides never squashed');
-  }
-  win.close();
-}
-
 function main() {
   testMachineNameLandsInTheStatusBar();
   console.log('  ok - configData machine name shows in the status bar');
   testConfigDataWithoutMachineLeavesTheNameAlone();
   console.log('  ok - a reply without machine keeps the shown name');
-  testMachineNameSitsMidBarWithoutOverlapRisk();
-  console.log('  ok - the machine name sits mid-bar with no overlap risk');
   console.log('statusBarMachineName.test.js: all tests passed');
 }
 

@@ -64,11 +64,11 @@ class _ParkingAgent(ChatSorcarAgent):
         self.parked = threading.Event()
         self.release = threading.Event()
 
-    def build_chat_prompt(self, prompt: str) -> str:
+    def build_chat_prompt(self, prompt: str, name_commands: bool = False) -> str:
         """Signal that the window is open, wait, then build for real."""
         self.parked.set()
         self.release.wait(30)
-        return super().build_chat_prompt(prompt)
+        return super().build_chat_prompt(prompt, name_commands)
 
 
 def _run_task(

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import ipaddress
 import json
 import logging
 import os
@@ -49,7 +50,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from kiss.agents.sorcar.web_stealth import disabled_blink_features, virtual_display
 from kiss.core.browser_handoff import is_headless_environment
@@ -71,6 +72,9 @@ _JPEG_QUALITY = 60
 _MIN_FRAME_INTERVAL = 1 / 15
 _OPEN_TIMEOUT = 90.0
 _CALL_TIMEOUT = 30.0
+# Longest an agent thread waiting for an open goes without a bytecode
+# check point, i.e. without noticing the task runner's Stop.
+_WAIT_SLICE = 0.5
 _HEADLESS_UA_TOKEN = "HeadlessChrome"
 # After terminating a hung script, how long the page gets to answer a probe.
 _INTERRUPT_PROBE_TIMEOUT = 3.0
@@ -116,6 +120,21 @@ class _PageRecord:
     closing: bool = False
 
 
+@dataclass
+class _OpenClaim:
+    """Who owns the tab an agent thread's open makes; read and written on the loop only.
+
+    The open records its tab here unless the thread stopped waiting
+    (``abandoned``), and closes the tab itself when it did; the
+    thread's give-up closes a tab already recorded.  Both steps run on
+    the loop without an ``await`` inside, so exactly one of them sees
+    the other's mark and the tab is never left without an owner.
+    """
+
+    abandoned: bool = False
+    tab_id: str = ""
+
+
 @dataclass(frozen=True)
 class AgentTab:
     """A browser tab opened for an agent, which drives it through its own CDP client.
@@ -147,16 +166,51 @@ def normalize_url(text: str) -> str:
 
     Returns:
         ``text`` unchanged when it has a scheme, ``https://`` + text
-        for a host name, otherwise a Google search for the words.
+        for a host name, ``http://`` + text for an IP address (as
+        browsers do: a LAN device or local server has no certificate),
+        otherwise a Google search for the words.
     """
     text = text.strip()
     if not text:
         return home_url()
     if "://" in text or text.startswith(("about:", "chrome:", "data:", "file:")):
         return text
-    if " " not in text and (_HOST_RE.match(text) or text.startswith("localhost")):
-        return "https://" + text
+    if " " not in text:
+        if _HOST_RE.match(text) or text.startswith("localhost"):
+            return "https://" + text
+        if _is_ip_address(text):
+            return "http://" + text
     return "https://www.google.com/search?q=" + quote(text)
+
+
+def _result_in_slices[T](future: concurrent.futures.Future[T], timeout: float) -> T:
+    """Return *future*'s result, waiting in :data:`_WAIT_SLICE` slices.
+
+    One ``future.result(timeout)`` is a C-level wait that an exception
+    injected into the thread (the task runner's Stop) cannot interrupt:
+    it would land only once the open finished, possibly minutes later.
+
+    Raises:
+        TimeoutError: *timeout* passed first.
+    """
+    deadline = time.monotonic() + timeout
+    while not future.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"no answer from the browser within {timeout:g}s")
+        concurrent.futures.wait([future], min(remaining, _WAIT_SLICE))
+    return future.result()
+
+
+def _is_ip_address(text: str) -> bool:
+    """Whether *text* is an IP address (IPv6 in brackets), with an optional ``:port`` and path."""
+    try:
+        parts = urlsplit("//" + text)
+        ipaddress.ip_address(parts.hostname or "")
+        _ = parts.port  # a port that is not a number raises
+    except ValueError:
+        return False
+    return True
 
 
 class BrowserTabService:
@@ -234,11 +288,16 @@ class BrowserTabService:
             RuntimeError: The service is shut down or the browser cannot
                 be launched.
         """
-        future = self._run_threadsafe(self._open_for_agent(), _OPEN_TIMEOUT)
+        claim = _OpenClaim()
         try:
-            return future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
-        except Exception as exc:
-            raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
+            future = self._run_threadsafe(self._open_for_agent(claim), _OPEN_TIMEOUT)
+            return _result_in_slices(future, _OPEN_TIMEOUT + _CALL_TIMEOUT)
+        except BaseException as exc:
+            # Also the task runner's Stop: nobody is left to use the tab.
+            self._submit(self._abandon(claim))
+            if isinstance(exc, Exception):
+                raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
+            raise
 
     def open_for_user(self, url: str) -> bool:
         """Open *url* in a new tab that every surface switches to, for the user to complete.
@@ -258,10 +317,16 @@ class BrowserTabService:
             browser cannot be launched or *url* cannot be loaded (the
             blank tab is closed again).
         """
+        claim = _OpenClaim()
         try:
-            future = self._run_threadsafe(self._open_for_user(url), _OPEN_TIMEOUT)
-            future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 — the caller falls back to another browser
+            future = self._run_threadsafe(self._open_for_user(url, claim), _OPEN_TIMEOUT)
+            _result_in_slices(future, _OPEN_TIMEOUT + _CALL_TIMEOUT)
+        except BaseException as exc:
+            # Also the task runner's Stop: nobody is left to use the tab.
+            self._submit(self._abandon(claim))
+            if not isinstance(exc, Exception):
+                raise
+            # The caller falls back to another browser.
             logger.warning("browser tab: cannot open %s for the user: %s", url, exc)
             return False
         return True
@@ -572,16 +637,12 @@ class BrowserTabService:
                 self._emit({"type": "browserError", "tab_id": rec.tab_id, "text": str(exc)})
         return rec.tab_id
 
-    async def _open_for_agent(self) -> AgentTab:
-        rec = await self._new_tab()
-        # The agent wants the user's attention: every surface switches to the tab.
-        self._emit(self._open_event(rec, focus=True))
+    async def _open_for_agent(self, claim: _OpenClaim) -> AgentTab:
+        rec = await self._claimed_tab(claim)
         return AgentTab(rec.tab_id, rec.target_id, self._cdp_url())
 
-    async def _open_for_user(self, url: str) -> None:
-        rec = await self._new_tab()
-        # The user has to act on this page: every surface switches to the tab.
-        self._emit(self._open_event(rec, focus=True))
+    async def _open_for_user(self, url: str, claim: _OpenClaim) -> None:
+        rec = await self._claimed_tab(claim)
         try:
             await rec.page.goto(url, wait_until="commit")
         except Exception:
@@ -589,6 +650,30 @@ class BrowserTabService:
             # so the caller can fall back to another browser.
             await self._close_page(rec)
             raise
+
+    async def _claimed_tab(self, claim: _OpenClaim) -> _PageRecord:
+        """Open a tab for the agent thread behind *claim* and switch every surface to it.
+
+        The agent wants the user's attention, or the user has to act on
+        the page.  A thread that stopped waiting meanwhile gets no tab:
+        it is closed again before it is ever focused.
+
+        Raises:
+            RuntimeError: The thread stopped waiting (see :class:`_OpenClaim`).
+        """
+        rec = await self._new_tab()
+        if claim.abandoned:
+            await self._close_page(rec)
+            raise RuntimeError("Nobody is waiting for the tab any more.")
+        claim.tab_id = rec.tab_id
+        self._emit(self._open_event(rec, focus=True))
+        return rec
+
+    async def _abandon(self, claim: _OpenClaim) -> None:
+        """Give up the open behind *claim*: close its tab now, or let the open close it."""
+        claim.abandoned = True
+        if claim.tab_id:
+            await self._close(claim.tab_id)
 
     async def _new_tab(self) -> _PageRecord:
         """Launch the browser if needed, create a page and announce it unfocused.

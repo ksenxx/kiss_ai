@@ -20,7 +20,6 @@ instances (real threads, one shared directory).
 from __future__ import annotations
 
 import json
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -32,18 +31,21 @@ from kiss.tests.conftest import HOT_READER_PAUSE
 from kiss.tests.server.conftest import find_free_port
 
 
-def _server(url_dir: Path) -> RemoteAccessServer:
+def _server(root: Path) -> RemoteAccessServer:
+    """Return a server working in ``root/wd`` whose URL file lives in ``root/url``."""
+    (root / "wd").mkdir(exist_ok=True)
+    (root / "url").mkdir(exist_ok=True)
     return RemoteAccessServer(
         host="127.0.0.1",
         port=find_free_port(),
-        work_dir=tempfile.mkdtemp(prefix="kiss_reset_flag_wd_"),
-        url_file=url_dir / "remote-url.json",
+        work_dir=str(root / "wd"),
+        url_file=root / "url" / "remote-url.json",
     )
 
 
-def test_flag_is_written_as_json_with_conn_id() -> None:
-    url_dir = Path(tempfile.mkdtemp(prefix="kiss_reset_flag_"))
-    server = _server(url_dir)
+def test_flag_is_written_as_json_with_conn_id(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    url_dir = tmp_path / "url"
     server._write_server_reset_flag("conn-42")
     flag = server._server_reset_flag_path()
     data = json.loads(flag.read_text(encoding="utf-8"))
@@ -52,10 +54,10 @@ def test_flag_is_written_as_json_with_conn_id() -> None:
     assert sorted(p.name for p in url_dir.iterdir()) == [flag.name]
 
 
-def test_failed_publish_leaves_no_temp_file() -> None:
+def test_failed_publish_leaves_no_temp_file(tmp_path: Path) -> None:
     """A publish that cannot land must not leave a temp file behind."""
-    url_dir = Path(tempfile.mkdtemp(prefix="kiss_reset_flag_"))
-    server = _server(url_dir)
+    server = _server(tmp_path)
+    url_dir = tmp_path / "url"
     flag = server._server_reset_flag_path()
     # A stray DIRECTORY at the flag path makes the final rename fail
     # (a file cannot replace a non-empty directory on any platform).
@@ -70,10 +72,10 @@ def test_failed_publish_leaves_no_temp_file() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_concurrent_writers_never_expose_a_torn_flag() -> None:
+def test_concurrent_writers_never_expose_a_torn_flag(tmp_path: Path) -> None:
     """Two server instances + many threads: every read is a whole document."""
-    url_dir = Path(tempfile.mkdtemp(prefix="kiss_reset_flag_"))
-    servers = [_server(url_dir), _server(url_dir)]
+    servers = [_server(tmp_path), _server(tmp_path)]
+    url_dir = tmp_path / "url"
     flag = servers[0]._server_reset_flag_path()
     stop = threading.Event()
     torn: list[str] = []

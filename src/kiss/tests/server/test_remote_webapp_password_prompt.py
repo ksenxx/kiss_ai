@@ -39,7 +39,7 @@ Second reported bug ("it still does not ask for a password"):
     prompt: once :data:`_AUTH_FAIL_MAX` NON-EMPTY wrong guesses landed
     on the shared tunnel IP (one user mistyping, or stale cached
     passwords replayed by other devices), :meth:`_authenticate_ws`
-    closed every new socket *silently* for :data:`_AUTH_LOCKOUT`
+    closed every new socket *silently* for up to :data:`_AUTH_FAIL_WINDOW`
     seconds.  The shim's password modal only appears on
     ``auth_required``, so every visitor — including ones who never
     typed anything wrong — just saw the loading overlay spin forever.
@@ -72,7 +72,7 @@ from websockets.exceptions import ConnectionClosed
 from kiss.core.user_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
-    _AUTH_LOCKOUT,
+    _AUTH_FAIL_WINDOW,
     RemoteAccessServer,
 )
 from kiss.tests.server.conftest import FORWARDED_VISITOR, find_free_port, no_verify_ssl
@@ -305,7 +305,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
             retry_after = msg.get("retry_after")
             self.assertIsInstance(retry_after, int)
             self.assertGreater(retry_after, 0)
-            self.assertLessEqual(retry_after, int(_AUTH_LOCKOUT))
+            self.assertLessEqual(retry_after, int(_AUTH_FAIL_WINDOW))
             with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
 

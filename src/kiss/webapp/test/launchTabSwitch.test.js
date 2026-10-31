@@ -20,7 +20,12 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage: makeChatPage, send, stubRaf} = require('./simplify2_harness');
+const {
+  makePage: makeChatPage,
+  send,
+  snapshotEntry,
+  stubRaf,
+} = require('./simplify2_harness');
 
 // A launched window whose backend is live. `daemonStatus connected` is how
 // the socket shim announces that: it synthesises it the moment the password
@@ -67,12 +72,9 @@ function clickTab(win, tabId) {
 function tabsState(win, entries) {
   send(win, {
     type: 'tabs_state',
-    tabs: entries.map(e => ({
-      tabId: e.tabId,
-      chatId: e.chatId || '',
-      title: e.title || 'new chat',
-      workDir: e.workDir || '',
-    })),
+    tabs: entries.map(e =>
+      snapshotEntry(e.tabId, e.title, e.chatId, e.workDir),
+    ),
   });
 }
 

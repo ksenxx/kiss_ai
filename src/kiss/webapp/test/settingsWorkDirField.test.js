@@ -11,9 +11,9 @@
 // work_dir) that every task runs in.  The web client treats
 // `configData.config.work_dir` this way:
 //
-//   * it is adopted as-is -- no per-browser-tab sessionStorage pin, no
-//     `setWorkDir` echo back to the daemon (that used to re-pin the
-//     connection; there is no connection pin any more);
+//   * it is adopted as-is -- no `setWorkDir` echo back to the daemon
+//     (that used to re-pin the connection; there is no connection pin
+//     any more);
 //   * the Settings form never carries `work_dir` in `saveConfig`, because
 //     the folder is changed only through the chat header's working
 //     directory drop-down (a `listDir` check, then `setWorkDir`;
@@ -32,32 +32,12 @@ const {
 } = require('./simplify2_harness');
 
 // The served web page carries body.remote-chat (web_server.py injects the
-// class).  `stalePin` seeds the sessionStorage key an older WS shim used
-// to write, to prove main.js no longer reads it.
-function makePage(opts) {
-  const {stalePin = ''} = opts || {};
-  const {win, posted} = makeSharedPage({
-    bodyClass: 'remote-chat',
-    beforeScripts: win => {
-      if (stalePin) {
-        win.sessionStorage.setItem('sorcar-work-dir', stalePin);
-      }
-    },
-  });
-  return {win, posted};
+// class).
+function makePage() {
+  return makeSharedPage({bodyClass: 'remote-chat'});
 }
 
 function assertNoDirectoryFields(win) {
-  assert.strictEqual(
-    win.document.getElementById('cfg-work-dir'),
-    null,
-    'the settings panel must not have a working-directory field',
-  );
-  assert.strictEqual(
-    win.document.getElementById('cfg-memory-dir'),
-    null,
-    'the settings panel must not have a memory-directory field',
-  );
   const labels = Array.from(
     win.document.querySelectorAll('#config-form .config-label'),
   ).map(l => l.textContent.trim());
@@ -155,11 +135,6 @@ function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
       'setWorkDir would persist and re-broadcast what the daemon just said',
   );
   assert.strictEqual(
-    win.sessionStorage.getItem('sorcar-work-dir'),
-    null,
-    'no per-browser-tab pin is written: every page uses the one global value',
-  );
-  assert.strictEqual(
     mentionWorkDir(win, posted),
     '/srv/project',
     'commands from this page run in the global working directory',
@@ -179,31 +154,6 @@ function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
   console.log('  ok - the web client adopts the global directory without echo');
 }
 
-function testRemoteIgnoresStaleSessionPin() {
-  const {win, posted} = makePage({stalePin: '/srv/mine'});
-  send(win, {type: 'configData', config: {work_dir: '/srv/global'}});
-  assert.strictEqual(
-    mentionWorkDir(win, posted),
-    '/srv/global',
-    'a sessionStorage pin left by an older page must not override the ' +
-      'global working directory',
-  );
-  assert.deepStrictEqual(setWorkDirs(posted), [], 'and nothing is echoed');
-  send(win, {
-    type: 'tabs_state',
-    tabs: [tabEntry('mine-1', '/srv/mine'), tabEntry('g-1', '/srv/global')],
-  });
-  assert.deepStrictEqual(
-    tabBarIds(win),
-    ['mine-1', 'g-1'],
-    'the tab bar shows every registry tab whatever folder it ran in',
-  );
-  win.close();
-  console.log(
-    '  ok - a stale per-tab pin is ignored in favour of the global value',
-  );
-}
-
 // Changing the folder through the chat header's drop-down (listDir
 // confirm, then setWorkDir, never saveConfig, re-scoped at once) and
 // following the daemon's workDirChanged broadcast are pinned by
@@ -213,7 +163,6 @@ function main() {
   testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   testRemoteBlankWhenNothingIsStored();
   testRemoteAdoptsGlobalWorkDirWithoutEcho();
-  testRemoteIgnoresStaleSessionPin();
   console.log('settingsWorkDirField.test.js: all tests passed');
 }
 

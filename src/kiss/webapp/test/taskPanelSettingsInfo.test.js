@@ -207,7 +207,7 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
   );
 });
 
-test('subagent settings show sequential and parentage', () => {
+test('subagent settings show parentage', () => {
   const wv = makePage();
   const win = wv.win;
   const TAB = readyTabId(wv.posted);
@@ -216,7 +216,6 @@ test('subagent settings show sequential and parentage', () => {
     type: 'task_settings',
     settings: {
       model: 'model-y',
-      is_parallel: false,
       chat_id: 'chat-abc',
       task_id: 'task-2',
       is_subagent: true,

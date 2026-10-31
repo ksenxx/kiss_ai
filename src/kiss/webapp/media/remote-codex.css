@@ -91,7 +91,7 @@ body.remote-chat {
   --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
 
-  /* The settings dialog's outline (see #settings-panel below): the
+  /* The settings dialog's outline (main.css #settings-panel): the
      theme's widget border, so the dialog reads like a native VS Code
      widget on both themes. */
   --settings-border: var(--border-widget);
@@ -154,18 +154,15 @@ body.remote-chat.high-contrast .more-menu-item:hover:not(:disabled) {
    band, dim inactive pills, the active pill in the editor background
    with the accent line on its top edge.  #content-tab-bar is the
    content pane's row (desktop split layout, below); the group strip
-   (#tab-bar: the chat on screen and its sub-agents) sits on the editor
-   background with smaller pills. */
-body.remote-chat #content-tab-bar,
-body.remote-chat #tab-bar { border-bottom: 1px solid var(--border); }
-
+   (#tab-bar: the chat on screen and its sub-agents) keeps main.css's
+   editor background and smaller pill text; both rows keep its bottom
+   hairline. */
 body.remote-chat #content-tab-bar {
   background: var(--tabs-bg);
   padding: var(--space-2) var(--space-2-5) var(--space-1);
 }
 
 body.remote-chat #tab-bar {
-  background: var(--bg);
   padding: var(--space-1) var(--space-2-5) var(--space-1) var(--space-5);
 }
 
@@ -182,10 +179,7 @@ body.remote-chat #tab-bar .chat-tab {
   transition: background var(--dur-base), color var(--dur-base);
 }
 
-body.remote-chat #tab-bar .chat-tab {
-  padding: var(--space-0-5) var(--space-2-5);
-  font-size: var(--fs-sm);
-}
+body.remote-chat #tab-bar .chat-tab { padding: var(--space-0-5) var(--space-2-5); }
 
 body.remote-chat #content-tab-bar .chat-tab:hover,
 body.remote-chat #tab-bar .chat-tab:hover {
@@ -261,7 +255,6 @@ body.remote-chat #tab-status-bar {
 body.remote-chat #input-drawer-btn {
   background: var(--surface2);
   border-color: var(--border-input);
-  color: var(--dim);
 }
 
 body.remote-chat #input-drawer-btn:hover {
@@ -274,10 +267,6 @@ body.remote-chat #input-drawer-btn:hover {
 body.remote-chat #input-area.drawer-collapsed {
   padding-top: var(--space-2-5);
 }
-
-body.remote-chat #welcome h2 { color: var(--fg); }
-
-body.remote-chat #welcome p { color: var(--dim); }
 
 body.remote-chat #input-area {
   background: var(--bg);
@@ -298,10 +287,7 @@ body.remote-chat #input-container:focus-within {
   box-shadow: inset 0 0 1px var(--ring-focus);
 }
 
-body.remote-chat #task-input {
-  color: var(--fg);
-  min-height: 2.4em;
-}
+body.remote-chat #task-input { min-height: 2.4em; }
 
 body.remote-chat #task-input::placeholder { color: var(--faint); }
 
@@ -335,22 +321,29 @@ body.remote-chat #more-btn {
   transition: background var(--dur-base);
 }
 
-body.remote-chat #menu-btn:hover:not(:disabled),
-body.remote-chat #meta-drawer-btn:hover:not(:disabled),
-body.remote-chat #new-chat-btn:hover:not(:disabled),
-body.remote-chat #tricks-btn:hover:not(:disabled),
-body.remote-chat #more-btn:hover:not(:disabled) {
-  background: var(--hover-strong);
-  color: var(--fg);
-}
-
 body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
   background: var(--hover-strong);
   color: var(--fg-strong);
 }
 
-body.remote-chat #more-menu {
+/* After the .active rule (same specificity): hover wins on an active
+   button too. */
+body.remote-chat #menu-btn:hover,
+body.remote-chat #meta-drawer-btn:hover,
+body.remote-chat #new-chat-btn:hover,
+body.remote-chat #tricks-btn:hover,
+body.remote-chat #more-btn:hover {
+  background: var(--hover-strong);
+  color: var(--fg);
+}
+
+/* The floating surfaces: the "..." menu, the model list and the
+   dialogs (password, sign-in, server reset). */
+body.remote-chat #more-menu,
+body.remote-chat #model-dropdown,
+body.remote-chat .auth-modal-content,
+body.remote-chat .server-reset-confirm-content {
   background: var(--menu-bg);
   border: 1px solid var(--border-widget);
   border-radius: var(--radius-2xl);
@@ -381,7 +374,7 @@ body.remote-chat #model-btn {
   max-width: clamp(72px, 21vw, 220px);
 }
 
-body.remote-chat #model-btn:hover:not(:disabled) {
+body.remote-chat #model-btn:hover {
   background: var(--hover);
   border-color: var(--border-hover);
   color: var(--fg);
@@ -392,7 +385,6 @@ body.remote-chat #send-btn {
   color: var(--send-fg);
   width: 36px;
   height: 36px;
-  border-radius: var(--radius-round);
 }
 
 body.remote-chat #send-btn:hover {
@@ -409,18 +401,9 @@ body.remote-chat #send-btn:disabled {
 body.remote-chat #stop-btn {
   width: 36px;
   height: 36px;
-  border-radius: var(--radius-round);
   background: var(--send-bg);
   color: var(--send-fg);
   border: none;
-}
-
-body.remote-chat #model-dropdown {
-  background: var(--menu-bg);
-  border: 1px solid var(--border-widget);
-  border-radius: var(--radius-2xl);
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
 }
 
 body.remote-chat .file-chip {
@@ -447,19 +430,10 @@ body.remote-chat #tricks-panel {
 
 body.remote-chat #settings-panel {
   background: var(--surface);
-
-  /* Same hairline and elevation as the VS Code surfaces (see main.css
-     #settings-panel), routed through the --settings-border palette
-     alias so the remote page keeps palette tokens out of plain
-     properties (test_no_decorative_color_tokens_in_codex_css). */
-  border: 1px solid var(--settings-border);
-  box-shadow: var(--shadow-lg);
 }
 
 body.remote-chat .sidebar-hdr {
   color: var(--faint);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   font-size: var(--fs-sm);
 }
 
@@ -493,14 +467,6 @@ body.remote-chat .config-label textarea {
 
 body.remote-chat .config-update-btn {
   border-radius: var(--radius-pill);
-}
-
-body.remote-chat #auth-modal .auth-modal-content,
-body.remote-chat .server-reset-confirm-content {
-  background: var(--menu-bg);
-  border: 1px solid var(--border-widget);
-  border-radius: var(--radius-2xl);
-  box-shadow: var(--shadow-lg);
 }
 
 body.remote-chat .auth-modal-btn,
@@ -576,27 +542,11 @@ body.remote-chat .running-item-ids {
   color: var(--faint);
 }
 
-body.remote-chat .running-item .ids-copy-btn,
-body.remote-chat .running-item .sidebar-item-collapse,
-body.remote-chat .running-item .sidebar-item-copy,
-body.remote-chat .running-item .sidebar-item-favorite {
-  color: var(--fg);
-}
-
 body.remote-chat .running-item .ids-copy-btn:hover,
 body.remote-chat .running-item .sidebar-item-collapse:hover,
 body.remote-chat .running-item .sidebar-item-copy:hover,
 body.remote-chat .running-item .sidebar-item-favorite:hover {
   background: var(--border);
-}
-
-body.remote-chat .running-item .sidebar-item-favorite.favorited {
-  color: var(--favorite);
-}
-
-body.remote-chat .running-item .ids-copy-btn.copied,
-body.remote-chat .running-item .sidebar-item-copy.copied {
-  color: var(--status-ok);
 }
 
 body.remote-chat .running-item-info {
@@ -835,11 +785,10 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
        pane. */
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
     grid-template-areas:
       'machine'
       'strip'
-      'status'
       'chat'
       'composer';
   }
@@ -865,7 +814,6 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     grid-template-areas:
       'machine  handle ctabs'
       'strip    handle content'
-      'status   handle content'
       'chat     handle content'
       'composer handle content';
   }
@@ -1065,8 +1013,6 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     grid-area: machine;
     align-self: stretch;
   }
-
-  body.remote-chat.remote-desktop #tab-status-bar { grid-area: status; }
 
   body.remote-chat.remote-desktop #input-area {
     grid-area: composer;

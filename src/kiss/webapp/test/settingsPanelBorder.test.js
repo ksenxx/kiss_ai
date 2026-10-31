@@ -6,11 +6,20 @@
 'use strict';
 
 // The settings dialog is lifted off the page with a 1px theme hairline
-// plus the --shadow-lg elevation token, in the base stylesheet (main.css)
-// and in the dark and light themes layered on it (remote-codex.css).  The
-// hairline colour comes from a theme variable (never a hard-coded
+// plus the --shadow-lg elevation token, in the base stylesheet (main.css);
+// the remote page's palette (remote-codex.css) picks the hairline colour.
+// The hairline colour comes from a theme variable (never a hard-coded
 // colour) so each palette picks its own shade, and no later rule may
 // repaint it.
+//
+// This suite is a deliberate cssRule exception to the rule that a test
+// checks what the user sees: it reads the stylesheet text.  Every value
+// it pins is built from custom properties, and jsdom's getComputedStyle
+// does not resolve var(): `border: 1px solid var(--x)` computes to the
+// initial `medium` black border and `box-shadow: var(--s)` comes back
+// verbatim (measured with jsdom 29.1.1).  Only a real browser can
+// measure the painted border, so this file pins the declarations the
+// cascade applies instead.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -49,19 +58,11 @@ function testMainCssUsesHairlineAndElevation() {
 }
 
 function testRemoteSurfaceUsesHairlineAndElevation() {
-  // The remote stylesheet routes the hairline through the
-  // --settings-border palette alias, re-derived on body.remote-chat so
-  // the light theme's variable overrides flow through.
-  const rule = cssRule(REMOTE_CSS, 'body.remote-chat #settings-panel');
-  assert.ok(
-    /border:\s*1px solid var\(--settings-border\)/.test(rule),
-    `the remote settings panel needs the 1px hairline — got: ${rule.trim()}`,
-  );
-  assert.ok(
-    /box-shadow:\s*var\(--shadow-lg\)/.test(rule),
-    `the remote settings panel needs the --shadow-lg elevation — ` +
-      `got: ${rule.trim()}`,
-  );
+  // The remote page keeps main.css's hairline and elevation: its
+  // palette, re-derived on body.remote-chat so the light theme's
+  // variable overrides flow through, points the --settings-border alias
+  // at the widget border (the computed border is measured in
+  // src/kiss/tests/webapp/test_remote_stylesheet_cascade_sweep1030.py).
   const palette = cssRule(REMOTE_CSS, 'body.remote-chat');
   assert.ok(
     /--settings-border:\s*var\(--border-widget\)/.test(palette),

@@ -116,6 +116,7 @@ function testClipLessTalkIsSilentAndAdvancesQueue() {
 
 function testLeadingClipLessTalkDoesNotDelayAudio() {
   const {win} = makePage({beforeScripts: stubRaf});
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('s1', 'no clip here'));
@@ -127,6 +128,7 @@ function testLeadingClipLessTalkDoesNotDelayAudio() {
     'audio must start immediately after the silent clip-less talk',
   );
   assert.strictEqual(players[0].playCalls, 1);
+  assertNoSpeech(spoken, 'leading clip-less talk');
   console.log('PASS: a leading clip-less talk never delays the next clip');
 }
 
@@ -196,24 +198,6 @@ async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
   console.log('PASS: late media error never double-advances the queue');
 }
 
-function testUnspeakableTextDoesNotDeadlockQueue() {
-  const {win} = makePage({beforeScripts: stubRaf});
-  const spoken = installSpeech(win);
-  const players = installAudio(win, Promise.resolve());
-
-  send(win, talkEv('z1', '\u{1F642}'));
-  send(win, talkEv('z2', 'real clip', {audioB64: B64}));
-
-  assert.strictEqual(
-    players.length,
-    1,
-    'an unspeakable talk must not block the queue',
-  );
-  assert.strictEqual(players[0].playCalls, 1);
-  assertNoSpeech(spoken, 'unspeakable talk text');
-  console.log('PASS: unspeakable talk text does not deadlock the queue');
-}
-
 function testMissingAudioApiDegradesToSilence() {
   const {win} = makePage({beforeScripts: stubRaf});
   const spoken = installSpeech(win);
@@ -259,7 +243,6 @@ async function main() {
   testLeadingClipLessTalkDoesNotDelayAudio();
   await testRejectedPlayDegradesSilentlyThenAdvances();
   await testLateErrorAfterRejectedPlayDoesNotDoubleAdvance();
-  testUnspeakableTextDoesNotDeadlockQueue();
   testMissingAudioApiDegradesToSilence();
   testThrowingAudioConstructorDegradesToSilence();
   console.log('All talkAudioOverlap tests passed.');

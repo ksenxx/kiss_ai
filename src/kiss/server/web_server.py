@@ -123,10 +123,11 @@ from kiss.core.utils import (
     read_bytes_waiting_for_writer,
     replace_waiting_for_readers,
 )
-from kiss.server import agent_state, standalone_app
+from kiss.server import agent_state, deferred_restart, standalone_app
 from kiss.server import sorcar as sorcar_api
 from kiss.server.commands import broadcast_to_conn, sea_commands_event
 from kiss.server.helpers import MEDIA_DIR
+from kiss.server.http_speed import speed_up_response
 from kiss.server.install_problems import NOTICE_ID as INSTALL_PROBLEMS_NOTICE_ID
 from kiss.server.install_problems import install_problems_notice
 from kiss.server.json_printer import (
@@ -136,6 +137,7 @@ from kiss.server.json_printer import (
     with_synthesized_events,
 )
 from kiss.server.server import AgentServer
+from kiss.server.services import Services
 from kiss.server.signin import send_signin
 from kiss.server.speech import (
     DEFAULT_AUDIO_MODEL,
@@ -411,8 +413,6 @@ _RATE_LIMIT_INDICATORS = (
 _AUTH_FAIL_MAX = 5
 
 _AUTH_FAIL_WINDOW = 60.0
-
-_AUTH_LOCKOUT = 60.0
 
 _MAX_RESTORED_TABS = 32
 
@@ -703,10 +703,7 @@ def _forwarded_client_ip(websocket: ServerConnection) -> str:
     if cf_ip:
         return cf_ip
     xff = str(headers.get("X-Forwarded-For") or "")
-    first = xff.split(",")[0].strip()
-    if first:
-        return first
-    return ""
+    return xff.split(",")[0].strip()
 
 
 _HEAD_200 = (
@@ -727,7 +724,7 @@ _HEAD_403 = (
 def _peer_ip(connection: Any) -> str:
     """Return *connection*'s raw TCP peer address, or ``""`` when unknown."""
     addr = getattr(connection, "remote_address", None)
-    return str(addr[0]) if addr and len(addr) >= 1 else ""
+    return str(addr[0]) if addr else ""
 
 
 def _connection_peer_is_loopback(connection: Any) -> bool:
@@ -1632,7 +1629,8 @@ def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
     The signalling (identity check before EVERY signal, SIGTERM,
     bounded wait, re-verified SIGKILL escalation, pidfile unlink) is
     delegated to :func:`_terminate_declined_cloudflared`, which exists
-    for exactly this "recorded pid we must not adopt" situation.  When
+    for exactly this "recorded pid we must not adopt" situation; a
+    pidfile naming a process that is already dead is just removed.  When
     *local_port* is given, cloudflared processes forwarding to it that
     the pidfile does not know about (lost pidfile, other home directory)
     are terminated as well — they expose this server just the same.
@@ -1640,15 +1638,17 @@ def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
     data = _load_cloudflared_pidfile()
     if data is not None:
         pid = int(data["pid"])
-        # No ``ps`` here: ``_terminate_cloudflared_pid`` verifies the
-        # identity itself (and logs a recycled pid) before signalling.
         if _is_pid_alive(pid):
             logger.warning(
                 "no remote password is set; terminating the cloudflared "
                 "tunnel (pid=%d) left by a previous kiss-web so its "
                 "public URL stops reaching this server.", pid,
             )
-        _terminate_declined_cloudflared(pid)
+            # No ``ps`` here: ``_terminate_cloudflared_pid`` verifies the
+            # identity itself (and logs a recycled pid) before signalling.
+            _terminate_declined_cloudflared(pid)
+        else:
+            _unlink_cloudflared_pidfile()
     if local_port is not None:
         _terminate_stray_cloudflared(local_port, None)
 
@@ -2060,8 +2060,8 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
     return None
 
 
-def _wait_for_remote_password(timeout: float = 30.0) -> str:
-    """Block up to *timeout* seconds for ``remote_password`` to appear.
+async def _wait_for_remote_password(timeout: float = 30.0) -> str:
+    """Wait up to *timeout* seconds for ``remote_password`` to appear.
 
     Polls ``$KISS_HOME/config.json`` every 500 ms.  This eliminates the
     boot-time race where ``kiss-web`` is (re)started *before* the
@@ -2070,6 +2070,12 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
     ``launchd`` to respawn the daemon and mint a brand-new
     ``*.trycloudflare.com`` URL), the daemon waits patiently for the
     password to arrive.
+
+    The wait runs on the event loop (each config read in a worker
+    thread), so cancelling the caller -- a SIGTERM or Ctrl-C during
+    startup -- ends it at once.  A wait inside one worker thread kept
+    the daemon alive for the rest of the timeout, because
+    ``asyncio.run`` joins its executor threads before it returns.
 
     Args:
         timeout: Maximum seconds to wait for a non-empty password.
@@ -2080,12 +2086,13 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
     """
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
-        pw = str(load_config().get("remote_password", "") or "")
+        config = await asyncio.to_thread(load_config)
+        pw = str(config.get("remote_password", "") or "")
         if pw:
             return pw
         if time.monotonic() >= deadline:
             return ""
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
 
 def _save_url_file(
@@ -2896,32 +2903,18 @@ class WebPrinter(JsonPrinter):
         successful ``worktree_result`` (merge or discard finished)
         drops it, so the main checkout wins again.
 
-        A ``task_events`` replay envelope is scanned too, in event
-        order: session replay first runs :meth:`cleanup_tab` (dropping
-        the entry) and, while the task is still running, nothing else
-        re-presents the worktree — the historical ``worktree_created``
-        nested in the replayed transcript is the only copy of the
-        directory, so it must restore the tracking.
-
         Args:
             event: The event being broadcast.
             tab_id: The tab the event copy is addressed to.
             task_id: For a fan-out copy, the task whose subscriber
                 list named *tab_id*; the directory is recorded only if
                 the tab is STILL subscribed to it (see
-                :meth:`_record_tab_worktree_dir`).  ``None`` for an
+                :meth:`_store_tab_worktree_dir`).  ``None`` for an
                 event addressed to the tab directly.
         """
         if not isinstance(tab_id, str) or not tab_id:
             return
         etype = event.get("type")
-        if etype == "task_events":
-            nested = event.get("events")
-            if isinstance(nested, list):
-                for sub in nested:
-                    if isinstance(sub, dict):
-                        self._track_worktree_event(sub, tab_id, task_id)
-            return
         if etype in ("worktree_created", "worktree_done"):
             wt_work_dir = event.get("worktreeWorkDir")
             wt_dir = (
@@ -2934,7 +2927,10 @@ class WebPrinter(JsonPrinter):
             # the work dir's worktree, which relative file links need.
             keep_existing = not (isinstance(wt_work_dir, str) and wt_work_dir)
             if isinstance(wt_dir, str) and wt_dir:
-                self._record_tab_worktree_dir(tab_id, wt_dir, task_id, keep_existing)
+                locked_call(
+                    self._lock, self._store_tab_worktree_dir,
+                    tab_id, wt_dir, task_id, keep_existing,
+                )
         elif (
             etype == "worktree_result"
             and event.get("success")
@@ -2958,10 +2954,10 @@ class WebPrinter(JsonPrinter):
             return
         self._tab_worktree_dirs.pop(tab_id, None)
 
-    def _record_tab_worktree_dir(
-        self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool = False,
+    def _store_tab_worktree_dir(
+        self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool,
     ) -> None:
-        """Record *wt_dir* as *tab_id*'s worktree, unless the copy is stale.
+        """Under ``_lock``: record *wt_dir* as *tab_id*'s worktree, unless the copy is stale.
 
         A fan-out copy is addressed from a subscriber snapshot taken
         before this call; a concurrent rebind (``cleanup_tab`` then a
@@ -2983,14 +2979,6 @@ class WebPrinter(JsonPrinter):
                 worktree directory yet (a second repository's worktree
                 must not displace the work dir's).
         """
-        locked_call(
-            self._lock, self._store_tab_worktree_dir, tab_id, wt_dir, task_id, keep_existing,
-        )
-
-    def _store_tab_worktree_dir(
-        self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool,
-    ) -> None:
-        """Under ``_lock``: the subscription re-check and write of ``_record_tab_worktree_dir``."""
         if task_id is not None:
             key = self._coerce_task_id(task_id)
             viewers = self._subscribers.get(key) if key else None
@@ -3025,17 +3013,19 @@ class WebPrinter(JsonPrinter):
         replay, new chat).  That is safe: after rebinding a chat the
         server re-presents a finished pending worktree
         (``_emit_pending_worktree`` broadcasts ``worktree_done``),
-        and for a still-running task the replayed ``task_events``
-        transcript carries the historical ``worktree_created`` — either
-        way :meth:`_track_worktree_event` re-records the entry before
-        any file link is checked.
+        and attaching the tab to a still-running task re-sends the
+        task's current ``worktree_created``
+        (``AgentServer._emit_running_worktree``) — either way
+        :meth:`_track_worktree_event` re-records the entry before the
+        replayed transcript's file links are checked.
 
         The subscriptions go first, then the entry is dropped under the
-        same ``_lock`` :meth:`_record_tab_worktree_dir` writes under.
-        A stale fan-out copy that passed its subscription re-check
-        before the unsubscribe has already written its entry by the
-        time this pop runs (so the pop removes it); one that re-checks
-        afterwards writes nothing.  Either way the entry is gone.
+        same ``_lock`` :meth:`_store_tab_worktree_dir` writes under.
+        The unsubscribe waits for every delivery already resolved for
+        the tab (it takes ``delivery_lock``): a fan-out or transient
+        copy that targeted the tab has written its entry by the time
+        this pop runs (so the pop removes it); one resolved afterwards
+        no longer targets the tab.  Either way the entry is gone.
 
         Args:
             tab_id: The frontend tab identifier to drop.
@@ -3103,12 +3093,7 @@ class WebPrinter(JsonPrinter):
             # A replay: either a running task's, whose sends were
             # reserved under ``delivery_lock`` by ``replay_snapshot``
             # (supply the payload), or a ``ready``-driven one delivered
-            # to one connection.  Both still re-present the tab's
-            # worktree (a running worktree task's ``worktree_created``
-            # nested in the transcript), which the daemon tracks for
-            # every client.
-            if "tabId" in event:
-                self._track_worktree_event(event, event.get("tabId"))
+            # to one connection.
             data = json.dumps(event)
             if slot is not None:
                 slot.set_result(data)
@@ -3166,13 +3151,18 @@ class WebPrinter(JsonPrinter):
         (:mod:`kiss.server.talk_player`) before every client receives
         the event as usual.
 
+        The copies are resolved and sent under ``delivery_lock``, as every
+        other fan-out is: a tab whose subscription is retired meanwhile
+        (:meth:`~kiss.server.json_printer.JsonPrinter.cleanup_tab`, e.g.
+        on a bind to a machine) gets its copy before that, never after.
+
         Args:
             event: The ``talk`` event (no ``tabId`` stamp).
         """
         targets = set(self._fanout_targets(event.get("taskId")))
         if targets and self._local_client_addressed(targets):
             self._play_talk_clip_locally(event)
-        self._fanout_stamped(event)
+        locked_call(self.delivery_lock, self._fanout_stamped, event)
 
     def _local_client_addressed(self, tab_ids: set[str]) -> bool:
         """Return True when a local client addressed one of *tab_ids*.
@@ -3707,11 +3697,9 @@ _FONT_VARS_CSS = (
     "      --theme-font-family: -apple-system, BlinkMacSystemFont, "
     '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
     "sans-serif;\n"
-    "      --theme-font-weight: normal;\n"
     "      --theme-editor-font-size: 13px;\n"
     '      --theme-editor-font-family: Menlo, Monaco, Consolas, '
     '"Droid Sans Mono", "Courier New", monospace;\n'
-    "      --theme-editor-font-weight: normal;\n"
 )
 """VS Code's default fonts as ``--theme-*`` variables."""
 
@@ -3734,52 +3722,33 @@ _DARK_MODERN_CSS = (
     "      --theme-editorLineNumber-activeForeground: #cccccc;\n"
     "      --theme-editorWidget-background: #202020;\n"
     "      --theme-editorWarning-foreground: #cca700;\n"
-    "      --theme-editorGutter-addedBackground: #2ea043;\n"
-    "      --theme-editorGutter-deletedBackground: #f85149;\n"
-    "      --theme-editorGutter-modifiedBackground: #0078d4;\n"
     "      --theme-sideBar-background: #181818;\n"
     "      --theme-sideBar-border: #2b2b2b;\n"
     "      --theme-panel-border: #2b2b2b;\n"
     "      --theme-widget-border: #313131;\n"
     "      --theme-widget-shadow: #0000005c;\n"
     "      --theme-editorGroupHeader-tabsBackground: #2b2b2b;\n"
-    "      --theme-tab-activeBackground: #1f1f1f;\n"
-    "      --theme-tab-inactiveBackground: #2b2b2b;\n"
     "      --theme-tab-activeForeground: #ffffff;\n"
     "      --theme-tab-inactiveForeground: #9d9d9d;\n"
     "      --theme-tab-activeBorderTop: #0078d4;\n"
-    "      --theme-activityBar-foreground: #d7d7d7;\n"
-    "      --theme-activityBar-inactiveForeground: #868686;\n"
-    "      --theme-activityBar-activeBorder: #0078d4;\n"
     "      --theme-list-hoverBackground: #2a2d2e;\n"
-    "      --theme-list-activeSelectionBackground: #04395e;\n"
     "      --theme-list-inactiveSelectionBackground: #37373d;\n"
     "      --theme-input-background: #313131;\n"
     "      --theme-input-foreground: #cccccc;\n"
     "      --theme-input-border: #3c3c3c;\n"
     "      --theme-input-placeholderForeground: #989898;\n"
-    "      --theme-dropdown-background: #313131;\n"
-    "      --theme-dropdown-border: #3c3c3c;\n"
     "      --theme-button-background: #0078d4;\n"
     "      --theme-button-foreground: #ffffff;\n"
     "      --theme-button-hoverBackground: #026ec1;\n"
-    "      --theme-button-border: #ffffff1a;\n"
     "      --theme-button-secondaryBackground: #00000000;\n"
     "      --theme-button-secondaryForeground: #cccccc;\n"
     "      --theme-button-secondaryHoverBackground: #2b2b2b;\n"
-    "      --theme-badge-background: #616161;\n"
-    "      --theme-badge-foreground: #f8f8f8;\n"
     "      --theme-textLink-foreground: #4daafc;\n"
     "      --theme-textLink-activeForeground: #4daafc;\n"
     "      --theme-textCodeBlock-background: #2b2b2b;\n"
-    "      --theme-textBlockQuote-background: #2b2b2b;\n"
-    "      --theme-textBlockQuote-border: #616161;\n"
     "      --theme-textPreformat-foreground: #d0d0d0;\n"
-    "      --theme-textPreformat-background: #3c3c3c;\n"
     "      --theme-menu-background: #1f1f1f;\n"
     "      --theme-menu-selectionBackground: #0078d4;\n"
-    "      --theme-notifications-background: #1f1f1f;\n"
-    "      --theme-notifications-border: #2b2b2b;\n"
     "      --theme-toolbar-hoverBackground: #5a5d5e50;\n"
     "      --theme-scrollbarSlider-background: #79797966;\n"
     "      --theme-terminal-foreground: #cccccc;\n"
@@ -3823,52 +3792,33 @@ _LIGHT_MODERN_CSS = (
     "      --theme-editorLineNumber-activeForeground: #171184;\n"
     "      --theme-editorWidget-background: #f8f8f8;\n"
     "      --theme-editorWarning-foreground: #bf8803;\n"
-    "      --theme-editorGutter-addedBackground: #2ea043;\n"
-    "      --theme-editorGutter-deletedBackground: #f85149;\n"
-    "      --theme-editorGutter-modifiedBackground: #005fb8;\n"
     "      --theme-sideBar-background: #f8f8f8;\n"
     "      --theme-sideBar-border: #e5e5e5;\n"
     "      --theme-panel-border: #e5e5e5;\n"
     "      --theme-widget-border: #e5e5e5;\n"
     "      --theme-widget-shadow: #00000029;\n"
     "      --theme-editorGroupHeader-tabsBackground: #e5e5e5;\n"
-    "      --theme-tab-activeBackground: #ffffff;\n"
-    "      --theme-tab-inactiveBackground: #e5e5e5;\n"
     "      --theme-tab-activeForeground: #3b3b3b;\n"
     "      --theme-tab-inactiveForeground: #616161;\n"
     "      --theme-tab-activeBorderTop: #005fb8;\n"
-    "      --theme-activityBar-foreground: #1f1f1f;\n"
-    "      --theme-activityBar-inactiveForeground: #616161;\n"
-    "      --theme-activityBar-activeBorder: #005fb8;\n"
     "      --theme-list-hoverBackground: #f2f2f2;\n"
-    "      --theme-list-activeSelectionBackground: #e8e8e8;\n"
     "      --theme-list-inactiveSelectionBackground: #e4e6f1;\n"
     "      --theme-input-background: #ffffff;\n"
     "      --theme-input-foreground: #3b3b3b;\n"
     "      --theme-input-border: #cecece;\n"
     "      --theme-input-placeholderForeground: #767676;\n"
-    "      --theme-dropdown-background: #ffffff;\n"
-    "      --theme-dropdown-border: #cecece;\n"
     "      --theme-button-background: #005fb8;\n"
     "      --theme-button-foreground: #ffffff;\n"
     "      --theme-button-hoverBackground: #0258a8;\n"
-    "      --theme-button-border: #0000001a;\n"
     "      --theme-button-secondaryBackground: #e5e5e5;\n"
     "      --theme-button-secondaryForeground: #3b3b3b;\n"
     "      --theme-button-secondaryHoverBackground: #cccccc;\n"
-    "      --theme-badge-background: #cccccc;\n"
-    "      --theme-badge-foreground: #3b3b3b;\n"
     "      --theme-textLink-foreground: #005fb8;\n"
     "      --theme-textLink-activeForeground: #005fb8;\n"
     "      --theme-textCodeBlock-background: #f8f8f8;\n"
-    "      --theme-textBlockQuote-background: #f8f8f8;\n"
-    "      --theme-textBlockQuote-border: #e5e5e5;\n"
     "      --theme-textPreformat-foreground: #3b3b3b;\n"
-    "      --theme-textPreformat-background: #0000001f;\n"
     "      --theme-menu-background: #ffffff;\n"
     "      --theme-menu-selectionBackground: #005fb8;\n"
-    "      --theme-notifications-background: #ffffff;\n"
-    "      --theme-notifications-border: #e5e5e5;\n"
     "      --theme-toolbar-hoverBackground: #b8b8b850;\n"
     "      --theme-scrollbarSlider-background: #64646466;\n"
     "      --theme-terminal-foreground: #3b3b3b;\n"
@@ -3914,52 +3864,33 @@ _DARK_HIGH_CONTRAST_CSS = (
     "      --theme-editorLineNumber-activeForeground: #f0f0f0;\n"
     "      --theme-editorWidget-background: #1a1a1a;\n"
     "      --theme-editorWarning-foreground: #ebcb8b;\n"
-    "      --theme-editorGutter-addedBackground: #a3be8c;\n"
-    "      --theme-editorGutter-deletedBackground: #bf616a;\n"
-    "      --theme-editorGutter-modifiedBackground: #ebcb8b;\n"
     "      --theme-sideBar-background: #0a0a0a;\n"
     "      --theme-sideBar-border: #f0f0f066;\n"
     "      --theme-panel-border: #f0f0f066;\n"
     "      --theme-widget-border: #f0f0f0;\n"
     "      --theme-widget-shadow: #00000000;\n"
     "      --theme-editorGroupHeader-tabsBackground: #0a0a0a;\n"
-    "      --theme-tab-activeBackground: #0a0a0a;\n"
-    "      --theme-tab-inactiveBackground: #0a0a0a;\n"
     "      --theme-tab-activeForeground: #ffffff;\n"
     "      --theme-tab-inactiveForeground: #f0f0f0bd;\n"
     "      --theme-tab-activeBorderTop: #88c0d0;\n"
-    "      --theme-activityBar-foreground: #f0f0f0;\n"
-    "      --theme-activityBar-inactiveForeground: #f0f0f0bd;\n"
-    "      --theme-activityBar-activeBorder: #88c0d0;\n"
     "      --theme-list-hoverBackground: #2a2a2a;\n"
-    "      --theme-list-activeSelectionBackground: #434c5e;\n"
     "      --theme-list-inactiveSelectionBackground: #2a2a2a;\n"
     "      --theme-input-background: #000000;\n"
     "      --theme-input-foreground: #f0f0f0;\n"
     "      --theme-input-border: #f0f0f0;\n"
     "      --theme-input-placeholderForeground: #f0f0f099;\n"
-    "      --theme-dropdown-background: #000000;\n"
-    "      --theme-dropdown-border: #f0f0f0;\n"
     "      --theme-button-background: #434c5e;\n"
     "      --theme-button-foreground: #eceff4;\n"
     "      --theme-button-hoverBackground: #4c566a;\n"
-    "      --theme-button-border: #f0f0f0;\n"
     "      --theme-button-secondaryBackground: #000000;\n"
     "      --theme-button-secondaryForeground: #f0f0f0;\n"
     "      --theme-button-secondaryHoverBackground: #2a2a2a;\n"
-    "      --theme-badge-background: #88c0d0;\n"
-    "      --theme-badge-foreground: #000000;\n"
     "      --theme-textLink-foreground: #88c0d0;\n"
     "      --theme-textLink-activeForeground: #f0f0f0;\n"
     "      --theme-textCodeBlock-background: #1a1a1a;\n"
-    "      --theme-textBlockQuote-background: #1a1a1a;\n"
-    "      --theme-textBlockQuote-border: #f0f0f0;\n"
     "      --theme-textPreformat-foreground: #f0f0f0;\n"
-    "      --theme-textPreformat-background: #2a2a2a;\n"
     "      --theme-menu-background: #0a0a0a;\n"
     "      --theme-menu-selectionBackground: #434c5e;\n"
-    "      --theme-notifications-background: #0a0a0a;\n"
-    "      --theme-notifications-border: #f0f0f0;\n"
     "      --theme-toolbar-hoverBackground: #2a2a2a;\n"
     "      --theme-scrollbarSlider-background: #f0f0f066;\n"
     "      --theme-terminal-foreground: #f0f0f0;\n"
@@ -4006,52 +3937,33 @@ _LIGHT_HIGH_CONTRAST_CSS = (
     "      --theme-editorLineNumber-activeForeground: #000000;\n"
     "      --theme-editorWidget-background: #ffffff;\n"
     "      --theme-editorWarning-foreground: #a46700;\n"
-    "      --theme-editorGutter-addedBackground: #007041;\n"
-    "      --theme-editorGutter-deletedBackground: #be1744;\n"
-    "      --theme-editorGutter-modifiedBackground: #0064b0;\n"
     "      --theme-sideBar-background: #ffffff;\n"
     "      --theme-sideBar-border: #0f4a85;\n"
     "      --theme-panel-border: #0f4a85;\n"
     "      --theme-widget-border: #0f4a85;\n"
     "      --theme-widget-shadow: #00000000;\n"
     "      --theme-editorGroupHeader-tabsBackground: #ffffff;\n"
-    "      --theme-tab-activeBackground: #ffffff;\n"
-    "      --theme-tab-inactiveBackground: #ffffff;\n"
     "      --theme-tab-activeForeground: #000000;\n"
     "      --theme-tab-inactiveForeground: #000000bd;\n"
     "      --theme-tab-activeBorderTop: #0f4a85;\n"
-    "      --theme-activityBar-foreground: #000000;\n"
-    "      --theme-activityBar-inactiveForeground: #000000bd;\n"
-    "      --theme-activityBar-activeBorder: #0f4a85;\n"
     "      --theme-list-hoverBackground: #0f4a851a;\n"
-    "      --theme-list-activeSelectionBackground: #0f4a8540;\n"
     "      --theme-list-inactiveSelectionBackground: #0f4a8526;\n"
     "      --theme-input-background: #ffffff;\n"
     "      --theme-input-foreground: #000000;\n"
     "      --theme-input-border: #0f4a85;\n"
     "      --theme-input-placeholderForeground: #000000bd;\n"
-    "      --theme-dropdown-background: #ffffff;\n"
-    "      --theme-dropdown-border: #0f4a85;\n"
     "      --theme-button-background: #0f4a85;\n"
     "      --theme-button-foreground: #ffffff;\n"
     "      --theme-button-hoverBackground: #0064b0;\n"
-    "      --theme-button-border: #0f4a85;\n"
     "      --theme-button-secondaryBackground: #ffffff;\n"
     "      --theme-button-secondaryForeground: #000000;\n"
     "      --theme-button-secondaryHoverBackground: #0f4a851a;\n"
-    "      --theme-badge-background: #0f4a85;\n"
-    "      --theme-badge-foreground: #ffffff;\n"
     "      --theme-textLink-foreground: #0064b0;\n"
     "      --theme-textLink-activeForeground: #0f4a85;\n"
     "      --theme-textCodeBlock-background: #ffffff;\n"
-    "      --theme-textBlockQuote-background: #ffffff;\n"
-    "      --theme-textBlockQuote-border: #0f4a85;\n"
     "      --theme-textPreformat-foreground: #000000;\n"
-    "      --theme-textPreformat-background: #0f4a851a;\n"
     "      --theme-menu-background: #ffffff;\n"
     "      --theme-menu-selectionBackground: #0f4a85;\n"
-    "      --theme-notifications-background: #ffffff;\n"
-    "      --theme-notifications-border: #0f4a85;\n"
     "      --theme-toolbar-hoverBackground: #0f4a8526;\n"
     "      --theme-scrollbarSlider-background: #0f4a8580;\n"
     "      --theme-terminal-foreground: #000000;\n"
@@ -4079,9 +3991,7 @@ _LIGHT_HIGH_CONTRAST_CSS = (
 """A light high-contrast palette in Cursor Light's hues as ``--theme-*`` variables."""
 
 _HIGH_CONTRAST_VARS_CSS = (
-    "html.high-contrast,\n"
-    "    body.remote-chat.high-contrast {\n" + _DARK_HIGH_CONTRAST_CSS + "    }\n"
-    "    html.light-theme.high-contrast,\n"
+    "body.remote-chat.high-contrast {\n" + _DARK_HIGH_CONTRAST_CSS + "    }\n"
     "    body.remote-chat.light-theme.high-contrast {\n"
     + _LIGHT_HIGH_CONTRAST_CSS + "    }\n"
 )
@@ -5014,6 +4924,10 @@ class RemoteAccessServer:
             else local_endpoint.default_endpoint_path()
         )
         self._local_token: str = local_endpoint.new_token()
+        # The brand's $KISS_HOME/services.d helpers (Seamless Loop's hub
+        # relay): started once the endpoint file they read is written,
+        # stopped with the daemon.
+        self._services = Services()
         # Set by start_private_async: only token-authenticated local
         # clients may use the daemon, never a remote password.
         self._local_only: bool = False
@@ -5059,15 +4973,17 @@ class RemoteAccessServer:
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
         self._update_watch_task: asyncio.Task[None] | None = None
+        # Finishes the restart an installer deferred while tasks ran
+        # (_deferred_restart_loop).
+        self._deferred_restart_task: asyncio.Task[None] | None = None
         # "Update when idle": ``_update_when_idle_task`` polls the agent
         # registry and runs the installer once no task is in flight.  It
         # stays tracked (for shutdown) until it finishes; ``_armed`` is
         # the generation of the poller still waiting for idle (0 once
         # it launched or was cancelled), i.e. non-zero while a Cancel
-        # can still call it off.  Every arm takes a fresh generation so
-        # a poller's idle check that was parked on the registry lock
-        # across a Cancel and a re-arm (which now belongs to a NEW
-        # poller) cannot pass for the new one.
+        # can still call it off.  Every arm takes a fresh generation and
+        # a poller's idle check acts only on its own, so a cancelled
+        # poller cannot consume a re-arm that belongs to a NEW poller.
         self._update_when_idle_task: asyncio.Task[None] | None = None
         self._update_when_idle_armed = 0
         self._update_when_idle_gen = 0
@@ -5348,19 +5264,18 @@ class RemoteAccessServer:
     def _auth_lock_remaining(self, ip: str) -> float:
         """Return the seconds left in *ip*'s rate-limit lock (0.0 if none).
 
-        An IP becomes locked once it has accumulated
-        :data:`_AUTH_FAIL_MAX` failures within the most recent
-        :data:`_AUTH_FAIL_WINDOW` seconds.  The lock persists until
-        :data:`_AUTH_LOCKOUT` seconds have elapsed since the last
-        recorded failure; the returned value is the time remaining
-        until that expiry, so callers can tell a locked-out client
-        exactly when to retry.
+        An IP is locked while it has :data:`_AUTH_FAIL_MAX` failures
+        within the most recent :data:`_AUTH_FAIL_WINDOW` seconds, so
+        the lock ends when the oldest of its last
+        :data:`_AUTH_FAIL_MAX` failures leaves the window; the returned
+        value is the time until then, so callers can tell a locked-out
+        client exactly when to retry.
         """
         now = time.monotonic()
         fails = self._prune_auth_failures(ip, now)
         if len(fails) < _AUTH_FAIL_MAX:
             return 0.0
-        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+        return max(0.0, _AUTH_FAIL_WINDOW - (now - fails[-_AUTH_FAIL_MAX]))
 
     def _prune_auth_failures(self, ip: str, now: float) -> list[float]:
         """Drop *ip*'s failures older than the window; return the rest.
@@ -5954,23 +5869,28 @@ class RemoteAccessServer:
     ) -> None:
         """Hand a spawned installer to its exit watcher, or release the guards.
 
-        Done-callback of the spawn future of :meth:`_handle_run_update`,
-        run on the event loop whether or not that handler is still
-        awaiting it.  A started installer now holds the single-flight
-        guard through ``_update_proc`` and the run-admission barrier
-        until :meth:`_watch_update_exit` lowers it; a failed spawn
-        (``None``, already reported as an ``error`` event, or a raise
-        the awaiting handler re-raises) owns nothing, so the barrier
-        goes down and a later Update click starts over.
+        Done-callback of the spawn future of :meth:`_handle_run_update`
+        (:meth:`_spawn_update_script`) and of
+        :meth:`_deferred_restart_loop` (:meth:`_spawn_deferred_restart`),
+        run on the event loop whether or not the spawner is still
+        awaiting it.  A started installer takes over the single-flight
+        guard here, as ``_update_proc`` in the step that clears
+        ``_update_starting``, and holds the run-admission barrier until
+        :meth:`_watch_update_exit` lowers it; a failed spawn (``None``,
+        already reported as an ``error`` event, or a raise the awaiting
+        spawner re-raises) owns nothing, so the barrier goes down and a
+        later Update click starts over.
 
         Args:
             conn_id: Requesting connection id (``""`` to broadcast).
             started: When the spawn was submitted (``time.time()``).
-            spawn: The executor future of :meth:`_spawn_update_script`.
+            spawn: The executor future of the spawn.
         """
-        self._update_starting = False
         failed = spawn.cancelled() or spawn.exception() is not None
         spawned = None if failed else spawn.result()
+        if spawned is not None:
+            self._update_proc = spawned[0]
+        self._update_starting = False
         if spawned is None:
             self._set_update_barrier(False)
             return
@@ -6004,36 +5924,39 @@ class RemoteAccessServer:
         ``run`` submitted between the poller's "no active tasks"
         observation and the installer spawn is either counted as
         active (and defers the update) or refused by the barrier.
-        The armed generation is read in the same section — and
-        :meth:`_cancel_update_when_idle` clears it under the same lock
-        — so a Cancel that lands while this thread waits for the lock
-        is seen here and nothing is armed for an update nobody will
-        run (the cancelled poller has already lowered the barrier and
-        no exit watcher would ever lower it again).  Comparing *gen*
-        rather than testing "armed" also covers a Cancel followed by a
-        re-arm during that wait: the armed generation is then the new
-        poller's and this (cancelled) poller's check must not consume
-        it, or the new poller would never see idle and the barrier
-        would stay up with no installer behind it.  The generation is
-        CONSUMED in this section: from here on the launch belongs to
-        the poller, and a Cancel that gets the lock after it finds
-        nothing armed and stands down.  Clearing it later, on the
-        poller's next loop step, let such a Cancel cancel a poller
-        already inside :meth:`_handle_run_update`; landing at the spawn
-        ``await`` that left a started installer with the barrier
-        lowered and no exit watcher (conc1018 I2-F1).
-        Blocks on the lock: call it off the event loop.
+        Nothing is armed once the shutdown sweep has begun
+        (``_shutdown_stopping``, set under the same lock): it stops
+        every task, and the idle daemon it leaves behind must not run
+        an installer that would restart it.  The armed generation must
+        still be *gen* (a Cancel, or a Cancel and a re-arm, cleared or
+        replaced it) and is CONSUMED here: from here on the launch
+        belongs to the poller, and a Cancel arriving later finds
+        nothing armed and stands down (conc1018 I2-F1).
+
+        Runs on the event loop, in the step in which the poller enters
+        :meth:`_handle_run_update` and takes the single-flight guard
+        (``_update_starting``).  An installer's exit watcher, a loop
+        callback too, lowers the barrier whenever no installer is in
+        progress; were this check on a worker thread, a watcher could
+        run between the raise and the poller's resume and drop the
+        barrier under the poller.  Task threads hold the lock for
+        milliseconds, which the loop waits out as in
+        :meth:`_set_update_barrier`.
 
         Args:
             gen: The calling poller's generation.
 
         Returns:
             ``True`` when the barrier was raised (idle), ``False`` when
-            a task is still live and the poller must wait, or the idle
-            update was cancelled meanwhile.
+            a task is still live and the poller must wait, the daemon
+            is shutting down, or the idle update was cancelled.
         """
         with agent_state.STATE_LOCK:
-            if self._update_when_idle_armed != gen or _snapshot_active_tabs():
+            if (
+                self._update_when_idle_armed != gen
+                or self._agent_server._shutdown_stopping
+                or _snapshot_active_tabs()
+            ):
                 return False
             self._update_when_idle_armed = 0
             self._agent_server._update_installing = True
@@ -6125,13 +6048,10 @@ class RemoteAccessServer:
             ]
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"
-        spawned = self._spawn_detached(
+        return self._spawn_detached(
             argv, cwd, env, self._update_log_path, conn_id,
             f"{PRODUCT_NAME} update",
         )
-        if spawned is not None:
-            self._update_proc = spawned[0]
-        return spawned
 
     def _spawn_detached(
         self,
@@ -6144,12 +6064,15 @@ class RemoteAccessServer:
     ) -> tuple[subprocess.Popen[bytes], int] | None:
         """Start *argv* detached from the daemon, appending its output to *log_path*.
 
-        Shared by the self-updater and the model-catalog updater: both
-        must survive a restart of this daemon (``start_new_session=True``,
-        ``stdin=DEVNULL``) and both report a spawn failure as an
-        ``error`` event stamped with the requesting connection instead
-        of raising.  Blocking (file I/O, process spawn): run it in the
-        executor.
+        Shared by the self-updater, the deferred restart and the
+        model-catalog updater: all must survive a restart of this daemon
+        (``start_new_session=True``, ``stdin=DEVNULL``) and all report a
+        spawn failure as an ``error`` event stamped with the requesting
+        connection instead of raising.  Besides ``OSError`` that
+        includes the ``ValueError`` ``Popen`` raises for a NUL byte in
+        an argument or the environment (a deferred-restart record's
+        ``home`` becomes ``KISS_HOME``).  Blocking (file I/O, process
+        spawn): run it in the executor.
 
         Args:
             argv: The command line.
@@ -6180,7 +6103,7 @@ class RemoteAccessServer:
                     start_new_session=True,
                 )
                 return proc, log_offset
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             broadcast_to_conn(self._printer, {
                 "type": "error",
                 "text": f"Failed to start {what}: {exc}",
@@ -6211,14 +6134,16 @@ class RemoteAccessServer:
         so the run-admission barrier raised for it is lowered: a daemon
         the installer did not restart (a failed or no-op update) must
         accept tasks again.  Unless the barrier already belongs to the
-        NEXT installer: an Update click or the idle poller that lands
-        between this installer's exit and the poll that notices it
-        (:meth:`_update_in_progress` is already false then) raises the
-        barrier for its own installer, which this watcher must not
-        lower from under it; that installer's watcher lowers it.
+        NEXT installer: an Update click, the idle poller or the
+        deferred-restart loop that lands between this installer's exit
+        and the poll that notices it raises the barrier in the loop step
+        in which it takes the single-flight guard, so
+        :meth:`_update_in_progress` is true again when this watcher
+        checks it, and that installer's watcher lowers the barrier.
 
         Args:
-            proc: The installer started by :meth:`_spawn_update_script`.
+            proc: The installer started by :meth:`_spawn_update_script`
+                or :meth:`_spawn_deferred_restart`.
             log_offset: Size of the update log when *proc* started,
                 i.e. where this run's output begins.
             conn_id: Requesting connection id (``""`` to broadcast).
@@ -6416,8 +6341,12 @@ class RemoteAccessServer:
         the KISS transcription agent (:func:`transcribe_pcm`) — which
         also reports the language that was spoken — the speaker is
         identified locally (best effort), and the client gets back
-        ``{type: 'voiceSpeech', text, speaker, language}``, which
-        voice.js inserts and submits as the dictated task.  An
+        ``{type: 'voiceSpeech', text, speaker, language, round}``, which
+        voice.js inserts and submits as the dictated task.  ``round``
+        echoes the command's integer ``round`` tag (``None`` for any
+        other value): voice.js pairs a tagged reply with exactly that
+        dictation, so a cancelled dictation's late reply is refused
+        instead of being taken for the next one's.  An
         empty/undecodable audio
         payload or a failed translation replies with an empty ``text``
         so the page can clear its transcribing indicator.
@@ -6484,9 +6413,15 @@ class RemoteAccessServer:
                 speaker = await self._loop.run_in_executor(
                     None, self._identify_voice_speaker, speaker_pcm,
                 )
+        round_tag = cmd.get("round")
+        if not isinstance(round_tag, int) or isinstance(round_tag, bool):
+            round_tag = None
         await self._reply_direct(
             endpoint,
-            {"type": "voiceSpeech", "text": text, "speaker": speaker, "language": language},
+            {
+                "type": "voiceSpeech", "text": text, "speaker": speaker,
+                "language": language, "round": round_tag,
+            },
             "voiceTranscribe",
         )
 
@@ -7666,17 +7601,23 @@ class RemoteAccessServer:
 
             {"type": "activeTasksResponse",
              "count": <int>,
-             "tabs": ["<tabId>(task=<task_id>)", ...]}
+             "tabs": ["<tabId>(task=<task_id>)", ...],
+             "restartPendingFile": "<path>"}
 
         Inactive tabs are filtered out; ``count`` is the length of the
         ``tabs`` list, matching the format emitted by the signal-
-        handler log line above.
+        handler log line above.  ``restartPendingFile`` is where an
+        installer that defers its restart records it, for
+        :meth:`_deferred_restart_loop` to finish once the tasks are
+        done; an installer that gets none from an older daemon tells
+        the user to re-run it instead.
         """
         active_tabs = _snapshot_active_tabs()
         await self._reply_direct(endpoint, {
             "type": "activeTasksResponse",
             "count": len(active_tabs),
             "tabs": active_tabs,
+            "restartPendingFile": str(self._restart_pending_path()),
         }, "activeTasksQuery")
 
 
@@ -7888,10 +7829,12 @@ class RemoteAccessServer:
             update is under way and the single-flight guard in
             :meth:`_handle_run_update` covers any concurrent request.
             The armed generation is cleared under
-            :data:`agent_state.STATE_LOCK` — the lock the idle check
-            (:meth:`_arm_update_barrier_if_idle`) takes — so a check
-            already parked on the lock cannot raise the barrier after
-            this cancel.  Task threads hold that lock for the few
+            :data:`agent_state.STATE_LOCK`, the lock the idle check
+            (:meth:`_arm_update_barrier_if_idle`) reads it under.  Both
+            run on the event loop, so a Cancel lands either while the
+            poller sleeps (cancelled there, it never checks again) or
+            after its verdict (the generation is consumed and this call
+            stands down).  Task threads hold that lock for the few
             milliseconds of a run admission or a refusal broadcast; the
             loop waits those out here as :meth:`_set_update_barrier`
             does.
@@ -7939,13 +7882,13 @@ class RemoteAccessServer:
     async def _run_update_when_idle(self, gen: int) -> None:
         """Wait until no task is in flight, then launch the installer.
 
-        Polls :meth:`_arm_update_barrier_if_idle` (off-thread: it takes
-        the registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.
-        The idle verdict and the run-admission barrier are one atomic
-        step, so no ``run`` can start between "no active tasks" and the
-        installer spawn (the barrier makes ``_cmd_run`` refuse it).
-        That step also disarms the poller, so a Cancel arriving later
-        finds nothing to cancel; it then runs
+        Polls :meth:`_arm_update_barrier_if_idle` every
+        :data:`_IDLE_UPDATE_POLL_S` seconds.  The idle verdict and the
+        run-admission barrier are one atomic step, so no ``run`` can
+        start between "no active tasks" and the installer spawn (the
+        barrier makes ``_cmd_run`` refuse it).  That step also disarms
+        the poller, so a Cancel arriving later finds nothing to cancel;
+        in the same event-loop step it then enters
         :meth:`_handle_run_update` for every window
         (``conn_id=""``): the click that armed it may be long gone by
         the time the update starts, so its notices must not be confined
@@ -7958,7 +7901,7 @@ class RemoteAccessServer:
                 while it is the armed one).
         """
         try:
-            while not await asyncio.to_thread(self._arm_update_barrier_if_idle, gen):
+            while not self._arm_update_barrier_if_idle(gen):
                 await asyncio.sleep(_IDLE_UPDATE_POLL_S)
             await self._handle_run_update("")
             await self._broadcast_update_available()
@@ -7974,6 +7917,106 @@ class RemoteAccessServer:
         finally:
             if self._update_when_idle_task is asyncio.current_task():
                 self._update_when_idle_task = None
+
+    def _restart_pending_path(self) -> Path:
+        """Path of the record of a deferred restart (:mod:`kiss.server.deferred_restart`).
+
+        Next to ``remote-url.json``, i.e. in ``$KISS_HOME`` where
+        ``install.sh`` removes it after every restart, and in a test
+        server's own directory when it has its own ``url_file=``.
+        """
+        return self._url_file.parent / deferred_restart.RESTART_PENDING_FILE
+
+    def _raise_update_barrier_if_idle(self) -> bool:
+        """Raise the run-admission barrier if it is down and no task is in flight.
+
+        The idle check (:func:`_snapshot_active_tabs`) and the raise are
+        one :data:`agent_state.STATE_LOCK` section, the lock ``_cmd_run``
+        admits a run under, so a run is either counted here or refused
+        by the barrier.  A barrier that is up already belongs to an
+        installer about to start (an Update click, the idle poller).
+        Once the shutdown sweep has begun (``_shutdown_stopping``, set
+        under the same lock) nothing is raised: the sweep stops every
+        task, and the idle daemon it leaves behind must not run an
+        installer that would restart it.  Task threads hold the lock
+        for milliseconds, which the event loop waits out as in
+        :meth:`_set_update_barrier`.
+
+        Returns:
+            Whether this call raised the barrier.
+        """
+        with agent_state.STATE_LOCK:
+            if (
+                self._agent_server._update_installing
+                or self._agent_server._shutdown_stopping
+                or _snapshot_active_tabs()
+            ):
+                return False
+            self._agent_server._update_installing = True
+            return True
+
+    async def _deferred_restart_loop(self) -> None:
+        """Finish the restart an installer deferred, once no task is in flight.
+
+        ``install.sh`` does not restart a daemon that reports tasks in
+        flight; it records the restart in :meth:`_restart_pending_path`
+        (the file :meth:`_handle_active_tasks_query` names to it) and
+        exits.  Every :data:`_IDLE_UPDATE_POLL_S` seconds this loop
+        looks for that record.  With one there, no installer being
+        spawned or running and no task in flight, it raises the
+        run-admission barrier and, in the same event-loop step, takes
+        the single-flight guard of :meth:`_handle_run_update`, then runs
+        the recorded installer with ``--restart-only``
+        (:meth:`_spawn_deferred_restart`).  That run restarts this
+        daemon onto the build the deferred install left on disk; when
+        it does not, its exit watcher (:meth:`_watch_update_exit`, via
+        :meth:`_update_spawned`) lowers the barrier and reports why.
+        A record is finished however old it is: a daemon started another
+        way since (a reboot) runs from the service definition the
+        deferred run did not rewrite.  A failed check is logged and the
+        next poll tries again, as in the daemon's other background
+        loops.
+        """
+        loop = asyncio.get_running_loop()
+        path = self._restart_pending_path()
+        while True:
+            await asyncio.sleep(_IDLE_UPDATE_POLL_S)
+            try:
+                if not await asyncio.to_thread(path.exists):
+                    continue
+                if self._update_in_progress() or not self._raise_update_barrier_if_idle():
+                    continue
+                self._update_starting = True
+                spawn = loop.run_in_executor(None, self._spawn_deferred_restart, path)
+                spawn.add_done_callback(partial(self._update_spawned, "", time.time()))
+                await asyncio.shield(spawn)
+            except Exception:  # noqa: BLE001 — the loop must outlive one bad poll
+                logger.warning("Deferred restart check failed", exc_info=True)
+
+    def _spawn_deferred_restart(
+        self, path: Path,
+    ) -> tuple[subprocess.Popen[bytes], int] | None:
+        """Start the ``install.sh --restart-only`` run a deferred restart recorded.
+
+        Claims the record at *path* (:func:`deferred_restart.claim`)
+        and starts its command detached, logging to the update log, the
+        way :meth:`_spawn_update_script` starts the Update button's
+        installer.  Blocking: run it in the executor.
+
+        Args:
+            path: The deferred-restart record.
+
+        Returns:
+            The started process and the update log's size at that
+            moment, or ``None`` when the record was unusable or the
+            spawn failed.
+        """
+        command = deferred_restart.claim(path)
+        if command is None:
+            return None
+        return self._spawn_detached(
+            *command, self._update_log_path, "", f"{PRODUCT_NAME} restart",
+        )
 
     async def _handle_snooze_update(self, latest: str = "") -> None:
         """Record a 24h "Remind me later" snooze and rebroadcast.
@@ -8063,16 +8106,19 @@ class RemoteAccessServer:
           down the whole authenticated connection over one bad field;
         * blanks non-str ``tabId`` / ``chatId`` values — a non-str
           ``chatId`` would flow into backend handlers that assume
-          strings.
+          strings — and non-str ``title`` / ``workDir`` values.
 
-        Every rejection is logged with a ``warning``.
+        The cap, a non-dict element and a blanked ``tabId`` /
+        ``chatId`` are logged with a ``warning``; a blanked ``title``
+        or ``workDir`` is not.
 
         Args:
             cmd: The ``ready`` command dict.
 
         Returns:
-            Cleaned entries, each ``{"tabId": str, "chatId": str}``
-            (fields blanked to ``""`` when missing or malformed).
+            Cleaned entries, each ``{"tabId": str, "chatId": str,
+            "title": str, "workDir": str}`` (fields blanked to ``""``
+            when missing or malformed).
         """
         restored = cmd.get("restoredTabs") or []
         if not isinstance(restored, list):
@@ -8597,18 +8643,26 @@ class RemoteAccessServer:
                 "1015 — Cloudflare is rate-limiting "
                 "trycloudflare.com quick-tunnels for this egress IP",
             )
-        # URL discovery failed for a still-live process (F4-11): kill
-        # it, or the watchdog would forever see a healthy tunnel whose
-        # public URL is never advertised (only the local URL is), and
-        # never retry discovery or restart it.
+        self._terminate_unadvertised_tunnel()
+        return None
+
+    def _terminate_unadvertised_tunnel(self) -> None:
+        """Terminate a still-live cloudflared whose URL was not discovered.
+
+        Left running (F4-11), the watchdog would see a healthy tunnel
+        once it registers (now or later), whose public URL is never
+        advertised (only the local URL is), and never retry discovery
+        or restart it.  Terminated, the watchdog's next tick starts a
+        fresh tunnel.  A cloudflared that already exited is left for
+        the watchdog's dead-process branch.
+        """
         if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
             logger.warning(
-                "cloudflared quick-tunnel started but its URL could "
-                "not be discovered; terminating it so the watchdog "
-                "can start a fresh tunnel",
+                "cloudflared started but its URL could not be "
+                "discovered; terminating it so the watchdog can start "
+                "a fresh tunnel",
             )
             self._terminate_tunnel_proc()
-        return None
 
     def _start_named_tunnel(self) -> str | None:
         """Start a named tunnel using :attr:`tunnel_token`.
@@ -8623,8 +8677,9 @@ class RemoteAccessServer:
 
         Returns:
             The discovered or configured ``https://`` URL, the legacy
-            sentinel string, or ``None`` if the subprocess exits
-            before registering.
+            sentinel string, or ``None`` if the subprocess exits, or
+            stops logging, before registering (a still-live one is
+            terminated, as in :meth:`_start_quick_tunnel`).
         """
         self._spawn_cloudflared(["run", "--token", self.tunnel_token or ""])
         assert self._tunnel_proc is not None
@@ -8633,7 +8688,10 @@ class RemoteAccessServer:
             partial(_parse_named_tunnel_url, configured_url=self.tunnel_url),
             timeout=30,
         )
-        if url and self._tunnel_metrics_port is not None:
+        if not url:
+            self._terminate_unadvertised_tunnel()
+            return None
+        if self._tunnel_metrics_port is not None:
             _save_cloudflared_pidfile(
                 self._tunnel_proc.pid, self._tunnel_metrics_port, url,
             )
@@ -9025,21 +9083,25 @@ class RemoteAccessServer:
         ``$KISS_HOME/machines.json`` is written by this daemon's own
         ``machineAction`` and, from other processes, by a ``/machine
         add`` task or the CLI.  Its size and mtime are read every
-        :data:`MACHINES_REGISTRY_POLL_SECONDS`; a change after the
-        first look sends a ``machines`` reply (pinged anew) to every
-        connection, so each surface's MACHINES subpanel refreshes and
-        unfolds for a new machine without waiting for its own poll.
+        :data:`MACHINES_REGISTRY_POLL_SECONDS`.  A change after the
+        first look first retires this daemon's cached links and ssh
+        tunnels of every machine whose entry changed or vanished
+        (another process's write sweeps only that process's;
+        :func:`~kiss.agents.sorcar.machines.close_links` may wait for a
+        dial, so it runs on a worker thread), then sends a ``machines``
+        reply (pinged anew) to every connection, so each surface's
+        MACHINES subpanel refreshes and unfolds for a new machine
+        without waiting for its own poll.
         """
-        from kiss.agents.sorcar.machines import machines_file
-
-        seen = _file_stamp(machines_file())
+        seen = _file_stamp(machines.machines_file())
         while True:
             await asyncio.sleep(MACHINES_REGISTRY_POLL_SECONDS)
             try:
-                stamp = _file_stamp(machines_file())
+                stamp = _file_stamp(machines.machines_file())
                 if stamp == seen:
                     continue
                 seen = stamp
+                await asyncio.to_thread(machines.close_links, machines.load_machines())
                 await self._server_api.broadcast_machines()
             except Exception:
                 logger.debug("machines registry watch failed", exc_info=True)
@@ -9399,9 +9461,11 @@ class RemoteAccessServer:
         the same ``*.trycloudflare.com`` (or named-tunnel) hostname.
 
         This is the difference between :meth:`_stop_tunnel` (kills
-        the spawned ``cloudflared`` immediately — used by the
-        watchdog when the tunnel is unhealthy and must be replaced)
-        and :meth:`_detach_tunnel` (leaves the spawned ``cloudflared``
+        the spawned ``cloudflared`` immediately — used by
+        :meth:`stop_async`, whose embedders and tests own the whole
+        server lifecycle; the watchdog replaces an unhealthy tunnel
+        with :meth:`_terminate_tunnel_proc` instead) and
+        :meth:`_detach_tunnel` (leaves the spawned ``cloudflared``
         running — used on graceful kiss-web shutdown so the public
         URL survives the restart).
 
@@ -9549,6 +9613,10 @@ class RemoteAccessServer:
             # cancellation must not leave a half-bound WSS listener
             # live in an embedder that catches the exception.
             self._close_partial_setup()
+            # Then the services.d helpers _bind_listeners started, off
+            # the loop: stopping one that ignores SIGTERM waits
+            # STOP_GRACE_SECONDS before the SIGKILL.
+            await asyncio.to_thread(self._services.stop)
             raise
 
     def _close_partial_setup(self) -> None:
@@ -9598,6 +9666,8 @@ class RemoteAccessServer:
             host,
             self.port,
             process_request=self._process_request,
+            # gzip for text bodies, a year of caching for hashed media.
+            process_response=speed_up_response,
             open_timeout=_OPEN_TIMEOUT_SECONDS,
             ping_interval=None,
             ping_timeout=None,
@@ -9792,6 +9862,9 @@ class RemoteAccessServer:
         # the endpoint lock) so a cancellation of this startup cannot
         # race a detached writer that publishes after the rollback.
         self._write_local_endpoint_file()
+        # The services.d helpers find this daemon through the endpoint
+        # file, so they start now, not after the tunnel wait below.
+        self._services.start()
         # A machine enrolling itself finds the endpoint file from here
         # on, so its CA must be picked up from here on too, not after
         # the tunnel wait below (cancelled with the listeners by
@@ -9815,9 +9888,7 @@ class RemoteAccessServer:
                 await asyncio.to_thread(
                     _terminate_orphan_cloudflared, self.port,
                 )
-            password = await asyncio.to_thread(
-                _wait_for_remote_password, 30.0,
-            )
+            password = await _wait_for_remote_password(30.0)
             own_tunnel_pid: int | None = None
             if password:
                 adopted = await asyncio.to_thread(
@@ -9887,6 +9958,9 @@ class RemoteAccessServer:
         )
         self._machines_watch_task = asyncio.create_task(
             self._machines_registry_watch(),
+        )
+        self._deferred_restart_task = asyncio.create_task(
+            self._deferred_restart_loop(),
         )
 
         self._start_sea_command_watcher()
@@ -10506,8 +10580,9 @@ class RemoteAccessServer:
         up, killed when they ignore it), the streams of tabs running on
         remote machines, the brand's sign-in hook (SIGTERM, killed when
         it ignores it: its kill thread would not survive the interpreter's
-        exit), and the SEA-registry watcher.  Every step is idempotent:
-        the SIGTERM thread runs the first three early.
+        exit), the brand's ``services.d`` helpers (the same), and the
+        SEA-registry watcher.  Every step is idempotent: the SIGTERM
+        thread runs the first three early.
         """
         self._stop_active_agent_tasks()
         self._await_active_merges()
@@ -10519,6 +10594,7 @@ class RemoteAccessServer:
         self._server_api.remote_tabs.close_all()
         self._server_api.remote_views.close_all()
         self._server_api.signin.shutdown()
+        self._services.stop()
         self._stop_sea_command_watcher()
 
     async def start_async(self) -> None:
@@ -10613,6 +10689,8 @@ class RemoteAccessServer:
             self._version_check_task = None
             await _cancel_task(self._machines_watch_task)
             self._machines_watch_task = None
+            await _cancel_task(self._deferred_restart_task)
+            self._deferred_restart_task = None
             await _cancel_task(self._update_watch_task)
             self._update_watch_task = None
             idle_poller = self._update_when_idle_task

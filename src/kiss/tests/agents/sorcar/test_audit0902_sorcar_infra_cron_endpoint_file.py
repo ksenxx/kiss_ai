@@ -6,8 +6,9 @@
 
 Redundancy found by the 2026-09-02 sorcar-infra audit:
 ``cron_agent._run_prompt_job`` once re-implemented the endpoint
-precedence that :func:`daemon_client._resolve_endpoint_file` already
-owns, just to name the endpoint in its "cannot reach the daemon" error.
+precedence that ``daemon_client.run`` (through
+:func:`local_endpoint.default_endpoint_path`) already owns, just to
+name the endpoint in its "cannot reach the daemon" error.
 A prompt job is now launched as a generated SEA through the
 ``run_agent`` tool (:func:`agent_dispatch.make_run_agent_tool`), whose
 dispatch resolves the endpoint file exactly once: the file recorded by
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import cron_agent, daemon_client
+from kiss.agents.sorcar import cron_agent, local_endpoint
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +60,6 @@ def test_error_names_recorded_daemon_endpoint(
     monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(endpoint))
     text = _run(tmp_path)
     assert f"Cannot connect to the sorcar daemon: no endpoint file at {endpoint}" in text
-    assert str(daemon_client._resolve_endpoint_file(str(endpoint))) == str(endpoint)
 
 
 def test_error_names_env_endpoint(
@@ -76,6 +76,6 @@ def test_error_names_default_endpoint(
 ) -> None:
     monkeypatch.delenv("KISS_SORCAR_LOCAL", raising=False)
     text = _run(tmp_path)
-    expected = daemon_client._resolve_endpoint_file(None)
+    expected = local_endpoint.default_endpoint_path()
     assert expected == tmp_path / "sorcar-local.json"
     assert f"Cannot connect to the sorcar daemon: no endpoint file at {expected}" in text

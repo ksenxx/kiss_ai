@@ -29,7 +29,7 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 
-PRIMARY_MODEL = "claude-fable-5-1"
+PRIMARY_MODEL = "claude-fable-5-1-max"
 """The model that does every task."""
 
 REVIEW_MODEL = "gpt-6-astra"

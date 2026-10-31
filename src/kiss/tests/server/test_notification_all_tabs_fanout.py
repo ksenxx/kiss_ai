@@ -92,7 +92,7 @@ class TestAutoCommitToastReachesAllTabs:
             printer.subscribe_tab("4242", "tab-viewer-b")
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = printer.of_type("notification")
             expected_tabs = {"tab-owner", "tab-viewer-a", "tab-viewer-b"}
@@ -123,7 +123,7 @@ class TestAutoCommitToastReachesAllTabs:
             agent._last_task_id = "4343"
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = printer.of_type("notification")
             assert len(notifs) == 2
@@ -143,7 +143,7 @@ class TestAutoCommitToastReachesAllTabs:
             printer.subscribe_tab("4444", "tab-viewer")
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = printer.of_type("notification")
             assert len(notifs) == 2
@@ -328,7 +328,7 @@ class TestTransientBroadcastNearTeardown:
             agent._last_task_id = "6161"
 
             with _LLMUnavailable():
-                assert agent._commit_worktree() is True
+                assert agent._commit_worktree(agent.worktrees[0]) is True
 
             notifs = printer.of_type("notification")
             expected = {"tab-launch", "tab-viewer"}

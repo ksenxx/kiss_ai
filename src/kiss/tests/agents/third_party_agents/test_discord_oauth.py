@@ -224,7 +224,7 @@ def test_user_sign_in_refuses_bot_only_features(discord_server: _DiscordServer) 
     assert json.loads(tools["finish_discord_auth"]())["ok"] is True
     backend = agent._backend
     for result in (
-        backend.list_third_party_agents("777"),
+        backend.list_channels("777"),
         backend.get_channel("555"),
         backend.get_channel_messages("555"),
         backend.edit_message("555", "1", "x"),

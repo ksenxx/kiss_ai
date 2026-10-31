@@ -17,11 +17,13 @@ branded cases run the same code from a re-branded copy of the package
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import json
 import os
 import platform
 import plistlib
+import shlex
 import shutil
 import socket
 import subprocess
@@ -120,14 +122,67 @@ def _run(
     return subprocess.run([str(exe), *args], capture_output=True, text=True, env=env, timeout=120)
 
 
-def _site(port: int = 0) -> tuple[http.server.HTTPServer, str]:
-    """Start a :class:`_Hits` site (a stand-in daemon) on *port*; return it and its URL."""
+class _Site(http.server.ThreadingHTTPServer):
+    """A :class:`_Hits` site (a stand-in daemon) serving each connection on its own thread.
+
+    Like the daemon it lets no connection hold up the others: under
+    load Chromium opens a spare connection it may never send a request
+    on.  Closed, it also drops the connections it accepted, as a daemon
+    going down does, so a spare one answers nothing while it is down.
+    """
+
+    def __init__(self, port: int) -> None:
+        # Set first: a failed bind calls server_close from the constructor.
+        self.connections: list[socket.socket] = []
+        super().__init__(("127.0.0.1", port), _Hits)
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        """Accept a connection and keep it for :meth:`server_close`."""
+        conn, addr = super().get_request()
+        self.connections.append(conn)
+        return conn, addr
+
+    def server_close(self) -> None:
+        """Close the listening socket and drop every connection still open."""
+        super().server_close()
+        for conn in self.connections:
+            with contextlib.suppress(OSError):  # its handler closed it already
+                conn.shutdown(socket.SHUT_RDWR)
+
+
+def _site(port: int = 0) -> tuple[_Site, str]:
+    """Start a :class:`_Site` on *port* with a fresh path log; return it and its URL."""
     _Hits.paths = []
     _Hits.app_window_open = False
     _Hits.close = False
-    httpd = http.server.HTTPServer(("127.0.0.1", port), _Hits)
+    _Hits.saved = None
+    httpd = _Site(port)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_port}/"
+
+
+def _page_requests() -> list[str]:
+    """The paths the site served, less the browser's own ``/favicon.ico`` requests.
+
+    The site serves each connection on its own thread, so the favicon
+    request a page load brings may be logged before the page's own.
+    """
+    return [p for p in _Hits.paths if p != "/favicon.ico"]
+
+
+def _start_page_handoff(requests: list[str]) -> int:
+    """The index of the popup opener's request in *requests*, after the start page's probes.
+
+    The start page asks the site every half second and gives a probe up
+    after two seconds, so under load more than one probe can reach the
+    site before the first answer moves the page on (two did, under the
+    full run).  Everything before the opener must be such a probe.
+    """
+    pages = [i for i, p in enumerate(requests) if p.startswith("/media/appWindow.html?url=")]
+    assert pages, requests
+    assert pages[0] >= 1, requests
+    assert set(requests[: pages[0]]) == {standalone_app.APP_WINDOW_API}, requests
+    return pages[0]
 
 
 # --- the daemon's URL -------------------------------------------------------
@@ -198,12 +253,35 @@ def test_daemon_answers_with_any_http_status(tmp_path: Path) -> None:
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - http.server API
             pass
 
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), _NotFound)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    not_found = http.server.HTTPServer(("127.0.0.1", 0), _NotFound)
+    threading.Thread(target=not_found.serve_forever, daemon=True).start()
     try:
-        assert standalone_app.daemon_answers(f"http://127.0.0.1:{httpd.server_port}/")
+        assert standalone_app.daemon_answers(f"http://127.0.0.1:{not_found.server_port}/")
     finally:
+        not_found.shutdown()
+
+
+def test_a_closed_site_answers_nothing_on_a_connection_it_accepted() -> None:
+    """A closed :class:`_Site` drops the connections it accepted, an idle one too.
+
+    The macOS start-page test takes the site down and up again as a
+    daemon restart: a spare connection the browser opened before must
+    not answer the start page's probe while the site is down.
+    """
+    httpd, _ = _site()
+    spare = socket.create_connection(("127.0.0.1", httpd.server_port), timeout=10)
+    try:
+        assert _wait_for(lambda: bool(httpd.connections))
         httpd.shutdown()
+        httpd.server_close()
+        try:
+            spare.sendall(f"GET {standalone_app.APP_WINDOW_API} HTTP/1.0\r\n\r\n".encode())
+            answer = spare.recv(1024)
+        except ConnectionError:  # the dropped connection was reset
+            answer = b""
+        assert answer == b""
+    finally:
+        spare.close()
 
 
 def test_start_page_url_names_the_app_and_the_daemon_probe() -> None:
@@ -235,10 +313,10 @@ def test_print_command_does_not_wait_for_the_daemon(tmp_path: Path) -> None:
     started = time.monotonic()
     proc = _run(["--print-command"], env)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.split()[:2] == [str(stub), _app_flag(url)]
+    assert shlex.split(proc.stdout)[:2] == [str(stub), _app_flag(url)]
     proc = _run(["--print-command", "--url", _LOOPBACK], env)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.split()[:2] == [str(stub), _app_flag(_LOOPBACK)]
+    assert shlex.split(proc.stdout)[:2] == [str(stub), _app_flag(_LOOPBACK)]
     assert time.monotonic() - started < 4
     assert not (tmp_path / "browser.log").exists()
 
@@ -252,7 +330,7 @@ def test_browser_override_wins_and_must_exist(tmp_path: Path) -> None:
     env = _env(tmp_path, KISS_APP_BROWSER=str(stub))
     proc = _run(["--print-command", "--url", _LOOPBACK], env)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.split() == [
+    assert shlex.split(proc.stdout) == [
         str(stub),
         _app_flag(_LOOPBACK),
         f"--user-data-dir={tmp_path / 'kiss-home' / 'webapp-profile'}",
@@ -425,7 +503,7 @@ def test_a_daemon_not_answering_yet_gets_the_start_page(tmp_path: Path) -> None:
     proc = _run(
         ["--print-command", "--url", url], _env(tmp_path, KISS_APP_BROWSER=str(stub)),
     )
-    assert proc.stdout.split()[1] == _app_flag(url)
+    assert shlex.split(proc.stdout)[1] == _app_flag(url)
 
 
 def test_the_start_page_waits_for_the_daemon_and_then_shows_the_app(tmp_path: Path) -> None:
@@ -502,8 +580,9 @@ class _Hits(http.server.BaseHTTPRequestHandler):
     also moves and resizes a popup once to ``_MOVED_BOUNDS`` (a popup
     may move itself; an app window may not), so a relaunch shows
     whether the bounds were kept, and closes itself once ``close`` is
-    set (it asks ``/close`` every 200 ms).  Like the daemon, the site
-    answers kiss-app's question whether the popup is open
+    set (it asks ``/close`` every 200 ms, sending what its bounds keeper
+    saved last, which the site keeps in ``saved``).  Like the daemon,
+    the site answers kiss-app's question whether the popup is open
     (``/api/app-window``) with ``app_window_open``, which the test sets:
     the daemon learns it from the popup's WebSocket connection, which
     this page does not make.
@@ -512,10 +591,11 @@ class _Hits(http.server.BaseHTTPRequestHandler):
     paths: list[str] = []
     app_window_open = False
     close = False
+    saved: tuple[int, ...] | None = None
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         self.paths.append(self.path)
-        path, _, _query = self.path.partition("?")
+        path, _, query = self.path.partition("?")
         media = Path(path).name
         ctype = "text/html"
         if path.startswith("/media/") and media in ("appWindow.html", "appWindow.js"):
@@ -525,6 +605,9 @@ class _Hits(http.server.BaseHTTPRequestHandler):
             body = json.dumps({"open": self.app_window_open}).encode()
             ctype = "application/json"
         elif path == "/close":
+            saved = json.loads(urllib.parse.parse_qs(query).get("saved", ["null"])[0])
+            if saved:
+                _Hits.saved = (saved["left"], saved["top"], saved["width"], saved["height"])
             body = b"1" if _Hits.close else b"0"
             ctype = "text/plain"
         else:
@@ -537,7 +620,9 @@ class _Hits(http.server.BaseHTTPRequestHandler):
                 f"  window.resizeTo({_MOVED_BOUNDS[2]}, {_MOVED_BOUNDS[3]});".encode()
                 + b"}"
                 b"setInterval(function () {"
-                b"  fetch('/close').then(r => r.text())"
+                b"  fetch('/close?saved=' +"
+                b"    encodeURIComponent(localStorage.getItem('kissAppWindowBounds')))"
+                b"    .then(r => r.text())"
                 b"    .then(t => { if (t === '1') window.close(); });"
                 b"}, 200);</script>"
             )
@@ -677,26 +762,28 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         # browser.  The --app page was the popup opener, which asked the
         # site whether the popup was open already, then closed itself:
         # one window, the popup, showing the page.
-        assert _Hits.paths[0] == standalone_app.APP_WINDOW_API, _Hits.paths
-        assert _Hits.paths[1].startswith("/media/appWindow.html?url="), _Hits.paths
-        assert _Hits.paths[2] == standalone_app.APP_WINDOW_API, _Hits.paths
+        requests = _page_requests()
+        assert requests[0] == standalone_app.APP_WINDOW_API, _Hits.paths
+        assert requests[1].startswith("/media/appWindow.html?url="), _Hits.paths
+        assert requests[2] == standalone_app.APP_WINDOW_API, _Hits.paths
         _Hits.app_window_open = True
         pid = _macos_engine_pid(exe_copy, profile)
         assert standalone_app.macos_bundle_pid(bundle) == pid
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+        placed = _macos_windows(pid, [_MOVED_BOUNDS], _BOUNDS_SLACK)
+        assert _fits(placed, [_MOVED_BOUNDS], _BOUNDS_SLACK), (placed, _Hits.paths)
         # A click on the running app's icon (what `open -a` sends: a
         # reopen event) brings that window to the front and opens no
         # other, which it would for an app window (Chromium opens a new
         # browser window when it finds no window of its own to focus).
         subprocess.run(["open", "-a", str(bundle)], check=True)
         time.sleep(3)
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         # A second kiss-app while the window is open does the same.
         proc = _run(["--url", url], env)
         assert proc.returncode == 0, proc.stderr
         assert "already open" in proc.stdout
         time.sleep(3)
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         assert _Hits.paths.count("/") == 1, _Hits.paths
         # The popup between connections (the daemon restarted; the
         # reconnect is due within seconds): a second kiss-app waits for
@@ -710,7 +797,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         assert 3 <= time.monotonic() - started < standalone_app.APP_WINDOW_SETTLE_SECS
         assert _Hits.app_window_open
         time.sleep(3)
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         assert _Hits.paths.count("/") == 1, _Hits.paths
         # A start handed to the running browser while the popup is
         # connected (two kiss-app at once): the --app page learns so
@@ -730,7 +817,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         ), _Hits.paths[pages:]
         time.sleep(3)
         assert _Hits.paths.count("/") == 1, _Hits.paths
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         # The daemon's check leaves a browser alone whose popup is
         # connected, and one that still has a window on screen after
         # the popup's page went away (a reload).
@@ -740,7 +827,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         assert standalone_app.app_window_event("closing")
         time.sleep(standalone_app.APP_WINDOW_QUIT_GRACE_SECS + 1)
         assert standalone_app.macos_bundle_in_use(bundle)
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         # The user closes the window: the browser lives on without one.
         # kiss-app, told by the site that the popup is gone (and stays
         # so for the settling time: a minimized popup between
@@ -758,7 +845,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         assert "already open" not in proc.stdout
         assert time.monotonic() - started >= standalone_app.APP_WINDOW_SETTLE_SECS
         assert _wait_for(lambda: _Hits.paths.count("/") == 2), _Hits.paths
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS]
+        assert _macos_windows(pid, placed) == placed
         # Closed again, with the popup's connection merely dropped (the
         # daemon's keepalive timed out): no quit at once (the window
         # may be minimized), but the sweeps that find the browser
@@ -785,7 +872,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
         assert proc.returncode == 0, proc.stderr
         assert _wait_for(lambda: _Hits.paths.count("/") == 3), _Hits.paths
         pid = _macos_engine_pid(exe_copy, profile)
-        assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+        assert _macos_windows(pid, placed) == placed, _Hits.paths
         # Closed with its page going away: the daemon's check quits the
         # browser without a window after the grace period.
         _Hits.close = True
@@ -813,7 +900,11 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
     popup, as on a start with the daemon up.  A second kiss-app
     meanwhile brings the waiting window to the front (the site cannot
     be asked, so the window on screen decides) instead of opening
-    another.
+    another.  Chrome 156 gives the popup the start page opens no
+    geometry, so ``appWindow.html`` hands the app on to a popup it
+    opens itself, which can be placed: the bounds asserts below fail
+    without that.  Its fallback for a blocked popup is not driven here:
+    kiss-app lets the macOS pages open popups without a click.
     """
     browser = standalone_app.find_browser()
     if browser is None or standalone_app.macos_browser_bundle(browser) is None:
@@ -861,11 +952,12 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
         httpd, _ = _site(port)
         try:
             assert _wait_for(lambda: "/" in _Hits.paths), _Hits.paths
-            assert _Hits.paths[0] == standalone_app.APP_WINDOW_API, _Hits.paths
-            assert _Hits.paths[1].startswith("/media/appWindow.html?url="), _Hits.paths
-            assert _Hits.paths[2] == standalone_app.APP_WINDOW_API, _Hits.paths
+            requests = _page_requests()
+            page = _start_page_handoff(requests)
+            assert requests[page + 1] == standalone_app.APP_WINDOW_API, _Hits.paths
             _Hits.app_window_open = True
-            assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+            placed = _macos_windows(pid, [_MOVED_BOUNDS], _BOUNDS_SLACK)
+            assert _fits(placed, [_MOVED_BOUNDS], _BOUNDS_SLACK), (placed, _Hits.paths)
             assert _Hits.paths.count("/") == 1, _Hits.paths
             # The user closes the window and the daemon goes down (a
             # restart).  The browser lives on without a window (no
@@ -873,6 +965,10 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
             # start page; once the daemon is back the popup shows the
             # app where it was: the opener restores the bounds the
             # page saved, the page itself moves only once per profile.
+            # The bounds keeper saves what the page sees, which under
+            # load can lag behind the window server: the user closes
+            # the window once the moved bounds are saved.
+            assert _wait_for(lambda: [_Hits.saved] == placed), (_Hits.saved, placed)
             _Hits.close = True
             assert _macos_windows(pid, []) == []
             _Hits.close = False
@@ -889,9 +985,8 @@ def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
         httpd, _ = _site(port)  # starts a fresh path log
         try:
             assert _wait_for(lambda: "/" in _Hits.paths), _Hits.paths
-            assert _Hits.paths[0] == standalone_app.APP_WINDOW_API, _Hits.paths
-            assert _Hits.paths[1].startswith("/media/appWindow.html?url="), _Hits.paths
-            assert _macos_windows(pid, [_MOVED_BOUNDS]) == [_MOVED_BOUNDS], _Hits.paths
+            _start_page_handoff(_page_requests())
+            assert _macos_windows(pid, placed) == placed, _Hits.paths
             assert _Hits.paths.count("/") == 1, _Hits.paths
         finally:
             httpd.shutdown()
@@ -941,13 +1036,34 @@ function run(argv) {
 """
 
 
-def _macos_windows(pid: int, expected: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
+_BOUNDS_SLACK = 4
+"""How many points the window server may nudge a window from where its page put it.
+
+On a Mac whose main display is an external one (lid closed), the page's
+``window.moveTo(123, 77)`` lands at top 74.  Only that first placement
+gets the slack: the tests then expect every later window at exactly the
+bounds first seen, so a drift across relaunches still fails.
+"""
+
+
+def _fits(windows: list[tuple[int, ...]], expected: list[tuple[int, ...]], slack: int) -> bool:
+    """Whether *windows* are *expected*, each edge within *slack* points."""
+    return len(windows) == len(expected) and all(
+        abs(a - b) <= slack
+        for window, want in zip(windows, expected)
+        for a, b in zip(window, want)
+    )
+
+
+def _macos_windows(
+    pid: int, expected: list[tuple[int, ...]], slack: int = 0
+) -> list[tuple[int, ...]]:
     """The on-screen windows of process *pid* as (left, top, width, height), front to back.
 
-    Waits up to 30 s for them to be *expected*, then returns whatever is
-    there.  The list comes from the window server (JXA over
-    CoreGraphics), which needs no accessibility permission; a minimized
-    window is off screen and not listed.
+    Waits up to 30 s for them to be *expected*, each edge within *slack*
+    points, then returns whatever is there.  The list comes from the
+    window server (JXA over CoreGraphics), which needs no accessibility
+    permission; a minimized window is off screen and not listed.
     """
     windows: list[tuple[int, ...]] = []
     for _ in range(300):
@@ -958,7 +1074,7 @@ def _macos_windows(pid: int, expected: list[tuple[int, ...]]) -> list[tuple[int,
             check=True,
         ).stdout
         windows = [tuple(int(v) for v in w) for w in json.loads(out)]
-        if windows == expected:
+        if _fits(windows, expected, slack):
             break
         time.sleep(0.1)
     return windows
@@ -1299,7 +1415,7 @@ def test_branded_app_uses_the_brand_home_and_window_class(
     del env["KISS_HOME"]  # the brand's own default home decides
     proc = _run_branded(branded_src, ["--print-command", "--url", _LOOPBACK], env)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.split() == [
+    assert shlex.split(proc.stdout) == [
         str(stub),
         _app_flag(_LOOPBACK, "Seamless Loop"),
         f"--user-data-dir={tmp_path / 'home' / '.s10s' / 'webapp-profile'}",

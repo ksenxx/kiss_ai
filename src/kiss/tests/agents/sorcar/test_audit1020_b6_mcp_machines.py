@@ -87,7 +87,7 @@ def test_handshake_landing_at_the_deadline_keeps_the_leased_connection(
         # The handshake lands while the waiter is queued on the lock ...
         assert conn.ready.wait(30.0) and conn.error == ""
         # ... and another task leases the connection before it gets in.
-        leased, session = manager._lease(key)
+        leased, session = manager._lease(key, [])
         assert leased is conn and session is not None
     waiter.join(30.0)
     assert not waiter.is_alive() and waiter_error == []
@@ -196,9 +196,11 @@ def test_start_url_wait_stops_within_a_slice(
 
 
 _SLOW_FAKE_SSH = '''#!__PYTHON__
-"""Stand-in for ssh: ``-N -L`` logs in once $KISS_TEST_SSH_RELEASE exists, then binds the port."""
+"""Stand-in for ssh: ``-N -L`` logs in once $KISS_TEST_SSH_RELEASE exists, then binds the port
+and runs the ``LocalCommand``, as ssh does."""
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -209,6 +211,7 @@ while not os.path.exists(os.environ["KISS_TEST_SSH_RELEASE"]):
 server = socket.socket()
 server.bind(("127.0.0.1", int(local)))
 server.listen()
+subprocess.run(next(a[13:] for a in args if a.startswith("LocalCommand=")), shell=True)
 while True:
     time.sleep(1)
 '''
@@ -255,6 +258,8 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
         return mach._tunnels.get(login) is not stale
 
     mach.close_tunnels()
+    # tunnel_port opens forwards for registered logins only.
+    mach.save_machines([mach.Machine("far", "https://far.example.org:8787", ssh=login)])
     first = threading.Thread(target=opener, args=(8787,), name="opener-8787")
     second = threading.Thread(target=opener, args=(9797,), name="opener-9797")
     closer = threading.Thread(
@@ -289,7 +294,7 @@ def test_superseded_tunnel_is_closed_outside_the_tunnels_lock(
         first.join(30.0)
         second.join(30.0)
         closer.join(30.0)
-        mach.close_tunnels()
+        mach.save_machines([])
         stale_left = mach._tunnels.get(login)
         if stale_left is not None:
             stale_left.close()

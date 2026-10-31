@@ -13,30 +13,20 @@
 // Runs with: node test/audit1016b_history_rename.test.js
 
 const assert = require('assert');
-const {makePage: buildPage, send, ofType} = require('./simplify2_harness');
-const {makeRow, sendHistory} = require('./history_helpers');
-
-function makePage() {
-  const {win, posted} = buildPage({bodyClass: 'remote-chat'});
-  win.document.getElementById('sidebar').classList.add('open');
-  send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  return {win, posted};
-}
-
-function header(win, chatId) {
-  const g = win.document.querySelector(
-    '#history-list .history-chat-group[data-chat-id="' + chatId + '"]',
-  );
-  assert.ok(g, 'chat panel for ' + chatId);
-  return g.querySelector(':scope > .history-chat-header');
-}
+const {ofType} = require('./simplify2_harness');
+const {
+  makeRow,
+  sendHistory,
+  openChatsPage,
+  chatHeader,
+} = require('./history_helpers');
 
 function title(win, chatId) {
-  return header(win, chatId).querySelector(':scope > .history-chat-title');
+  return chatHeader(win, chatId).querySelector(':scope > .history-chat-title');
 }
 
 function pencil(win, chatId) {
-  return header(win, chatId).querySelector('.history-chat-rename');
+  return chatHeader(win, chatId).querySelector('.history-chat-rename');
 }
 
 function pencilShown(win, chatId) {
@@ -63,7 +53,7 @@ function mouse(win, el, type, detail) {
  * and a closeTab of the first), and the dblclick opens the rename box.
  */
 function testDoubleClickOpensTheChatOnce() {
-  const {win, posted} = makePage();
+  const {win, posted} = openChatsPage();
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
   ]);
@@ -108,7 +98,7 @@ function testDoubleClickOpensTheChatOnce() {
  * A chat with a local row (alone or mixed with remote rows) keeps it.
  */
 function testRemoteOnlyChatOffersNoRename() {
-  const {win, posted} = makePage();
+  const {win, posted} = openChatsPage();
   sendHistory(win, posted, [
     makeRow({id: 'R', task_id: 1, machine: 'boxb', chat_summary: 'Remote'}),
     makeRow({id: 'R', task_id: 2, machine: 'boxb', chat_summary: 'Remote'}),

@@ -27,6 +27,7 @@ const {
   fakeGeometry,
   bottom,
   startRunningTask,
+  twoTabs,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -618,14 +619,9 @@ async function testBackgroundTabDoesNotScrollActiveChat() {
   fakeGeometry(O, geoO);
   const tabId = startRunningTask(win, posted);
   send(win, {type: 'system_output', text: 'visible line\n'});
-  const bgTabId = tabId + '-bg';
-  send(win, {
-    type: 'task_events',
-    tabId: bgTabId,
-    task: 'background task',
-    task_id: 9,
-    events: [],
-  });
+  // A real hidden tab: open a second chat, then go back to the first.
+  const {api, second: bgTabId} = twoTabs(win);
+  api.switchToTab(tabId);
   // Stay AT the bottom so the visible chat's auto-scroll remains
   // ENABLED, then grow the chat: background-tab streaming must still
   // never move the visible chat, because its events target a detached
@@ -647,6 +643,16 @@ async function testBackgroundTabDoesNotScrollActiveChat() {
     O.scrollTop,
     pos,
     'BUG: background-tab streaming moved the visible chat scroll',
+  );
+  assert.ok(
+    !O.textContent.includes('bg out'),
+    'BUG: background-tab output leaked into the visible chat',
+  );
+  // The events did reach the hidden tab: its transcript holds them.
+  api.switchToTab(bgTabId);
+  assert.ok(
+    O.textContent.includes('bg out') && O.textContent.includes('bg text'),
+    'the background events must render into the hidden tab',
   );
   win.close();
   console.log('  ok - background-tab streaming leaves the visible chat alone');

@@ -29,6 +29,7 @@ REAL child processes.  No mocks, patches or doubles, no LLM calls.
 from __future__ import annotations
 
 import multiprocessing
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -53,7 +54,8 @@ def _redirect(tmpdir: Path) -> tuple:
 
 
 def _restore(saved: tuple) -> None:
-    """Undo :func:`_redirect`."""
+    """Undo :func:`_redirect`, closing the liveness marker minted in the private home."""
+    th._release_owner_marker()
     th._close_db()
     (th._DB_PATH, th._db_conn, th._KISS_DIR, th._owner_state) = saved
 
@@ -87,6 +89,7 @@ class _PersistenceTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         _restore(self.saved)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _all_event_seqs(self, task_id: str) -> list[int]:
         db = sqlite3.connect(th._DB_PATH)

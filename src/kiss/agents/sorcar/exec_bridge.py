@@ -29,6 +29,7 @@ from __future__ import annotations
 import functools
 import http.client
 import json
+import shlex
 import threading
 import time
 import urllib.error
@@ -41,10 +42,10 @@ from kiss.agents.sorcar.docker_manager import (
     _KILL_WAIT_S,
     MAX_OUTPUT_CHARS,
     STOPPED_MESSAGE,
+    _refuse_or_lift,
     _timeout_message,
     _with_exit_code,
 )
-from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _output_budget,
     _stop_requested,
@@ -163,11 +164,13 @@ class ExecBridge:
     """The agent's shell tools on a remote environment, through a local HTTP bridge.
 
     Mirrors the parts of :class:`kiss.agents.sorcar.docker_manager.DockerManager`
-    the agent uses: ``Bash``, ``run_commands_parallel``, ``stop_event``,
-    ``stream_callback`` (output is not streamed: the bridge returns it whole),
-    ``volumes`` (none), and the context-manager protocol (nothing to open
-    or close: the sandbox belongs to the server).  It has no ``container``:
-    a child of a bridged task inherits the bridge by its ``url``
+    the agent uses: ``Bash``, ``run_commands_parallel`` (both with the
+    Docker tools' shell guards), ``stop_event``, ``stream_callback``
+    (output is not streamed: the bridge returns it whole), ``volumes``
+    (none), ``workdir`` (the environment's working directory, asked for
+    on entry) and the context-manager protocol (nothing to open or close:
+    the sandbox belongs to the server).  It has no ``container``: a child
+    of a bridged task inherits the bridge by its ``url``
     (``agent_dispatch``), never a container.
     """
 
@@ -183,10 +186,15 @@ class ExecBridge:
         self.stop_event: threading.Event | None = None
         self.stream_callback: Callable[[str], None] | None = None
         self.volumes: dict[str, str] = {}
+        self.workdir: str | None = None
 
     def __enter__(self) -> ExecBridge:
         if not bridge_alive(self.url):
             raise KISSError(f"Exec bridge {self.url} is not answering.")
+        # Where the environment starts every command: the here-document
+        # guard resolves relative targets against it (unknown: refused).
+        cwd = bridge_exec(self.url, "pwd", 30)[1].strip()
+        self.workdir = cwd if cwd.startswith("/") else None
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -212,7 +220,8 @@ class ExecBridge:
             it failed, or the timeout error with the output seen so far.
         """
         print(description)
-        guard, deadline = refuse_or_lift(command, None, timeout_seconds)
+        exists = functools.partial(self._path_exists, timeout_seconds, self.stop_event)
+        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds, exists)
         if guard is not None:
             return guard
         exit_code, output = bridge_exec(self.url, command, deadline, self.stop_event)
@@ -252,12 +261,29 @@ class ExecBridge:
         self, command: str, cancel: threading.Event, timeout_seconds: float,
     ) -> tuple[int | None, str, float]:
         """Run one ``run_commands_parallel`` command under :meth:`Bash`'s guards; never raises."""
-        guard, timeout_seconds = refuse_or_lift(command, None, timeout_seconds)
-        if guard is not None:
-            return -1, guard, 0.0
         started = time.monotonic()
-        try:
+        try:  # the guard probes the environment too
+            exists = functools.partial(self._path_exists, timeout_seconds, cancel)
+            guard, timeout_seconds = _refuse_or_lift(
+                command, self.workdir, timeout_seconds, exists,
+            )
+            if guard is not None:
+                return -1, guard, 0.0
             exit_code, output = bridge_exec(self.url, command, timeout_seconds, cancel)
         except KISSError as error:
             exit_code, output = 1, str(error)
         return exit_code, output, time.monotonic() - started
+
+    def _path_exists(
+        self, timeout_seconds: float, cancel: threading.Event | None, path: str,
+    ) -> bool:
+        """Whether *path* may exist on the environment (the here-document guard's probe).
+
+        Bounded like the command (its deadline and a Stop).  A probe that
+        gave no answer (timed out or stopped) counts as existing: the copy
+        is refused, never run on a target nobody checked.
+        """
+        exit_code, _ = bridge_exec(
+            self.url, f"test -e {shlex.quote(path)}", timeout_seconds, cancel,
+        )
+        return exit_code != 1

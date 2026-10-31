@@ -148,6 +148,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
+from kiss.core.memoryfield.evaluate import TASK_ERROR_RE, is_failed_result
 from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
 
@@ -476,11 +477,6 @@ _REVIEWER_MISUSE = re.compile(
     r"references the parent-repo path)"
 )
 _RESULT_SUCCESS = re.compile(r"^success:\s*(true|false)", re.MULTILINE)
-_TASK_ERROR = re.compile(
-    r"^(<p>|<h3>Partial result: )?(Task failed:|KISSError:|ModelRefusalError:|KISS Error:)"
-    r"\s*(KISS Error:)?\s*"
-)
-"""In-process task errors (budget, consecutive model errors, stalls) as persisted in ``result``."""
 _TOOL_ERROR_PATTERNS = (
     "%Error%",
     "%error:%",
@@ -650,12 +646,7 @@ def _status(row: dict[str, Any], final_success: bool | None) -> str:
     """``running`` / ``failed`` / ``unsuccessful`` / ``success`` of a history row."""
     if not int(row.get("end_ts") or 0):
         return "running"
-    result = str(row.get("result") or "")
-    if (
-        persistence._is_failed_result(result)
-        or result.startswith("Task stopped by user")
-        or _TASK_ERROR.match(result)
-    ):
+    if is_failed_result(str(row.get("result") or "")):
         return "failed"
     if final_success is False:
         return "unsuccessful"
@@ -935,7 +926,7 @@ def _run_findings(task_id: str) -> dict[str, Any] | str:
 
 def _error_reason(result: str) -> str:
     """Normalise a ``Task failed: ...`` result into a short reason (ids and numbers stripped)."""
-    text = re.sub(r"<[^>]+>", " ", _TASK_ERROR.sub("", result))
+    text = re.sub(r"<[^>]+>", " ", TASK_ERROR_RE.sub("", result))
     text = re.sub(r"Agent .*? Session-\S+ ", "Agent ", text)
     text = re.sub(r"[0-9a-f]{12,}|\$?\d[\d.,]*", "N", text)
     return " ".join(text.split())[:160]
@@ -990,7 +981,7 @@ def _model_scorecard(days: float = 7) -> dict[str, Any]:
         errors = [
             _error_reason(str(r.get("result") or ""))
             for _rec, r in done
-            if _TASK_ERROR.match(str(r.get("result") or ""))
+            if TASK_ERROR_RE.match(str(r.get("result") or ""))
         ]
         cards.append(
             {
@@ -2734,11 +2725,14 @@ def _dispatch_replay(
     detached job, so here the bound is on the replay itself.  Returns
     the ``result`` (the dict ``success``, ``summary``, ``cost``,
     ``steps``, or the dispatch's error string) and the
-    ``replay_task_id`` (empty when the dispatch failed).
+    ``replay_task_id`` (empty when the dispatch failed).  The job is
+    built before it is launched, and launched inside the ``try``, so a
+    Stop landing right after the launch still stops the replay (a
+    replay with no calling task has no run end to collect it).
     """
     plain = sea == SORCAR
     owner = current_agent()
-    job = agent_dispatch.start_agent_job(sea, {
+    job = agent_dispatch.new_agent_job(sea, {
         "name": sea, "prompt": task, "sea_path": "" if plain else sea_file,
         "work_dir": work_dir, "model_name": model, "budget": max_budget,
         "timeout": timeout, "parent_agent": owner, "scope_work_dir": str(_work_root()),
@@ -2747,6 +2741,7 @@ def _dispatch_replay(
         ),
     }, owner)
     try:
+        agent_dispatch.launch_agent_job(job)
         finished = agent_dispatch.join_agent_job(job, timeout)
     except BaseException:
         agent_dispatch.kill_agent_job(job)

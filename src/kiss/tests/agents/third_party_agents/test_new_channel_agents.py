@@ -10,6 +10,7 @@ and ``clear_*_auth`` tools, plus config persistence.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -29,26 +30,38 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import tools_by_name
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
+def _auth_tool_name(class_name: str, prefix: str) -> str:
+    """Return the name of *class_name*'s auth tool that starts with *prefix*."""
+    return next(n for n in EXPECTED_AUTH_TOOLS[class_name] if n.startswith(prefix))
+
+
 def _auth_tool(class_name: str, module_path: str, prefix: str):
     """Return a fresh agent's auth tool whose name starts with *prefix* (``check_``/``clear_``)."""
     tools = tools_by_name(get_agent_class(class_name, module_path)())
-    name = next(n for n in EXPECTED_AUTH_TOOLS[class_name] if n.startswith(prefix))
-    return tools[name]
+    return tools[_auth_tool_name(class_name, prefix)]
 
 
 @pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)
 def test_check_auth_unauthenticated(class_name: str, module_path: str) -> None:
-    """check_*_auth() returns a helpful message when not configured."""
+    """check_*_auth() reports the unconfigured state and names the tool that configures it.
+
+    A check that wrongly answered success (``"Feishu authenticated."``, a
+    WhatsApp status with ``"paired": true``) in the empty ``KISS_HOME`` fails.
+    """
     if class_name == "IMessageAgent" and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
     result = _auth_tool(class_name, module_path, "check_")()
+    authenticate = _auth_tool_name(class_name, "authenticate_")
+    if class_name == "WhatsAppAgent":
+        status = json.loads(result)
+        assert status["paired"] is False, result
+        assert authenticate in status["next_step"], result
+        return
     lower = result.lower()
-    assert (
-        "not authenticated" in lower
-        or "not configured" in lower
-        or "no " in lower
-        or "authenticate" in lower
-    ), f"Expected unauthenticated message, got: {result[:200]}"
+    assert "not authenticated" in lower or "not configured" in lower, (
+        f"Expected unauthenticated message, got: {result[:200]}"
+    )
+    assert authenticate in result, f"Expected a pointer to {authenticate}, got: {result[:200]}"
 
 
 @pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)

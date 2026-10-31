@@ -530,15 +530,20 @@ class LineChannelBackend(ToolMethodBackend):
 def _muse_authenticate(
     backend: LineChannelBackend, channel_access_token: str, channel_secret: str
 ) -> str:
-    """Enroll a LINE channel access token into the Muse vault and validate it.
+    """Enroll a LINE channel access token into the Muse vault once LINE accepts it.
 
-    The plaintext token goes straight into the vault as a bearer
-    credential, atomically replacing any previous enrollment, and is
-    never written to ``config.json`` (only the inbound
-    ``channel_secret`` webhook-verification metadata is — written
-    first, so a failed enrollment leaves no access token on disk).
-    Validation runs the message-quota read through the daemon boundary,
-    so it is audited; an invalid token leaves the vault empty.
+    A direct read of the message quota (:func:`probe_credential`)
+    checks the token BEFORE anything is stored, so a token LINE rejects
+    leaves the previous enrollment and ``config.json`` untouched.  Only
+    then does :func:`enroll_credential` store the token as a bearer
+    credential (atomically replacing any previous vault entry; the token
+    never reaches ``config.json``) together with the inbound
+    ``channel_secret`` webhook-verification metadata (or the file's
+    removal), under the config lock: a failed metadata write leaves the
+    vault untouched, and a refused store puts the old file back, so the
+    old token stays paired with the old secret.  A daemon failure after
+    the probe is reported without clearing the vault: whichever
+    credential it holds is worth keeping.
 
     Args:
         backend: The agent's LINE backend to (re)wire.
@@ -548,34 +553,29 @@ def _muse_authenticate(
     Returns:
         JSON string with the validation result.
     """
-    import contextlib
-
-    from kiss.agents.third_party_agents._channel_agent_utils import save_json_config
-    from kiss.agents.third_party_agents.muse_auth.client import (
-        clear_credentials,
-        store_credentials,
+    from kiss.agents.third_party_agents._channel_agent_utils import (
+        enroll_credential,
+        probe_credential,
     )
 
+    api_base = os.environ.get("LINE_API_BASE", _LINE_API_BASE)
+    quota, detail = probe_credential(
+        f"{api_base}/v2/bot/message/quota", {"Authorization": f"Bearer {channel_access_token}"}
+    )
+    if quota is None:
+        return json.dumps({"ok": False, "error": f"LINE rejected the token: {detail}"})
     try:
-        if channel_secret:
-            save_json_config(_config.path, {"channel_secret": channel_secret})
-        else:
-            _config.clear()
-        store_credentials("line", {"kind": "bearer", "token": channel_access_token}, [])
-        if backend._wire_muse():  # pragma: no branch - credential was just stored
-            result = json.loads(backend.get_quota())
-            if result.get("ok"):
-                return json.dumps({"ok": True, "message": "LINE credentials saved (Muse-auth)."})
-            error = json.dumps({"ok": False, "error": str(result)})
-        else:  # pragma: no cover - defense in depth
-            error = json.dumps({"ok": False, "error": backend._connection_info})
+        enroll_credential(
+            _config.path,
+            {"channel_secret": channel_secret} if channel_secret else None,
+            "line",
+            {"kind": "bearer", "token": channel_access_token},
+        )
+        if not backend._wire_muse():  # pragma: no cover - credential was just stored
+            return json.dumps({"ok": False, "error": backend._connection_info})
     except Exception as e:
-        error = json.dumps({"ok": False, "error": str(e)})
-    # Roll the vault back so a bad token is not left enrolled.
-    with contextlib.suppress(Exception):
-        clear_credentials("line")
-    backend._api = None
-    return error
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps({"ok": True, "message": "LINE credentials saved (Muse-auth)."})
 
 
 class LineAgent(BaseChannelAgent):

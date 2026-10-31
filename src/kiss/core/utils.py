@@ -125,6 +125,7 @@ def atomic_write_text(
     content: str,
     mode: int | None = None,
     create_mode: int = 0o600,
+    errors: str = "strict",
 ) -> None:
     """Write *content* to *target* so readers never see a partial file.
 
@@ -163,6 +164,9 @@ def atomic_write_text(
             failure.
         create_mode: Permission bits (before the process umask) used
             only when *target* does not exist and *mode* is ``None``.
+        errors: The UTF-8 encoding's error handler; ``"surrogateescape"``
+            writes back unchanged the undecodable bytes of a file read
+            with that handler.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     preserved: int | None = mode
@@ -182,7 +186,7 @@ def atomic_write_text(
         # POSIX-legal short return count would otherwise be ignored and
         # then published as a permanently truncated file.
         with os.fdopen(fd, "wb") as staged:
-            staged.write(content.encode("utf-8"))
+            staged.write(content.encode("utf-8", errors))
         # Applied to the staged file only: os.replace moves the inode,
         # mode included, so a second chmod on the target would be a no-op.
         if preserved is not None:

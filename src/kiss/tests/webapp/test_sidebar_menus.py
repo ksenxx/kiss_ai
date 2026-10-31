@@ -92,9 +92,10 @@ def _click_root_button(page, root: str, action: str) -> None:
     button.click()
 
 
-def _open_page(browser, harness, width: int = 1400):
+def _open_page(browser, harness, width: int = 1400, received_frames: list[dict] | None = None):
     """Open the remote page in desktop mode with clipboard access and
-    record the WS frames the client sends."""
+    record the WS frames the client sends (and, into *received_frames*
+    when given, the daemon's)."""
     context = browser.new_context(
         ignore_https_errors=True,
         viewport={"width": width, "height": 900},
@@ -103,14 +104,17 @@ def _open_page(browser, harness, width: int = 1400):
     page = context.new_page()
     sent_frames: list[dict] = []
 
-    def _on_ws(ws) -> None:
-        def _on_sent(payload) -> None:
-            try:
-                sent_frames.append(json.loads(payload))
-            except Exception:
-                pass
+    def _record(frames: list[dict], payload) -> None:
+        try:
+            frames.append(json.loads(payload))
+        except Exception:
+            pass
 
-        ws.on("framesent", _on_sent)
+    def _on_ws(ws) -> None:
+        ws.on("framesent", lambda payload: _record(sent_frames, payload))
+        if received_frames is not None:
+            received = received_frames  # narrowed once, for the lambda
+            ws.on("framereceived", lambda payload: _record(received, payload))
 
     page.on("websocket", _on_ws)
     goto_retrying_network_change(page, harness.base_url + "/")
@@ -1150,8 +1154,15 @@ def test_graph_file_click_opens_a_diff_editor(browser, harness, worktree):
         assert diff["original"] == "a\n" and diff["modified"] == "a\n"
         assert _sent(frames, "gitShow")[-1]["origPath"] == "a.txt"
         # Clicking the same file again brings its tab back, no new tab.
+        # The tab comes back with the gitShow reply, which also slides
+        # the panel off: wait for it, or a late reply hides the panel
+        # under the next click.
         _panel_click(files.filter(has_text="nested.py").first)
-        page.wait_for_timeout(500)
+        page.wait_for_function(
+            f"document.querySelector('#content-tab-list .chat-tab.active')"
+            f".textContent.includes('nested.py ({first7} \u2194 {second7})')",
+            timeout=15000,
+        )
         assert page.locator(".chat-tab").count() == tabs_before + 2
         # The menu's Open Changes on a file of a commit is the same diff.
         _panel_click(files.filter(has_text="nested.py").first, button="right")
@@ -1430,13 +1441,59 @@ def _wait_pdf_status(page, text: str) -> None:
     )
 
 
+def _wait_connect_focus_settled(page, received_frames: list[dict]) -> None:
+    """Wait until the daemon's connect-time ``focusInput`` has arrived and
+    the composer's deferred focus retries it starts (100 and 300 ms
+    later) have run.
+
+    The daemon sends it at the end of the ``ready`` handshake, which on
+    a loaded host finishes seconds after the page is usable.  A test
+    that put the keyboard elsewhere by then (nothing focused, so the
+    viewer's shortcuts apply) would have it pulled into the composer
+    between two key presses, where the keys move the caret instead.
+
+    Args:
+        page: The remote page, opened by :func:`_open_page`.
+        received_frames: The daemon's frames, as :func:`_open_page`
+            records them when given the list.
+    """
+    for _ in range(600):
+        if any(frame.get("type") == "focusInput" for frame in received_frames):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError("no focusInput from the daemon within 30 s")
+    page.wait_for_timeout(500)
+
+
+def _wait_pdf_fitted(page) -> None:
+    """Wait until the pages are laid out for the scroller's current width.
+
+    The viewer refits them from a ResizeObserver, which the browser
+    runs at its next frame after the pane changed size (the panel
+    sliding away, the split moving), while a geometry read from the
+    test already sees the new size.  On a loaded host that frame comes
+    late enough for a key press to land in a layout about to be
+    rescaled around the middle of the view, which moves the scroll
+    offset from under the test.
+    """
+    page.wait_for_function(
+        "() => { const g = (" + _PDF_GEOMETRY_JS + ")();"
+        " return Math.abs(g.pageWidth - g.avail) <= 1.5; }",
+        timeout=10000,
+    )
+
+
 def _wait_pdf_at_first_page(page) -> None:
     """Scroll the viewer to its top and wait for the indicator to say so.
 
     Widening the pane rescales the pages while keeping the point under
     the middle of the view in place, so on a slow host the viewer may
-    be showing page 2 once the first page has rendered.
+    be showing page 2 once the first page has rendered; the rescale
+    itself is waited for first (:func:`_wait_pdf_fitted`), so it cannot
+    move the view after this returns.
     """
+    _wait_pdf_fitted(page)
     page.evaluate("document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 0")
     _wait_pdf_status(page, "Page 1 of 8")
 
@@ -2097,7 +2154,10 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
     the arrows pan instead once the pages are wider than the view."""
     pdf = harness.work_dir / "pages8.pdf"
     pdf.write_bytes(_pdf_bytes(8))
-    context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
+    received: list[dict] = []
+    context, page, frames = _open_page(
+        browser, harness, width=_PDF_PAGE_WIDTH, received_frames=received
+    )
     errors: list[str] = []
     page.on("pageerror", lambda err: errors.append(str(err)))
     try:
@@ -2108,7 +2168,9 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
         _wait_pdf_rendered(page)
         _wait_pdf_at_first_page(page)
         # No click into the viewer first: the keys work as soon as the
-        # viewer is shown.
+        # viewer is shown.  Nothing may focus the composer afterwards,
+        # so the daemon's connect-time focus request is waited out.
+        _wait_connect_focus_settled(page, received)
         page.evaluate("document.activeElement.blur()")
         page.keyboard.press("PageDown")
         _assert_pdf_page_at_top(page, 2)

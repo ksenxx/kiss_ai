@@ -13,16 +13,17 @@ progress summary, user message, ``/ask`` answer, final result) and
 renders them four ways:
 
 * :func:`transcript_page` — a clipped, optionally filtered page of
-  entries (the ``task_transcript`` tool of the task-update and
-  ``rsi7d`` agents);
+  entries (the task-update agent's ``task_transcript`` tool and the
+  ``rsi7d`` agent's ``run_transcript``);
 * :func:`overview` — everything needed to orient in one call: the
   header, sub-agent tasks, later user messages, previous ``/ask``
-  answers, the task's own progress summaries and its latest entries;
+  answers, the task's own progress summaries and its latest entries
+  (the ``rsi7d`` agent's ``run_overview``);
 * :func:`entry_detail` — one entry in full (a complete command
-  output, diff or tool argument);
+  output, diff or tool argument; the ``rsi7d`` agent's ``run_entry``);
 * :func:`context` — the one-shot context of the ``/ask`` agent: the
-  header, the sub-agent tasks, the tail of the task's progress log on
-  disk and as many of the newest transcript entries as fit a fixed
+  header, the sub-agent tasks, the tail of the progress log the task
+  wrote and as many of the newest transcript entries as fit a fixed
   character budget.
 
 All of them read the live database in-process (queued events are
@@ -38,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from kiss.agents.sorcar.chat_summary import end_ms, launch_ms
+from kiss.agents.sorcar.useful_tools import _edit_pairs
 
 # Per-kind clip limits (characters) applied when an entry is rendered.
 _CLIP: dict[str, int] = {
@@ -68,10 +70,11 @@ MAX_CONTEXT_CHARS = 60_000
 # Only the newest progress-log entries matter for a question about
 # the current state of the task.
 _PROGRESS_LOG_CHARS = 8_000
-# Progress logs a task may keep in its work dir; the most recently
-# modified existing one wins, so the live ``tmp/PROGRESS.md`` a
-# running agent appends to beats a stale copy at the root.
-_PROGRESS_LOG_NAMES = ("PROGRESS_LOG.md", "PROGRESS.md", os.path.join("tmp", "PROGRESS.md"))
+# File names of a task's progress log: a top-level task keeps
+# ``tmp/PROGRESS.md`` in its work dir, a sub-agent ``PROGRESS.md`` in its
+# scratch dir; ``PROGRESS.md`` / ``PROGRESS_LOG.md`` at the root are
+# older conventions.
+_PROGRESS_LOG_NAMES = frozenset({"PROGRESS.md", "PROGRESS_LOG.md"})
 
 # Events that carry no progress information (UI signalling, streaming
 # markers): the digest drops them without a trace.
@@ -460,7 +463,7 @@ def _summary_section(indexed: list[tuple[int, Entry]]) -> list[str]:
         return [_summary_line(i, e) for i, e in indexed]
     return [
         *(_summary_line(i, e) for i, e in indexed[:head]),
-        f"... {omitted} earlier summaries omitted (see task_transcript) ...",
+        f"... {omitted} earlier summaries omitted (see run_transcript) ...",
         *(_summary_line(i, e) for i, e in indexed[-tail:]),
     ]
 
@@ -489,7 +492,9 @@ def overview(task_id: str) -> str:
     Sections: header (status, timing, spend, current time), sub-agent
     tasks, user messages sent after the initial prompt, the latest
     ``/ask`` answers, the task's own progress summaries, and the last
-    :data:`_OVERVIEW_TAIL_ENTRIES` transcript entries.
+    :data:`_OVERVIEW_TAIL_ENTRIES` transcript entries.  The closing
+    hint names the paging tools of the ``rsi7d`` agent, whose
+    ``run_overview`` tool this is.
 
     Args:
         task_id: The ``task_history`` row id (32 hex characters).
@@ -519,8 +524,8 @@ def overview(task_id: str) -> str:
     lines += [f"[{i}] {e.render()}" for i, e in tail] or ["(no transcript entries yet)"]
     lines += [
         "",
-        "Indices in [brackets] are transcript entry numbers: task_transcript(task_id, "
-        "start, count, contains) pages or filters all entries; task_step(task_id, "
+        "Indices in [brackets] are transcript entry numbers: run_transcript(task_id, "
+        "start, count, contains) pages or filters all entries; run_entry(task_id, "
         "index) returns one entry in full.",
     ]
     return "\n".join(lines)
@@ -543,42 +548,95 @@ def _tail(text: str, limit: int, marker: str) -> str:
     return marker + "\n" + tail
 
 
-def progress_log_tail(work_dir: str, limit: int = _PROGRESS_LOG_CHARS) -> str:
-    """Return the newest *limit* chars of the task's progress log, or ``""``.
+def _replay(text: str, ev: dict[str, Any]) -> str:
+    """Return the log *text* after the task's successful ``Write`` / ``Edit`` call *ev*.
 
-    The transcript only shows what the task has persisted, while a
-    running agent keeps writing its progress log as it works, so the
-    log is read from disk at call time.  Among the candidates in
-    :data:`_PROGRESS_LOG_NAMES` the most recently modified non-blank
-    file wins; unreadable files are skipped.
+    A ``Write`` puts its content.  An edit replaces its old text (each
+    occurrence with ``replace_all``) as the tool did; when the old text
+    is not in *text*, the file held text the task did not write there,
+    so only the edit's new text is added, at the end.  A malformed
+    ``edits`` list changes nothing.
+    """
+    args = _tool_call_args(ev)
+    if ev.get("name") == "Write":
+        return str(args.get("content") or "")
+    pairs = _edit_pairs(str(args["edits"])) if args.get("edits") else [(
+        str(args.get("old_string") or ""), str(args.get("new_string") or ""),
+        str(args.get("replace_all")).lower() == "true",
+    )]
+    if isinstance(pairs, str):
+        return text
+    for old, new, every in pairs:
+        if old and old in text:
+            text = text.replace(old, new, -1 if every else 1)
+        elif new:
+            text += new if not text or text.endswith("\n") else "\n" + new
+    return text
+
+
+def _progress_log_text(task: dict[str, Any]) -> str:
+    """Return the progress log as the task's own successful writes left it (``""``: none).
+
+    Replays the task's ``Write`` / ``Edit`` calls of a
+    :data:`_PROGRESS_LOG_NAMES` file in order (:func:`_replay`), each
+    paired with the result that follows it: a call whose result is an
+    error (raised, or returned as ``Error: ...`` text) wrote nothing.  A
+    relative path is taken from the task's work dir; the log is the file
+    of the newest successful call.
+    """
+    work_dir = str(task.get("work_dir") or "")
+    logs: dict[str, str] = {}
+    newest = ""
+    pending: tuple[str, dict[str, Any]] | None = None
+    for ev in task.get("events") or []:
+        if ev.get("type") == "tool_call":
+            path = str(ev.get("path") or "")
+            pending = None
+            if (
+                ev.get("name") in ("Write", "Edit")
+                and os.path.basename(path) in _PROGRESS_LOG_NAMES
+            ):
+                pending = (os.path.normpath(os.path.join(work_dir, path)), ev)
+        elif ev.get("type") == "tool_result":
+            failed = ev.get("is_error") or str(ev.get("content") or "").startswith("Error")
+            if pending is not None and not failed:
+                newest = pending[0]
+                logs[newest] = _replay(logs.get(newest, ""), pending[1])
+            pending = None
+    return logs.get(newest, "")
+
+
+def progress_log_tail(task: dict[str, Any], limit: int = _PROGRESS_LOG_CHARS) -> str:
+    """Return the newest *limit* chars of the progress log *task* wrote, or ``""``.
+
+    Work dirs are shared by every task launched in them, so a log file
+    may hold other tasks' text (appended after this task wrote, or there
+    before it appended), and neither the file's name, its modification
+    time nor a piece of text this task wrote says which bytes are this
+    task's.  The log is therefore rebuilt from the task's own persisted
+    tool calls (:func:`_progress_log_text`), not read from disk: it holds
+    only text those calls wrote, however the file changed since
+    (rewritten, merged, deleted).  :func:`load_task` flushes the task's
+    queued events, so a running task's newest log write is included.
 
     Args:
-        work_dir: The task's working directory (``task_history.work_dir``).
+        task: A :func:`load_task` row (its ``events`` and ``work_dir``).
         limit: Character budget of the returned tail.
     """
-    if not work_dir:
+    text = _progress_log_text(task)
+    if not text.strip():
         return ""
-    best_body, best_mtime = "", -1.0
-    for name in _PROGRESS_LOG_NAMES:
-        path = os.path.join(work_dir, name)
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                body = fh.read()
-            mtime = os.path.getmtime(path)
-        except OSError:
-            continue
-        if body.strip() and mtime > best_mtime:
-            best_body, best_mtime = body, mtime
-    return _tail(best_body, limit, "[older progress-log entries elided]")
+    return _tail(text, limit, "[older progress-log entries elided]")
 
 
 def context(task_id: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
     """Return the one-shot context of a task for answering a question about it.
 
     Sections: header (status, timing, spend, current time), sub-agent
-    tasks, the tail of the task's progress log on disk, and the
-    transcript entries, oldest first.  When the whole text would exceed
-    *max_chars*, whole transcript entries are dropped OLDEST first and
+    tasks, the tail of the progress log the task's own writes keep (see
+    :func:`progress_log_tail`), and the transcript entries, oldest first.
+    When the whole text would exceed *max_chars*, whole transcript
+    entries are dropped OLDEST first and
     the elision is marked, so the newest steps (what questions usually
     target) always survive; the newest entry is kept even when it alone
     (with the marker) overflows the budget (its rendering is clipped,
@@ -597,7 +655,7 @@ def context(task_id: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
     task, entries, spend = loaded
     lines = _timed_header(task, entries, spend)
     lines += _children_section(task, with_side_channel_count=False)
-    log = progress_log_tail(str(task.get("work_dir") or ""))
+    log = progress_log_tail(task)
     if log:
         lines += ["", "== Progress log written by the task (newest entries) ==", log.rstrip()]
     lines += ["", f"== Transcript ({len(entries)} entries, oldest first) =="]

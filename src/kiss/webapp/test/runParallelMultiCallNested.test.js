@@ -945,8 +945,9 @@ function testLateSpawnUnderFinishedParentOpensUnderAncestor() {
 
 // A running sub-agent's tab stays open unless the USER closes it: a
 // hand close removes it and is echoed to the daemon (which mirrors it
-// to every other surface), and a close mirrored from another surface
-// removes a running tab here without echoing it back.
+// to every other surface).  The mirror side, a close from another
+// surface applied without an echo, is pinned by tabsMirrorReview's
+// testCloseSubagentTabBroadcastRemovesTabWithoutEcho.
 function testUserCloseOfRunningSubagentTab() {
   const {win, posted, rootId} = bootRunningRoot();
   const [x, y] = runParallelCall(win, posted, rootId, ['x', 'y'], 'S ');
@@ -964,14 +965,6 @@ function testUserCloseOfRunningSubagentTab() {
       .map(m => m.tabId),
     [x],
     'the hand close is echoed to the daemon',
-  );
-
-  send(win, {type: 'closeSubagentTab', tab_id: y});
-  assert.strictEqual(subagentTabEls(win).length, 0, 'mirrored close wins');
-  assert.strictEqual(
-    posted.filter(m => m.type === 'closeTab').length,
-    closes + 1,
-    'a mirrored close is not echoed back',
   );
   win.close();
   console.log('  ok - user close of a running sub-agent tab');

@@ -4,14 +4,17 @@
 # add your name here
 """Audit 17: Integration tests for race conditions in worktree mode.
 
-BUG-71: ``AgentServer._new_chat`` does not check whether a worktree
-    task is currently running on the same tab.  When the user triggers
-    "new chat" while the agent is actively writing files into the
-    worktree directory, the server calls ``tab.agent.new_chat()``
-    which invokes ``_release_worktree() -> _finalize_worktree()``.
-    The latter force-removes ``wt_dir`` mid-write, corrupting the
-    agent's in-progress edits, the baseline commit, and produces a
-    garbage squash-merge into the original branch.
+BUG-71: ``AgentServer._new_chat`` did not check whether a worktree
+    task was running on the same tab.  When the user triggered
+    "new chat" while the agent was writing files into the worktree
+    directory, the server called ``tab.agent.new_chat()``, which
+    invoked ``_release_worktree() -> _finalize_worktree()``.  The
+    latter force-removed ``wt_dir`` mid-write, corrupting the agent's
+    in-progress edits and the baseline commit, and produced a garbage
+    squash-merge into the original branch.  ``_new_chat`` no longer
+    touches the tab's agent: ``newChat`` always names a freshly minted
+    tab id, so it only records the tab's model, forgets the tab's view
+    state and broadcasts ``showWelcome``.
 
     The existing BUG-44 / BUG-35 checks only guarded against concurrent
     *non-worktree* tasks (via the since-removed ``_any_non_wt_running``);
@@ -118,19 +121,18 @@ class _RecordingPrinter:
 
 
 class TestNewChatSimpleBroadcast:
-    """``_new_chat`` on a fresh tab id simply resets the agent's chat
-    state and broadcasts ``showWelcome``.  (Earlier "refuse while a task
-    is running" guards were removed because the frontend always mints a
-    new tab id per ``newChat`` command, so the backend never observes a
-    tab whose previous run is still active.)
+    """``_new_chat`` on a fresh tab id broadcasts ``showWelcome`` without
+    touching the tab's agent.  (Earlier "refuse while a task is running"
+    guards were removed because the frontend always mints a new tab id
+    per ``newChat`` command, so the backend never observes a tab whose
+    previous run is still active.)
     """
 
     def test_new_chat_regression_allowed_when_no_task(
         self, tmp_path: Path,
     ) -> None:
-        """Regression: when no task is active the existing behavior
-        (call ``tab.agent.new_chat()`` and broadcast ``showWelcome``)
-        must be preserved."""
+        """Regression: with no task active, ``showWelcome`` is still
+        broadcast for the tab."""
         repo = _make_repo(tmp_path / "repo")
 
         server = AgentServer()

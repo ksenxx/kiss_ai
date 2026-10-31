@@ -97,7 +97,8 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
 
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert not wt_dir.exists()
         assert agent.work_dir == str(repo / "pkg")
@@ -109,7 +110,8 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
         agent = _agent_in_worktree(repo, wt_dir, branch, offset="")
 
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(repo)
 
@@ -165,7 +167,8 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         agent = _agent_in_worktree(repo, wt_dir, branch)
         shutil.rmtree(wt_dir)
 
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(repo / "pkg")
         assert "kiss_wt-" not in _git(repo, "worktree", "list")
@@ -185,7 +188,8 @@ class TestWorkDirUntouchedWhenWorktreeKept:
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
 
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
 
         assert wt_dir.exists()
         assert agent.work_dir == str(wt_dir / "pkg")
@@ -200,13 +204,15 @@ class TestWorkDirUntouchedWhenWorktreeKept:
         elsewhere.mkdir()
         agent.work_dir = str(elsewhere)
 
-        assert agent._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent._finalize_worktree(agent.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
 
         assert agent.work_dir == str(elsewhere)
 
         agent2 = _agent_in_worktree(repo, wt_dir, branch)
         agent2.work_dir = ""
-        assert agent2._finalize_worktree() is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
+        outcome = agent2._finalize_worktree(agent2.worktrees[0])
+        assert outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED
         assert agent2.work_dir == ""
 
 

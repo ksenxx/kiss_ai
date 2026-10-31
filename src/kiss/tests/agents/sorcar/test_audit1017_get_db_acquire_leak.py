@@ -154,9 +154,14 @@ def run_hammer() -> None:
             helper.join(20.0)
         # A round (interrupt, checkpoint, close, reopen) outlasts the
         # 0.5 ms between injections; the worker completes one on its
-        # own once they stop, unless a lock leaked.
+        # own once they stop, unless a lock leaked.  The last interrupt
+        # can land in the worker's loop instead of its call and end it,
+        # so a fresh worker is started, as in the loop above.
         deadline = time.monotonic() + 20.0
-        while driver.completed == 0 and worker.is_alive() and time.monotonic() < deadline:
+        while driver.completed == 0 and time.monotonic() < deadline:
+            if not worker.is_alive():
+                worker = Hammered(driver)
+                worker.start()
             time.sleep(0.01)
         worker.stop.set()
         worker.join(20.0)

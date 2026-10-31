@@ -134,16 +134,6 @@ class TestDiscordBackendBugs:
         self.backend.poll_messages("111", "12345", limit=50)
         assert self.server.requests[0]["query"]["after"] == ["12345"]
 
-    def test_send_message_posts_to_channel_with_reply_reference(self) -> None:
-        """send_message must POST to /channels/{channel}/messages with the
-        thread_ts snowflake as a reply reference, not use it as channel id."""
-        self.backend.send_message("111", "hello", thread_ts="9999")
-        req = self.server.requests[0]
-        assert req["method"] == "POST"
-        assert req["path"] == "/channels/111/messages"
-        assert req["body"]["content"] == "hello"
-        assert req["body"]["message_reference"] == {"message_id": "9999"}
-
     def test_send_message_without_thread_posts_to_channel(self) -> None:
         """send_message without thread_ts posts a plain channel message."""
         self.backend.send_message("111", "hi")

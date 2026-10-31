@@ -254,6 +254,8 @@ class _StopConfirmingDaemon(_LocalDaemon):
         self.stopped_result = stopped_result
         self.confirm_gate = confirm_gate
         self.commands: list[dict[str, Any]] = []
+        # Set once the client closed: its commands are all recorded.
+        self.disconnected = threading.Event()
         super().__init__("kiss_dispatch_timeout_")
 
     async def _handle(self, ws: ServerConnection) -> None:
@@ -282,6 +284,8 @@ class _StopConfirmingDaemon(_LocalDaemon):
                     })
         except ConnectionClosed:
             return
+        finally:
+            self.disconnected.set()
 
     def wait_for_command(self, cmd_type: str, timeout: float = 5.0) -> bool:
         """Poll until a *cmd_type* command was recorded (or timeout)."""
@@ -374,8 +378,9 @@ def test_interrupt_wakes_no_deadline_wait_on_silent_daemon(
     would starve the stop cascade forever (gpt-5.6-sol review
     finding).  The no-deadline wait must instead wake periodically
     (``_NO_DEADLINE_WAKE_SECONDS``, shortened here so the test runs in
-    milliseconds), let the interrupt fire, and cascade a ``stop`` +
-    ``closeTab`` to the dispatched task.
+    milliseconds), let the interrupt fire, and cascade a ``stop`` to
+    the dispatched task.  The stop is unconfirmed when the client
+    leaves, so the top-level run's tab stays open (no ``closeTab``).
     """
     monkeypatch.setattr(daemon_client, "_NO_DEADLINE_WAKE_SECONDS", 0.05)
     daemon = _RecordingDaemon(mode="silent")
@@ -410,7 +415,8 @@ def test_interrupt_wakes_no_deadline_wait_on_silent_daemon(
         assert daemon.wait_for_command("stop"), (
             "the interrupted no-deadline dispatch never cascaded a stop"
         )
-        assert daemon.wait_for_command("closeTab")
+        assert daemon.disconnected.wait(10)
+        assert not any(c.get("type") == "closeTab" for c in daemon.commands)
     finally:
         daemon.close()
 
@@ -553,7 +559,9 @@ def test_run_agent_tool_reports_unconfirmed_stop(
         assert "MAY STILL BE RUNNING" in killed
         assert "was stopped" not in killed
         assert daemon.wait_for_command("stop")
-        assert daemon.wait_for_command("closeTab")
+        # No calling task, so a top-level run: its tab stays open.
+        assert daemon.disconnected.wait(10)
+        assert not any(c.get("type") == "closeTab" for c in daemon.commands)
     finally:
         daemon.close()
 
@@ -565,14 +573,14 @@ def test_client_timeout_stop_cascade_is_opt_in(
     """``daemon_client.run`` stops a timed-out task only when asked.
 
     The public client keeps the documented timeout contract — a plain
-    timeout sends ``closeTab`` and leaves the task running — while
+    timeout leaves the task running, and its tab open — while
     ``stop_on_timeout=True`` (what ``run_agent`` passes) sends a
     ``stop`` and BLOCKS until the daemon's terminal status confirms
     the task is dead: the daemon stand-in delays that confirmation by
     0.5 s, so an elapsed time past the delay proves the client waited
     for it rather than raising right after sending the stop.  The
-    ``closeTab`` is sent after any ``stop``, so once it is observed
-    the recorded commands are final.
+    confirmed-dead task's tab is then closed.  Once the client has
+    disconnected the recorded commands are final.
     """
     daemon = _StopConfirmingDaemon(confirm_delay=0.5)
     try:
@@ -586,9 +594,9 @@ def test_client_timeout_stop_cascade_is_opt_in(
             excinfo.value, daemon_client.StopUnconfirmedTimeoutError,
         ), "a confirmed (or never-attempted) stop must raise the plain error"
         elapsed = time.monotonic() - begin
-        assert daemon.wait_for_command("closeTab")
-        stopped = any(c.get("type") == "stop" for c in daemon.commands)
-        assert stopped == stop_on_timeout
+        assert daemon.disconnected.wait(10)
+        types = [c.get("type") for c in daemon.commands]
+        assert types == (["stop", "closeTab"] if stop_on_timeout else [])
         if stop_on_timeout:
             assert elapsed >= 0.8, (
                 "the client raised before the stop confirmation arrived"
@@ -623,7 +631,9 @@ def test_stop_confirmation_wait_is_bounded(
             )
         assert time.monotonic() - begin < 5
         assert daemon.wait_for_command("stop")
-        assert daemon.wait_for_command("closeTab")
+        # The task may still be running: its tab stays open.
+        assert daemon.disconnected.wait(10)
+        assert not any(c.get("type") == "closeTab" for c in daemon.commands)
     finally:
         daemon.close()
 
