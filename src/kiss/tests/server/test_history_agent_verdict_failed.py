@@ -100,7 +100,7 @@ class TestHistoryAgentVerdictFailed(unittest.TestCase):
         histories = [e for e in self.events if e.get("type") == "history"]
         assert histories, "getHistory broadcast no history event"
         sessions: list[dict[str, Any]] = [
-            s for s in histories[-1]["sessions"] if s["preview"] == prompt
+            s for s in histories[-1]["sessions"] if s["title"] == prompt
         ]
         assert sessions, f"no history row for {prompt!r}"
         return sessions[0]

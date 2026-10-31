@@ -1067,6 +1067,9 @@
 
   let histCache = [];
   let histIdx = -1;
+  // The time of the most recent use among the texts of histCache (the
+  // daemon's `newest`): a refresh asks for the texts used since.
+  let histNewest = 0;
 
   let ghostTimer = null;
   let currentGhost = '';
@@ -14855,6 +14858,37 @@
     return true;
   }
 
+  /**
+   * Ask the daemon for the composer's ArrowUp history: the whole list
+   * the first time, afterwards (a task started or finished, a
+   * reconnect) only the texts used since the newest one on hand, which
+   * is one or two texts rather than the whole list again (hundreds of
+   * kilobytes on a slow network, at every task event).
+   */
+  function requestInputHistory() {
+    api.getInputHistory(histNewest > 0 ? {since: histNewest} : {});
+  }
+
+  /**
+   * The daemon's `inputHistory`: the whole list, or (`since` echoed)
+   * the texts used since the list on hand was fetched, which go on
+   * top of it, each text once.  An empty refresh changes nothing, so
+   * ArrowUp keeps its place; otherwise the cycling position is reset,
+   * since it is an index into the old list.
+   */
+  function handleInputHistory(ev) {
+    const fresh = ev.tasks || [];
+    if (ev.since > 0 && histNewest > 0) {
+      if (!fresh.length) return;
+      const seen = new Set(fresh);
+      histCache = fresh.concat(histCache.filter(t => !seen.has(t)));
+    } else {
+      histCache = fresh;
+    }
+    histNewest = Math.max(histNewest, Number(ev.newest) || 0);
+    histIdx = -1;
+  }
+
   function cycleHistoryUp() {
     // The history holds prompts; while the composer is the answer box
     // none of them is an answer.
@@ -16916,20 +16950,29 @@
    * base64 payloads on the tool_result event (see
    * JsonPrinter._collect_result_images) — inline in the tool's event
    * panel.  Clicking an image toggles between the capped preview
-   * height and its natural size.
+   * height and its natural size.  A replayed transcript carries each
+   * picture as a `lazy` handle instead of its bytes (the daemon's
+   * `_lazy_replay_images`): such a picture is fetched when it comes
+   * into view (loadReplayImageWhenShown).
+   *
+   * @param {Object} ev The tool_result event.
+   * @param {Element} container The panel the pictures go under.
+   * @param {string} ownerTabId The tab that owns the transcript (its
+   *   bound machine answers the fetch of a lazy picture).
    */
-  function appendResultImages(ev, container) {
+  function appendResultImages(ev, container, ownerTabId) {
     if (!Array.isArray(ev.images) || !ev.images.length) return;
     const wrap = mkEl('div', 'tr-images');
     for (let i = 0; i < ev.images.length; i++) {
       const im = ev.images[i];
-      if (!im || !im.b64 || !im.mime) continue;
+      if (!im || !im.mime || (!im.b64 && !im.lazy)) continue;
       const box = mkEl('div', 'tr-img-box');
       const img = document.createElement('img');
       img.className = 'tr-img';
       // Property assignment (never innerHTML): the payload is inert
       // data, and an <img> data: URI cannot run scripts.
-      img.src = 'data:' + im.mime + ';base64,' + im.b64;
+      if (im.b64) img.src = 'data:' + im.mime + ';base64,' + im.b64;
+      else loadReplayImageWhenShown(img, im.lazy, ownerTabId);
       img.alt = im.path || 'tool result image';
       if (im.path) img.title = im.path;
       img.addEventListener('click', () => {
@@ -16953,6 +16996,127 @@
       panel.classList.remove('collapsed');
       collapsePreview(panel);
     }
+  }
+
+  // ---- Pictures a replayed transcript left out -----------------------
+  // A replay carries each picture of a tool result as a `lazy` handle
+  // ({taskId, index}: the picture's ordinal in the task's transcript)
+  // instead of its base64 bytes, which do not compress and were most
+  // of a transcript with screenshots on a slow network.  The picture
+  // is fetched (getReplayImage) once its <img> comes into view, which
+  // a folded panel's or a hidden tab's never does.
+  const pendingReplayImages = new Map();
+  let replayImageSeq = 0;
+  const replayImageObserver =
+    typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(onReplayImagesShown, {rootMargin: '400px'})
+      : null;
+
+  /**
+   * Show the picture *lazy* names in *img* once it is on screen.
+   *
+   * @param {HTMLImageElement} img The picture's element (no src yet).
+   * @param {Object} lazy The daemon's handle: {taskId, index}.
+   * @param {string} ownerTabId The tab that owns the transcript.
+   */
+  function loadReplayImageWhenShown(img, lazy, ownerTabId) {
+    img.classList.add('tr-img-lazy');
+    img.dataset.replayTask = String(lazy.taskId || '');
+    img.dataset.replayIndex = String(lazy.index);
+    img.dataset.replayOwner = String(
+      ownerTabId === undefined ? activeTabId : ownerTabId,
+    );
+    // An exported copy is never on screen; a page without the
+    // observer (an old browser) fetches at once.
+    if (_shareExportReplay) return;
+    if (replayImageObserver) replayImageObserver.observe(img);
+    else requestReplayImage(img);
+  }
+
+  /** The observer's callback: fetch each picture that came into view. */
+  function onReplayImagesShown(entries) {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      replayImageObserver.unobserve(entry.target);
+      requestReplayImage(entry.target);
+    });
+  }
+
+  /**
+   * Ask the daemon (or the machine the owning tab is bound to) for
+   * the picture *img* stands for; handleReplayImage shows it.
+   */
+  function requestReplayImage(img) {
+    const token = 'rimg-' + ++replayImageSeq;
+    pendingReplayImages.set(token, img);
+    const owner = img.dataset.replayOwner || '';
+    api.getReplayImage(
+      onMachine(
+        {
+          taskId: img.dataset.replayTask || '',
+          index: Number(img.dataset.replayIndex),
+          tabId: owner,
+          token: token,
+        },
+        tabBoundMachine(owner),
+      ),
+    );
+  }
+
+  /** The daemon's answer to requestReplayImage: the picture, or why not. */
+  function handleReplayImage(ev) {
+    const img = ev.token ? pendingReplayImages.get(ev.token) : undefined;
+    if (!img) return;
+    pendingReplayImages.delete(ev.token);
+    img.classList.remove('tr-img-lazy');
+    if (ev.b64 && ev.mime) {
+      // Property assignment (never innerHTML): a data: URI in an
+      // <img> cannot run scripts.
+      img.src = 'data:' + ev.mime + ';base64,' + ev.b64;
+    } else {
+      img.title = 'Cannot show ' + (img.alt || 'this picture');
+      img.classList.add('inline-img-missing');
+    }
+  }
+
+  /**
+   * The connection dropped: the pictures asked for never come, so
+   * each one is watched again and asked for afresh once the page is
+   * back and it is still on screen.
+   */
+  function forgetInFlightReplayImages() {
+    const waiting = Array.from(pendingReplayImages.values());
+    pendingReplayImages.clear();
+    waiting.forEach(img => {
+      if (replayImageObserver) replayImageObserver.observe(img);
+    });
+  }
+
+  /**
+   * Give an exported copy of the live transcript the pictures its
+   * replay has not fetched yet (lazy ones still off screen): the
+   * daemon's share events carry every picture of the task, in the
+   * order the replay numbered them.
+   *
+   * @param {Element} body The cloned transcript.
+   * @param {string} taskId The task the events belong to.
+   * @param {Array<object>} events The task's events from the daemon.
+   */
+  function fillUnloadedReplayImages(body, taskId, events) {
+    const pending = body.querySelectorAll('img[data-replay-index]:not([src])');
+    if (!pending.length) return;
+    const pictures = [];
+    (events || []).forEach(ev => {
+      if (!ev || !Array.isArray(ev.images)) return;
+      ev.images.forEach(im => {
+        if (im && im.b64 && im.mime) pictures.push(im);
+      });
+    });
+    pending.forEach(img => {
+      if (img.dataset.replayTask !== taskId) return;
+      const im = pictures[Number(img.dataset.replayIndex)];
+      if (im) img.src = 'data:' + im.mime + ';base64,' + im.b64;
+    });
   }
 
   // ---- Pictures the agent wrote to disk ------------------------------
@@ -17944,7 +18108,7 @@
               appendStreamedText(cut, (sep ? '\n' : '') + ev.content);
             }
           }
-          appendResultImages(ev, tState.lastToolCallEl || target);
+          appendResultImages(ev, tState.lastToolCallEl || target, ownerTabId);
           break;
         }
         const resultTarget = tState.lastToolCallEl || target;
@@ -17987,7 +18151,7 @@
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
-          appendResultImages(ev, resultTarget);
+          appendResultImages(ev, resultTarget, ownerTabId);
         }
         break;
       }
@@ -19891,6 +20055,11 @@
         reconcileBrowserTabs(ev);
         break;
       case 'browserFrame': {
+        // Every frame is acknowledged first, view or no view: the daemon
+        // keeps at most two in flight to this page and holds the newest
+        // one back until then, so a slow link never piles frames up, and
+        // a frame the view fails to paint must not stall the window.
+        api.browserFrameAck({tab_id: ev.tab_id});
         const bt = getTab(ev.tab_id);
         if (bt && bt.browserView) bt.browserView.frame(ev);
         break;
@@ -19927,6 +20096,7 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           forgetInFlightInlineImages();
+          forgetInFlightReplayImages();
           machineWorkDirsAsked.clear();
           stopSidebarRefreshSpins();
           releaseSidebarFormSaves();
@@ -20089,6 +20259,9 @@
         return;
       case 'pathsExist':
         handlePathsExist(ev);
+        return;
+      case 'replayImage':
+        handleReplayImage(ev);
         return;
       // Replies of the task-info panel's Explorer / Source Control
       // sections (remote webapp only).  They are matched to the request by token,
@@ -20902,7 +21075,7 @@
       }
       case 'tasks_updated':
         refreshHistory();
-        api.getInputHistory();
+        requestInputHistory();
         break;
 
       case 'openExternalResult':
@@ -21206,11 +21379,7 @@
         break;
 
       case 'inputHistory':
-        histCache = ev.tasks || [];
-        // A cycling position is an index into the OLD list; keeping it
-        // would resume ArrowUp/ArrowDown from a random place in the
-        // new one.
-        histIdx = -1;
+        handleInputHistory(ev);
         break;
       case 'ghost':
         // tableak-coverage:start
@@ -22294,6 +22463,7 @@
         let metrics = shareTaskMetricsText(t.events, t.metrics);
         if (liveId && tid === liveId) {
           body = shareLiveTranscript();
+          fillUnloadedReplayImages(body, tid, t.events);
           liveUsed = true;
           if (!settings) settings = currentTaskSettings;
           metrics = liveTaskMetricsText();
@@ -23298,7 +23468,13 @@
     // must not become the chat this window commits or toasts against.
     // readychat-coverage:start
     const chatTabId = chatTabIdForHost();
-    const ready = {tabId: chatTabId, restoredTabs: collectRestoredTabs()};
+    const ready = {
+      tabId: chatTabId,
+      restoredTabs: collectRestoredTabs(),
+      // A reconnect keeps the composer history on hand: the daemon
+      // sends only what was typed since (see requestInputHistory).
+      inputHistorySince: histNewest,
+    };
     api.ready(ready);
     reportedChatTabId = chatTabId;
     // readychat-coverage:end
@@ -25974,6 +26150,21 @@
   }
 
   /**
+   * The task text of a history row: `title`, which the daemon sends
+   * once per row (the row's line, its tooltip and the tab's own task
+   * panel all read it), cut to its head and tail above the daemon's
+   * HISTORY_TITLE_CHARS (the transcript's prompt event has the whole
+   * text).  `preview` is the same text as a daemon before 2026-10-31
+   * sent it, a second time; a remote machine's rows can still come
+   * from one.
+   */
+  function historyRowText(session) {
+    if (typeof session.title === 'string' && session.title)
+      return session.title;
+    return typeof session.preview === 'string' ? session.preview : '';
+  }
+
+  /**
    * The chip naming the remote machine a history row came from; null
    * for the local daemon's own rows.  A plain label (the machine's
    * label, machineLabel): the row itself
@@ -26332,7 +26523,7 @@
     // anyway (white-space: nowrap), but the first line alone reads as
     // the title rather than a run-on of the whole prompt.
     const text =
-      (named || session.preview || session.title || 'Untitled')
+      (named || historyRowText(session) || 'Untitled')
         .split('\n')
         .map(l => l.trim())
         .filter(Boolean)[0] || 'Untitled';
@@ -26532,7 +26723,7 @@
   function openHistoryTask(s, wholeChat) {
     // The task text goes to the read-only task panel only.  #task-input
     // holds the user's own draft for the NEXT prompt and is never written.
-    const taskText = s.preview || s.title || '';
+    const taskText = historyRowText(s);
     const machine = sessionMachine(s);
     const existingChatTab = getChatTabOnMachine(s.id, machine);
     const resumable =
@@ -27399,8 +27590,8 @@
       // '' for the local daemon's rows, else the remote machine's name.
       div.dataset.machine =
         typeof s.machine === 'string' ? s.machine.trim() : '';
-      const itemText = s.title || s.preview || 'Untitled';
-      div.dataset.tooltip = s.preview || itemText;
+      const itemText = historyRowText(s) || 'Untitled';
+      div.dataset.tooltip = itemText;
 
       const statusMark = historyStatusMark(s);
       if (statusMark) div.appendChild(statusMark);
@@ -27455,7 +27646,7 @@
       }
       if (s.task_id) {
         actions.appendChild(
-          makeCopyButton(s.preview || itemText, 'sidebar-item-copy', 'task'),
+          makeCopyButton(itemText, 'sidebar-item-copy', 'task'),
         );
       }
       // Delete the task from history.db (its sub-tasks go with it).

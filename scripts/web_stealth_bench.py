@@ -8,9 +8,17 @@
 Drives the real :class:`kiss.agents.sorcar.web_use_tool.WebUseTool` (the
 engine, display and input helpers of :mod:`kiss.agents.sorcar.web_stealth`)
 at one page per host named in ``web_stealth.py`` and prints, per URL, the
-verdict (``OK``, ``BLOCKED(<vendor>)`` or ``ERROR``), the seconds the
-load took, the final URL and the page title.  The last line is the score.
-Exit status 1 when any page was blocked, so a scheduled run can tell.
+verdict (``OK``, ``BLOCKED(<vendor>)``, ``PUZZLE(<vendor>)`` or
+``ERROR``), the seconds the load took, the final URL and the page title.
+The last line is the score.  Exit status 1 when any page was blocked or
+errored, so a scheduled run can tell.  The one exception: a page in
+:data:`KNOWN_PUZZLES` is expected to answer with a particular vendor's
+CAPTCHA puzzle, which the tool recognises and reports to the agent
+(``PUZZLE(<vendor>)``); that counts as passed, since no browser setting
+changes a site's policy for this network's IP address.  Any other block
+on such a page (another vendor, a token challenge that never clears, the
+puzzle page unrecognised and returned as content) is a failure like
+elsewhere.
 
 Usage::
 
@@ -58,18 +66,35 @@ URLS = [
     "https://patents.justia.com/patent/6064064",
     "https://worldwide.espacenet.com/publicationDetails/biblio?CC=US&NR=6064064",
     "https://www.mdpi.com/1999-4893/7/4/523",
+    # AWS WAF: a silent token challenge on every page, and since 30 Oct
+    # 2026 the CAPTCHA puzzle on paper and search pages (KNOWN_PUZZLES).
+    "https://www.semanticscholar.org/paper/Enhancing-the-performance-of-kNN-for-glass-dataset"
+    "-Bhowmick-Saha/f5d7aaf00f43a18cf20fba144cdf88039a502262",
 ]
 
+# URL -> (the vendor label of the expected puzzle, a fragment of the
+# content page's title).  Pages that show a CAPTCHA puzzle to this
+# network's IP address even in an un-automated Chrome with a fresh profile
+# (checked 31 Oct 2026 for semanticscholar.org): the pass is that puzzle
+# being recognised and reported to the agent, or the content page when
+# the site's policy has relaxed.
+KNOWN_PUZZLES = {
+    URLS[-1]: (web_stealth.AWS_WAF_CAPTCHA, "Semantic Scholar"),
+}
 
-def verdict(tool: WebUseTool, result: str) -> str:
+
+def verdict(tool: WebUseTool, url: str, result: str) -> str:
     """Classify what ``go_to_url`` returned for the page now showing.
 
     Args:
         tool: The tool whose page was just navigated.
+        url: The URL that was loaded.
         result: The text ``go_to_url`` returned.
 
     Returns:
-        ``"OK"``, ``"BLOCKED(<vendor>) <note>"`` or ``"ERROR <message>"``.
+        ``"OK"``, ``"BLOCKED(<vendor>) <note>"``, ``"PUZZLE(<vendor>)
+        <note>"`` (a :data:`KNOWN_PUZZLES` page recognised and reported)
+        or ``"ERROR <message>"``.
     """
     first = result.splitlines()[0] if result else ""
     if result.startswith("Error"):
@@ -77,13 +102,20 @@ def verdict(tool: WebUseTool, result: str) -> str:
     try:
         # Bounded read: a renderer stuck in a busy loop raises instead of
         # hanging the whole run.
-        title, body = tool._read_page(
+        title, body, scripts = tool._read_page(
             tool._page,
-            "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '']",
+            "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '',"
+            " Array.from(document.scripts, s => s.src).filter(Boolean).join(' ').slice(0, 4000)]",
         )
     except Exception as exc:  # noqa: BLE001 — any read failure is an ERROR row
         return f"ERROR page read failed: {type(exc).__name__}"
-    vendor = web_stealth.challenge_vendor(str(title), str(body))
+    vendor = web_stealth.challenge_vendor(str(title), str(body), str(scripts))
+    if url in KNOWN_PUZZLES:
+        expected, content_title = KNOWN_PUZZLES[url]
+        if vendor == expected and first.startswith("Note:"):
+            return f"PUZZLE({vendor}) {first[:160]}"
+        if vendor is None and content_title not in str(title):
+            return f"BLOCKED({vendor}) unrecognised page titled {str(title)[:60]!r}"
     if vendor or first.startswith("Note:"):
         return f"BLOCKED({vendor}) {first[:160]}"
     return "OK"
@@ -101,12 +133,14 @@ def main() -> int:
     urls = args or URLS
     tool = WebUseTool(ephemeral=True, headless=True)
     loaded = 0
+    puzzles = 0
     try:
         for url in urls:
             started = time.monotonic()
             result = tool.go_to_url(url)
-            status = verdict(tool, result)
+            status = verdict(tool, url, result)
             loaded += status == "OK"
+            puzzles += status.startswith("PUZZLE(")
             # ``page.url`` is local state; the title comes from the tree's
             # first line, so a hung renderer cannot stall the report.
             print(
@@ -117,8 +151,8 @@ def main() -> int:
     finally:
         tool.close()
         web_stealth.stop_virtual_display()
-    print(f"\n{loaded}/{len(urls)} loaded")
-    return 0 if loaded == len(urls) else 1
+    print(f"\n{loaded}/{len(urls)} loaded, {puzzles} known puzzle(s) recognised")
+    return 0 if loaded + puzzles == len(urls) else 1
 
 
 if __name__ == "__main__":

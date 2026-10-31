@@ -11,6 +11,11 @@ KISS-owned persistent profile, and turns every browser page into one
 KISS tab: JPEG frames from the DevTools ``Page.startScreencast`` API are
 pushed to every client that shows the tab, and the clients' mouse,
 wheel, keyboard and paste events are replayed through ``Input.*``.
+A client acknowledges every frame it gets (``browserFrameAck``), and
+no more than two frames are in flight to it at a time
+(:mod:`kiss.server.frame_flow`): a slow link gets the newest frame at
+its own pace instead of a backlog that stalls the link's keepalive
+and drops the connection.
 
 The browser is this daemon's machine's.  A ``browserOpen`` stamped
 ``machine`` (the chat is bound to a registered machine) goes to that
@@ -30,7 +35,8 @@ carry ``connId`` and reach only the clients that show the tab):
   connecting client reconciles against (drops tabs closed while it
   was away)
 - ``browserState``    {tab_id, url, title, canGoBack, canGoForward}
-- ``browserFrame``    {tab_id, data (base64 JPEG), width, height}
+- ``browserFrame``    {tab_id, data (base64 JPEG), width, height} -
+  answered by the client with ``browserFrameAck`` {tab_id}
 - ``closeBrowserTab`` {tab_id}
 - ``browserError``    {tab_id, text}
 """
@@ -46,7 +52,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -56,6 +62,7 @@ from kiss.agents.sorcar.web_stealth import disabled_blink_features, virtual_disp
 from kiss.core.browser_handoff import is_headless_environment
 from kiss.core.default_browser import ResolvedBrowser, resolve_browser
 from kiss.core.locked import locked_call
+from kiss.server.frame_flow import FrameFlow
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, CDPSession, Page, Playwright
@@ -106,6 +113,9 @@ class _PageRecord:
     # second registration of the same page waits for it.
     attached: asyncio.Event = field(default_factory=asyncio.Event)
     viewers: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Per viewer, the frames in flight and the one held back (see
+    # frame_flow); set by _reserve, which creates the record.
+    flow: FrameFlow[dict[str, Any]] = field(init=False)
     casting: bool = False
     last_frame_at: float = 0.0
     pending_frame: dict[str, Any] | None = None
@@ -372,6 +382,14 @@ class BrowserTabService:
         """
         self._submit(self._viewport(tab_id, conn_id, width, height, visible))
 
+    def frame_acked(self, tab_id: str, conn_id: str) -> None:
+        """Record that *conn_id* received a frame of the tab (its ``browserFrameAck``).
+
+        The frame held back for the connection while it was behind, if
+        any, is sent now (see :mod:`kiss.server.frame_flow`).
+        """
+        self._submit(self._frame_acked(tab_id, conn_id))
+
     def viewer_gone(self, conn_id: str) -> None:
         """Forget every tab *conn_id* was watching (the client disconnected)."""
         if self._loop is not None:
@@ -533,6 +551,10 @@ class BrowserTabService:
                 except Exception as exc:  # noqa: BLE001 — the driver exits on its own
                     logger.warning("browser tab: driver stop after failed launch: %r", exc)
             raise
+        logger.info(
+            "browser tab: launched %s (%s) with profile %s",
+            self._browser.name, self._browser.executable, self._profile_dir,
+        )
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)
         return context
@@ -755,6 +777,10 @@ class BrowserTabService:
             tab_id = f"{TAB_ID_PREFIX}{self._next_id}"
             self._next_id += 1
             rec = _PageRecord(tab_id=tab_id, page=page, url=page.url)
+            rec.flow = FrameFlow(
+                send=lambda conn_id, frame: self._emit(dict(frame), conn_id),
+                schedule=self._call_later,
+            )
             self._pages[tab_id] = rec
             self._by_page[id(page)] = rec
             return rec, True
@@ -800,6 +826,7 @@ class BrowserTabService:
         down the browser launched since.
         """
         if context is self._context:
+            logger.warning("browser tab: the browser exited on its own; closing every tab")
             self._schedule(self._teardown(announce=True))
 
     async def _on_page_closed(self, rec: _PageRecord) -> None:
@@ -809,10 +836,14 @@ class BrowserTabService:
             remaining = len(self._pages)
         if rec.flush_handle is not None:
             rec.flush_handle.cancel()
+        rec.flow.close()
         if not known:
             # Already withdrawn by a teardown, whose context close is
             # what fired this event: nothing left to announce or close.
             return
+        logger.info(
+            "browser tab: %s closed (%s); %d tab(s) left", rec.tab_id, rec.url, remaining,
+        )
         self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
         if remaining:
             return
@@ -846,9 +877,15 @@ class BrowserTabService:
             self._by_page.clear()
             context, playwright = self._context, self._playwright
             self._context, self._playwright = None, None
+        if context is not None:
+            logger.info(
+                "browser tab: closing the browser (%s)",
+                "it exited or the daemon stops" if announce else "its last tab closed",
+            )
         for rec in records:
             if rec.flush_handle is not None:
                 rec.flush_handle.cancel()
+            rec.flow.close()
             if announce:
                 self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
         if context is not None:
@@ -980,17 +1017,26 @@ class BrowserTabService:
         if rec is None:
             return
         if visible and width > 0 and height > 0:
+            # A resize keeps the viewer's frames in flight on its
+            # account: the window is the viewer's, not the size's.
             rec.viewers[conn_id] = (width, height)
             if rec.page.viewport_size != {"width": width, "height": height}:
                 await rec.page.set_viewport_size({"width": width, "height": height})
         else:
             rec.viewers.pop(conn_id, None)
+            rec.flow.forget(conn_id)
         await self._sync_cast(rec)
+
+    async def _frame_acked(self, tab_id: str, conn_id: str) -> None:
+        rec = self._record(tab_id)
+        if rec is not None:
+            rec.flow.acked(conn_id)
 
     async def _viewer_gone(self, conn_id: str) -> None:
         with self._lock:
             records = list(self._pages.values())
         for rec in records:
+            rec.flow.forget(conn_id)
             if rec.viewers.pop(conn_id, None) is not None:
                 await self._sync_cast(rec)
 
@@ -1072,7 +1118,7 @@ class BrowserTabService:
             return
         rec.last_frame_at = time.monotonic()
         for conn_id in list(rec.viewers):
-            self._emit(dict(frame), conn_id)
+            rec.flow.offer(conn_id, frame)
 
     def _ack(self, rec: _PageRecord, session: int) -> None:
         if rec.cdp is not None and not rec.page.is_closed():
@@ -1096,6 +1142,11 @@ class BrowserTabService:
                 await rec.cdp.send("Input.insertText", {"text": str(ev.get("text", ""))})
         except Exception as exc:  # noqa: BLE001 — input on a closing page is dropped
             logger.debug("browser tab: input %s: %s", kind, exc)
+
+    @staticmethod
+    def _call_later(delay: float, callback: Callable[[], None]) -> None:
+        """Run *callback* on the private loop after *delay* seconds (called on the loop)."""
+        asyncio.get_running_loop().call_later(delay, callback)
 
     def _schedule(self, coro: Any) -> None:
         """Run *coro* from a Playwright callback (already on the private loop)."""

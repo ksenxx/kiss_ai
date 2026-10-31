@@ -63,7 +63,7 @@ class TestHistoryCronFlag(unittest.TestCase):
         with self._lock:
             for e in reversed(self.events):
                 if e["type"] == "history":
-                    return {s["preview"]: s for s in e["sessions"]}
+                    return {s["title"]: s for s in e["sessions"]}
         return {}
 
     def test_persisted_flag_reaches_the_history_rows(self) -> None:

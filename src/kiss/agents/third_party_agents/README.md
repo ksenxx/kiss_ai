@@ -15,7 +15,12 @@ Sorcar in plain language** on any of its UI surfaces, name the service you want 
 on, and Sorcar dispatches the work to the right channel agent. Every module also has a
 console entry point (`kiss-slack`, `kiss-gmail`, ...; see `pyproject.toml`
 `[project.scripts]`), used for one-off shell runs, gateway poll ticks, and
-infrastructure setup. This document explains what prompts you can send, on which
+infrastructure setup; a shell run needs no `kiss-web` daemon of its own, since the
+launcher (`_kiss_web_launcher.run_agent_via_kiss_web`) starts one in-process
+daemon per process on a loopback port behind a private endpoint file and removes
+that file's directory when the process exits (`atexit`), and the run's reported
+summary is the task's text, or `Task failed` for a failed task without one. This
+document explains what prompts you can send, on which
 surfaces, and what each channel can do.
 
 - [The surfaces: where prompts go](#the-surfaces-where-prompts-go)
@@ -330,7 +335,19 @@ files and Teams refuses to sign in): as a refresh-token credential the daemon
 renews itself when the grant includes a refresh token (Teams rejects a grant without
 one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
 plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
-header). The daemon starts on demand, and only for a request: a channel agent wires
+header). A token or password you paste (a Discord bot token, LINE, Mattermost,
+Zalo, BlueBubbles, Nextcloud) is checked with one direct read against the service
+before anything is stored (`probe_credential`, a strict `/room` read for Nextcloud; a
+rejected one leaves the previous
+enrollment, `config.json` and the live client untouched), and the accepted credential
+is then stored together with its non-secret `config.json` metadata (server URL,
+login, client id, `auth_mode`) as one enrollment under the connector's config lock
+(`enroll_credential`, also used by the Twitch and Discord user sign-ins): a failed
+metadata write leaves the vault untouched, and a store that did not land puts the
+previous file back — the daemon's `generation` op (protocol v8; every store issues a
+new nonce, a token refresh keeps it) tells whether it landed even when the reply
+was lost — so the metadata and the credential never disagree.
+The daemon starts on demand, and only for a request: a channel agent wires
 its vault-backed client on the first request it serves (under a per-agent lock, so
 concurrent first requests share one client), not when it is built for its tool list,
 and the enrollment probes (`vault_has_credentials`, which an agent calls to decide
@@ -690,8 +707,14 @@ kiss-web daemon ticks the scheduler automatically, and a job's result can be del
 gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_REPLY`
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
-ends); the daemon's scheduler tick never waits for a long job, and a job whose previous
-run is still in progress in that scheduler is not started again until it finishes.
+ends, whatever the outcome, except for a prompt job whose task may still be running —
+the connection to the daemon was lost while the task ran, or the run timed out and the
+daemon never confirmed the stop — where the directory is kept, since the task may still
+use it, and the recorded error names it); the daemon's scheduler tick never waits for a
+long job, and a job whose previous run is still in progress in that scheduler is not
+started again until it finishes. A stored job whose schedule or `next_run_at` the tick
+cannot read is disabled and skipped (`cron_agent._disable_malformed`: `last_status`
+`error`, the parse error in `last_summary`) and the other due jobs still run.
 Like cron, the scheduler never catches up on occurrences that passed while no daemon
 was running (stopped, restarted by an install, or the machine asleep): a repeating job
 found more than ten minutes overdue (`cron_agent.MISSED_RUN_GRACE_SECONDS`) is
@@ -702,7 +725,10 @@ fix them") names that directory instead; a prompt job in a Git repository isolat
 its changes in a worktree and merges them back with its own `create_worktree` /
 `commit_and_merge` tools, like a chat task. A run is stopped
 once it exceeds the job's timeout (default one hour for a prompt job, ten minutes for a
-command). A poll that should stop once it has fired ("tell me *when* X happens") is
+command); a `max_budget` or `timeout` given when a job is created
+(`cron_agent._parse_amount`) must be a finite number of at least zero, empty or zero
+meaning the default, and anything else refuses the job. A poll that should stop once it
+has fired ("tell me *when* X happens") is
 stored with `until_delivered` (`--until-delivered` on the CLI): the job disables itself
 after its first successfully delivered non-silent result, also when `run_now` triggered
 it, instead of repeating the same news every tick; `run_now` on a job whose run is
@@ -863,7 +889,13 @@ Two caveats. Adapters that receive messages through an **embedded callback serve
 (Slack, Telegram, email, ...) fetch history from the platform, so scheduled ticks
 catch up on anything sent in between. And Discord is a partial exception: until a
 first message has been captured, each tick looks back only about one second, so
-messages that arrive between ticks in a quiet channel can be missed.
+messages that arrive between ticks in a quiet channel can be missed. Matrix polls
+with the homeserver's `/sync` token as its cursor: only a token the homeserver
+refuses (HTTP 400 other than a rate limit) is dropped, for one full sync, while a
+sync that fails for any other reason (a 429, a proxy's 408, a 401/403, a 5xx) keeps
+the token and serves nothing that tick; a reply the homeserver refuses, a 429 included
+(matrix-nio's own retrying is turned off, so a rate-limited send fails at once
+instead of blocking the tick), stays in the ledger for redelivery.
 
 **20. What you can send *into* a gateway.** Once the gateway runs, the channel is a
 full chat surface: any prompt in this document works there, replies land in the same

@@ -167,7 +167,7 @@ async function main() {
       transport.postMessage({type: 'getConfig'}); // posted while socket 2 awaits auth_ok
       next.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(frames(next).slice(1), [
-        {type: 'auth', password: 'NewPassword000000000'},
+        {type: 'auth', password: 'NewPassword000000000', parts: true},
         {
           password: 'NewPassword000000000',
           type: 'saveConfig',

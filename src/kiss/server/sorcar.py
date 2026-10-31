@@ -261,6 +261,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("browserNavigate", required=("tab_id", "action")),
     ApiCommand("browserInput", required=("tab_id", "event")),
     ApiCommand("browserViewport", required=("tab_id",)),
+    ApiCommand("browserFrameAck", required=("tab_id",)),
     ApiCommand("browserList"),
     ApiCommand("terminalOpen", required=("tab_id",), handler="terminal_open"),
     ApiCommand(
@@ -284,6 +285,9 @@ API: dict[str, ApiCommand] = _catalog(
         "saveFile", required=("path", "content"), handler="save_file"
     ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
+    ApiCommand(
+        "getReplayImage", required=("taskId", "index"), handler="get_replay_image"
+    ),
     ApiCommand("getTaskUpdate", handler="get_task_update"),
     ApiCommand("getCronJobs", handler="get_cron_jobs"),
     ApiCommand("cronAction", required=("action",), handler="cron_action"),
@@ -442,15 +446,24 @@ class Auth:
             answered, and told global events, but left out of the
             task-event fan-out (see
             :meth:`~kiss.server.web_server.WebPrinter.add_client`).
+        parts: The peer joins the parts of a big frame
+            (``"parts": true`` in its ``auth`` frame: the webapp's
+            ``transport.js``, a ``MachineLink``, ``daemon_client``):
+            a frame above :data:`~kiss.agents.sorcar.local_endpoint.PART_CHARS`
+            is sent to it as separate ``part`` frames
+            (:func:`~kiss.agents.sorcar.local_endpoint.frame_parts`),
+            whole to any other client.
     """
 
     kind: AuthKind
     link: bool = False
+    parts: bool = False
 
 
 def _auth_result(kind: AuthKind, msg: Any) -> Auth:
     """Return the :class:`Auth` of an accepted ``auth`` frame *msg*."""
-    return Auth(kind, link=isinstance(msg, dict) and msg.get("link") is True)
+    fields = msg if isinstance(msg, dict) else {}
+    return Auth(kind, link=fields.get("link") is True, parts=fields.get("parts") is True)
 
 
 def _frame_token(msg: Any) -> str:
@@ -600,6 +613,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_get_task_update(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_get_replay_image(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -1769,6 +1786,24 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
+
+    async def get_replay_image(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Serve a picture a replayed transcript left out, to the asking client.
+
+        A replay carries each picture of a ``tool_result`` as a
+        ``lazy: {taskId, index}`` handle; the chat page asks for the
+        picture with it when the picture comes into view.  A request
+        stamped ``machine`` (the tab is bound to a registered machine,
+        whose transcript it is) never reaches this handler:
+        :meth:`dispatch` forwards it to the machine's daemon and relays
+        its reply (:func:`~kiss.server.sidebar_panels.machine_replay_image_reply`).
+
+        Args:
+            cmd: The ``getReplayImage`` command (``taskId``, ``index``,
+                optional ``token``, ``machine``).
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_get_replay_image(cmd, ctx.endpoint)
 
     async def get_task_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report the ``/ask`` agent's task update to a task-info panel.

@@ -2090,12 +2090,18 @@ class WebUseTool:
             self._move_mouse_to(x, y)
 
     def _challenge_vendor(self) -> str | None:
-        """Return the bot-protection vendor whose interstitial is showing, if any."""
-        title, body_head = self._read_page(
+        """Return the bot-protection vendor whose interstitial is showing, if any.
+
+        The title, the head of the body text and the page's script URLs
+        (AWS WAF's blank interstitial is known by its script alone) go to
+        :func:`web_stealth.challenge_vendor`.
+        """
+        title, body_head, scripts = self._read_page(
             self._page,
-            "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '']",
+            "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '',"
+            " Array.from(document.scripts, s => s.src).filter(Boolean).join(' ').slice(0, 4000)]",
         )
-        return web_stealth.challenge_vendor(str(title), str(body_head))
+        return web_stealth.challenge_vendor(str(title), str(body_head), str(scripts))
 
     def _turnstile_checkbox(self) -> dict[str, float] | None:
         """Return the box of Cloudflare Turnstile's "Verify you are human" checkbox.
@@ -2131,9 +2137,9 @@ class WebUseTool:
         the visible frame of the ``#px-captcha`` widget
         (:data:`web_stealth.PRESS_AND_HOLD_BOX_JS`,
         :func:`web_stealth.press_and_hold_box`; the widget can be wider
-        than its button) and pressed anywhere on it.  CAPTCHA puzzles and
-        hard blocks have no such element and are reported for
-        :meth:`show_browser`.
+        than its button) and pressed anywhere on it.  CAPTCHA puzzles
+        (AWS WAF's "Begin" button opens one) and hard blocks have no such
+        element and are reported for :meth:`show_browser`.
 
         Args:
             vendor: The label :meth:`_challenge_vendor` returned.
@@ -2189,14 +2195,18 @@ class WebUseTool:
     def _settle_challenge(self) -> str:
         """Wait out a bot-protection interstitial; describe it when it stays.
 
-        Cloudflare's managed challenge (and Anubis' proof-of-work page)
-        run their checks in the browser and then reload the real page on
-        their own — for a browser they rate as human.  Returning the
+        Cloudflare's managed challenge (and Anubis' proof-of-work page,
+        AWS WAF's blank token challenge) run their checks in the browser
+        and then reload the real page on their own — for a browser they
+        rate as human.  Returning the
         interstitial's accessibility tree would make the agent retry or
         give up, so the tool waits up to
         :func:`web_stealth.challenge_wait_secs` with small pointer
         movements for the page to clear, and presses the widget a person
-        would press (:meth:`_challenge_widget`) when one shows.  A Google
+        would press (:meth:`_challenge_widget`) when one shows; an
+        interstitial that gives way to another vendor's page (AWS WAF's
+        token challenge, then its CAPTCHA puzzle) gets that page's own,
+        possibly shorter, wait from then on.  A Google
         "unusual traffic" page is not waited on: it rates the network's
         IP, not the browser, so the same query is opened on Bing.  The
         interstitial is recognised by what the page shows
@@ -2242,7 +2252,13 @@ class WebUseTool:
             else:
                 self._idle_mouse()
             self._page.wait_for_timeout(random.randint(500, 900))
-            vendor = self._challenge_vendor()
+            previous, vendor = vendor, self._challenge_vendor()
+            if vendor is not None and vendor != previous:
+                # One interstitial replaced by another's (AWS WAF's token
+                # challenge handing over to its puzzle): the new page
+                # gets its own wait from now, never more than was left.
+                wait_secs = web_stealth.challenge_wait_secs(vendor)
+                deadline = min(deadline, time.monotonic() + wait_secs)
         if vendor is None:
             self._wait_for_stable()
             return ""
