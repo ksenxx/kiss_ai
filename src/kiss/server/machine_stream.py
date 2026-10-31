@@ -119,17 +119,25 @@ class MachineStream:
         reported lost because a frame's delivery raised must not keep
         its socket (and the machine's resources for it) open.
         """
+        # A big frame of the machine's (a replayed transcript) comes as
+        # parts (``local_endpoint.frame_parts``), joined here; this
+        # daemon's send to its own clients splits it again.
+        joiner = local_endpoint.FrameJoiner()
         try:
             for raw in self._ws:
                 text = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
                 try:
-                    msg = json.loads(text)
+                    whole = joiner.feed(json.loads(text), text)
                 except ValueError:
                     continue
-                if isinstance(msg, dict):
-                    self._relay_frame(msg, text)
-        except (ConnectionClosed, OSError):
-            pass
+                if whole is not None and isinstance(whole[0], dict):
+                    self._relay_frame(whole[0], whole[1])
+        except (ConnectionClosed, OSError) as exc:
+            if not self._closed:
+                logger.warning(
+                    "%s: the connection to %s is lost: %r",
+                    self._thread.name, self.machine.name, exc,
+                )
         finally:
             lost = not self._closed
             self._close_socket()

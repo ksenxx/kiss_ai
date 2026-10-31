@@ -376,6 +376,10 @@
   - `cmd`: The ``checkPaths`` command.
   - `ctx`: The transport context of the current call.
 
+- **get_replay_image** — Serve a picture a replayed transcript left out, to the asking client. A replay carries each picture of a ``tool_result`` as a ``lazy: {taskId, index}`` handle; the chat page asks for the picture with it when the picture comes into view.  A request stamped ``machine`` (the tab is bound to a registered machine, whose transcript it is) never reaches this handler: :meth:`dispatch` forwards it to the machine's daemon and relays its reply (:func:`~kiss.server.sidebar_panels.machine_replay_image_reply`).<br/>`async get_replay_image(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getReplayImage`` command (``taskId``, ``index``, optional ``token``, ``machine``).
+  - `ctx`: The transport context of the current call.
+
 - **get_task_update** — Report the ``/ask`` agent's task update to a task-info panel. The remote webapp's task-info panel (docked on desktop, a drawer on mobile) polls this command while the visible tab's task runs: the info subpanel shows the :mod:`~kiss.agents.seas.ask.ask_sea` agent's short answer to what that task has done so far and its partial results.  The first poll once the task is a minute old runs the agent (as a sub-agent of the task, in the task's chat; its cost counts towards the task), later polls re-run it every 10 minutes, and a poll with ``refresh: true`` (the panel's refresh button) re-runs it at once.  The direct ``taskUpdate`` reply goes back to the asking endpoint, local or remote.  A poll stamped ``machine`` (the tab is bound to a registered machine, where its task runs) never reaches this handler: :meth:`dispatch` forwards it to the machine's daemon and relays its reply (:func:`~kiss.server.sidebar_panels.machine_task_update_reply`).<br/>`async get_task_update(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``getTaskUpdate`` command (``tabId``, optional ``knownSig``, ``token``, ``refresh``, ``machine``).
   - `ctx`: The transport context of the current call.

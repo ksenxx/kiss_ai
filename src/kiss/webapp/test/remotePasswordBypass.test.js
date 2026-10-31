@@ -800,7 +800,7 @@ async function run() {
       sockets[1].fireOpen();
       assert.deepStrictEqual(
         JSON.parse(sockets[1].sent[0]),
-        {type: 'auth', password: 'pw2'},
+        {type: 'auth', password: 'pw2', parts: true},
         'the reconnect carries the typed password',
       );
       ok(
@@ -1768,6 +1768,7 @@ async function run() {
       assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]), {
         type: 'auth',
         password: 'wrong',
+        parts: true,
       });
       // The typed guess is not stored until the server accepts it.
       assert.strictEqual(
@@ -1897,6 +1898,7 @@ async function run() {
       assert.deepStrictEqual(JSON.parse(s0.sent[s0.sent.length - 1]), {
         type: 'auth',
         password: 'wrong',
+        parts: true,
       });
       s0.fireMessage({
         type: 'error',
@@ -1917,6 +1919,7 @@ async function run() {
       assert.deepStrictEqual(JSON.parse(s1.sent[s1.sent.length - 1]), {
         type: 'auth',
         password: 'right',
+        parts: true,
       });
       s1.fireMessage({type: 'auth_ok'});
       assert.ok(isVisible(app), 'the right password reveals the app');
@@ -2214,6 +2217,7 @@ async function run() {
         assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]), {
           type: 'auth',
           password: pwd,
+          parts: true,
         });
         sock.fireMessage({type: 'auth_ok'});
         await tick();
@@ -2249,7 +2253,7 @@ async function run() {
       s1.fireOpen();
       assert.deepStrictEqual(
         JSON.parse(s1.sent[0]),
-        {type: 'auth', password: 'pw4'},
+        {type: 'auth', password: 'pw4', parts: true},
         'the cached password reconnects',
       );
       s1.fireMessage({type: 'auth_ok'});
@@ -2288,6 +2292,7 @@ async function run() {
       assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]), {
         type: 'auth',
         password: 'saved',
+        parts: true,
       });
       sock.fireMessage({type: 'auth_ok'});
       await tick();

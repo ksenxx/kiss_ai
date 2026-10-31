@@ -719,7 +719,7 @@ def test_backend_history_event_renders_spinner_end_to_end(
         event = _history_event_from_real_backend(fake_running_task_id="-1")
         row = next(
             s for s in event["sessions"]
-            if s["preview"] == "running task from real backend"
+            if s["title"] == "running task from real backend"
         )
         assert row["is_running"] is True, (
             "synthetic alive-thread fixture should produce is_running=True"

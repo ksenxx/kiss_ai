@@ -15,9 +15,11 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+import math
 import queue
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -175,6 +177,25 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
+def _parse_time(value: Any) -> float:
+    """Parse a frontend-supplied JSON value as a time in seconds, ``0.0`` when it is not one.
+
+    The guarded parse behind ``getInputHistory``'s ``since`` (a
+    ``newest`` the daemon reported): a malformed or missing value
+    means the whole list, as a request without one.
+
+    Args:
+        value: Arbitrary value taken from a client command dict.
+    """
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
+
+
 def _opt_str(value: Any) -> str | None:
     """Return *value* when it is a non-empty string, else ``None``.
 
@@ -280,6 +301,14 @@ class _CommandsMixin:
     # then sweeps away.  Read and written only under ``_state_lock``.
     _history_deletes: int = 0
 
+    # When the history last lost rows (``_delete_history``), as the
+    # rows' ``timestamp`` counts time; ``0`` while it lost none.  The
+    # composer history a page refreshes by deltas (``getInputHistory``
+    # with ``since``) cannot learn of a deleted prompt from a delta, so
+    # a page whose list predates this gets the whole list again
+    # (``AgentServer._get_input_history``).
+    _input_history_cut: float = 0.0
+
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
@@ -368,7 +397,7 @@ class _CommandsMixin:
             create: bool = False,
         ) -> int: ...
         def _ensure_complete_worker(self) -> None: ...
-        def _get_input_history(self, conn_id: str = "") -> None: ...
+        def _get_input_history(self, conn_id: str = "", since: float = 0.0) -> None: ...
         def _get_adjacent_task(
             self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "",
@@ -1081,6 +1110,7 @@ class _CommandsMixin:
             self._history_deletes += 1
         try:
             delete(key)
+            self._input_history_cut = time.time()
         finally:
             with self._state_lock:
                 self._history_deletes -= 1
@@ -1977,6 +2007,10 @@ class _CommandsMixin:
             bool(cmd.get("visible", True)),
         )
 
+    def _cmd_browser_frame_ack(self, cmd: dict[str, Any]) -> None:
+        """A client received a frame of a browser tab: the next one may go."""
+        self.browser_tabs.frame_acked(str(cmd.get("tab_id") or ""), cmd.get("connId", ""))
+
     def _cmd_browser_list(self, cmd: dict[str, Any]) -> None:
         """Tell the sender every live browser page (the ``browserTabs`` snapshot a ``ready`` gets).
 
@@ -2067,8 +2101,12 @@ class _CommandsMixin:
             )
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
-        """Send deduplicated task texts for arrow-key cycling."""
-        self._get_input_history(cmd.get("connId", ""))
+        """Send deduplicated task texts for arrow-key cycling.
+
+        ``since`` (the ``newest`` of the reply the page holds) asks for
+        the texts used after it only (:meth:`AgentServer._get_input_history`).
+        """
+        self._get_input_history(cmd.get("connId", ""), _parse_time(cmd.get("since")))
 
     def _cmd_get_sea_commands(self, cmd: dict[str, Any]) -> None:
         """Send the slash-command list built from every SEA folder.
@@ -2752,5 +2790,6 @@ class _CommandsMixin:
         "browserNavigate": _cmd_browser_navigate,
         "browserInput": _cmd_browser_input,
         "browserViewport": _cmd_browser_viewport,
+        "browserFrameAck": _cmd_browser_frame_ack,
         "browserList": _cmd_browser_list,
     }

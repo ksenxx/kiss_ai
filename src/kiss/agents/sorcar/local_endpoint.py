@@ -213,6 +213,7 @@ def connect(
     *,
     open_timeout: float = 10.0,
     max_size: int | None = None,
+    parts: bool = False,
 ) -> ClientConnection:
     """Connect to the daemon named by *endpoint_file* as a local client.
 
@@ -228,6 +229,10 @@ def connect(
             handshake and for the ``auth_ok`` reply.
         max_size: Largest incoming frame accepted, in bytes; ``None``
             (the default) accepts frames of any size.
+        parts: Whether the caller joins the parts of a big frame
+            (:class:`FrameJoiner`): the daemon then sends one above
+            :data:`PART_CHARS` as separate ``part`` frames
+            (:func:`frame_parts`), else whole.
 
     Returns:
         The authenticated synchronous client connection.
@@ -259,7 +264,10 @@ def connect(
             "— start it with `kiss-web`."
         ) from exc
     try:
-        send(ws, json.dumps({"type": "auth", "token": endpoint.token}), timeout=open_timeout)
+        send(
+            ws, json.dumps({"type": "auth", "token": endpoint.token, "parts": parts}),
+            timeout=open_timeout,
+        )
         reply = recv_auth_reply(ws, timeout=open_timeout)
     except (ConnectionError, ConnectionClosed, TimeoutError, ValueError) as exc:
         ws.close()
@@ -341,3 +349,83 @@ def recv_auth_reply(ws: ClientConnection, *, timeout: float) -> object:
         reply = json.loads(ws.recv(timeout=remaining))
         if not (isinstance(reply, dict) and reply.get("type") == "heartbeat"):
             return reply
+
+
+PART_CHARS = 64 * 1024
+"""Characters per part of a big frame (:func:`frame_parts`)."""
+
+
+def frame_parts(text: str) -> list[str]:
+    """Return the frames that carry the serialised frame *text* to a client.
+
+    A frame of at most :data:`PART_CHARS` characters is sent as it is.
+    A bigger one (a replayed transcript of megabytes) goes out as
+    separate ``part`` frames of that many characters of its text each,
+    numbered ``seq`` from 0, every one but the last flagged ``more``;
+    the receiver joins them (:class:`FrameJoiner`, the webapp's
+    ``transport.js``) and sees the frame whole.  Separate frames rather
+    than one fragmented WebSocket message because a receiver sees a
+    fragmented message only once it is complete: a browser on a slow
+    network took minutes of silence for a dead socket and reconnected
+    (its 45 s stale check) before a transcript could land, and the
+    daemon's own send deadline could not tell a slow reader from a
+    stopped one.  Each part is a sign of progress to both.
+
+    Args:
+        text: The frame, serialised with ``json.dumps``.
+    """
+    if len(text) <= PART_CHARS:
+        return [text]
+    parts = []
+    for seq, start in enumerate(range(0, len(text), PART_CHARS)):
+        part: dict[str, object] = {
+            "type": "part", "seq": seq, "data": text[start:start + PART_CHARS],
+        }
+        if start + PART_CHARS < len(text):
+            part["more"] = True
+        parts.append(json.dumps(part))
+    return parts
+
+
+class FrameJoiner:
+    """Join the parts of a big frame (:func:`frame_parts`) as a receiver reads them.
+
+    One per connection: the daemon sends one endpoint's frames one
+    after the other, so the parts of a frame are never interleaved
+    with another frame's.  A part whose ``seq`` is not the next one
+    expected (the start of the sequence was read and discarded before
+    this joiner looked, as :meth:`MachineLink._drain_buffered` does)
+    is dropped with what was gathered, until the next ``seq`` 0.
+    """
+
+    def __init__(self) -> None:
+        """Start with no part gathered."""
+        self._parts: list[str] = []
+
+    def feed(self, msg: object, text: str = "") -> tuple[object, str] | None:
+        """Return the frame *msg* (decoded from *text*) completes, or ``None``.
+
+        An ordinary frame is returned as it came; a ``part`` is kept
+        and ``None`` returned until the last part of its frame, which
+        yields the joined frame (decoded, and its text).
+
+        Args:
+            msg: The decoded frame.
+            text: Its wire form, for a caller that passes frames on
+                as they came (``""`` when the text is not needed).
+
+        Raises:
+            ValueError: When the joined text is not JSON.
+        """
+        if not (isinstance(msg, dict) and msg.get("type") == "part"):
+            return msg, text
+        if msg.get("seq") != len(self._parts):
+            self._parts.clear()
+            if msg.get("seq") != 0:
+                return None
+        self._parts.append(str(msg.get("data") or ""))
+        if msg.get("more") is True:
+            return None
+        whole = "".join(self._parts)
+        self._parts.clear()
+        return json.loads(whole), whole

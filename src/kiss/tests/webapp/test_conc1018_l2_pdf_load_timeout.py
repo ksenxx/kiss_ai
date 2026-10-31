@@ -13,8 +13,14 @@ minutes later; pdfView.js now aborts the load after 15 s and shows
 its failure note, the way terminalTab.js already did for xterm.js.
 A stall is produced with a ``page.route`` handler that never
 fulfils the request (the real pdf.js module and worker URLs on
-``cdn.jsdelivr.net``); everything else is a REAL headless Chromium
-against a REAL :class:`RemoteAccessServer` — no mocks.
+``cdn.jsdelivr.net``), and the OTHER pdf.js file is answered at once
+from an inert stand-in (see ``_STAND_IN``: the load is lost to the
+timeout, so its exports are never consumed and no worker is started;
+the viewer retries once when a download DROPS, so a CDN blip in that
+other download would change the request count under test);
+everything else is a REAL headless Chromium
+against a REAL :class:`RemoteAccessServer` — no mocks, and the
+recovery after the stall downloads the real pdf.js.
 """
 
 from __future__ import annotations
@@ -44,13 +50,39 @@ _TIMEOUT_NOTE = "Cannot display report.pdf: Error: pdf.js did not load within 15
 _MAX_WAIT_S = 25
 
 
+# Stand-ins for the pdf.js file that is NOT stalled.  The load is lost
+# to the timeout, so nothing is done with either: the viewer consumes
+# the module's exports and starts the worker only once both have
+# arrived (a dynamic import() does evaluate the stand-in module, which
+# has no side effects).  Answering at once
+# from here keeps a dropped CDN connection (which Chromium reports under
+# load whenever a Docker container's veth comes or goes) from triggering
+# the viewer's one retry of a dropped download, which would add a second
+# request for the stalled file and so fail the "asked for once" checks
+# for a reason that is neither a stall nor a timeout.
+_STAND_IN = {
+    "pdf.min.mjs": "export default {};\n",
+    "pdf.worker.min.mjs": "// pdf.js worker stand-in: never started\n",
+}
+
+
+def _file_name(route) -> str:
+    """The pdf.js file a request is for (a retried import carries a
+    ``?retry=N`` query, dropped here)."""
+    return str(route.request.url).rsplit("/", 1)[1].split("?")[0]
+
+
+def _answer_stand_in(route) -> None:
+    route.fulfill(body=_STAND_IN[_file_name(route)], content_type="text/javascript")
+
+
 def _stall_file(name: str):
     """A ``_route_pdfjs`` decision that never answers requests for
-    *name* and lets every other pdf.js download through."""
+    *name* and answers the other pdf.js file from its stand-in."""
 
     def decide(route, n):
-        if not route.request.url.rsplit("/", 1)[1].startswith(name):
-            route.continue_()
+        if _file_name(route) != name:
+            _answer_stand_in(route)
 
     return decide
 
@@ -58,7 +90,8 @@ def _stall_file(name: str):
 def _check_stall_reported_then_recovers(browser, harness, stalled: str) -> None:
     """Open report.pdf while *stalled* never downloads: the note names
     the timeout within the limit and the stalled file was asked for
-    once (a timeout is not a dropped connection, so no retry).  Once
+    once (a timeout is not a dropped connection, so no retry; the other
+    file arrived at once, so nothing else could have caused one).  Once
     the CDN answers again the next viewer draws the page: a timed-out
     load is forgotten like any other failure."""
     context, page, frames = _open_page(browser, harness)
@@ -109,15 +142,18 @@ def test_pdf_viewer_timed_out_import_that_later_succeeds_allocates_no_worker_url
     time, and the late import must not turn it into a blob: URL that
     no viewer will ever use or revoke (it would stay allocated for the
     life of the page, once per failed open).  The next open allocates
-    exactly the one URL its viewer uses."""
+    exactly the one URL its viewer uses.  The worker and the released
+    module are stand-ins (``_STAND_IN``): the load was lost to the
+    timeout before either could be used, so the inert module's exports
+    are never consumed and the worker body is never started."""
     context, page, _frames = _open_page(browser, harness)
     held: list = []
 
     def hold_module(route, n):
-        if route.request.url.rsplit("/", 1)[1].startswith("pdf.min.mjs"):
+        if _file_name(route) == "pdf.min.mjs":
             held.append(route)
         else:
-            route.continue_()
+            _answer_stand_in(route)
 
     _route_pdfjs(context, hold_module)
     try:
@@ -128,7 +164,7 @@ def test_pdf_viewer_timed_out_import_that_later_succeeds_allocates_no_worker_url
         assert len(held) == 1
         page.evaluate(_RECORD_OBJECT_URLS)
         with page.expect_response(lambda r: "pdf.min.mjs" in r.url, timeout=30000):
-            held[0].continue_()
+            _answer_stand_in(held[0])
         # Let the late import settle and its continuation run.
         page.wait_for_timeout(3000)
         assert page.evaluate("window.__objectUrls") == []

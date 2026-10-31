@@ -139,7 +139,7 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
                 if e["type"] == "history":
                     sessions = list(e["sessions"])
                     break
-        by_task = {s["preview"]: s for s in sessions}
+        by_task = {s["title"]: s for s in sessions}
         session = by_task["running task"]
 
         self.assertTrue(session["is_running"])
@@ -160,7 +160,7 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
                 if e["type"] == "history":
                     sessions = list(e["sessions"])
                     break
-        by_task = {s["preview"]: s for s in sessions}
+        by_task = {s["title"]: s for s in sessions}
         self.assertTrue(by_task["crashed task"]["failed"])
         self.assertFalse(by_task["crashed task"]["is_running"])
 

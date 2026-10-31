@@ -32,12 +32,12 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 from unittest import TestCase
 
 from websockets.sync.client import ClientConnection
 
 import kiss.agents.sorcar.machines as mach
+from kiss.agents.sorcar.local_endpoint import FrameJoiner
 from kiss.tests.remote_daemon import start_remote_daemon
 
 ONE_MIB = 1024 * 1024
@@ -46,14 +46,21 @@ CHAT_ID = "chat-big"
 
 
 def _recv_frame(ws: ClientConnection, wanted: str, seconds: float) -> str:
-    """Return the raw text of the first *wanted* frame *ws* receives within *seconds*."""
+    """Return the text of the first *wanted* frame *ws* receives within *seconds*.
+
+    A big frame comes as parts (``local_endpoint.frame_parts``), joined here.
+    """
     deadline = time.monotonic() + seconds
+    joiner = FrameJoiner()
     while True:
         raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()))
         text = raw if isinstance(raw, str) else raw.decode("utf-8")
-        frame: dict[str, Any] = json.loads(text)
-        if frame.get("type") == wanted:
-            return text
+        whole = joiner.feed(json.loads(text), text)
+        if whole is None:
+            continue
+        frame = whole[0]
+        if isinstance(frame, dict) and frame.get("type") == wanted:
+            return whole[1]
 
 
 class TestMachineLinkLargeFrames(TestCase):

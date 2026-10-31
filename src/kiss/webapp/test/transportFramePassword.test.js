@@ -7,7 +7,10 @@
 //   * a post-auth error/auth_failed (the password was rotated) forgets the
 //     stored password so the reconnect probes with the empty one;
 //   * a browser the daemon admits without a password (http://127.0.0.1,
-//     nothing stored) sends its frames bare: no password key at all.
+//     nothing stored) sends its frames bare: no password key at all;
+//   * the auth frame says the page joins the parts of a big frame
+//     (`parts: true`), and the shim joins them (`_joinPart`): the page
+//     sees the frame whole, a part out of sequence is dropped.
 const assert = require('assert');
 const {
   newAuthDom,
@@ -60,7 +63,7 @@ async function run() {
       // The daemon answers the batch's ping; the held frame goes out.
       sock.fireMessage({type: 'pong'});
       assert.deepStrictEqual(frames(sock), [
-        {type: 'auth', password: 'Secret20Chars0000000'},
+        {type: 'auth', password: 'Secret20Chars0000000', parts: true},
         {password: 'Secret20Chars0000000', type: 'ready'},
         {password: 'Secret20Chars0000000'},
         {password: 'Secret20Chars0000000', type: 'ping'},
@@ -79,7 +82,9 @@ async function run() {
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null);
       openNextSocket(sockets, timers, 0);
       sockets[1].fireOpen();
-      assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
+      assert.deepStrictEqual(frames(sockets[1]), [
+        {type: 'auth', password: '', parts: true},
+      ]);
       ok('post-auth auth_failed forgets the password; the reconnect probes with ""');
     } catch (err) {
       fail('rotated password handling', err);
@@ -102,7 +107,7 @@ async function run() {
       // ping, then a live frame.  Socket 1 confirmed its own batch, so
       // nothing of it is sent again.
       assert.deepStrictEqual(frames(sockets[1]).slice(1), [
-        {type: 'auth', password: 'NewPassword000000000'},
+        {type: 'auth', password: 'NewPassword000000000', parts: true},
         {password: 'NewPassword000000000', type: 'getConfig'},
         {password: 'NewPassword000000000', type: 'ping'},
         {password: 'NewPassword000000000', type: 'ping'},
@@ -130,7 +135,7 @@ async function run() {
     transport.postMessage({type: 'getConfig'});
     try {
       assert.deepStrictEqual(frames(sock), [
-        {type: 'auth', password: ''},
+        {type: 'auth', password: '', parts: true},
         {type: 'ready'},
         {type: 'ping'},
         {type: 'getConfig'},
@@ -187,7 +192,7 @@ async function run() {
     transport.postMessage({type: 'ping'});
     try {
       assert.deepStrictEqual(frames(sock), [
-        {type: 'auth', password: 'Secret20Chars0000000'},
+        {type: 'auth', password: 'Secret20Chars0000000', parts: true},
         {
           password: 'Secret20Chars0000000', type: 'saveConfig',
           config: {remote_password: 'Rotated0Password0001'},
@@ -222,7 +227,9 @@ async function run() {
       sock.close();
       openNextSocket(sockets, timers, 0);
       sockets[1].fireOpen();
-      assert.deepStrictEqual(frames(sockets[1]), [{type: 'auth', password: ''}]);
+      assert.deepStrictEqual(frames(sockets[1]), [
+        {type: 'auth', password: '', parts: true},
+      ]);
       const refusal = 'Remote access is turned off: no remote password is set.';
       sockets[1].fireMessage({type: 'error', code: 'localhost_only', text: refusal});
       const overlay = window.document.getElementById('kiss-server-loading-msg');
@@ -231,6 +238,65 @@ async function run() {
       ok('clearing the password signs the page out; the reconnect shows remote access is off');
     } catch (err) {
       fail('remotePasswordChanged with an empty password', err);
+    }
+    window.close();
+  }
+
+  // 5. A big frame comes as numbered parts (the daemon's frame_parts):
+  //    the page sees it whole once the last part landed; a part out of
+  //    sequence (the start was never seen) is dropped with what was
+  //    gathered; a plain frame passes through as it is.
+  {
+    const {window} = newAuthDom('http://127.0.0.1:8787/');
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    bootShim(window);
+    // What the page sees, as JSON text (the window's objects are of
+    // another realm, which deepStrictEqual would tell apart).
+    const received = [];
+    window.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.type !== 'daemonStatus')
+        received.push(JSON.stringify(ev.data));
+    });
+    window.acquireTransport();
+    const sock = sockets[0];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_ok', local: false});
+    sock.fireMessage({type: 'pong'});
+    const big = JSON.stringify({type: 'task_events', events: [{text: 'x'.repeat(200)}]});
+    const half = Math.ceil(big.length / 2);
+    // A part as the daemon serialises it (Python's json.dumps: a space
+    // after each colon, `type` first), which is what the shim looks for.
+    const part = (seq, data, more) =>
+      sock.onmessage({
+        data:
+          '{"type": "part", "seq": ' + seq + ', "data": ' + JSON.stringify(data) +
+          (more ? ', "more": true}' : '}'),
+      });
+    try {
+      assert.deepStrictEqual(frames(sock).slice(0, 1), [
+        {type: 'auth', password: '', parts: true},
+      ]);
+      received.length = 0;
+      part(0, big.slice(0, half), true);
+      assert.deepStrictEqual(received, [], 'a part with more to come shows nothing');
+      part(1, big.slice(half), false);
+      assert.deepStrictEqual(received, [big], 'the last part yields the whole frame');
+      // A sequence whose start was missed: dropped until a seq 0.
+      received.length = 0;
+      part(1, big.slice(half), false);
+      part(2, 'tail', false);
+      assert.deepStrictEqual(received, [], 'parts out of sequence are dropped');
+      sock.fireMessage({type: 'tasks_updated'});
+      part(0, big.slice(0, half), true);
+      part(1, big.slice(half), false);
+      assert.deepStrictEqual(
+        received, [JSON.stringify({type: 'tasks_updated'}), big],
+        'a plain frame passes through; the next seq 0 starts a frame again',
+      );
+      ok('the parts of a big frame are joined; a part out of sequence is dropped');
+    } catch (err) {
+      fail('parts joining', err);
     }
     window.close();
   }

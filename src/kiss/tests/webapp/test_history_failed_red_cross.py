@@ -362,7 +362,7 @@ def test_user_cancelled_task_from_backend_history_renders_red_cross(
     """
     event = _history_event_for_persisted_result("Task stopped by user")
     session = event["sessions"][0]
-    assert session["preview"] == "cancelled task from real backend"
+    assert session["title"] == "cancelled task from real backend"
     assert session["failed"] is True
 
     context, page = _open_history_page(_browser)
