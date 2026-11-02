@@ -675,9 +675,6 @@ def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
 
 RUN_CONTEXT_HEADING = "# Run context"
 PREVIOUS_TAIL_CHARS = 1_500
-#: Run outcomes after which the window is covered: a reported result or
-#: a deliberate ``[SILENT]`` (nothing to report), never an error.
-COVERING_STATUSES = ("ok", "silent")
 
 
 def run_context(job: dict[str, Any], now: float | None = None) -> str:
@@ -685,9 +682,10 @@ def run_context(job: dict[str, Any], now: float | None = None) -> str:
 
     The current time (local schedule zone and UTC), the schedule, the
     start of the window this run covers — the watermark ``covered_until``:
-    the last *successful* run, or the job's creation while none has
-    succeeded, since a failed attempt covers nothing and the window
-    must keep growing until one does; a job stored before the watermark
+    the last *successful* run (silent, or its result delivered to every
+    target), or the job's creation while none has succeeded, since a
+    failed attempt or an undelivered result covers nothing and the
+    window must keep growing until one does; a job stored before the watermark
     existed gets one schedule interval back — the previous attempt and
     the tail of its result, so the run neither spends a turn on
     ``date`` nor reads its own log to find where the last run stopped.
@@ -1394,9 +1392,13 @@ def _execute_job(job: dict[str, Any]) -> None:
                 stored["last_summary"] = (text or "")[:MAX_STORED_SUMMARY_CHARS]
                 stored["last_delivery"] = notes
                 stored["failure_streak"] = streak
-                if status in COVERING_STATUSES:
+                if status == "silent" or delivered:
                     # The watermark the next run's window starts at: a
-                    # failed attempt covers nothing (see run_context).
+                    # deliberate ``[SILENT]`` (nothing to report) or a
+                    # result every target received.  A failed attempt
+                    # covers nothing (see run_context), and neither does
+                    # a result a target did not get: the retry must
+                    # report the same news again, not only what is newer.
                     stored["covered_until"] = started
                 if backoff and stored.get("enabled") and stored.get("next_run_at"):
                     stored["next_run_at"] = max(

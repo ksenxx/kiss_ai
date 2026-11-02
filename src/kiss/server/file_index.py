@@ -32,11 +32,17 @@ Scan rules: dot-directories, :data:`JUNK_DIR_NAMES` and the non-glob
 entries of every ``.gitignore`` met on the way down (nested repositories
 included) are skipped, depth is capped at :data:`MAX_DEPTH`, and bulk
 data dumps (:func:`_bulk_data_dirs`) are collapsed to their ``dir/``
-entry.
+entry.  The home index also skips the operating system's application
+state tree (Windows-hidden directories such as ``AppData``; ``~/Library``
+on macOS, see :data:`_HOME_RULES`), and a directory the operating
+system refuses to let the daemon read (macOS privacy protection, see
+:data:`_refused`) is left out for the rest of the process instead of
+stalling every scan.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -228,11 +234,14 @@ def _list_dir(abs_dir: str) -> tuple[list[str], list[str]]:
     but never followed: ``Application Data`` -> ``AppData\\Local`` would
     otherwise recurse to :data:`MAX_DEPTH`); Windows-hidden directories
     are dropped like dot-directories; an unreadable directory lists as
-    empty.  ``is_dir`` reads the type the kernel returned with the entry,
-    so no per-entry ``stat`` system call happens.
+    empty, and one the OS refused (see :data:`_refused`) is answered
+    empty without asking again.  ``is_dir`` reads the type the kernel
+    returned with the entry, so no per-entry ``stat`` system call happens.
     """
     files: list[str] = []
     dirs: list[str] = []
+    if abs_dir in _refused:
+        return [], []
     try:
         with os.scandir(abs_dir) as it:
             for entry in it:
@@ -240,8 +249,15 @@ def _list_dir(abs_dir: str) -> tuple[list[str], list[str]]:
                     files.append(entry.name)
                 elif not _is_hidden_dir(entry):
                     dirs.append(entry.name)
-    except OSError:
-        logger.debug("cannot list %s", abs_dir, exc_info=True)
+    except OSError as exc:
+        if exc.errno in _REFUSED_ERRNOS:
+            _refused.add(abs_dir)
+            logger.info(
+                "%s cannot be listed (%s); left out of the file picker until restart",
+                abs_dir, exc.strerror,
+            )
+        else:
+            logger.debug("cannot list %s", abs_dir, exc_info=True)
         return [], []
     return sorted(files), sorted(dirs)
 
@@ -276,6 +292,35 @@ _Buckets = tuple[list[str], list[str], list[str], list[str]]
 _Rules = tuple[frozenset[str], frozenset[str], frozenset[str]]
 _ROOT_RULES: _Rules = (frozenset({".git"}), frozenset(), frozenset())
 
+# Skip rules of the home root.  macOS keeps application state in
+# ``~/Library`` (caches, sandbox containers, the mail, message and photo
+# stores: a third of a home directory's entries, most of them behind the
+# privacy protection described at ``_refused``), the way Windows keeps it
+# in the hidden ``AppData`` that ``_is_hidden_dir`` already drops; Finder
+# hides the folder by default.  A work dir inside it (iCloud Drive lives
+# at ``~/Library/Mobile Documents``) is a root of its own, as a work dir
+# inside any skipped directory is (``FileIndexRegistry.root_for``).
+_HOME_SKIPPED_DIRS = frozenset({"Library"}) if sys.platform == "darwin" else frozenset()
+_HOME_RULES: _Rules = (_ROOT_RULES[0], _ROOT_RULES[1], _HOME_SKIPPED_DIRS)
+
+# Absolute paths of the directories this process may not read.  macOS
+# answers a daemon without "Files and Folders" permission (a launchd
+# agent cannot show the permission prompt) with a five-second wait and
+# ``EINTR`` for each ``scandir`` of a protected directory (``~/Desktop``,
+# ``~/Downloads``, ``~/Library/Messages``, ...) and holds an ``open`` of
+# a file below one for as long as the prompt stays unanswered -- for
+# ever, on the only index worker thread.  A directory refused once is
+# refused until the daemon restarts (so a scan pays each wait once) and
+# is never persisted, so a daemon granted the permission lists it on its
+# next start.  Only the index worker thread writes the set.
+_refused: set[str] = set()
+_REFUSED_ERRNOS = frozenset({errno.EINTR, errno.EPERM, errno.EACCES})
+
+# Seconds a ``.gitignore`` read may take before its directory counts as
+# refused: the OS answers a permitted read in microseconds and a refused
+# ``scandir`` in five seconds.
+_READ_DEADLINE = 5.0
+
 
 class _DerivedDir(NamedTuple):
     """What the scan derived from one directory's listing.
@@ -305,14 +350,45 @@ def _gitignore_mtime(abs_dir: str) -> int:
         return -1
 
 
+def _read_file_into(path: str, out: list[str]) -> None:
+    """Append the text of *path* to *out*; nothing on a read or decoding error."""
+    try:
+        out.append(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        pass
+
+
+def _read_gitignore(abs_dir: str) -> str | None:
+    """Return the text of ``abs_dir/.gitignore``, or ``None`` if it cannot be read.
+
+    The read runs on a helper thread and is given :data:`_READ_DEADLINE`
+    seconds.  A directory listed from the persisted listings was never
+    opened by this process, and if the OS protects it (see
+    :data:`_refused`) the ``open`` never returns; the deadline turns
+    that into a refusal of the directory, and the helper thread is left
+    behind blocked (at most one per refused directory).
+    """
+    if abs_dir in _refused:
+        return None
+    text: list[str] = []
+    reader = threading.Thread(
+        target=_read_file_into, args=(abs_dir + "/.gitignore", text), daemon=True,
+    )
+    reader.start()
+    reader.join(_READ_DEADLINE)
+    if reader.is_alive():
+        _refused.add(abs_dir)
+        logger.warning("%s cannot be read (permission prompt pending); skipped", abs_dir)
+        return None
+    return text[0] if text else None
+
+
 def _child_rules(abs_dir: str, rel: str, rules: _Rules) -> _Rules:
     """Merge ``abs_dir/.gitignore`` into *rules* for the directories below."""
-    try:
-        names, dir_names, anchored = _parse_gitignore(
-            Path(abs_dir, ".gitignore").read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeDecodeError):
+    text = _read_gitignore(abs_dir)
+    if text is None:
         return rules
+    names, dir_names, anchored = _parse_gitignore(text)
     if not names and not dir_names and not anchored:
         return rules
     skip_names, skip_dir_names, skip_paths = rules
@@ -528,7 +604,11 @@ class FileIndex:
         wide_from: Index in ``paths`` of the first entry inside a wide
             container (``len(paths)`` when there is none).
         built_at: ``time.monotonic()`` when the scan started — anything
-            changed after that instant may be missing.
+            changed after that instant may be missing.  ``-inf`` for an
+            index built from persisted listings alone (``trusted``), which
+            verified nothing: it is stale from birth, so every job queued
+            for its root rescans and the registry asks for a rescan
+            whenever it serves it.
     """
 
     def __init__(
@@ -560,6 +640,8 @@ class FileIndex:
         root: str,
         listings: Listings | None = None,
         previous: FileIndex | None = None,
+        rules: _Rules = _ROOT_RULES,
+        trusted: bool = False,
     ) -> FileIndex:
         """Walk *root* and build an index, reusing what has not changed.
 
@@ -573,12 +655,25 @@ class FileIndex:
         way down) apply to the listed names, so a rule change never
         needs a re-listing.
 
+        A directory the OS refuses to let this process read (see
+        :data:`_refused`) is indexed as its bare ``dir/`` entry: nothing
+        below it, and no listing of it is kept for persistence.
+
         Args:
             root: Absolute directory to index.
             listings: Persisted listings of the same root, used when
                 *previous* is ``None``.
             previous: The index this scan refreshes; its listings and
                 derived per-directory results are reused where valid.
+            rules: Skip rules in force at *root* (:data:`_HOME_RULES`
+                for the home directory).
+            trusted: Build from *listings* alone, without touching the
+                file system: every cached directory counts as unchanged,
+                one missing from the cache is left out, and ``.gitignore``
+                files are not read (their directories are marked so the
+                next scan derives their rules).  A daemon that just
+                started serves this index while its first real scan,
+                which may wait on the OS, runs behind it.
 
         Returns:
             A new index; ``relisted`` tells whether anything was read.
@@ -588,12 +683,19 @@ class FileIndex:
         # _SCAN_FILES_CAP entries, minutes on a network file system) would
         # stop every other thread's cyclic garbage from being collected.
         started = time.monotonic()
-        index = cls._scan(root, listings or {}, previous)
-        index.built_at = started
+        index = cls._scan(root, listings or {}, previous, rules, trusted)
+        index.built_at = float("-inf") if trusted else started
         return index
 
     @classmethod
-    def _scan(cls, root: str, listings: Listings, previous: FileIndex | None) -> FileIndex:
+    def _scan(
+        cls,
+        root: str,
+        listings: Listings,
+        previous: FileIndex | None,
+        root_rules: _Rules,
+        trusted: bool,
+    ) -> FileIndex:
         """Body of :meth:`scan`; see there."""
         old = previous.listings if previous is not None else listings
         old_derived = previous._derived if previous is not None else {}
@@ -604,16 +706,31 @@ class FileIndex:
         groups: list[tuple[str, _Buckets]] = []
         total = 0
         # rel_dir, depth, inside a wide container, skip rules
-        pending: deque[tuple[str, int, bool, _Rules]] = deque([("", 0, False, _ROOT_RULES)])
+        pending: deque[tuple[str, int, bool, _Rules]] = deque([("", 0, False, root_rules)])
         stat = os.stat
         while pending and total < _SCAN_FILES_CAP:
             rel, depth, in_wide, rules = pending.popleft()
             abs_dir = root + "/" + rel if rel else root
-            try:
-                mtime = stat(abs_dir).st_mtime_ns
-            except OSError:
-                continue
+            # A refused directory (see ``_refused``) contributes nothing of
+            # its own -- its parent's listing already holds its ``dir/``
+            # entry -- and keeps no listing: neither a later scan nor the
+            # persisted cache may take its emptiness for its contents.
+            # Checked before any cached listing or derived entry is
+            # reused, so a refusal recorded by another scan holds here.
+            # Dropping a listing it had changes what is persisted.
             cached = old.get(rel)
+            if abs_dir in _refused:
+                relisted = relisted or cached is not None
+                continue
+            if trusted:
+                if cached is None:
+                    continue
+                mtime = cached[0]
+            else:
+                try:
+                    mtime = stat(abs_dir).st_mtime_ns
+                except OSError:
+                    continue
             d = old_derived.get(rel)
             if cached is not None and cached[0] == mtime:
                 new[rel] = cached
@@ -625,10 +742,22 @@ class FileIndex:
                 )
             else:
                 files, subdirs = _list_dir(abs_dir)
+                if abs_dir in _refused:
+                    # Dropping the cached listing it had changes what is
+                    # persisted; a directory never cached changes nothing.
+                    relisted = relisted or cached is not None
+                    continue
                 new[rel] = (mtime, files, subdirs)
                 relisted = True
                 has_gitignore = ".gitignore" in files
-            gitignore_mtime = _gitignore_mtime(abs_dir) if has_gitignore else -1
+            # A trusted build records an unread .gitignore as -2, an mtime
+            # no file has, so the scan that follows derives its rules.
+            if not has_gitignore:
+                gitignore_mtime = -1
+            elif trusted:
+                gitignore_mtime = -2
+            else:
+                gitignore_mtime = _gitignore_mtime(abs_dir)
             if (
                 d is None
                 or d.mtime != mtime
@@ -636,7 +765,15 @@ class FileIndex:
                 or d.rules != rules
                 or d.gitignore_mtime != gitignore_mtime
             ):
-                child_rules = _child_rules(abs_dir, rel, rules) if has_gitignore else rules
+                child_rules = rules
+                if has_gitignore and not trusted:
+                    child_rules = _child_rules(abs_dir, rel, rules)
+                    if abs_dir in _refused:
+                        # Reading its .gitignore was refused, so nothing
+                        # below it can be read either: drop its listing.
+                        del new[rel]
+                        relisted = True
+                        continue
                 d = _DerivedDir(
                     mtime, in_wide, rules, gitignore_mtime, child_rules,
                     *_derive(rel, files, subdirs, in_wide, child_rules),
@@ -894,8 +1031,9 @@ class FileIndexRegistry:
         A work dir at or below :attr:`home` maps to the home index with
         ``sub_dir`` its home-relative path plus ``/`` (``""`` for home
         itself), unless a path component is one the scan skips
-        (dot-directory, Windows-hidden directory, :data:`JUNK_DIR_NAMES`)
-        or — once the home index exists — the directory is not among its
+        (dot-directory, Windows-hidden directory, :data:`JUNK_DIR_NAMES`,
+        the home's application state tree of :data:`_HOME_RULES`) or —
+        once the home index exists — the directory is not among its
         :attr:`FileIndex.dirs` (gitignored, collapsed or too deep).
         Everything else, and a filesystem root (which is never scanned),
         maps to a root of its own: ``(work_dir, "")``.
@@ -908,7 +1046,9 @@ class FileIndexRegistry:
         if wd.startswith(self.home + os.sep):
             rel = wd[len(self.home) + 1:].replace(os.sep, "/")
             parts = rel.split("/")
-            skipped = any(p.startswith(".") or p in JUNK_DIR_NAMES for p in parts)
+            skipped = parts[0] in _HOME_SKIPPED_DIRS or any(
+                p.startswith(".") or p in JUNK_DIR_NAMES for p in parts
+            )
             hidden = _hidden_dir_on_path(self.home, parts)
             if len(parts) <= MAX_DEPTH and not skipped and not hidden:
                 with self._lock:
@@ -1058,13 +1198,41 @@ class FileIndexRegistry:
         return base / (hashlib.sha1(os.fsencode(root)).hexdigest()[:16] + ".json")
 
     def _build(self, root: str) -> None:
-        """Scan *root* (reusing cached listings) and publish the index."""
+        """Scan *root* (reusing cached listings) and publish the index.
+
+        The first build of a root with persisted listings publishes an
+        index made from the listings alone (``trusted``: no system call,
+        well under a second for a home directory) and queues the real
+        rescan as the next job: the first ``@`` after a daemon restart
+        then answers at once, while the rescan -- which on macOS can
+        wait seconds on each protected directory it must re-list -- runs
+        behind it and publishes the fresh index when done.  The trusted
+        index is born stale (``built_at`` is ``-inf``), so a job that was
+        queued for the root while the listings loaded, and absorbed the
+        rescan request, rescans too instead of taking it for current.
+        """
         with self._lock:
             previous = self._indexes.get(root)
+        rules = _HOME_RULES if root == self.home else _ROOT_RULES
         started = time.monotonic()
         try:
             listings = {} if previous is not None else _load_listings(self._cache_path(root), root)
-            index = FileIndex.scan(root, listings, previous)
+            if listings:
+                index = FileIndex.scan(root, listings, None, rules, trusted=True)
+                with self._lock:
+                    self._indexes[root] = index
+                    self._enqueue_locked(root, None)
+                if index.relisted:
+                    # The listings held a directory this process has
+                    # already been refused: it was dropped, and the rescan
+                    # (which starts from this index) would not notice.
+                    _save_listings(self._cache_path(root), root, index.listings)
+                logger.info(
+                    "file index of %s: %d entries in %.2fs (persisted listings; rescan queued)",
+                    root, len(index.paths), time.monotonic() - started,
+                )
+                return
+            index = FileIndex.scan(root, {}, previous, rules)
         except Exception:
             logger.exception("file index scan of %s failed", root)
             index = FileIndex.empty(root)

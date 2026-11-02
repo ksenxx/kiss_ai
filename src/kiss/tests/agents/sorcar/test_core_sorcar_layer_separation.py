@@ -146,14 +146,17 @@ def test_get_tools_serves_file_tools_from_sorcar() -> None:
     assert local_tools["Bash"].__module__.startswith("kiss.agents.sorcar.")
 
     # Any truthy docker_manager flips _get_tools onto the docker branch;
-    # DockerTools only stores the bash callable, so no daemon is needed.
+    # DockerTools only stores the callables, so no daemon is needed.
     class _DockerManagerStandIn:
-        """Truthy docker_manager with the two attributes _get_tools touches."""
+        """Truthy docker_manager with the three attributes _get_tools touches."""
 
         stop_event = None
 
         def run_commands_parallel(self, commands: str) -> str:
             return ""
+
+        def read_bytes(self, path: str) -> bytes:
+            return b""
 
     agent.docker_manager = _DockerManagerStandIn()
     docker_tools = {t.__name__: t for t in agent._get_tools()}

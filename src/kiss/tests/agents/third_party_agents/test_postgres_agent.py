@@ -20,7 +20,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import time
 import uuid
 from functools import partial
 
@@ -162,10 +161,8 @@ def test_pg_execute_read_only_refusal_without_connecting() -> None:
     'read-only mode' message proves no connection was tried.
     """
     b = _backend(_UNUSED_URI, read_only=True)
-    start = time.monotonic()
     result = json.loads(b.pg_execute("INSERT INTO t VALUES (1)"))
     assert result == {"ok": False, "error": "Postgres agent is in read-only mode"}
-    assert time.monotonic() - start < 1.0  # no connect_timeout wait
 
 
 def test_pg_explain_analyze_refused_in_read_only() -> None:

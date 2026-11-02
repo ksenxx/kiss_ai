@@ -130,8 +130,13 @@ class TestSignalBackend(unittest.TestCase):
             self._backend.send_message("+FAIL", "hi")
 
     def test_send_message_success_does_not_raise(self) -> None:
-        """A successful send returns without raising."""
+        """A successful send returns without raising, having asked signal-cli to send the text."""
+        cli_dir = install_cli_on_path(self, "signal-cli", ARGV_RECORDING_SIGNAL_CLI)
         self._backend.send_message("+1AAA", "hi")
+        self.assertEqual(
+            json.loads((cli_dir / "argv.json").read_text()),
+            ["-u", "+1BOT", "send", "-m", "hi", "+1AAA"],
+        )
 
     def test_receive_messages_forwards_its_timeout(self) -> None:
         """receive_messages(timeout=60) asks signal-cli to wait 60 s and parses its envelopes."""

@@ -16,17 +16,27 @@ Like VS Code's own Explorer, a paste that would overwrite an existing
 entry is refused unless the client confirmed the replacement
 (``overwrite``), and a copy into the entry's own folder gets the
 "name copy" suffix VS Code uses.
+
+The actions that change the tree run one at a time
+(:data:`_mutation_lock`): each checks that its destination is free and
+creates it in a separate step, and two unconfirmed requests for one
+name (two surfaces' Explorers run on separate threads) that both found
+it free would otherwise both create it, the second silently
+overwriting the first's entry.  The search and compare actions change
+nothing and run alongside.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.core.locked import locked
 from kiss.core.processes import run_capped
 
 FS_ACTIONS: frozenset[str] = frozenset(
@@ -53,6 +63,9 @@ _TOOL_TIMEOUT_S = 30
 """Deadline of the ``git grep`` / ``git diff`` child of one request."""
 
 _FIND_EXCLUDED_DIRS = (".git", ".svn", ".hg", "node_modules", ".venv", "__pycache__")
+
+_mutation_lock = threading.RLock()
+"""Held by every action that changes the tree, from its checks to its last step."""
 
 
 def fs_action(
@@ -114,6 +127,7 @@ def _safe_name(name: str) -> str:
     return "/".join(parts)
 
 
+@locked(_mutation_lock)
 def _new_entry(parent: str, name: str, is_dir: bool) -> dict[str, Any]:
     """Create a file or folder named *name* under *parent*."""
     if not os.path.isdir(parent):
@@ -133,6 +147,7 @@ def _new_entry(parent: str, name: str, is_dir: bool) -> dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
+@locked(_mutation_lock)
 def _rename(path: str, dest: str, overwrite: bool) -> dict[str, Any]:
     """Rename *path* to *dest* (an absolute path in the same folder).
 
@@ -228,6 +243,7 @@ def _replace(target: Path, operation: Callable[..., Any], *args: Any) -> None:
     _remove(backup)
 
 
+@locked(_mutation_lock)
 def _delete(path: str) -> dict[str, Any]:
     """Delete *path* permanently (the remote host has no trash)."""
     target = Path(path)
@@ -256,6 +272,7 @@ def _copy_name(dest_dir: Path, src: Path) -> Path:
     return candidate
 
 
+@locked(_mutation_lock)
 def _paste(path: str, dest_dir: str, move: bool, overwrite: bool) -> dict[str, Any]:
     """Copy or move *path* into the folder *dest_dir*."""
     src = Path(path)

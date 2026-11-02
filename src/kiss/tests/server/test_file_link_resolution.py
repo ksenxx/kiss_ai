@@ -30,6 +30,7 @@ import base64
 from pathlib import Path
 from typing import Any
 
+from kiss.server.web_server import _file_version
 from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_server_liveness_and_run_refusals import (
     _UNAVAILABLE_MODEL,
@@ -174,7 +175,7 @@ class TestFileLinkResolution(_ServerHarness):
         self.assertEqual(reply["line"], 2)
         self.assertEqual(reply["tabId"], "tab-open")
         self.assertEqual(reply["content"], "print(1)\nprint(2)\n")
-        self.assertRegex(reply["version"], r"^\d+:\d+$")
+        self.assertEqual(reply["version"], _file_version(target.read_bytes()))
         self.assertNotIn("error", reply)
 
     async def test_open_file_falls_back_to_the_pending_worktree(self) -> None:

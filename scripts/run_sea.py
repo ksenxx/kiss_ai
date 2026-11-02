@@ -6,43 +6,26 @@
 """Run a SEA in this process: no kiss-web daemon, no UI.
 
     uv run python scripts/run_sea.py <sea> "<task>" [--work-dir DIR] [-m MODEL] [-b USD]
+                                     [--no-trajectories] [--json]
 
 ``<sea>`` is a SEA name (``sh``, ``weather``: resolved through the same
 registry the daemon uses, i.e. the bundled ``seas/`` folder, the folders
 listed in ``$KISS_HOME/SEAS.md`` and ``third_party_agents/``) or the path
-of a SEA file (``<name>/<name>_sea.py``).  Loads it exactly as the daemon
-does (``sea_layers`` + ``evaluate_sea``) and runs ``SorcarAgent.run`` with
-the SEA's settings, prompt and hooks.
+of a SEA file (``<name>/<name>_sea.py``).  The command-line form of
+:func:`kiss.agents.sorcar.headless.run_sea`, which loads the SEA exactly
+as the daemon does and runs it with the SEA's settings, prompt and hooks.
 Needs only an API key in the environment (``$KISS_HOME/api_keys.env`` is
-loaded).  Prints the agent's YAML result; exits 0 on success, 1 otherwise.
+loaded).  Prints the agent's YAML result (with ``--json``, the whole
+outcome: result, error, counters and the trajectory files the run
+wrote); exits 0 on success, 1 otherwise.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
+import dataclasses
+import json
 import sys
-from pathlib import Path
-
-import yaml
-
-
-def resolve_sea(sea: str) -> Path:
-    """Return the SEA script for *sea*, a registered SEA name or a file path.
-
-    A path wins when it names an existing file; otherwise the name is
-    looked up in the SEA registry.  Raises ``SystemExit`` with the list
-    of known names when neither matches.
-    """
-    from kiss.agents.sorcar.sea_commands import get_command, list_commands
-
-    path = Path(sea)
-    if path.is_file():
-        return path.resolve()
-    found = get_command(sea)
-    if found is None:
-        sys.exit(f"unknown SEA {sea!r}; known names: {', '.join(list_commands())}")
-    return found
 
 
 def main() -> int:
@@ -52,43 +35,38 @@ def main() -> int:
     parser.add_argument("--work-dir", default="", help="working directory (default: cwd)")
     parser.add_argument("-m", "--model", default="", help="model (SEA 'model' setting wins)")
     parser.add_argument("-b", "--max-budget", type=float, default=None, help="USD budget")
+    parser.add_argument(
+        "--no-trajectories", action="store_true", help="write no trajectory files"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="print the whole outcome as JSON, not the result"
+    )
     args = parser.parse_args()
 
-    from kiss.core.user_config import load_api_keys_readonly
+    from kiss.agents.sorcar.headless import run_sea
+    from kiss.agents.sorcar.sea_settings import SeaError
 
-    load_api_keys_readonly()
-
-    from kiss.agents.sorcar.sea_commands import evaluate_sea, sea_layers
-    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-    sea_path = resolve_sea(args.sea)
-    run = evaluate_sea(sea_layers(sea_path), args.task)
-    s = run.settings
-    work_dir = s.get("work_dir") or args.work_dir or os.getcwd()
-    result = SorcarAgent(sea_path.stem).run(
-        model_name=s.get("model") or args.model or None,
-        prompt_template=run.prompt,
-        work_dir=work_dir,
-        max_budget=s.get("max_budget", args.max_budget),
-        tool_profile=s.get("tool_profile", ""),
-        web_tools=bool(s.get("use_web_tools", False)),
-        use_memory=s.get("use_memory"),
-        model_config=s.get("model_config"),
-        docker_image=s.get("docker_image") or None,
-        system_prompt_hook=run.system_prompt_hook,
-        tools_hook=run.tools_hook,
-        llm_call_hook=run.llm_call_hook,
-        tool_call_hook=run.tool_call_hook,
-        verbose=sys.stdout.isatty(),
-    )
-    if not sys.stdout.isatty():
-        print(result)
     try:
-        return 0 if yaml.safe_load(result).get("success") else 1
-    except Exception:
-        # A ``finish`` called with wrong arguments ends the run with the
-        # tool error text, not a YAML mapping.
-        return 1
+        outcome = run_sea(
+            args.sea,
+            args.task,
+            model=args.model,
+            work_dir=args.work_dir,
+            max_budget=args.max_budget,
+            save_trajectories=not args.no_trajectories,
+            verbose=sys.stdout.isatty() and not args.json,
+        )
+    except SeaError as exc:
+        sys.exit(str(exc))
+    if args.json:
+        payload = dataclasses.asdict(outcome)
+        payload["trajectory_paths"] = [str(path) for path in outcome.trajectory_paths]
+        print(json.dumps(payload, indent=2))
+    elif not sys.stdout.isatty():
+        print(outcome.result or outcome.error)
+    elif outcome.error:
+        print(outcome.error, file=sys.stderr)
+    return 0 if outcome.success else 1
 
 
 if __name__ == "__main__":

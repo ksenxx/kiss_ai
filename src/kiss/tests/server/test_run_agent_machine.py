@@ -639,7 +639,11 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
             _DelegatingModel.script = _default_script(here)
             _DelegatingModel.calls = 0
             _DelegatingModel.tool_results = []
-            seen, child = await self._delegate(tab)
+            # A local call falls under the same-family rule: the task asks
+            # for the sub-agent (fanout_guard.same_family_conflict).
+            seen, child = await self._delegate(
+                tab, prompt="Delegate to a sub-agent on this machine",
+            )
             self.assertTrue(child, "the local sub-agent's new_tab was broadcast")
             tool_result = next(
                 (t for t in _DelegatingModel.tool_results if CHILD_SUMMARY in t), "",

@@ -14,18 +14,43 @@ const {
   sendEmptyWorkDir,
   rowsByTitle,
   stubClipboard,
-  captureTimers,
 } = require('./simplify2_harness');
+
+// How long a copy button shows its "copied" feedback (panelCopy.js).
+const FLASH_MS = 1500;
+
+/**
+ * A `beforeScripts` hook: the page's flash-revert timers (FLASH_MS) are
+ * recorded in `timeouts` as `{cb, ms, id, cleared}` and held, never
+ * armed, so the feedback a test has just asserted cannot expire under it
+ * while it yields to the event loop on a slow host; `clearTimeout` marks
+ * a held timer `cleared`, and fireTimeout plays one by hand.  Every
+ * other timer the page arms runs for real.
+ */
+function holdFlashTimers(win, timeouts) {
+  const realSetTimeout = win.setTimeout;
+  const realClearTimeout = win.clearTimeout;
+  let nextHeldId = -1; // a real timer id is a positive integer
+  win.setTimeout = function (cb, ms, ...args) {
+    if (ms !== FLASH_MS) return realSetTimeout.call(win, cb, ms, ...args);
+    const id = nextHeldId--;
+    timeouts.push({cb, ms, id, cleared: false});
+    return id;
+  };
+  win.clearTimeout = function (id) {
+    const held = timeouts.find(t => t.id === id);
+    if (held) held.cleared = true;
+    else realClearTimeout.call(win, id);
+  };
+}
 
 function makePage() {
   let clipboardWrites;
-  // Every timer the page arms is recorded (and still runs) so a test can
-  // play the clock forward by hand instead of sleeping through it.
   const timeouts = [];
   const {win, posted} = makeHarnessPage({
     beforeScripts(win) {
       clipboardWrites = stubClipboard(win).writes;
-      captureTimers(win, timeouts);
+      holdFlashTimers(win, timeouts);
     },
   });
   return {win, posted, clipboardWrites, timeouts};
@@ -421,7 +446,7 @@ async function testRepeatedClicksRestartFlashTimer() {
     chatBtn.classList.contains('copied'),
     'first click must flash the "copied" feedback',
   );
-  const firstFlash = timeouts.slice(armed).filter(t => t.ms === 1500);
+  const firstFlash = timeouts.slice(armed).filter(t => t.ms === FLASH_MS);
   assert.strictEqual(firstFlash.length, 1, 'the first click arms one revert');
 
   // A second click 1.2 s later, then the clock reaches the first
@@ -429,7 +454,7 @@ async function testRepeatedClicksRestartFlashTimer() {
   armed = timeouts.length;
   click(win, chatBtn);
   await new Promise(r => setTimeout(r, 0));
-  const secondFlash = timeouts.slice(armed).filter(t => t.ms === 1500);
+  const secondFlash = timeouts.slice(armed).filter(t => t.ms === FLASH_MS);
   assert.strictEqual(secondFlash.length, 1, 'the second click arms one revert');
 
   fireTimeout(win, firstFlash[0]);

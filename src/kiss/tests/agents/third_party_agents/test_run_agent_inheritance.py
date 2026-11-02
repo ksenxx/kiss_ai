@@ -104,6 +104,9 @@ def _parent_after_a_run(repo: Path) -> ChatSorcarAgent:
     directly keeps these tests independent of a model endpoint.
     """
     parent = ChatSorcarAgent("inherit-parent")
+    # A parent whose task asks for sub-agents may dispatch children of
+    # its own model family (fanout_guard.same_family_conflict).
+    parent.task_description = "delegate the greeting to a sub-agent"
     parent.model_name = PARENT_MODEL
     parent._launch_model_name = PARENT_MODEL
     parent.model_config = dict(PARENT_CONFIG)
@@ -661,8 +664,10 @@ def _run_parent(
 ) -> ChatSorcarAgent:
     """Run a ``ChatSorcarAgent`` whose scripted model calls ``run_agent`` once."""
     parent = ChatSorcarAgent("inherit-e2e-parent")
+    # The task asks for a sub-agent, so the child may share the parent's
+    # model family (fanout_guard.same_family_conflict).
     result = parent.run(
-        prompt_template="delegate to the sorcar agent",
+        prompt_template="delegate to a sorcar sub-agent",
         model_name=STANDIN_MODEL,
         model_config=server.model_config,
         work_dir=str(env.repo),

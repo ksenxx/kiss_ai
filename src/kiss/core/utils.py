@@ -541,6 +541,8 @@ def _is_secret_config_field(name: str) -> bool:
     not be serialized into trajectories either.  The ``AWS_`` fields are
     the Bedrock credentials (bearer token, access key pair, session
     token); ``AWS_REGION`` is not a secret but travels with them.
+    ``CLAUDE_CODE_OAUTH_TOKEN`` and ``CODEX_ACCESS_TOKEN`` are the
+    subscription credentials of the ``cc/`` and ``codex/`` models.
 
     Args:
         name: The config field name to classify.
@@ -548,7 +550,12 @@ def _is_secret_config_field(name: str) -> bool:
     Returns:
         bool: True when the field must be excluded from serialization.
     """
-    return "API_KEY" in name or "WORKSPACE_ID" in name or name.startswith("AWS_")
+    return (
+        "API_KEY" in name
+        or "WORKSPACE_ID" in name
+        or name.startswith("AWS_")
+        or name in ("CLAUDE_CODE_OAUTH_TOKEN", "CODEX_ACCESS_TOKEN")
+    )
 
 
 def config_to_dict() -> dict[str, Any]:
@@ -677,6 +684,7 @@ def finish(
     is_continue: bool = False,
     summary_in_html: str = "",
     suggested_next_task: str = "",
+    evidence: str = "",
 ) -> str:
     """Finish execution with status and summary.
 
@@ -692,6 +700,10 @@ def finish(
         suggested_next_task: ONE concrete follow-up task for the user, as one plain-text sentence.
             Shown to the user as "Suggested next"; leave empty when nothing
             sensible follows.
+        evidence: With ``success=True``, a JSON list of the shell commands you ran in
+            this run (exactly as you ran them) whose exit code 0 backs the claim:
+            the verifier run, the test run.  A gated run checks that each one ran
+            and passed; leave empty when the task ran no check.
 
     Returns:
         A YAML string with 'success', 'is_continue' and 'summary' keys, where

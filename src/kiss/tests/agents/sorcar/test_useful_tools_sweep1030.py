@@ -77,11 +77,11 @@ def test_heredoc_guard_checks_the_directory_a_vanished_worktree_falls_back_to(
     notes = repo / "notes.md"
     refusal = HEREDOC_VERDICT.format(path=notes)
     tools = UsefulTools(work_dir=str(wt))
-    assert tools.Bash("cat > notes.md <<'EOF'\nnew\nEOF", "rewrite") == refusal
+    assert tools.Bash("cat > notes.md <<'EOF'\nnew\nEOF", "rewrite").startswith(refusal)
     report = tools.run_commands_parallel(json.dumps(["cat >> notes.md <<EOF\nx\nEOF"]))
     assert refusal in report, report
     assert notes.read_text() == "old\n"
-    assert tools.Bash("cat notes.md", "view") == "old\n"
+    assert tools.Bash("cat notes.md", "view").startswith("old\n")
     assert tools.Edit(str(notes), "old", "new").startswith("Successfully")
     assert notes.read_text() == "new\n"
 
@@ -98,8 +98,8 @@ def test_remote_background_job_is_not_judged_by_local_files(
     command = "cat > notes.md <<EOF\nx\nEOF"
     out = tools.Bash(command, "remote", background=True, machine="bench")
     assert out.startswith("Error: no registered machine named 'bench'"), out
-    assert tools.Bash(command, "local", background=True) == HEREDOC_VERDICT.format(
-        path=work / "notes.md")
+    assert tools.Bash(command, "local", background=True).startswith(
+        HEREDOC_VERDICT.format(path=work / "notes.md"))
     assert (work / "notes.md").read_text() == "old\n"
 
 
@@ -148,9 +148,9 @@ def test_sleep_guard_allows_quoted_and_short_sleeps(command: str) -> None:
 
 
 def test_bash_refuses_a_minute_sleep_without_running_it(tmp_path: Path) -> None:
-    """F3 end to end: ``sleep 1m`` is refused before anything runs."""
+    """F3 end to end: ``sleep 1m`` over the call's timeout is refused before anything runs."""
     tools = UsefulTools(work_dir=str(tmp_path))
-    out = tools.Bash("touch ran; sleep 1m", "poll")
+    out = tools.Bash("touch ran; sleep 1m", "poll", timeout_seconds=30)
     assert out.startswith("REFUSED: the Bash call did NOT run: a foreground sleep of 60s")
     assert not (tmp_path / "ran").exists()
     assert tools.Bash("echo '(sleep 60)'", "text") == "(sleep 60)\n"

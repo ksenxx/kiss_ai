@@ -17,6 +17,12 @@ Shared by ``run_parallel`` / ``run_agent`` and the daemon:
   puts the child on the read-only ``review`` tool profile.  The
   reviewer marker is inherited down the sub-tree and across daemon
   dispatches so a reviewer's helpers get the same reduced toolset.
+* A sub-agent of the caller's own model family is the same model with
+  less context (:func:`same_family_conflict`): it is refused unless the
+  call is a fan-out over disjoint named pieces of work
+  (:func:`named_pieces`), the caller's task asks for sub-agents
+  (:func:`asks_for_sub_agents`), another family is pinned, or the child
+  is a review (which the dispatcher moves to another family).
 """
 
 from __future__ import annotations
@@ -25,6 +31,9 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Sequence
+
+from kiss.core.models.model_families import family_of, other_family_model, same_family
 
 _REVIEW_WORDS = re.compile(
     r"\b(review\w*|audit\w*|critiqu\w*|inspect\w*|regression\w*"
@@ -52,10 +61,9 @@ def is_review_task(task: str) -> bool:
 
 
 REVIEW_BUDGET_BASE_USD = 5.0
-"""Budget (USD) of a read-only review of an empty diff.  The 2,535
-reviewer sub-agents of the three weeks before 2026-10-25 cost $1.57 at
-the median and $3.27 at the 75th percentile while holding 28x their
-spend; the base alone covers three reviews in four."""
+"""Budget (USD) of a read-only review of an empty diff.  A review spends
+a few dollars at most while an inherited half-share would hand it many
+times that; the base alone covers most reviews."""
 REVIEW_BUDGET_PER_KLINE_USD = 5.0
 """Budget (USD) added per 1,000 changed lines the review has to read."""
 GIT_BIG_FILE_BYTES = 512 * 1024 * 1024
@@ -157,6 +165,157 @@ def is_implementation_task(task: str) -> bool:
         True when the text contains an implementation verb.
     """
     return _IMPLEMENTATION_WORDS.search(task) is not None
+
+
+_SUB_AGENT_WORDS = re.compile(
+    r"sub-?agent|sub-?task|run_parallel|run_agent|parallel agents"
+    r"|adversarial (?:testing|training)|second opinion|reviewer",
+    re.IGNORECASE,
+)
+
+
+def asks_for_sub_agents(task: str) -> bool:
+    """Return whether *task* asks for sub-agents in so many words.
+
+    Lexical: the text mentions sub-agent / subagent, sub-task / subtask,
+    ``run_parallel``, ``run_agent``, "parallel agents", "adversarial
+    testing", "adversarial training", "second opinion" or "reviewer"
+    (case-insensitive, plurals included).  A caller whose own task asks
+    for them may dispatch children of its own model family
+    (:func:`same_family_conflict`).
+
+    Args:
+        task: The calling agent's task text.
+    """
+    return _SUB_AGENT_WORDS.search(task) is not None
+
+
+_PIECE = re.compile(
+    r"`([^`\n]+)`"  # a backticked command or name
+    r"|(https?://[^\s`'\"<>()\[\]]+)"  # a URL
+    # A slash path: ``src/x/y.py``, ``tests/``, ``./tmp/x``, ``/etc/hosts``, ``~/.kiss``.
+    r"|(?<![\w./-])((?:\.{1,2}|~)?/[\w.-]+(?:/[\w.-]*)*|[\w.-]+(?:/[\w.-]*)+)"
+    # A dotted module or file name whose components start with a letter.
+    r"|(?<![\w./-])([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)\b"
+)
+_PROSE_DOTTED = frozenset({"e.g", "i.e", "a.m", "p.m"})
+
+
+def named_pieces(task: str) -> set[str]:
+    """Return the pieces of work *task* names: paths, directories, modules, URLs, commands.
+
+    A regular-expression heuristic, not a parser.  A piece is a slash
+    path (``src/x/y.py``, ``./tmp/x``, ``/etc/hosts``; an unprefixed
+    ``a/b`` with no dot and no trailing slash is prose such as
+    ``and/or`` or ``I/O``), a directory ending in ``/``, a dotted module
+    or file name whose components start with a letter
+    (``kiss.agents.sorcar``, ``README.md``; ``3.12`` and ``gpt-4.1`` are
+    not pieces, nor are ``e.g.`` / ``i.e.``), a URL, or a backticked
+    span (the command or name as written, plus the pieces inside it).
+    Pieces are compared as written: ``x.py`` and ``src/x.py`` are two
+    pieces, ``Foo.py`` and ``foo.py`` too.
+
+    Args:
+        task: A sub-agent task description.
+
+    Returns:
+        The pieces; empty when the text names none.
+    """
+    pieces: set[str] = set()
+    for match in _PIECE.finditer(task):
+        span, url, path, dotted = match.groups()
+        if span is not None:
+            inner = span.strip()
+            if inner:
+                pieces.add(inner)
+                pieces |= named_pieces(inner)  # no backticks inside: one level deep
+        elif url is not None:
+            pieces.add(url.rstrip(".,;:"))
+        elif path is not None:
+            path = path.rstrip(".")
+            if (
+                "." in path or path.count("/") >= 2 or path.endswith("/")
+                or path.startswith(("/", "./", "../", "~/"))
+            ):
+                pieces.add(path)
+        elif dotted not in _PROSE_DOTTED:
+            pieces.add(dotted)
+    return pieces
+
+
+def undivided_work(tasks: Sequence[str]) -> str:
+    """Return why *tasks* are not a fan-out over disjoint named pieces of work, or ``""``.
+
+    Args:
+        tasks: The task texts of one ``run_agent`` / ``run_parallel`` call.
+
+    Returns:
+        ``""`` when there are two or more tasks, each names a piece
+        (:func:`named_pieces`) and no piece is named by two of them;
+        else the first shortfall, as a clause for the refusal.
+    """
+    if len(tasks) < 2:
+        return "one sub-task is no fan-out over disjoint work"
+    pieces = [named_pieces(task) for task in tasks]
+    for i, found in enumerate(pieces):
+        if not found:
+            return (
+                f"task {i + 1} of the fan-out names no file, directory, module, URL or "
+                "`command` of its own"
+            )
+    for i, first in enumerate(pieces):
+        for j in range(i + 1, len(pieces)):
+            shared = first & pieces[j]
+            if shared:
+                return f"tasks {i + 1} and {j + 1} of the fan-out both name {sorted(shared)[0]}"
+    return ""
+
+
+def same_family_conflict(
+    parent_model: str, child_model: str, tasks: Sequence[str], parent_task: str, review: bool,
+) -> str:
+    """Return why a sub-task on the caller's own model family may not start, or ``""``.
+
+    Inside a task a sub-agent of the caller's family
+    (:func:`~kiss.core.models.model_families.same_family`) is the same
+    model with less context: a fan-out to it costs more and succeeds less
+    often than the caller doing the work itself.
+    The child may start when (i) the call is a fan-out of two or more
+    tasks over disjoint named pieces of work (:func:`undivided_work`),
+    (ii) the caller's own task asks for sub-agents
+    (:func:`asks_for_sub_agents`), (iii) *child_model* is of another
+    family (the call pinned it), or (iv) the child is a *review*, which
+    the dispatcher moves to another family instead.  Nothing is refused
+    when either model is unknown (empty).
+
+    Args:
+        parent_model: The calling agent's model.
+        child_model: The model the sub-task would run: the call's pin,
+            the SEA's ``model`` setting, or the inherited one.
+        tasks: Every task of the call (one for ``run_agent``, all of a
+            ``run_parallel``).
+        parent_task: The calling agent's current task text.
+        review: Whether the sub-task is a review.
+
+    Returns:
+        ``""`` when the dispatch may proceed, else the reason, ending
+        with the three ways out.
+    """
+    if review or not parent_model or not child_model:
+        return ""
+    if not same_family(parent_model, child_model) or asks_for_sub_agents(parent_task):
+        return ""
+    shortfall = undivided_work(tasks)
+    if not shortfall:
+        return ""
+    other = other_family_model(parent_model)
+    pin = f'model="{other}"' if other else 'model="<a model of another family>"'
+    return (
+        f"a sub-agent on {child_model} is this task's own model family "
+        f"({family_of(parent_model)}), the same model with less context, and {shortfall}. "
+        "Ways out: do the work inline in this task; or name the disjoint files/commands in "
+        f"each task of a run_parallel; or pass {pin}."
+    )
 
 
 # A ``\\`` pair, or a lone backslash before a character that is not a JSON

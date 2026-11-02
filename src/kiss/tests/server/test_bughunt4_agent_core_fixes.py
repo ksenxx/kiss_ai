@@ -55,7 +55,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, auto_commit_changes
 from kiss.core.models.model_info import model as _model_factory
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.tests.conftest import seed_worktree
+from kiss.tests.conftest import executor_of, seed_worktree
 from kiss.tests.server.conftest import assert_repo_root, run_git, run_git_checked
 
 
@@ -289,10 +289,11 @@ class TestF05ApiKeyPreservation(_SetModelHarness):
     """Same-provider switch on a DEFAULT endpoint must keep the task key."""
 
     def test_task_specific_key_survives_same_provider_switch(self) -> None:
-        agent: Any = SorcarAgent("f05")
+        sorcar: Any = SorcarAgent("f05")
+        set_model = self._set_model_tool(sorcar)
+        agent: Any = executor_of(sorcar)
         agent.model = _fresh_openai_model("task-key-123")
         agent.model_name = "gpt-4o"
-        set_model = self._set_model_tool(agent)
 
         msg = set_model("gpt-4o-mini")
 
@@ -309,13 +310,14 @@ class TestF06ConfigSanitization(_SetModelHarness):
 
     def test_openai_options_dropped_on_switch_to_anthropic(self) -> None:
         pytest.importorskip("anthropic")
-        agent: Any = SorcarAgent("f06")
+        sorcar: Any = SorcarAgent("f06")
+        set_model = self._set_model_tool(sorcar)
+        agent: Any = executor_of(sorcar)
         agent.model = _fresh_openai_model(
             "task-key-456",
             config={"reasoning_effort": "low", "use_responses_api": True},
         )
         agent.model_name = "gpt-4o"
-        set_model = self._set_model_tool(agent)
 
         msg = set_model("claude-sonnet-4-5")
 
@@ -332,16 +334,17 @@ class TestF07GeminiThoughtSignatures(_SetModelHarness):
 
     def test_signatures_survive_gemini_switch(self) -> None:
         pytest.importorskip("google.genai")
-        agent: Any = SorcarAgent("f07")
+        sorcar: Any = SorcarAgent("f07")
         try:
             old_model: Any = _model_factory("gemini-2.5-flash")
         except Exception as exc:  # no key configured in this environment
             pytest.skip(f"gemini model unavailable: {exc}")
         old_model.initialize("task")
         old_model._thought_signatures["call-1"] = b"sig-bytes"
+        set_model = self._set_model_tool(sorcar)
+        agent: Any = executor_of(sorcar)
         agent.model = old_model
         agent.model_name = "gemini-2.5-flash"
-        set_model = self._set_model_tool(agent)
 
         msg = set_model("gemini-2.5-pro")
 

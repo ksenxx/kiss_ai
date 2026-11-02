@@ -11,9 +11,8 @@ check, escalate on a verified failure, log every decision to
 ``openrouter/<vendor>/<model>`` catalog entry, so one OpenRouter key runs the
 whole session and no direct vendor key is needed.  :data:`TIERS` lists the
 OpenRouter twins of the autorouter's candidates in the same preference
-order; the orchestrator itself runs on the autorouter's
-:data:`~kiss.agents.seas.autorouter.autorouter_sea.ROUTER_MODEL`, which is
-already an OpenRouter model.
+order, and the orchestrator itself runs on :data:`ROUTER_MODEL`, the
+OpenRouter twin of the autorouter's router model.
 
 Three ways to run it::
 
@@ -26,8 +25,8 @@ Three ways to run it::
 
 The protocol, the cost estimate, the observed call costs, the ledger and the
 weekly ``/rsi7d autorouter`` evidence job are the autorouter's; only the
-menu and the pick (``model_menu``, ``pick_model``) read this module's
-:data:`TIERS`.
+router model and the menu and the pick (``model_menu``, ``pick_model``,
+which read this module's :data:`TIERS`) are this module's.
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ from typing import Any
 from kiss.agents.seas.autorouter.autorouter_sea import (
     DEFAULT_TOKENS_IN,
     DEFAULT_TOKENS_OUT,
-    ROUTER_MODEL,
     Tiers,
     estimate_cost,
     log_decision,
@@ -50,43 +48,50 @@ from kiss.agents.seas.autorouter.autorouter_sea import (
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 
+ROUTER_MODEL = "openrouter/anthropic/claude-opus-5.5-max"
+"""The orchestrator's model: the OpenRouter twin of the autorouter's
+:data:`~kiss.agents.seas.autorouter.autorouter_sea.ROUTER_MODEL` (which needs a direct
+vendor key), so one OpenRouter key runs the whole session."""
 VENDOR_PREFIX = "openrouter/"
 """Every candidate of :data:`TIERS` starts with this catalog prefix."""
 
 TIERS: Tiers = {
     "small": (
         ("openrouter/z-ai/glm-5.3-flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
-        ("openrouter/openai/gpt-6-luna", "OpenAI small model, 1M context; cheapest cost per task"),
-        ("openrouter/deepseek/deepseek-v4.1-flash", "DeepSeek flash"),
-        ("openrouter/qwen/qwen3.8-flash", "Qwen flash"),
-        ("openrouter/openai/gpt-5.6-luna", "previous-generation OpenAI small model"),
         (
-            "openrouter/anthropic/claude-haiku-4.5",
+            "openrouter/openai/gpt-6-luna-xhigh",
+            "OpenAI small model, 1M context; cheapest cost per task",
+        ),
+        ("openrouter/deepseek/deepseek-v4.1-flash", "DeepSeek flash"),
+        ("openrouter/xiaomi/mimo-v2.6-flash", "Xiaomi's flash model"),
+        ("openrouter/qwen/qwen3.8-flash", "Qwen flash"),
+        (
+            "openrouter/anthropic/claude-haiku-5.5-max",
             "Anthropic small; 10x gpt-6-luna, only when Anthropic is required",
         ),
     ),
     "medium": (
         (
-            "openrouter/google/gemini-3.8-flash",
+            "openrouter/meta/muse-wonder",
+            "Good general purpose model from Meta",
+        ),
+        (
+            "openrouter/google/gemini-4-argon",
             "Google flash; best coding score per dollar in the tier",
         ),
-        ("openrouter/z-ai/glm-5.3", "Z.ai flagship, open weights"),
-        ("openrouter/deepseek/deepseek-v4-pro-0813", "DeepSeek pro"),
+        ("openrouter/~z-ai/glm-latest", "Z.ai flagship, open weights"),
+        ("openrouter/deepseek/deepseek-v4.1-flash-1017", "DeepSeek pro"),
         ("openrouter/x-ai/grok-4.7", "xAI"),
         (
-            "openrouter/openai/gpt-6-sol",
+            "openrouter/openai/gpt-6.1-sol-high",
             "OpenAI mid model, 400k context; cheapest measured per step",
         ),
         (
-            "openrouter/anthropic/claude-sonnet-5",
+            "openrouter/anthropic/claude-sonnet-5.5-max",
             "Anthropic mid model; default when Anthropic is required",
         ),
         (
-            "openrouter/anthropic/claude-opus-5.5",
-            "Anthropic frontier; cheapest, fastest frontier per step measured",
-        ),
-        (
-            "openrouter/moonshotai/kimi-k3",
+            "openrouter/moonshotai/kimi-k3.1-pro",
             "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.1. Go-to model "
             "for security analysis and hardening.",
         ),
@@ -97,8 +102,12 @@ TIERS: Tiers = {
             "OpenAI frontier; priciest per step measured, reliable reviewer",
         ),
         (
-            "openrouter/anthropic/claude-fable-5.1",
+            "openrouter/anthropic/claude-fable-5.1-max",
             "Anthropic top model; longest, hardest tasks only; measured stalls",
+        ),
+        (
+            "openrouter/anthropic/claude-opus-5.5-max",
+            "Anthropic's coding model; best coding model",
         ),
     ),
 }
@@ -136,8 +145,8 @@ class OrautorouterSea(BaseSea):
         """List ``orautorouter`` in the model picker.
 
         A picked ``orautorouter`` makes the daemon run every task of the tab
-        through this SEA on the autorouter's ``ROUTER_MODEL`` (an OpenRouter
-        model), with :data:`SYSTEM_PROMPT` added to the system prompt.
+        through this SEA on :data:`ROUTER_MODEL` (an OpenRouter model), with
+        :data:`SYSTEM_PROMPT` added to the system prompt.
         """
         return True
 

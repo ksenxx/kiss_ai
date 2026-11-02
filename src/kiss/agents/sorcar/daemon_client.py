@@ -18,12 +18,20 @@ The public API surface is unchanged: :mod:`kiss.server.sorcar`
 re-exports :func:`run` and :class:`TaskResult`, so
 ``kiss.server.sorcar.run(...)`` keeps working for external callers.
 
+A connection the daemon drops while the task runs is re-established
+with backoff and the run resumed from the daemon's replay of its tab
+(:func:`run`'s ``reconnect_seconds``), so a running task is not reported
+finished.  The outcomes of a run — its :class:`TaskResult`, a timeout,
+a confirmed or unconfirmed stop, a refused run, a connection lost for
+good — are listed in :func:`run`'s docstring.
+
 Depends only on ``websockets`` and the sorcar/core layers.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -39,6 +47,8 @@ from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar.sea_apply import SETTING_FIELDS
 from kiss.core import tool_interrupt
 from kiss.core.printer import event_cost
+
+logger = logging.getLogger(__name__)
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 """Largest daemon event frame the client accepts.
@@ -189,6 +199,16 @@ thread is not a tool call but watches its *cancel* event on every wake,
 so this also bounds how long an ``agent_job`` kill takes to act.
 """
 
+_RECONNECT_FIRST_BACKOFF_SECONDS = 1.0
+_RECONNECT_MAX_BACKOFF_SECONDS = 30.0
+"""Pause before the second reconnect attempt, and the longest pause between attempts.
+
+When the daemon drops the connection of a running task, :func:`run`
+reconnects at once, then after 1 s, 2 s, 4 s, ... up to 30 s between
+attempts (see :meth:`_Inbox.reconnect`) for the window its
+``reconnect_seconds`` argument allows.
+"""
+
 _NO_DEADLINE_WAKE_SECONDS = 10.0
 """Socket read wake-up interval for a ``timeout=None`` wait.
 
@@ -225,6 +245,9 @@ class TaskResult:
             tool profile, timeout, inherited and overridden values; see
             :mod:`kiss.agents.sorcar.run_config`); empty when the run
             ended before the daemon emitted it.
+        reconnects: How many times the client lost its daemon
+            connection mid-run and reconnected (the ``reconnect_seconds``
+            argument of :func:`run`); 0 for an uninterrupted wait.
     """
 
     text: str
@@ -235,6 +258,7 @@ class TaskResult:
     chat_id: str = ""
     task_id: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
+    reconnects: int = 0
 
 
 def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any]:
@@ -277,6 +301,7 @@ def _to_task_result(
     task_id: str = "",
     totals: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
+    reconnects: int = 0,
 ) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
@@ -296,6 +321,8 @@ def _to_task_result(
             ``usage_info``.
         settings: The ``settings`` payload of the run's
             ``task_settings`` event, or ``None`` when none was seen.
+        reconnects: How many times the run's connection was lost and
+            re-established (see :meth:`_Inbox.reconnect`).
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -314,6 +341,7 @@ def _to_task_result(
         chat_id=chat_id,
         task_id=task_id,
         settings=dict(settings or {}),
+        reconnects=reconnects,
     )
 
 
@@ -330,6 +358,8 @@ class _Observed:
         settings: The ``settings`` payload of the run's
             ``task_settings`` event, or ``None``.
         totals: The latest spend totals (:func:`_net_totals`), or ``None``.
+        reconnects: How many times the run's connection was lost and
+            re-established (:meth:`_Inbox.reconnect`).
     """
 
     chat_id: str = ""
@@ -337,10 +367,39 @@ class _Observed:
     result: dict[str, Any] | None = None
     settings: dict[str, Any] | None = None
     totals: dict[str, Any] | None = None
+    reconnects: int = 0
 
     def task_result(self) -> TaskResult:
         """Return the :class:`TaskResult` of what was observed (:func:`_to_task_result`)."""
-        return _to_task_result(self.result, self.chat_id, self.task_id, self.totals, self.settings)
+        return _to_task_result(
+            self.result, self.chat_id, self.task_id, self.totals, self.settings, self.reconnects,
+        )
+
+    def absorb(self, event: dict[str, Any], charged: dict[str, Any]) -> None:
+        """Fold one event of the run's tab into what was observed.
+
+        Shared by the live stream and a replayed transcript
+        (:meth:`_Inbox.reconnect`), which repeats events the live
+        stream already delivered: a replay starts *charged* over, so
+        folding every replayed event again yields the same totals.
+
+        Args:
+            event: A display event of the run's tab (``clear``,
+                ``usage_info``, ``result``, ``task_settings``, ...).
+            charged: The :func:`_net_totals` sums of spend already
+                charged elsewhere; updated in place.
+        """
+        etype = event.get("type")
+        if etype == "clear":
+            self.chat_id = str(event.get("chat_id", "") or "") or self.chat_id
+        elif etype != "status" and event.get("taskId"):
+            self.task_id = str(event["taskId"])
+        if etype in ("result", "usage_info") and "cost" in event:
+            self.totals = _net_totals(event, charged)
+        if etype == "result":
+            self.result = event
+        elif etype == "task_settings" and isinstance(event.get("settings"), dict):
+            self.settings = event["settings"]
 
 
 def resolve_sea_path(sea_path: str | None) -> str:
@@ -397,20 +456,136 @@ def _oversize_error_text(exc: ConnectionClosed) -> str:
     return ""
 
 
-def _closed_error(exc: ConnectionClosed) -> ConnectionLostError:
+def _closed_error(exc: ConnectionClosed, reconnects: int = 0) -> ConnectionLostError:
     """Translate a daemon connection closed while the task ran into the client's error.
 
     A too-big frame is named (:func:`_oversize_error_text`); any other
     close means the daemon went away before the task finished.
+
+    Args:
+        exc: The close the connection's reader hit.
+        reconnects: How many times the run's connection had already
+            been re-established (:meth:`_Inbox.reconnect`); named in
+            the error when non-zero.
     """
-    return ConnectionLostError(
+    text = (
         _oversize_error_text(exc)
         or "The sorcar daemon closed the connection before the task finished"
     )
+    if reconnects:
+        text += f" (after {reconnects} reconnect(s))"
+    return ConnectionLostError(text)
+
+
+def _resumable(seen: _Observed, reconnect_seconds: float) -> bool:
+    """Whether a lost connection may be re-established and the run resumed.
+
+    Only with a reconnect window (*reconnect_seconds* > 0) and a run the
+    daemon can find again: a ``resumeSession`` must name the run's chat
+    or task, as the daemon ignores one naming neither
+    (``commands._cmd_resume_session``) and a blind reconnect would miss
+    a ``result`` published while the client was away.  The daemon names
+    the chat (the ``clear`` of its ``run`` handler) before the task's
+    ``running=true``, so a started task is resumable.
+
+    Args:
+        seen: What the run reported so far.
+        reconnect_seconds: :func:`run`'s reconnect window.
+    """
+    return reconnect_seconds > 0 and bool(seen.chat_id or seen.task_id)
+
+
+def _close_quietly(ws: ClientConnection) -> None:
+    """Close *ws*, ignoring every error (the connection may already be gone)."""
+    try:
+        ws.close()
+    except Exception:
+        pass
+
+
+def _wait_interruptible(seconds: float) -> None:
+    """Sleep *seconds*, honouring the calling tool call's Stop on every wake.
+
+    Waking every :data:`_TOOL_CALL_WAKE_SECONDS` to call
+    :func:`tool_interrupt.raise_if_interrupted` keeps a reconnect wait
+    as responsive to the ``run_agent`` panel's Stop button as the
+    event wait of :func:`run` is.
+    """
+    end = time.monotonic() + seconds
+    while True:
+        tool_interrupt.raise_if_interrupted()
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(left, _TOOL_CALL_WAKE_SECONDS))
+
+
+def _read_frames(ws: ClientConnection) -> queue.SimpleQueue[str | bytes | BaseException]:
+    """Start the helper thread reading *ws* and return the queue it fills.
+
+    The thread queues every frame, then the error that ended the
+    reading (a ``ConnectionClosed`` once the connection is gone), and
+    exits; each connection gets its own queue, so a replaced
+    connection's reader cannot be mistaken for the current one's.
+    """
+    frames: queue.SimpleQueue[str | bytes | BaseException] = queue.SimpleQueue()
+    threading.Thread(
+        target=_pump_frames, args=(ws, frames), name="sorcar-local-recv", daemon=True,
+    ).start()
+    return frames
+
+
+def _pump_frames(
+    ws: ClientConnection, frames: queue.SimpleQueue[str | bytes | BaseException],
+) -> None:
+    """Queue every frame of *ws* into *frames*, then the error that ended the reading."""
+    while True:
+        try:
+            frame = ws.recv()
+        except BaseException as exc:  # re-raised on the task thread
+            frames.put(exc)
+            return
+        frames.put(frame)
+
+
+def _connect_and_resume(
+    endpoint_file: Path | None, resume: dict[str, Any], open_timeout: float,
+) -> ClientConnection:
+    """Open a new daemon connection and send the *resume* command on it.
+
+    Args:
+        endpoint_file: The endpoint file to read (``None`` for the default).
+        resume: The ``resumeSession`` command re-attaching the run's tab.
+        open_timeout: Seconds allowed for the connection handshake.
+
+    Raises:
+        ConnectionError: When the connection could not be opened, or
+            closed before *resume* was written.
+
+    The connection is closed again whatever ends the send: a closed
+    daemon side (``ConnectionClosed``, translated), a write timeout,
+    or the ``KeyboardInterrupt`` a Stop injects (re-raised as is).
+    Until it is returned, nobody else holds the connection — a
+    leaked one keeps its socket and reader thread alive for good.
+    """
+    ws = local_endpoint.connect(
+        endpoint_file, open_timeout=open_timeout, max_size=_MAX_LINE_BYTES, parts=True,
+    )
+    try:
+        local_endpoint.send(ws, json.dumps(resume))
+    except ConnectionClosed as exc:
+        _close_quietly(ws)
+        raise ConnectionError(
+            f"the sorcar daemon closed the new connection at once: {exc}"
+        ) from exc
+    except BaseException:
+        _close_quietly(ws)
+        raise
+    return ws
 
 
 class _Inbox:
-    """The daemon connection's incoming frames, read on a helper thread.
+    """The daemon connection of a run: its incoming frames, read on a helper thread.
 
     The daemon stops a task by injecting ``KeyboardInterrupt`` into its
     thread, and CPython can raise it right after a ``with lock:``
@@ -422,27 +597,69 @@ class _Inbox:
     ``queue.SimpleQueue``, whose ``get`` takes no Python-level lock.
     The queue is unbounded (no read flow control), which the local
     daemon's event stream does not need.
+
+    The inbox owns the connection (:attr:`ws`).  When the daemon drops
+    it while the task runs, :meth:`reconnect` opens a new one to the
+    same endpoint and asks the daemon to replay the run's tab, so
+    :func:`run` goes on waiting where it was instead of reporting the
+    task over (its ``reconnect_seconds`` argument).  Until that
+    replay's ``replayDone`` arrives (:meth:`replay_done`), a terminal
+    status is held back in :attr:`pending_end`: the ``result`` it
+    confirms may be in the transcript still to come.  The reconnect
+    window opens at the first drop and closes with that ``replayDone``:
+    a connection that dies in between is one more failed attempt of the
+    same window, and one that stays silent (the daemon never replays
+    the run) spends it as well (:meth:`replay_due_within`).
+
+    Attributes:
+        ws: The current connection.
+        replay_id: The id of the replay the daemon owes this
+            connection after a reconnect; ``""`` when none is due.
+        alive: Whether the daemon reported the task running since the
+            last reconnect (the replay's ``status running=true``, or a
+            live one).
+        pending_end: A ``status running=false`` of the run's tab
+            received while a replay was due, or ``None``.
     """
 
-    def __init__(self, ws: ClientConnection) -> None:
-        """Start reading *ws*; the reader ends when the connection closes."""
-        self._frames: queue.SimpleQueue[str | bytes | BaseException] = queue.SimpleQueue()
-        threading.Thread(
-            target=self._pump, args=(ws,), name="sorcar-local-recv", daemon=True,
-        ).start()
+    def __init__(
+        self, ws: ClientConnection, endpoint_file: Path | None, tab_id: str, run_token: str = "",
+    ) -> None:
+        """Start reading *ws*; the reader ends when the connection closes.
 
-    def _pump(self, ws: ClientConnection) -> None:
-        """Queue every frame of *ws*, then the error that ended the reading."""
-        while True:
-            try:
-                frame = ws.recv()
-            except BaseException as exc:  # re-raised on the task thread
-                self._frames.put(exc)
-                return
-            self._frames.put(frame)
+        Args:
+            ws: The authenticated daemon connection the ``run`` goes out on.
+            endpoint_file: The endpoint file a reconnect reads (``None``
+                for the default).
+            tab_id: The run's synthetic tab id (the tab a reconnect resumes).
+            run_token: The client-minted token the ``run`` carries as
+                ``taskId``: the one name the daemon knows the run by
+                before its history row exists (``client_run_token``).
+        """
+        self.ws = ws
+        self.replay_id = ""
+        self.alive = False
+        self.pending_end: dict[str, Any] | None = None
+        self._endpoint_file = endpoint_file
+        self._tab_id = tab_id
+        self._run_token = run_token
+        self._frames = _read_frames(ws)
+        # A big frame of the daemon's comes as parts (``local_endpoint.frame_parts``).
+        self._joiner = local_endpoint.FrameJoiner()
+        # The open reconnect window (see :meth:`reconnect`): its deadline
+        # (``None`` when none is open), its length, and the pause before
+        # and the count of its attempts so far.
+        self._give_up_at: float | None = None
+        self._window = 0.0
+        self._backoff = _RECONNECT_FIRST_BACKOFF_SECONDS
+        self._attempts = 0
 
-    def recv(self, timeout: float) -> str | bytes:
-        """Return the next frame, like ``ws.recv(timeout=timeout)``.
+    def recv_event(self, timeout: float) -> Any | None:
+        """Return the next whole event, or ``None`` when the frame completed no event.
+
+        A ``part`` frame (joined by :class:`local_endpoint.FrameJoiner`
+        until its last part) and an undecodable frame both yield
+        ``None``; the caller just reads on.
 
         Args:
             timeout: Seconds to wait for a frame (positive).
@@ -458,7 +675,245 @@ class _Inbox:
             raise TimeoutError(f"no frame within {timeout:.1f}s") from None
         if isinstance(frame, BaseException):
             raise frame
-        return frame
+        try:
+            whole = self._joiner.feed(json.loads(frame))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        return None if whole is None else whole[0]
+
+    def reconnect(
+        self, window: float, seen: _Observed, deadline: float | None = None,
+    ) -> None:
+        """Replace the lost connection and have the daemon replay the run's tab.
+
+        The first drop opens a reconnect window of *window* seconds,
+        closed by the ``replayDone`` of the replay asked for below
+        (:meth:`replay_done`).  Within it the client connects again at
+        once, then after :data:`_RECONNECT_FIRST_BACKOFF_SECONDS`,
+        twice that, ... up to :data:`_RECONNECT_MAX_BACKOFF_SECONDS`
+        between attempts (each logged at INFO).  A connection that was
+        established but died before the daemon replayed the run is one
+        more failed attempt of the same window: the next one waits its
+        turn, so a daemon that accepts and drops at once is not
+        hammered, and the window is not restarted.  The new connection
+        is sent a ``resumeSession`` for the run's tab and its chat and
+        task (see :func:`_resumable`), scoped to this connection and
+        tagged with a fresh :attr:`replay_id`: the daemon re-attaches
+        the tab to the task if it still runs (a ``status
+        running=true``), sends the transcript so far (``task_events``,
+        holding a ``result`` published while the client was away) and
+        ends with ``replayDone``.  Live events of the tab reach the new
+        connection from the moment it is open, so the replay may repeat
+        some of them; :meth:`_Observed.absorb` tolerates that.
+        :attr:`alive` and :attr:`pending_end` start over.
+
+        The waits between attempts honour the calling tool call's Stop
+        (:func:`_wait_interruptible`) and end at *deadline*, the
+        caller's own: the pauses and the opening handshake are capped
+        by it, and once it has passed no further attempt is made —
+        the method returns with no new connection (the dropped one
+        stays closed, so nothing is left to read) and :func:`run`'s
+        loop acts on its timeout as it would on a live connection: a
+        plain ``TimeoutError``, or the ``stop_on_timeout`` stop, which
+        :func:`_stop_and_await_confirmation` sends after a reconnect of
+        its own (no deadline, the same window; the window is never
+        restarted by any of this).
+
+        Args:
+            window: Seconds the window opened by the first drop lasts
+                (ignored while one is open).
+            seen: What the run reported so far (its chat and task ids
+                name the tab's task to the daemon); its ``reconnects``
+                is incremented on success.
+            deadline: :func:`run`'s absolute ``time.monotonic()``
+                deadline, or ``None`` for none.
+
+        Raises:
+            ConnectionLostError: When no connection was established
+                within the window; the task may still be running.
+        """
+        _close_quietly(self.ws)
+        if self._give_up_at is None:
+            self._give_up_at = time.monotonic() + window
+            self._window = window
+            self._backoff = _RECONNECT_FIRST_BACKOFF_SECONDS
+            self._attempts = 0
+        elif self.replay_id:
+            # The window's last attempt established a connection, and
+            # it died before the daemon replayed the run (that replay
+            # was still due): the next attempt waits its turn.
+            self._pause_or_give_up(
+                self._give_up_at,
+                "the re-established connection dropped before the daemon replayed the run",
+                deadline,
+            )
+        give_up_at = self._give_up_at
+        replay_id = uuid.uuid4().hex
+        # Before the first stamped event the run has no persisted id:
+        # the run token names it then, so the daemon replays THIS run
+        # and not the chat's latest row (another task's transcript).
+        # ``recovery``: this is a transport recovery, not a user asking
+        # for the tab.  The daemon restores this connection's
+        # subscription and transcript, but a tab the user closed while
+        # the run went on stays closed (audit1101 S4 F2).
+        resume = {
+            "type": "resumeSession",
+            "tabId": self._tab_id,
+            "chatId": seen.chat_id,
+            "taskId": seen.task_id or self._run_token,
+            "scoped": True,
+            "recovery": True,
+            "replayId": replay_id,
+        }
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                # The caller's timeout wins: no replay is due any more
+                # (the connection one was due on is gone).
+                self.replay_id = ""
+                return
+            self._attempts += 1
+            logger.info(
+                "sorcar daemon connection lost; reconnecting (attempt %d) to resume tab %s",
+                self._attempts, self._tab_id,
+            )
+            remaining = give_up_at - time.monotonic()
+            open_timeout = min(10.0, max(remaining, 1.0))
+            if deadline is not None:
+                open_timeout = min(open_timeout, max(deadline - time.monotonic(), 0.0))
+            try:
+                ws = _connect_and_resume(self._endpoint_file, resume, open_timeout=open_timeout)
+                break
+            except ConnectionError as exc:
+                self._pause_or_give_up(give_up_at, str(exc), deadline)
+        self.ws = ws
+        self._frames = _read_frames(ws)
+        self._joiner = local_endpoint.FrameJoiner()
+        self.replay_id = replay_id
+        self.alive = False
+        self.pending_end = None
+        seen.reconnects += 1
+        logger.info(
+            "reconnected to the sorcar daemon on attempt %d; tab %s resumed (task %s)",
+            self._attempts, self._tab_id, seen.task_id or "pending",
+        )
+
+    def _pause_or_give_up(
+        self, give_up_at: float, why: str, deadline: float | None = None,
+    ) -> None:
+        """Wait the window's current backoff before its next attempt, or give up.
+
+        Args:
+            give_up_at: The open window's ``time.monotonic()`` deadline.
+            why: What ended the last attempt, for the log and the error.
+            deadline: The caller's own deadline (see :meth:`reconnect`),
+                which caps the pause; ``None`` for none.
+
+        Raises:
+            ConnectionLostError: When the window is spent.
+        """
+        remaining = give_up_at - time.monotonic()
+        if remaining <= 0:
+            raise self._expired(why)
+        pause = min(self._backoff, remaining)
+        if deadline is not None:
+            pause = min(pause, max(deadline - time.monotonic(), 0.0))
+        logger.info(
+            "reconnect attempt %d failed (%s); next try in %.1fs", self._attempts, why, pause,
+        )
+        _wait_interruptible(pause)
+        self._backoff = min(self._backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
+
+    def _expired(self, why: str) -> ConnectionLostError:
+        """Return the error of a reconnect window spent without the run resumed.
+
+        Args:
+            why: What the last attempt of the window ended with.
+        """
+        return ConnectionLostError(
+            "The sorcar daemon connection was lost and the run was not resumed "
+            f"within {self._window:g}s ({self._attempts} attempt(s)): {why}"
+        )
+
+    def replay_due_within(self) -> float | None:
+        """Return the seconds the open window leaves for the due replay (``None``: none is due).
+
+        A reconnect's ``resumeSession`` may go unanswered: the daemon
+        accepted the connection but never replays the run (the request
+        was lost on the way, or the daemon is wedged).  The window the
+        first drop opened bounds that silence too: :func:`run` caps its
+        receive timeout with this before every receive, so the wait ends
+        at the window's deadline instead of at the next drop.
+
+        Raises:
+            ConnectionLostError: When the window is spent and the replay
+                has not arrived; the task may still be running.
+        """
+        if not self.replay_id or self._give_up_at is None:
+            return None
+        remaining = self._give_up_at - time.monotonic()
+        if remaining <= 0:
+            raise self._expired("the re-established connection delivered no replay of the run")
+        return remaining
+
+    def absorb_replay(
+        self, frame: dict[str, Any], seen: _Observed, charged: dict[str, Any],
+    ) -> None:
+        """Fold the replayed transcript *frame* (a ``task_events`` of the due replay) into *seen*.
+
+        The transcript holds every event of the task so far, including
+        those the live stream already delivered: *charged* starts over
+        so the ``ancestor_charged`` deltas of repeated events are
+        subtracted once (see :func:`_net_totals`).  A transcript of
+        another replay (one a user's history click broadcast to the
+        tab) is ignored.
+
+        Args:
+            frame: The ``task_events`` frame of the run's tab.
+            seen: What the run reported so far; updated in place.
+            charged: The :func:`_net_totals` sums; reset and refilled.
+        """
+        if not self.replay_id or frame.get("replayId") != self.replay_id:
+            return
+        charged.update(cost=0.0, tokens=0, steps=0)
+        for event in frame.get("events") or []:
+            if isinstance(event, dict):
+                seen.absorb(event, charged)
+
+    def replay_done(self, seen: _Observed, stopping: bool) -> dict[str, Any] | None:
+        """End the due replay; return the terminal status :func:`run` must act on, or ``None``.
+
+        Called on the replay's ``replayDone``.  A terminal status held
+        back meanwhile (:attr:`pending_end`) is returned now that the
+        transcript it refers to has been absorbed.  Without one, a task
+        the daemon re-attached as running (:attr:`alive`) goes on, and
+        the wait with it (``None``); a task the daemon did not report
+        running is over — a sub-agent's replay carries no status at
+        all, only its transcript — so a synthetic terminal status is
+        returned for it.
+
+        Args:
+            seen: What the run reported so far.
+            stopping: Whether :func:`run` has sent a stop and awaits its
+                confirmation (a confirmed stop needs no result).
+
+        Raises:
+            ConnectionLostError: When the task is over but no ``result``
+                was seen, live or replayed, and no stop is pending: the
+                daemon lost the task (a restart) while the client was
+                away, and an empty result would misreport that as the
+                task's own failure.
+        """
+        self.replay_id = ""
+        self._give_up_at = None  # the daemon is back: a later drop opens a new window
+        ended, self.pending_end = self.pending_end, None
+        if ended is None and self.alive:
+            return None
+        if seen.result is None and not stopping:
+            raise ConnectionLostError(
+                "The sorcar daemon connection was lost and, once back, the daemon "
+                "reported the task neither running nor finished with a result"
+            )
+        return ended or {"type": "status", "running": False, "tabId": self._tab_id}
 
 
 def _send(ws: ClientConnection, cmd: dict[str, Any]) -> None:
@@ -500,15 +955,25 @@ def _send_stop(ws: ClientConnection, tab_id: str, run_token: str) -> None:
 
 
 def _stop_and_await_confirmation(
-    ws: ClientConnection, tab_id: str, run_token: str, what: str,
+    inbox: _Inbox,
+    tab_id: str,
+    run_token: str,
+    what: str,
+    reconnect_seconds: float,
+    seen: _Observed,
 ) -> float:
     """Send the stop for a *what* task and return the confirmation deadline.
 
     Args:
-        ws: The connected daemon connection.
+        inbox: The run's daemon connection.
         tab_id: The run's synthetic tab id.
         run_token: The client-minted per-submission run token.
         what: ``"cancelled"`` or ``"timed-out"``, for the error text.
+        reconnect_seconds: How long to try reconnecting when the stop
+            cannot be written on a broken connection (0: not at all);
+            see :func:`run`.
+        seen: What the run reported so far (a reconnect resumes its
+            task, so one is tried only when :func:`_resumable`).
 
     Returns:
         The ``time.monotonic()`` deadline by which the daemon's terminal
@@ -519,35 +984,59 @@ def _stop_and_await_confirmation(
             the task was neither stopped nor confirmed dead — raising a
             plain ``TimeoutError`` would let a caller claim "was
             stopped"; the broken daemon connection is surfaced instead,
-            like every other mid-run connection failure.
+            like every other mid-run connection failure.  Before giving
+            up, the connection is re-established once
+            (:meth:`_Inbox.reconnect`, within *reconnect_seconds*) and
+            the stop sent on the new one.
     """
     # Clocked before the send: a slow but
     # successful send must not extend the caller's wait.
     deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
     try:
-        _send_stop(ws, tab_id, run_token)
+        _send_stop(inbox.ws, tab_id, run_token)
     except OSError as send_exc:
-        raise ConnectionLostError(
-            "The sorcar daemon connection failed while "
-            f"stopping the {what} task: {send_exc}"
-        ) from send_exc
+        if not _resumable(seen, reconnect_seconds):
+            raise ConnectionLostError(
+                "The sorcar daemon connection failed while "
+                f"stopping the {what} task: {send_exc}"
+            ) from send_exc
+        logger.info(
+            "the stop of the %s task could not be sent (%s); reconnecting", what, send_exc,
+        )
+        try:
+            inbox.reconnect(reconnect_seconds, seen)
+            _send_stop(inbox.ws, tab_id, run_token)
+        except (OSError, ConnectionLostError) as again:
+            raise ConnectionLostError(
+                "The sorcar daemon connection failed while "
+                f"stopping the {what} task: {again}"
+            ) from again
+        # The grace starts once the stop is actually on its way.
+        deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
     return deadline
 
 
 def _run_ended(aborted: BaseException | None, seen: _Observed) -> bool:
     """Whether :func:`run` exits knowing its task is over on the daemon.
 
-    True on a normal return, once the task's ``result`` arrived, on a
-    confirmed stop and on a refused run (nothing ran).  Any other exit
-    (a plain timeout, an unconfirmed stop, a lost connection or
-    machine, an abort whose cascaded ``stop`` is unconfirmed) may leave
-    the task running.
+    True on a normal return, once the task's terminal ``result``
+    arrived, on a confirmed stop and on a refused run (nothing ran).
+    Any other exit (a plain timeout, an unconfirmed stop, a lost
+    connection or machine, an abort whose cascaded ``stop`` is
+    unconfirmed) may leave the task running.  A session handoff's
+    ``result`` — ``finish(success=False, is_continue=True)``, which
+    the executor answers with the next session (the task goes on) —
+    is not terminal: only a successful or non-continuing one is, as
+    ``relentless_agent.perform_task`` reads them.
 
     Args:
         aborted: The exception :func:`run` exits with, or ``None``.
         seen: What the run's event stream reported.
     """
-    if aborted is None or seen.result is not None:
+    if aborted is None:
+        return True
+    result = seen.result
+    if result is not None and (result.get("success") or not result.get("is_continue")):
         return True
     if isinstance(aborted, CancelledError):
         return aborted.confirmed
@@ -697,6 +1186,7 @@ def run(
     machine: str = "",
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
+    reconnect_seconds: float = 300.0,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
@@ -796,7 +1286,9 @@ def run(
                         ...
                     def tools(self, tools: list) -> list: ...    # toolset -> the run's toolset
                     def llm_call_hook(self, new_messages: list) -> list: ...
-                    def tool_call_hook(self, name: str, args: dict) -> Verdict: ...  # ALLOW/refuse
+                    # the verdicts: ALLOW, refuse(text) (tool hook only), end_run(result)
+                    def tool_call_hook(self, name: str, args: dict) -> Verdict: ...
+                    def llm_response_hook(self, reply: LLMReply) -> Verdict: ...
                     def register_as_model(self) -> bool: ...     # model-picker entry
                     def on_picked_as_model(self, work_dir: str) -> str: ...
 
@@ -854,7 +1346,11 @@ def run(
             to be sent, and ``tool_call_hook(name, args)`` is called
             before every tool call and returns a ``Verdict``: the tool
             executes on ``ALLOW``; on ``refuse(text)`` the model is
-            given *text* as the tool's result instead.  The hooks apply
+            given *text* as the tool's result instead; on
+            ``end_run(result)`` the run ends with *result*.
+            ``llm_response_hook(reply)`` is called after every model
+            reply with its text, tool calls and token usage and returns
+            ``ALLOW`` or ``end_run(result)``.  The hooks apply
             to the task's own agent, not to sub-agents it spawns via
             ``run_parallel``.
 
@@ -1075,6 +1571,34 @@ def run(
         attachments: Files sent with the prompt (an image or PDF the
             user attached), each ``{"mimeType", "data"}`` with base64
             *data* — the webapp's ``submit`` wire shape.
+        reconnect_seconds: How long, in seconds, to keep reconnecting
+            when the daemon connection closes while the task runs
+            (after its ``status running=true``, with no stop pending).
+            The client reconnects to the same endpoint with exponential
+            backoff (at once, then 1 s, 2 s, 4 s, ... up to 30 s
+            between attempts), re-attaches to its tab and has the
+            daemon replay the tab's events, so a ``result`` or terminal
+            status published while it was away is still delivered and
+            the wait goes on as if nothing had happened
+            (``TaskResult.reconnects`` counts the reconnects).  Spend is
+            not double counted: the replayed transcript restarts the
+            totals.  A stop (*stop_on_timeout*, *cancel*) that cannot be
+            written on a broken connection is sent after one such
+            reconnect too.  The window opens at the first drop and
+            closes once the daemon has replayed the run; a connection
+            that dies before that is one more attempt within it, and
+            one that stays silent spends it too.  A *timeout* that
+            expires while the client is still trying ends the wait on
+            time, as it would on a live connection (the attempts stop;
+            with *stop_on_timeout* the stop is still sent after one
+            reconnect, as above).  When the run is not resumed within
+            the window (no connection, or no replay on the one
+            established), :class:`ConnectionLostError` is raised with
+            the spend seen so far.  A run the daemon has not named yet (no
+            chat or task id was announced, so there is nothing to
+            re-attach to) is not resumed either.  ``0`` keeps the
+            pre-reconnect behaviour: the first close raises
+            :class:`ConnectionLostError` at once.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -1092,12 +1616,18 @@ def run(
         ConnectionError: When no daemon is reachable at the endpoint
             or the ``run`` cannot be sent: no task was started.
         ConnectionLostError: When the daemon drops the connection
-            after the ``run`` was sent, loses its connection to the
-            *machine* running the task (a terminal status marked
-            ``lost``), or a stop (*stop_on_timeout*, *cancel*) cannot
-            be sent on the broken connection (a plain ``TimeoutError``
-            would falsely imply the task was stopped): the task may
-            still be running.  A subclass of ``ConnectionError``.
+            after the ``run`` was sent and before the task started, or
+            while a stop awaits its confirmation, or when a connection
+            lost mid-run is not re-established within
+            *reconnect_seconds* (or the daemon, once back, reports the
+            task neither running nor finished); when the daemon loses
+            its connection to the *machine* running the task (a
+            terminal status marked ``lost``); or when a stop
+            (*stop_on_timeout*, *cancel*) cannot be sent on the broken
+            connection even after one reconnect (a plain
+            ``TimeoutError`` would falsely imply the task was stopped):
+            the task may still be running.  A subclass of
+            ``ConnectionError``.
         TimeoutError: When the task does not finish within *timeout*
             seconds (never raised when *timeout* is ``None``).  The
             client then disconnects and the task keeps running —
@@ -1133,7 +1663,8 @@ def run(
 
     Before disconnecting, the client asks the daemon to close the run's
     tab (``closeTab``) once the task is known to be over: it returned,
-    its ``result`` arrived, its stop was confirmed or the run was
+    its terminal ``result`` arrived (a session handoff's ``is_continue``
+    result is not one), its stop was confirmed or the run was
     refused.  A task that may still be running keeps its tab on every
     surface until a user closes it.  A sub-agent run's tab is closed on
     every exit: no surface shows it (they show the parent's nested tab).
@@ -1148,18 +1679,23 @@ def run(
     # a late stop must never kill a newer run that reused the tab.
     run_token = uuid.uuid4().hex
     deadline = None if timeout is None else time.monotonic() + timeout
-    ws: ClientConnection | None = None
+    inbox: _Inbox | None = None
     aborted: BaseException | None = None
     seen = _Observed(chat_id=chat_id)
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
+    endpoint_path = Path(endpoint_file) if endpoint_file else None
     try:
-        ws = local_endpoint.connect(
-            Path(endpoint_file) if endpoint_file else None,
-            open_timeout=10.0 if timeout is None else min(timeout, 10.0),
-            max_size=_MAX_LINE_BYTES,
-            parts=True,
+        inbox = _Inbox(
+            local_endpoint.connect(
+                endpoint_path,
+                open_timeout=10.0 if timeout is None else min(timeout, 10.0),
+                max_size=_MAX_LINE_BYTES,
+                parts=True,
+            ),
+            endpoint_path,
+            tab_id,
+            run_token,
         )
-        inbox = _Inbox(ws)
         cmd = run_command(
             prompt,
             tab_id=tab_id,
@@ -1196,7 +1732,7 @@ def run(
             attachments=attachments,
         )
         try:
-            local_endpoint.send(ws, json.dumps(cmd))
+            local_endpoint.send(inbox.ws, json.dumps(cmd))
         except ConnectionClosed as exc:
             # A plain ConnectionError: the run was never sent, so no task runs.
             raise ConnectionError(
@@ -1215,8 +1751,6 @@ def run(
             if tool_interrupt.current_tool_call() is not None or cancel is not None
             else _NO_DEADLINE_WAKE_SECONDS
         )
-        # A big frame of the daemon's comes as parts (``local_endpoint.frame_parts``).
-        joiner = local_endpoint.FrameJoiner()
         while True:
             # The calling task's tool-call panel Stop is honored
             # cooperatively: every wake checks it (raising
@@ -1236,7 +1770,9 @@ def run(
                 cancelled = True
                 if not stopping:
                     stopping = True
-                    deadline = _stop_and_await_confirmation(ws, tab_id, run_token, "cancelled")
+                    deadline = _stop_and_await_confirmation(
+                        inbox, tab_id, run_token, "cancelled", reconnect_seconds, seen,
+                    )
                 continue
             if deadline is None:
                 # No deadline: wake periodically so an injected
@@ -1254,7 +1790,7 @@ def run(
                         # still act (see _STOP_CONFIRM_GRACE_SECONDS).
                         stopping = True
                         deadline = _stop_and_await_confirmation(
-                            ws, tab_id, run_token, "timed-out",
+                            inbox, tab_id, run_token, "timed-out", reconnect_seconds, seen,
                         )
                         continue
                     if stopping:
@@ -1290,25 +1826,51 @@ def run(
                 # and the cooperative check above — for the whole
                 # *remaining*.
                 wait = min(remaining, wake_seconds)
+            # A replay a reconnect asked for is due within the reconnect
+            # window: checked before every receive (a re-established
+            # connection that stays silent must not hold the wait past
+            # the window), and the receive wakes at its deadline.
+            due = inbox.replay_due_within()
+            if due is not None:
+                wait = min(wait, due)
             try:
-                raw = inbox.recv(wait)
+                event = inbox.recv_event(wait)
             except TimeoutError:
                 # Pure wake-up (or, with a finite deadline, loop back so
                 # the remaining<=0 branch above decides between the
                 # stop-on-timeout cascade and raising).
                 continue
             except ConnectionClosed as exc:
-                raise _closed_error(exc) from exc
-            try:
-                whole = joiner.feed(json.loads(raw))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                if not started or stopping or not _resumable(seen, reconnect_seconds):
+                    raise _closed_error(exc, seen.reconnects) from exc
+                # The task runs on without its client (the drop is the
+                # connection's, not the task's): get back to it and
+                # have the daemon replay what was missed, instead of
+                # reporting a running task as finished.  A stop
+                # awaiting its confirmation is not resumed: the
+                # connection failure is surfaced as every other one.
+                # The wait's own deadline bounds the attempts: past it,
+                # the loop goes on without a connection and the
+                # ``remaining <= 0`` branch above decides, as usual.
+                inbox.reconnect(reconnect_seconds, seen, deadline)
                 continue
-            if whole is None:
-                continue
-            event = whole[0]
-            if not isinstance(event, dict) or event.get("tabId") != tab_id:
+            if not isinstance(event, dict):
                 continue
             etype = event.get("type")
+            if etype == "replayDone":
+                if event.get("replayId") != inbox.replay_id:
+                    continue
+                # The replay a reconnect asked for is complete: act on
+                # the terminal status it settled, if any.
+                ended = inbox.replay_done(seen, stopping)
+                if ended is None:
+                    continue
+                event, etype = ended, "status"
+            elif event.get("tabId") != tab_id:
+                continue
+            if etype == "task_events":
+                inbox.absorb_replay(event, seen, charged)
+                continue
             if etype == "error" and event.get("code") == "prompt_refused":
                 # The daemon's ``_refuse_run``: a ``status running=false``
                 # (which the branch below ignores, nothing had started)
@@ -1317,17 +1879,14 @@ def run(
                     f"the sorcar daemon refused the task: "
                     f"{str(event.get('text') or '').strip() or 'refused'}"
                 )
-            if etype == "clear":
-                seen.chat_id = str(event.get("chat_id", "") or "") or seen.chat_id
-            elif etype != "status" and event.get("taskId"):
-                seen.task_id = str(event["taskId"])
-            if etype in ("result", "usage_info") and "cost" in event:
-                seen.totals = _net_totals(event, charged)
-            if etype == "result":
-                seen.result = event
-            elif etype == "task_settings" and isinstance(event.get("settings"), dict):
-                seen.settings = event["settings"]
-            elif etype == "status":
+            seen.absorb(event, charged)
+            if etype == "status":
+                if inbox.replay_id and not event.get("running") and not event.get("lost"):
+                    # The replay is still due: the result this status
+                    # confirms may be in the transcript to come, so the
+                    # decision waits for ``replayDone``.
+                    inbox.pending_end = event
+                    continue
                 if not event.get("running") and event.get("lost"):
                     # The daemon lost its stream to the machine running
                     # the task (``RemoteTabs.dropped``): the task may
@@ -1339,6 +1898,7 @@ def run(
                     )
                 if event.get("running"):
                     started = True
+                    inbox.alive = True
                     if running is not None:
                         running.set()
                 elif stopping:
@@ -1388,7 +1948,7 @@ def run(
                     return seen.task_result()
     except BaseException as exc:
         aborted = exc
-        if ws is not None and not isinstance(exc, _NO_STOP_CASCADE):
+        if inbox is not None and not isinstance(exc, _NO_STOP_CASCADE):
             # The dispatched task is stopped below, but whatever it
             # already spent stays spent: hand the caller the latest
             # totals so it can still charge them (``run_agent`` folds
@@ -1398,6 +1958,7 @@ def run(
     finally:
         # Nothing to cascade or close when the connect itself failed:
         # there is no task and no tab on the daemon's side.
+        ws = None if inbox is None else inbox.ws
         if ws is not None and aborted is not None and not isinstance(aborted, _NO_STOP_CASCADE):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
@@ -1428,7 +1989,4 @@ def run(
                     _send(ws, {"type": "closeTab", "tabId": tab_id})
                 except OSError:
                     pass
-            try:
-                ws.close()
-            except Exception:
-                pass
+            _close_quietly(ws)

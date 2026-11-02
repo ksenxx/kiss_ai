@@ -63,6 +63,11 @@ from kiss.core.user_config import CONFIG_PATH, load_config, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
+AUTH_OK = {"type": "auth_ok", "local": False, "echoesGeneration": True}
+"""The daemon's ``auth_ok`` to a password or loopback client (``sorcar._auth_ok``)."""
+AUTH_OK_LOCAL = {"type": "auth_ok", "local": True, "echoesGeneration": True}
+"""The daemon's ``auth_ok`` to a client with the local token."""
+
 
 def _lan_ip() -> str | None:
     try:
@@ -207,7 +212,7 @@ class TestPlainHttpLoopback(_ServerCase):
         async with connect(endpoint.url) as ws:
             await ws.send(json.dumps({"type": "auth", "token": endpoint.token}))
             reply = await self._recv(ws)
-        self.assertEqual(reply, {"type": "auth_ok", "local": True})
+        self.assertEqual(reply, AUTH_OK_LOCAL)
         # A legacy wss:// endpoint keeps a TLS context; junk is refused.
         wss = local_endpoint.LocalEndpoint(
             url=f"wss://127.0.0.1:{self._port}/ws", token="t", ca=None, pid=0,
@@ -221,7 +226,7 @@ class TestPlainHttpLoopback(_ServerCase):
         """With no password set, a loopback browser authenticates with "" and bare frames pass."""
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(ws), AUTH_OK)
             await ws.send(json.dumps({"type": "ping"}))
             self.assertEqual((await self._recv(ws))["type"], "pong")
 
@@ -242,7 +247,7 @@ class TestLoopbackNeedsNoPassword(_ServerCase):
         """
         async with connect(f"ws://127.0.0.1:{self._port}/ws", origin=self._origin()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(ws), AUTH_OK)
             await ws.send(json.dumps({"type": "getConfig"}))
             while (reply := await self._recv(ws))["type"] != "configData":
                 pass
@@ -255,14 +260,14 @@ class TestLoopbackNeedsNoPassword(_ServerCase):
             f"ws://127.0.0.1:{self._port}/ws", origin=self._origin("localhost"),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(ws), AUTH_OK)
 
     async def test_wrong_password_from_loopback_browser_is_still_admitted(self) -> None:
         """What the ``auth`` frame carries is irrelevant for the loopback page (and not counted)."""
         for _ in range(6):  # more than the brute-force lockout allows
             async with connect(f"ws://127.0.0.1:{self._port}/ws", origin=self._origin()) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
-                self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+                self.assertEqual(await self._recv(ws), AUTH_OK)
 
     async def test_loopback_program_and_foreign_page_still_need_the_password(self) -> None:
         """No ``Origin`` (a program on this machine) or a foreign one: password required.
@@ -274,7 +279,7 @@ class TestLoopbackNeedsNoPassword(_ServerCase):
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 self.assertEqual((await self._recv(ws))["type"], "auth_required", origin)
                 await ws.send(json.dumps({"type": "auth", "password": self.password}))
-                self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False}, origin)
+                self.assertEqual(await self._recv(ws), AUTH_OK, origin)
 
     async def test_forwarded_visitor_on_loopback_still_needs_the_password(self) -> None:
         """A cloudflared visitor arrives on loopback with a forwarded IP: password required."""
@@ -300,13 +305,13 @@ class TestLoopbackNeedsNoPassword(_ServerCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             self.assertEqual((await self._recv(ws))["type"], "auth_required")
             await ws.send(json.dumps({"type": "auth", "password": self.password}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(ws), AUTH_OK)
 
     async def test_local_token_still_gets_local_privileges(self) -> None:
         """The token path is unchanged: ``auth_ok`` with ``local: true``."""
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "token": self._token()}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": True})
+            self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
 
 
 class TestLocalOnlyDaemonUnchanged(IsolatedAsyncioTestCase):
@@ -333,7 +338,7 @@ class TestLocalOnlyDaemonUnchanged(IsolatedAsyncioTestCase):
             async with connect(endpoint.url) as ws:
                 await ws.send(json.dumps({"type": "auth", "token": endpoint.token}))
                 reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                self.assertEqual(reply, {"type": "auth_ok", "local": True})
+                self.assertEqual(reply, AUTH_OK_LOCAL)
         finally:
             await server.stop_async()
             if orig is not None:
@@ -351,7 +356,7 @@ class TestVsCodeNotice(_ServerCase):
             f"ws://127.0.0.1:{self._port}/ws", user_agent_header=None,
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "token": self._token()}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": True})
+            self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
             notice = await self._recv(ws)
         self.assertEqual(notice["type"], "notice")
         self.assertEqual(
@@ -370,7 +375,7 @@ class TestVsCodeNotice(_ServerCase):
         for kwargs in clients:
             async with connect(url, **kwargs) as ws:
                 await ws.send(json.dumps({"type": "auth", "token": self._token()}))
-                self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": True})
+                self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
                 await ws.send(json.dumps({"type": "ping"}))
                 self.assertEqual((await self._recv(ws))["type"], "pong", kwargs)
         # A loopback browser admitted without a token is not the extension.
@@ -379,7 +384,7 @@ class TestVsCodeNotice(_ServerCase):
             origin=Origin(f"http://127.0.0.1:{self._port}"),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(ws), AUTH_OK)
             await ws.send(json.dumps({"type": "ping"}))
             self.assertEqual((await self._recv(ws))["type"], "pong")
 
@@ -401,7 +406,7 @@ class TestFramePassword(_ServerCase):
             additional_headers=self._forwarded,
         )
         await ws.send(json.dumps({"type": "auth", "password": self.password}))
-        self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+        self.assertEqual(await self._recv(ws), AUTH_OK)
         return ws
 
     async def test_auth_checks_the_stored_password(self) -> None:

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import socket
 import sys
 import threading
 from collections.abc import Iterator
@@ -42,14 +41,6 @@ SEND_BOUND_SECONDS = 15.0
 def homeserver() -> Iterator[JsonWebhookServer]:
     """A local HTTP server answering every PUT with the test's canned JSON reply."""
     yield from serve_json_webhook()
-
-
-@pytest.fixture
-def refusing_port() -> int:
-    """A loopback port nothing listens on."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _backend_for(homeserver_url: str) -> MatrixChannelBackend:
@@ -172,12 +163,13 @@ def test_stopped_run_cancels_the_coroutine() -> None:
     backend = _started_backend()
     sleeper = _Sleeper()
     try:
+        previous_trace = sys.gettrace()
         sys.settrace(sleeper.stop_once_started)
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(sleeper.sleep(), timeout=60)
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert sleeper.cancelled.wait(5)
     finally:
         backend.disconnect()

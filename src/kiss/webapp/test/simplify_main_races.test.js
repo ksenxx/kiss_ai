@@ -200,10 +200,12 @@ async function openDirtyTab(ctx) {
       1,
       "b1's reply must not replace the dirty editor",
     );
-    // The tab's own reload reply still replaces the text.
+    // The tab's own reload reply (the daemon echoes the request's
+    // token) still replaces the text.
     h.send(win, {
       type: 'fileContent',
       tabId: 'a1',
+      token: h.ofType(posted, 'openFile')[0].token,
       path: FILE_PATH,
       name: 'notes.txt',
       content: 'v3 on disk',

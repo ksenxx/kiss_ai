@@ -408,6 +408,35 @@ class BrowserTabService:
         """The ``browserTabs`` event a connecting client reconciles its tabs against."""
         return {"type": "browserTabs", "tabs": self.open_events()}
 
+    def send_snapshot(self, conn_id: str) -> None:
+        """Send *conn_id* the ``browserTabs`` snapshot it reconciles its tabs against.
+
+        Captured and sent in one step of the private loop, the thread
+        every page's open and close is announced from in one step too:
+        the snapshot either lists a page and precedes its
+        ``closeBrowserTab``, or omits it and follows.  A snapshot
+        captured off the loop and sent later could follow a close it
+        predates, and the client, taking it as authoritative, would
+        reopen the closed page on that surface alone.  Without a loop
+        (no browser launched yet, or the service shut down) nothing is
+        in flight and the empty snapshot goes at once; decided under
+        the lock the first open starts the loop under and the shutdown
+        stops it under, so the send lands on a running loop or goes
+        directly, never on neither.
+
+        Args:
+            conn_id: The connection that asked (a ``ready``, a
+                ``browserList``); ``""`` reaches every client.
+        """
+        with self._lock:
+            if self._loop is None:
+                self._emit(self.snapshot_event(), conn_id)
+            else:
+                self._submit(self._send_snapshot(conn_id))
+
+    async def _send_snapshot(self, conn_id: str) -> None:
+        self._emit(self.snapshot_event(), conn_id)
+
     def shutdown(self) -> None:
         """Close the browser, stop the private loop and join its thread."""
         with self._lock:

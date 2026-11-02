@@ -42,6 +42,10 @@ WAIT_SLACK_SECONDS = 15
 QUICK_TIMEOUT = 30
 #: A job id (the ids are spliced into shell scripts, so nothing else passes).
 JOB_ID = re.compile(r"[0-9a-f]{8}")
+#: The status line of a :data:`REPORT_SCRIPT` report.
+STATUS_LINE = re.compile(r"^status: (.+)$", re.MULTILINE)
+#: Prints the ids among ``{ids}`` (space-separated) whose job has not exited.
+RUNNING_SCRIPT = "for id in {ids}; do [ -e {d}/$id.exit ] || echo $id; done; true"
 
 BashFn = Callable[[str, str, int, int], str]
 
@@ -142,6 +146,32 @@ class ContainerJobs:
             f"Use bash_job({job_id!r}, action='wait', timeout_seconds=N, until='<regex>') "
             "to block until it exits or its log matches, 'tail' for the current log, "
             "'kill' to stop it.")
+
+    def last_running(self) -> str | None:
+        """Return the id of the job of this registry started last that is still running.
+
+        One script in the container checks every known job's exit file;
+        ``None`` when no job is running.
+        """
+        if not self.commands:
+            return None
+        script = RUNNING_SCRIPT.format(ids=" ".join(self.commands), d=JOBS_DIR)
+        out = self.bash_fn(script, "find the running background jobs", QUICK_TIMEOUT, 2000)
+        running = [line.strip() for line in out.splitlines() if JOB_ID.fullmatch(line.strip())]
+        return running[-1] if running else None
+
+    def wait(self, job_id: str, seconds: float) -> str:
+        """Block until the job *job_id* exits or *seconds* pass; return its status.
+
+        The ``wait`` action of :meth:`bash_job`, reduced to the status
+        line of its report (``running`` or ``exited N``).  The report
+        opens with the job's command, which may hold such a line itself
+        (a here-document printing one): the status is read after it.
+        """
+        report = self.bash_job(job_id, "wait", seconds, 1, 2000)
+        header = f"Job {job_id}: {self.commands.get(job_id, '')}\n"
+        match = STATUS_LINE.search(report.removeprefix(header))
+        return match.group(1) if match else "status unknown"
 
     def bash_job(
         self,

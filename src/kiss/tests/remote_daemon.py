@@ -108,6 +108,13 @@ def start_remote_daemon(
     home.mkdir(parents=True, exist_ok=True)
     endpoint_file = home / local_endpoint.LOCAL_ENDPOINT_FILE
     child_env = dict(os.environ, **(env or {}), KISS_HOME=str(home))
+    # The child runs in *home*: a ``PYTHONPATH`` naming the checkout
+    # under test relative to the test's cwd (``src``) is resolved for
+    # it, or the child would import the venv's installed copy instead
+    # (or nothing, when that install points elsewhere).
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        os.path.abspath(p) for p in child_env.get("PYTHONPATH", "").split(os.pathsep) if p
+    )
     # The seed goes through a file: a row with a multi-megabyte task
     # text does not fit on the command line.
     seed_file = home / "seed.json"

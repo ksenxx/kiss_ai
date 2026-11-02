@@ -53,6 +53,9 @@ class TestDisplayEventTypes(unittest.TestCase):
             "task_done", "task_error", "task_stopped", "task_interrupted",
             "followup_suggestion", "ask_answer", "autocommit_done",
             "warning", "usage_info", "llm_call", "task_settings",
+            # Proposal 10 records: a compaction, a context hand-off and a
+            # finish-gate stage are shown (and persisted) like any event.
+            "compaction", "handoff", "gate_stage",
         }
         assert _DISPLAY_EVENT_TYPES == expected
 

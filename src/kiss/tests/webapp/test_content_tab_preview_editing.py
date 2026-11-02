@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.server.web_server import _file_version
 from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
@@ -175,7 +176,7 @@ class TestMarkdownHtmlEditSource:
             assert len(saves) == 1
             assert saves[0]["path"] == str(path)
             assert saves[0]["content"] == _MD_SOURCE + "\nappended_line"
-            assert saves[0]["version"].endswith(f":{len(_MD_SOURCE)}")
+            assert saves[0]["version"] == _file_version(_MD_SOURCE.encode())
         finally:
             context.close()
 

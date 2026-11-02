@@ -259,7 +259,7 @@ def test_default_tool_result_strips_base64_to_avoid_context_bloat(temp_dir):
     read_output = UsefulTools().Read(str(png_path))
     expected_b64 = base64.b64encode(_PNG_1x1).decode("ascii")
 
-    m = _StubModel("stub")
+    m = _StubModel("gpt-stub")  # an openai-family name: a model that sees images
     m.conversation = [
         {
             "role": "assistant",

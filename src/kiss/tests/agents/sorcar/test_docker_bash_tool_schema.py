@@ -72,9 +72,13 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         self.assertNotIn("timed out", result)
 
     def test_model_can_lower_the_timeout(self) -> None:
-        """A short timeout must actually cut a hung command short."""
+        """A short timeout must actually cut a hung command short.
+
+        The hang is a ``tail -f``: a literal ``sleep 60`` past the
+        deadline is refused by the sleep rule before it runs.
+        """
         start = time.monotonic()
-        result = self._bash_tool()("sleep 60", "hang", timeout_seconds=2)
+        result = self._bash_tool()("tail -f /dev/null", "hang", timeout_seconds=2)
         elapsed = time.monotonic() - start
         self.assertIn("timed out", result)
         self.assertLess(

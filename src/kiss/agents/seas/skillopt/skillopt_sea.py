@@ -372,6 +372,7 @@ class SeaTarget(Target):
         """
         from kiss.agents.sorcar.sea_commands import (
             base_llm_call_hook,
+            base_llm_response_hook,
             base_prompt,
             base_settings,
             base_tool_call_hook,
@@ -394,6 +395,7 @@ class SeaTarget(Target):
             "tools_hook": functools.partial(base_tools, seas),
             "llm_call_hook": functools.partial(base_llm_call_hook, seas),
             "tool_call_hook": functools.partial(base_tool_call_hook, seas),
+            "llm_response_hook": functools.partial(base_llm_response_hook, seas),
         }
         for setting, key in (
             ("tool_profile", "tool_profile"),

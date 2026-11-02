@@ -23,6 +23,7 @@ import pytest
 
 from kiss.core.kiss_agent import REFUSAL_RETRY_MSG, KISSAgent
 from kiss.core.kiss_error import ModelRefusalError
+from kiss.core.models import model_families
 from kiss.tests.core.models.test_anthropic_stream_stall_timeout import (
     _FAST_FAIL_BUDGET,
     _MODEL,
@@ -84,7 +85,11 @@ class _RefusalHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def refusal_server() -> Generator[str]:
+def refusal_server(monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
+    # A refusal fails over to a model of another family when the machine
+    # has one configured; an empty preference list keeps the retry path
+    # under test instead of a real provider.
+    monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
     _STATE.reset()
     server = _DaemonThreadingHTTPServer(("127.0.0.1", 0), _RefusalHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()

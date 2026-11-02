@@ -63,6 +63,7 @@ from kiss.agents.sorcar.sea_settings import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_verdict import ALLOW
 from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
@@ -257,10 +258,12 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
         assert cmd["maxBudget"] == 2.0 and cmd["useWebTools"] is True
         assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["base_tool", "shared"]
         assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) == ALLOW
+        assert cmd["llmResponseHook"](LLMReply("hi")) == ALLOW
         # The overridden set lists settings and ``prompt`` only, never the
-        # four hooks (they are always staged).
+        # five hooks (they are always staged).
         assert {"prompt", "maxBudget", "useWebTools"} <= overridden
-        assert not {"systemPromptHook", "toolsHook", "llmCallHook", "toolCallHook"} & overridden
+        hooks = {"systemPromptHook", "toolsHook", "llmCallHook", "toolCallHook", "llmResponseHook"}
+        assert not hooks & overridden
 
 
 def test_inheritance_errors_name_the_script(registry: Path) -> None:
@@ -472,12 +475,13 @@ class Sea(BaseSea):
     # Nothing on the command and nothing from the SEA: the daemon fills every setting.
     assert record.pop("defaulted") == sorted(SETTING_FIELDS)
     assert record == {"sea": "noprompt", "channel": False, "pinned": {}}
-    # The four hooks are always staged; here they are all identities.
+    # The five hooks are always staged; here they are all identities.
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
     assert cmd.pop("toolCallHook")("x", {}) == ALLOW
+    assert cmd.pop("llmResponseHook")(LLMReply("hi")) == ALLOW
     assert cmd == {"seaPath": str(sea), "prompt": "kept"}
     with pytest.raises(SeaError, match="must be a path string"):
         apply_sea({"seaPath": 7, "prompt": "p"})
@@ -573,6 +577,8 @@ def test_is_parallel_is_inherited_from_the_calling_agent(
     parent = SorcarAgent("parent")
     parent.model_name = "gpt-6-astra"
     parent._is_parallel = False
+    # Asks for sub-agents: a child on the parent's own model family is not refused.
+    parent.task_description = "run the sub-agents"
     plain = _write(tmp_path / "plain.py", PLAIN_SEA)
     run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), parent)
     run_agent("t", str(plain))

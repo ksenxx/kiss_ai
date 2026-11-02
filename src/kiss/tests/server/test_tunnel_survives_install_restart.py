@@ -140,10 +140,12 @@ class TestEarlyDetachOnSigterm(unittest.TestCase):
                 self.assertTrue(pid_alive(child_pid))
 
                 # The installer's escalation, compressed: SIGTERM, a
-                # short grace (far below the 30s loop-unwind failsafe),
+                # short grace (far below the 30s loop-unwind failsafe,
+                # but room for the shim's fork under a full-suite load:
+                # 2 s was missed once in the 98-way run of 2026-11-01),
                 # then SIGKILL.
                 proc.send_signal(signal.SIGTERM)
-                time.sleep(2.0)
+                time.sleep(5.0)
                 proc.kill()
                 proc.wait(timeout=10.0)
 

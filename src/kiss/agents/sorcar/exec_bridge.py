@@ -39,14 +39,18 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.sorcar.docker_manager import (
+    _FETCH_SCRIPT,
     _KILL_WAIT_S,
     MAX_OUTPUT_CHARS,
     STOPPED_MESSAGE,
+    PendingAppend,
     _refuse_or_lift,
     _timeout_message,
     _with_exit_code,
+    fetched_bytes,
 )
 from kiss.agents.sorcar.useful_tools import (
+    _MAX_BINARY_READ_BYTES,
     _output_budget,
     _stop_requested,
     _truncate_output,
@@ -89,6 +93,21 @@ def _kill_quietly(url: str, token: str) -> None:
         pass
 
 
+def _kill_bounded(url: str, token: str) -> None:
+    """Post ``/kill`` for *token* from a helper thread; wait at most :data:`_KILL_WAIT_S` for it.
+
+    The bridge server sweeps the remote sandbox before it replies, and a
+    stalled sandbox must not hold the task thread for the request's
+    whole socket timeout: the kill goes on with the helper thread.
+    """
+    killer = threading.Thread(
+        target=_kill_quietly, args=(url, token),
+        name=f"exec-bridge-kill-{token[:8]}", daemon=True,
+    )
+    killer.start()
+    killer.join(_KILL_WAIT_S)
+
+
 def bridge_exec(
     url: str, command: str, timeout: float, cancel: threading.Event | None = None,
 ) -> tuple[int | None, str]:
@@ -101,9 +120,10 @@ def bridge_exec(
     kills the command's process tree on the environment through
     ``POST /kill`` and returns at once.  The kill is posted from a helper
     thread and waited for at most :data:`_KILL_WAIT_S`, as
-    ``DockerManager`` does: the bridge server sweeps the remote sandbox
-    before it replies, and a stalled sandbox must not hold the task
-    thread for the request's whole socket timeout.
+    ``DockerManager`` does (:func:`_kill_bounded`).  An exception thrown
+    into this thread's wait (a ``KeyboardInterrupt``, the runner's Stop
+    injected as one) posts the same kill before it propagates, so the
+    command never outlives the call.
 
     Args:
         url: The bridge's base URL (``http://127.0.0.1:<port>``).
@@ -131,17 +151,19 @@ def bridge_exec(
             outcome.append(error)
 
     worker = threading.Thread(target=fetch, name=f"exec-bridge-{token[:8]}", daemon=True)
-    worker.start()
-    while worker.is_alive():
-        if _stop_requested(cancel):
-            killer = threading.Thread(
-                target=_kill_quietly, args=(url, token),
-                name=f"exec-bridge-kill-{token[:8]}", daemon=True,
-            )
-            killer.start()
-            killer.join(_KILL_WAIT_S)
-            return -1, STOPPED_MESSAGE
-        worker.join(0.2)
+    try:
+        worker.start()
+        while worker.is_alive():
+            if _stop_requested(cancel):
+                _kill_bounded(url, token)
+                return -1, STOPPED_MESSAGE
+            worker.join(0.2)
+    except BaseException:
+        # The wait was unwound from outside (an injected Stop, a
+        # KeyboardInterrupt): the request thread and the command on the
+        # environment must not go on without anyone waiting for them.
+        _kill_bounded(url, token)
+        raise
     reply = outcome[0]
     if isinstance(reply, KISSError):
         raise reply
@@ -187,6 +209,9 @@ class ExecBridge:
         self.stream_callback: Callable[[str], None] | None = None
         self.volumes: dict[str, str] = {}
         self.workdir: str | None = None
+        # The append a ``>>`` copy ``Bash`` redirected stands for, until
+        # ``DockerTools.Write`` settles it against the file's current bytes.
+        self.pending_append: PendingAppend | None = None
 
     def __enter__(self) -> ExecBridge:
         if not bridge_alive(self.url):
@@ -220,8 +245,12 @@ class ExecBridge:
             it failed, or the timeout error with the output seen so far.
         """
         print(description)
-        exists = functools.partial(self._path_exists, timeout_seconds, self.stop_event)
-        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds, exists)
+        probe = functools.partial(self._path_test, timeout_seconds, self.stop_event)
+        guard, deadline = _refuse_or_lift(
+            command, self.workdir, timeout_seconds, probe, self.read_bytes,
+            description, max_output_chars, functools.partial(probe, test="-d"),
+            functools.partial(setattr, self, "pending_append"),
+        )
         if guard is not None:
             return guard
         exit_code, output = bridge_exec(self.url, command, deadline, self.stop_event)
@@ -263,7 +292,7 @@ class ExecBridge:
         """Run one ``run_commands_parallel`` command under :meth:`Bash`'s guards; never raises."""
         started = time.monotonic()
         try:  # the guard probes the environment too
-            exists = functools.partial(self._path_exists, timeout_seconds, cancel)
+            exists = functools.partial(self._path_test, timeout_seconds, cancel)
             guard, timeout_seconds = _refuse_or_lift(
                 command, self.workdir, timeout_seconds, exists,
             )
@@ -274,16 +303,51 @@ class ExecBridge:
             exit_code, output = 1, str(error)
         return exit_code, output, time.monotonic() - started
 
-    def _path_exists(
-        self, timeout_seconds: float, cancel: threading.Event | None, path: str,
+    def _path_test(
+        self, timeout_seconds: float, cancel: threading.Event | None, path: str, test: str = "-e",
     ) -> bool:
-        """Whether *path* may exist on the environment (the here-document guard's probe).
+        """Whether *path* may pass ``test <test>`` on the environment (the guards' probe).
 
-        Bounded like the command (its deadline and a Stop).  A probe that
-        gave no answer (timed out or stopped) counts as existing: the copy
-        is refused, never run on a target nobody checked.
+        ``-e`` (the default) asks whether the path exists, the
+        here-document guard's question; ``-d`` whether it is a
+        directory, the question about a ``cd``.  Bounded like the
+        command (its deadline and a Stop).  A probe that gave no answer
+        (timed out or stopped) fails closed either way, as the Docker
+        manager's does: it counts as existing (a copy is refused rather
+        than run on a target nobody checked) and as no directory (a
+        ``cd`` nobody checked authorizes no rewrite after it).
         """
         exit_code, _ = bridge_exec(
-            self.url, f"test -e {shlex.quote(path)}", timeout_seconds, cancel,
+            self.url, f"test {test} {shlex.quote(path)}", timeout_seconds, cancel,
         )
-        return exit_code != 1
+        return exit_code == 0 if test == "-d" else exit_code != 1
+
+    def read_bytes(
+        self,
+        path: str,
+        max_bytes: int = _MAX_BINARY_READ_BYTES,
+        timeout_seconds: float = 60,
+    ) -> bytes:
+        """Return the bytes of the file *path* on the environment.
+
+        One command prints the file's size and its base64
+        (:data:`~kiss.agents.sorcar.docker_manager._FETCH_SCRIPT`), as
+        ``DockerManager.read_bytes`` does; a file over *max_bytes* is
+        not fetched.
+
+        Args:
+            path: The file's path on the environment.
+            max_bytes: The largest file fetched.
+            timeout_seconds: Deadline for the command.
+
+        Returns:
+            The file's bytes.
+
+        Raises:
+            OSError: When the file is missing, unreadable or over
+                *max_bytes*, or the fetch timed out or was stopped.
+        """
+        script = _FETCH_SCRIPT.format(path=shlex.quote(path), max=max_bytes)
+        exit_code, output = bridge_exec(self.url, script, timeout_seconds, self.stop_event)
+        tool_interrupt.raise_if_interrupted()
+        return fetched_bytes(path, max_bytes, exit_code, output)

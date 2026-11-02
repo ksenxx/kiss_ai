@@ -45,6 +45,7 @@ from kiss.core.models.openai_compatible_model import (
     _extract_deepseek_reasoning,
     _function_call_entry,
     _function_call_item,
+    _terminal_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,25 @@ def _hoist(value: Any, nested_key: str) -> Any:
         flat["type"] = nested_key
         return flat
     return value
+
+
+def _terminal_response_error(status: str, reason: str, message: str) -> KISSError:
+    """Return the error for a terminal ``failed`` / ``incomplete`` response.
+
+    Args:
+        status: ``"failed"`` or ``"incomplete"``.
+        reason: The ``incomplete_details.reason`` of an incomplete
+            response (``""`` when absent).
+        message: The error message; it names *reason*.
+
+    Returns:
+        :class:`ContentFilterError` when the content filter stopped the
+        response, :class:`OutputCapError` when it hit ``max_output_tokens``
+        (both make the agentic loop fail over to another model family
+        instead of retrying the same one), else a plain :class:`KISSError`.
+        Only an ``incomplete`` response is typed by its reason.
+    """
+    return _terminal_error(reason if status == "incomplete" else "", "max_output_tokens", message)
 
 
 # The request parameters a Responses call accepts, taken from the SDK's own
@@ -1377,9 +1397,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 self._close_thinking_if_open()
                 # A bare ``error`` event carries the error itself.
                 detail = self._failure_detail(resp) or self._failure_detail(event)
-                ending = "incomplete" if etype == "response.incomplete" else f"with {etype}"
-                raise KISSError(
-                    f"Responses API stream ended {ending}" + (f": {detail}" if detail else "")
+                status = "incomplete" if etype == "response.incomplete" else "failed"
+                ending = status if status == "incomplete" else f"with {etype}"
+                raise _terminal_response_error(
+                    status,
+                    self._incomplete_reason(resp),
+                    f"Responses API stream ended {ending}" + (f": {detail}" if detail else ""),
                 )
             elif etype == "response.completed":
                 saw_completed = True
@@ -1509,14 +1532,28 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 usage the response carries was billed: both callers
                 recorded it in ``_rejected_response`` (for
                 :meth:`take_partial_usage_response`) before calling this.
+                See :func:`_terminal_response_error` for the typed
+                subclasses an ``incomplete`` response raises.
         """
         status = _get_attr_or_key(response, "status")
         if status not in ("failed", "incomplete"):
             return
         detail = self._failure_detail(response)
-        raise KISSError(
-            f"Responses API returned {status} response" + (f": {detail}" if detail else "")
+        raise _terminal_response_error(
+            status,
+            self._incomplete_reason(response),
+            f"Responses API returned {status} response" + (f": {detail}" if detail else ""),
         )
+
+    @staticmethod
+    def _incomplete_reason(response: Any) -> str:
+        """Return ``response.incomplete_details.reason`` (``""`` when absent).
+
+        Args:
+            response: A Responses-API response (SDK object or dict) or ``None``.
+        """
+        details = _get_attr_or_key(response, "incomplete_details")
+        return str(_get_attr_or_key(details, "reason", "") or "")
 
     @staticmethod
     def _failure_detail(carrier: Any) -> str:
@@ -1906,13 +1943,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 the conversation.
         """
         # The conversion builds a new list, so a rejected result leaves
-        # the original one exactly as it was.
+        # the original one exactly as it was.  ``BaseException``: a Stop
+        # (``KeyboardInterrupt``) landing between the pending-call pop and
+        # the output append must restore the queue too, or the resumed
+        # run's resubmission of that result is rejected.
         original = self.conversation
         pending_snapshot = list(self._pending_function_calls)
         self.conversation = self._foreign_items_to_native_input(original)
         try:
             self._add_function_results_inner(function_results)
-        except Exception:
+        except BaseException:
             self.conversation = original
             self._pending_function_calls = pending_snapshot
             raise

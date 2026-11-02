@@ -55,7 +55,7 @@ class TestStartedTabResumeOwnRunningChat:
         server.printer.broadcast = events.append  # type: ignore[assignment]
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda task_id, tab_id: subs.append((task_id, tab_id))
+            lambda task_id, tab_id, headless=False: subs.append((task_id, tab_id))
         )
 
         state = agent_state.AgentState(

@@ -106,9 +106,7 @@ class TestSaveFile:
         target = harness.work_dir / "edit_me.py"
         target.write_text(_PY_SOURCE)
         opened = _open(harness, str(target))
-        st = target.stat()
-        assert opened["version"] == f"{st.st_mtime_ns}:{st.st_size}"
-        assert opened["version"] == _file_version(st)
+        assert opened["version"] == _file_version(target.read_bytes())
         new_text = _PY_SOURCE + "\nprint(greet('web'))\n"
         reply = _save(harness, {
             "path": str(target),
@@ -124,7 +122,7 @@ class TestSaveFile:
         assert reply["tabId"] == "chat-1"
         assert reply["token"] == "content-7"
         assert target.read_text() == new_text
-        assert reply["version"] == _file_version(target.stat())
+        assert reply["version"] == _file_version(target.read_bytes())
         assert reply["version"] != opened["version"]
 
     def test_stale_version_is_a_conflict_until_forced(self, harness) -> None:
@@ -417,7 +415,7 @@ class TestSaveFile:
         assert all(r["conflict"] is True for r in losers)
         winner_idx = int(winners[0]["token"].split("-")[1])
         assert target.read_text().startswith(f"writer-{winner_idx}\n")
-        assert winners[0]["version"] == _file_version(target.stat())
+        assert winners[0]["version"] == _file_version(target.read_bytes())
 
     def test_wrong_string_version_is_a_conflict(self, harness) -> None:
         """Any stamp that is not the file's current one is refused —

@@ -44,6 +44,7 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
 )
 from kiss.tests.conftest import (
+    executor_of,
     requires_openai_api_key,
     requires_openrouter_api_key,
 )
@@ -155,10 +156,10 @@ class TestSorcarOpenRouterLive:
         """gpt-4o -> openrouter ``:free`` model -> gpt-4o, each hop making a
         live tool call; the final model recalls both secrets, proving the
         production hand-off works with OpenRouter in both directions."""
-        agent: Any = SorcarAgent("openrouter-set-model-live")
-        agent._use_web_tools = False
-        tools = agent._get_tools()
-        set_model = _find_tool(tools, "set_model")
+        sorcar: Any = SorcarAgent("openrouter-set-model-live")
+        sorcar._use_web_tools = False
+        set_model = _find_tool(sorcar._get_tools(), "set_model")
+        agent: Any = executor_of(sorcar)
 
         agent.model = model_factory("gpt-4o")
         agent.model_name = "gpt-4o"

@@ -38,6 +38,18 @@ atomic under the GIL — and the interrupting side only ever holds
 begun returning is never injected, and an injection that raced the
 return is drained by :func:`end_tool_call` so it cannot surface later
 in the agent loop.
+
+A call made while the thread already runs one (the ``Write`` a tool's
+:class:`~kiss.core.tool_verdict.ToolRedirect` stands for, its follow-up)
+is registered UNDER the running call: its token names the enclosing
+call as ``parent``, the registry holds the innermost call, and ending
+the nested call puts the enclosing one back.  A Stop on the enclosing
+call's panel finds it through that chain and signals the nested call
+running at the time as well; a nested call that starts under an
+interrupted one (at any depth) starts interrupted and is not run
+(``KISSAgent._execute_tool``), and the agent checks the enclosing
+call's interrupt between the nested calls
+(``KISSAgent._execute_redirected``).
 """
 
 from __future__ import annotations
@@ -146,6 +158,8 @@ class ToolCallToken:
         closing: Set by the tool's thread the moment the tool returned
             (or raised an ordinary error); an interrupt arriving after
             that never injects.
+        parent: The call this one was registered under (the thread's
+            running call at the time, still in progress), or ``None``.
     """
 
     __slots__ = (
@@ -156,6 +170,7 @@ class ToolCallToken:
         "injecting",
         "interrupted",
         "name",
+        "parent",
         "thread",
         "thread_ident",
     )
@@ -170,6 +185,7 @@ class ToolCallToken:
         self.injected = False
         self.injecting = False
         self.closing = False
+        self.parent: ToolCallToken | None = None
 
 
 # Serializes the interrupting side only; the tool's own thread never
@@ -200,12 +216,38 @@ def new_tool_call(name: str) -> ToolCallToken:
 def register_tool_call(token: ToolCallToken) -> None:
     """Make *token*'s call interruptible: publish it for its thread.
 
-    A single dict store, so no lock is held on the tool thread.
+    A call the thread is already running (a redirecting call) becomes
+    the token's ``parent``: it stays in progress underneath and is put
+    back by :func:`unregister_tool_call`.  A Stop already accepted on
+    that call, or on any call it is nested in (it landed before this
+    call started: between the agent's checks around the nested calls)
+    makes this call start interrupted: the agent does not run it
+    (``KISSAgent._execute_tool``), so no watchdog is needed, and none is
+    armed here, on the tool thread (see the module docstring); the
+    enclosing call ends the chain once this one returns.  The registry
+    entry is stored BEFORE the enclosing calls' interrupts are read, and
+    :func:`interrupt_tool_call` stores its mark before it reads the
+    registry: whichever side runs first, one of them sees the other's
+    store, so a Stop landing while this call registers is never lost.
+    Every enclosing call is read, not the parent alone, because the
+    click marks the calls nested in the clicked one AFTER it reads the
+    registry: a call registering meanwhile is in neither that snapshot
+    nor its parent's mark, and only the clicked call's mark reaches it.
+    Plain reads and stores, so no lock is held on the tool thread.
 
     Args:
         token: The token :func:`new_tool_call` returned on this thread.
     """
+    parent = _RUNNING.get(token.thread_ident)
+    token.parent = parent
     _RUNNING[token.thread_ident] = token
+    enclosing = parent
+    while enclosing is not None:
+        if enclosing.interrupted and not enclosing.closing:
+            token.interrupted = True
+            token.event.set()
+            return
+        enclosing = enclosing.parent
 
 
 def drain_pending_interrupt() -> None:
@@ -255,7 +297,10 @@ def unregister_tool_call(token: ToolCallToken) -> None:
     while token.injecting and time.monotonic() < deadline:
         time.sleep(0.001)
     if _RUNNING.get(token.thread_ident) is token:
-        _RUNNING.pop(token.thread_ident, None)
+        if token.parent is None:
+            _RUNNING.pop(token.thread_ident, None)
+        else:
+            _RUNNING[token.thread_ident] = token.parent
 
 
 def end_tool_call(token: ToolCallToken) -> None:
@@ -448,20 +493,33 @@ def _inject_after_grace(token: ToolCallToken) -> None:
     _inject_unless_closing(token)
 
 
+def _calls_in_progress() -> list[ToolCallToken]:
+    """Every registered call and, through ``parent``, every call one is nested in."""
+    calls: list[ToolCallToken] = []
+    # ``list()`` snapshots the dict atomically; a tool thread may be
+    # storing its own key meanwhile.
+    for registered in list(_RUNNING.values()):
+        token: ToolCallToken | None = registered
+        while token is not None:
+            calls.append(token)
+            token = token.parent
+    return calls
+
+
 def _running_call(thread_ident: int, call_id: int | None) -> ToolCallToken | None:
     """Return the call thread *thread_ident* runs, or the one *call_id* names.
 
     The thread is tried first; when *call_id* is given and that thread
-    runs some other call (or none), the id is searched for: a tool
+    runs some other call (or none), the id is searched for among the
+    calls in progress, the enclosing ones included: a redirecting call
+    is in progress while the call it redirected to runs, and a tool
     Codex calls over the MCP bridge runs on a bridge thread the caller
     does not know, while the id, process-unique, still names exactly
     that call.
     """
     token = _RUNNING.get(thread_ident)
     if call_id is not None and (token is None or token.call_id != call_id):
-        # ``list()`` snapshots the dict atomically; a tool thread may be
-        # storing its own key meanwhile.
-        token = next((t for t in list(_RUNNING.values()) if t.call_id == call_id), None)
+        token = next((t for t in _calls_in_progress() if t.call_id == call_id), None)
     return token
 
 
@@ -508,19 +566,45 @@ def interrupt_tool_call(
         # Already signalled; a second click must not arm a second
         # watchdog.
         return True
-    token.interrupted = True
-    token.event.set()
+    # The mark is stored before the registry is read below: a call
+    # registering itself under this one meanwhile (at any depth) stores
+    # its registry entry before it reads the marks of the calls it is
+    # nested in (register_tool_call), so one side or the other sees the
+    # nested call interrupted.
+    _signal(token, thread_ident)
+    # A call nested in the interrupted one (the thread's registered
+    # call, down from the interrupted one through ``parent``) is what
+    # runs now: it is signalled too, so the Stop lands in it and the
+    # interrupted call ends once it returns.  One signalled already —
+    # by its own panel (its watchdog is armed) or because it started
+    # interrupted (the agent does not run it) — is left as it is.
+    nested: list[ToolCallToken] = []
+    running = _RUNNING.get(token.thread_ident)
+    while running is not None and running is not token:
+        nested.append(running)
+        running = running.parent
+    if running is token:
+        for call in nested:
+            if not call.interrupted:
+                _signal(call, thread_ident)
+    return True
+
+
+def _signal(call: ToolCallToken, thread_ident: int) -> None:
+    """Mark *call* interrupted, set its event and arm its watchdog.  Called under the lock."""
+    call.interrupted = True
+    call.event.set()
     logger.info(
         "Interrupting tool call %s (#%d) on thread %s",
-        token.name,
-        token.call_id,
+        call.name,
+        call.call_id,
         thread_ident,
     )
     try:
         threading.Thread(
             target=_inject_after_grace,
-            args=(token,),
-            name=f"tool-interrupt-{token.call_id}",
+            args=(call,),
+            name=f"tool-interrupt-{call.call_id}",
             daemon=True,
         ).start()
     except RuntimeError:  # pragma: no cover — thread exhaustion
@@ -530,7 +614,6 @@ def interrupt_tool_call(
         logger.warning(
             "Tool interrupt watchdog for %s could not start; the call is "
             "signalled cooperatively only",
-            token.name,
+            call.name,
             exc_info=True,
         )
-    return True

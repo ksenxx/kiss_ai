@@ -5,8 +5,11 @@
 
 """Docker library for managing Docker containers and executing commands."""
 
+import base64
+import binascii
 import codecs
 import functools
+import json
 import logging
 import os
 import queue
@@ -18,18 +21,30 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
-from kiss.agents.sorcar.edit_guards import heredoc_guard, rewrite_guard
+from kiss.agents.sorcar.edit_guards import (
+    edit_call,
+    heredoc_copy,
+    heredoc_guard,
+    mechanical_edit,
+    preview,
+    rewrite_guard,
+)
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
+    _MAX_BINARY_READ_BYTES,
     _output_budget,
     _stop_requested,
     _truncate_output,
+    cd_refusal,
+    edit_args,
+    followup_call,
+    rewrite_redirect,
     run_commands_pool,
 )
 from kiss.core import tool_interrupt
@@ -47,6 +62,25 @@ MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_default_chars
 #: command was killed by a task Stop or a tool-panel Stop; ``DockerTools``
 #: reads it to know that a follow-up command would be killed the same way.
 STOPPED_MESSAGE = "Killed: the task was stopped."
+
+
+class PendingAppend(NamedTuple):
+    """The append a redirected ``>>`` copy stands for, until its ``Write`` lands.
+
+    :func:`_rewrite_instead` redirects ``cat >> path`` to a ``Write`` of
+    *snapshot* (the file's bytes when the redirect was raised, decoded)
+    followed by *body*; the manager keeps it as ``pending_append`` so
+    ``DockerTools.Write`` appends *body* to the file as it is when the
+    Write lands instead (the agent's hook runs in between, and another
+    writer's append must not be overwritten by the stale snapshot).  It
+    belongs to that Write alone: the next call, whichever it is, takes
+    or drops it.
+    """
+
+    path: str
+    snapshot: bytes
+    body: str
+
 
 #: Environment variable used to tag an exec — and every process
 #: it spawns — so a timed-out command can be killed by matching
@@ -271,7 +305,15 @@ def _timeout_message(timeout_seconds: float, output: str) -> str:
 
 
 def _refuse_or_lift(
-    command: str, workdir: str | None, timeout_seconds: float, exists: Callable[[str], bool],
+    command: str,
+    workdir: str | None,
+    timeout_seconds: float,
+    exists: Callable[[str], bool],
+    read_bytes: Callable[[str], bytes] | None = None,
+    description: str = "",
+    max_output_chars: int = MAX_OUTPUT_CHARS,
+    isdir: Callable[[str], bool] | None = None,
+    remember: Callable[[PendingAppend | None], None] | None = None,
 ) -> tuple[str | None, float]:
     """Apply the guards of the container ``Bash`` tools to *command*.
 
@@ -280,15 +322,184 @@ def _refuse_or_lift(
     belong in ``Edit``: :func:`rewrite_guard`, and :func:`heredoc_guard`,
     which calls *exists* to learn whether a here-document's target exists
     in the container (or the exec bridge's environment, whose *workdir*
-    is ``None`` when unknown).
+    is ``None`` when unknown).  With *read_bytes* and *isdir* (the
+    ``Bash`` tools pass them; ``run_commands_parallel`` cannot redirect
+    a command and passes none) a literal here-document copy or
+    mechanical edit is redirected to the ``Write``/``Edit`` it stands
+    for (:func:`_rewrite_instead`) instead of being refused; the rest
+    of a compound command then runs as a ``Bash`` call with the
+    original call's *description*, *timeout_seconds* and
+    *max_output_chars*, *isdir* tells whether its leading ``cd``
+    names a directory there, and *remember* keeps the
+    :class:`PendingAppend` of a redirected ``>>`` copy on the manager,
+    after dropping (``None``) the one an earlier call left there: its
+    Write was refused, and it belonged to that Write alone.
 
     Returns:
         ``(refusal, timeout_seconds)``: the guard's message (``None``
         when the command may run) and the possibly lifted deadline.
+
+    Raises:
+        ToolRedirect: The ``Write``/``Edit`` to make instead of *command*.
     """
+    if remember is not None:
+        remember(None)
     guard, timeout_seconds = refuse_or_lift(command, workdir, timeout_seconds)
+    if guard is None and read_bytes is not None and isdir is not None and remember is not None:
+        guard = _rewrite_instead(
+            command, workdir, exists, isdir, read_bytes, description, timeout_seconds,
+            max_output_chars, remember,
+        )
     refusal = guard or rewrite_guard(command) or heredoc_guard(command, workdir, exists)
     return refusal, timeout_seconds
+
+
+def _rewrite_instead(
+    command: str,
+    workdir: str | None,
+    exists: Callable[[str], bool],
+    isdir: Callable[[str], bool],
+    read_bytes: Callable[[str], bytes],
+    description: str,
+    timeout_seconds: float,
+    max_output_chars: int,
+    remember: Callable[[PendingAppend], None],
+) -> str | None:
+    """Redirect a shell rewrite of a container file to the ``Write``/``Edit`` it stands for.
+
+    A ``cat``/``tee`` here-document copy into one literal path
+    (:func:`heredoc_copy`) stands for a ``Write`` of its body (after
+    the current text for an append, which *remember* keeps as the
+    :class:`PendingAppend` the ``Write`` settles against the file's
+    bytes when it lands, whether or not the file exists yet); a python
+    ``.replace`` rewrite or a one-substitution ``sed -i``
+    (:func:`mechanical_edit`) for the ``Edit`` it spells out, with the
+    pairs exact for the file's text (:meth:`MechanicalEdit.edits_for`,
+    read from the container when they depend on it; when none is, the
+    other guards decide).  The call is raised as the redirect the agent
+    makes through its hook, guard and events, with the rest of a
+    compound command as the follow-up ``Bash`` call
+    (:func:`followup_call`); a ``cd`` to anything but a directory is
+    refused up front, as bash would run nothing after it.  The
+    container tracks no shown files, so the target need not have been
+    read; a copy creating a new file is redirected too, and a copy into
+    ``/dev/`` runs.
+
+    Args:
+        command: The shell command text.
+        workdir: The directory it starts in (``None`` when unknown).
+        exists: Whether a path exists in the container.
+        isdir: Whether a path is a directory in the container.
+        read_bytes: Fetches a file's bytes from the container.
+        description: The ``Bash`` call's description, for the follow-up.
+        timeout_seconds: The call's deadline, for the follow-up.
+        max_output_chars: The call's output budget, for the follow-up.
+        remember: Keeps the pending append on the manager.
+
+    Returns:
+        ``None`` when *command* is no such rewrite (the other guards
+        decide), else the refusal of an append whose current text could
+        not be read or of a ``cd`` to a missing directory.
+
+    Raises:
+        ToolRedirect: The call to make instead.
+    """
+    copy = heredoc_copy(command, workdir)
+    if copy is not None and copy.path is not None and not copy.path.startswith("/dev/"):
+        refusal = cd_refusal(copy.cwd, isdir)
+        if refusal is not None:
+            return refusal
+        content = copy.body
+        if copy.append:
+            snapshot = b""
+            if exists(copy.path):
+                try:
+                    snapshot = read_bytes(copy.path)
+                    content = snapshot.decode("utf-8") + content
+                except (OSError, UnicodeDecodeError) as e:
+                    return f"Error: cannot append to {copy.path}: {e}"
+            # Remembered for an absent target too: another writer may
+            # create the file before the Write lands, and ``>>`` would
+            # have kept its bytes.
+            remember(PendingAppend(copy.path, snapshot, copy.body))
+        call = f"Write(file_path={json.dumps(copy.path)}, content={preview(content)})"
+        args = {"file_path": copy.path, "content": content}
+        followup = followup_call(
+            copy.cwd, copy.remainder, description, timeout_seconds, max_output_chars,
+        )
+        raise rewrite_redirect("Write", args, call, copy.append, followup)
+    edit = mechanical_edit(command, workdir)
+    if edit is not None and edit.path is not None:
+        refusal = cd_refusal(edit.cwd, isdir)
+        if refusal is not None:
+            return refusal
+        edits: list[tuple[str, str, bool]] | None = edit.edits
+        if edit.text_dependent and exists(edit.path):
+            try:
+                edits = edit.edits_for(read_bytes(edit.path).decode("utf-8"))
+            except (OSError, UnicodeDecodeError):
+                # A text nobody could read (too large, not UTF-8) settles no
+                # exact Edit: the other guards decide.
+                logger.debug("could not read %s for its exact edits", edit.path, exc_info=True)
+                edits = None
+        if edits is None:
+            return None
+        followup = followup_call(
+            edit.cwd, edit.remainder, description, timeout_seconds, max_output_chars,
+        )
+        call = edit_call(edit.path, edits)
+        raise rewrite_redirect("Edit", edit_args(edit.path, edits), call, followup=followup)
+    return None
+
+
+#: Prints the byte size of ``{path}`` and, when it is at most ``{max}``
+#: bytes, its base64 on a second line (:func:`fetched_bytes` decodes both).
+#: POSIX tools only: ``base64`` reads its standard input everywhere, while
+#: GNU's ``-w0`` (no line wrapping) is rejected by the BSD one of macOS,
+#: so the wrapping is taken out with ``tr``.
+_FETCH_SCRIPT = (
+    "size=$(wc -c < {path}) && echo \"$size\" && [ \"$size\" -le {max} ]"
+    " && base64 < {path} | tr -d '\\n'"
+)
+
+
+def fetched_bytes(path: str, max_bytes: int, exit_code: int | None, output: str) -> bytes:
+    """Decode what :data:`_FETCH_SCRIPT` printed for *path* into the file's bytes.
+
+    Args:
+        path: The file, for the error.
+        max_bytes: The size the script was given.
+        exit_code: The script's exit code (``None`` when it timed out).
+        output: What it printed.
+
+    Returns:
+        The file's bytes.
+
+    Raises:
+        OSError: When the file is missing, unreadable or over *max_bytes*,
+            the fetch gave no answer (timed out or stopped), or the base64
+            does not decode to the announced size (the pipeline's exit
+            code is ``tr``'s, so an encoder that died mid-file is caught
+            here).
+    """
+    size, _, encoded = output.partition("\n")
+    if not size.strip().isdigit():
+        reason = output.strip() or ("timed out" if exit_code is None else f"exit code {exit_code}")
+        raise OSError(f"cannot read {path}: {reason}")
+    if int(size) > max_bytes:
+        raise OSError(
+            f"{path} is {size.strip()} bytes, over the {max_bytes} byte limit; use Bash tools "
+            "(ffmpeg, ImageMagick) to produce a smaller artifact first"
+        )
+    if exit_code != 0:
+        raise OSError(f"cannot read {path}: {encoded.strip() or 'the fetch did not finish'}")
+    try:
+        data = base64.b64decode(encoded.strip(), validate=True)
+    except binascii.Error as e:
+        raise OSError(f"cannot read {path}: the fetched base64 is damaged ({e})") from e
+    if len(data) != int(size):
+        raise OSError(f"cannot read {path}: fetched {len(data)} of its {int(size)} bytes")
+    return data
 
 
 def _with_exit_code(output: str, exit_code: int) -> str:
@@ -340,9 +551,14 @@ class _ExecRun:
     one would poll until the container closes.
     """
 
-    def __init__(self, manager: "DockerManager", container_id: str | None, command: str) -> None:
+    def __init__(self, manager: "DockerManager", container: Container, command: str) -> None:
         self.manager = manager
-        self.container_id = container_id
+        # The container the exec is created in, kept by the run itself:
+        # the reaper sweeps it even after a ``close()`` of an attached
+        # manager nulled ``manager.container`` while the container, owned
+        # by someone else, lives on with the delayed command inside.
+        self.container = container
+        self.container_id = container.id
         self.command = command
         self.token = uuid.uuid4().hex
         self.exec_id = ""  # set by the worker before it commits to starting
@@ -443,28 +659,31 @@ class _ExecRun:
         exited while background children it spawned (``sleep 71 &``)
         live on, holding the output stream open; they carry the token
         too and die here.  A never-started exec is watched for as long
-        as the container lives — a fixed window would let a start
-        delayed past it run forever, the exact bug this reaper exists
-        to prevent — unless the daemon refused the start.  The poll
-        interval backs off so an indefinitely delayed start costs one
-        inspect every few seconds.
+        as its container lives (the inspect fails once the container
+        is removed) — a fixed window would let a start delayed past it
+        run forever, the exact bug this reaper exists to prevent — unless
+        the daemon refused the start.  The watch is on the exec's own
+        container, not on ``manager.container``: a ``close()`` of an
+        attached manager drops that handle while the container lives
+        on.  The poll interval backs off so an indefinitely delayed
+        start costs one inspect every few seconds.
 
         Args:
             swept: Set once the first sweep has run.
         """
         try:
-            self.manager._kill_exec(self.token)
+            self.manager._kill_exec(self.token, self.container)
         finally:
             swept.set()
         interval = _REAP_POLL_INTERVAL_S
-        while self.manager.container is not None and not self.start_refused:
+        while not self.start_refused:
             try:
                 info = self.manager.client.api.exec_inspect(self.exec_id)
             except Exception:  # container/exec already gone
                 logger.debug("could not inspect timed-out exec", exc_info=True)
                 return
             if info.get("Pid"):
-                self.manager._kill_exec(self.token)
+                self.manager._kill_exec(self.token, self.container)
                 if not info.get("Running"):
                     return  # the exec itself is finished; its tree is swept
             time.sleep(interval)
@@ -542,6 +761,9 @@ class DockerManager:
         # The task's stop event, when the owning agent has one:
         # ``run_commands_parallel`` kills its running execs on it.
         self.stop_event: threading.Event | None = None
+        # The append a ``>>`` copy ``Bash`` redirected stands for, until
+        # ``DockerTools.Write`` settles it against the file's current bytes.
+        self.pending_append: PendingAppend | None = None
 
         self.attached_container: str | None = None
         if image_name.startswith(ATTACH_PREFIX):
@@ -694,8 +916,12 @@ class DockerManager:
 
         print(description)
 
-        exists = functools.partial(self._path_exists, container, timeout_seconds, self.stop_event)
-        guard, deadline = _refuse_or_lift(command, self.workdir, timeout_seconds, exists)
+        probe = functools.partial(self._path_test, container, timeout_seconds, self.stop_event)
+        guard, deadline = _refuse_or_lift(
+            command, self.workdir, timeout_seconds, probe, self.read_bytes,
+            description, max_output_chars, functools.partial(probe, test="-d"),
+            functools.partial(setattr, self, "pending_append"),
+        )
         if guard is not None:
             return guard
         exit_code, output = self._exec(
@@ -779,7 +1005,7 @@ class DockerManager:
         """
         started = time.monotonic()
         try:  # the guard probes the container too
-            exists = functools.partial(self._path_exists, container, timeout_seconds, cancel)
+            exists = functools.partial(self._path_test, container, timeout_seconds, cancel)
             guard, timeout_seconds = _refuse_or_lift(
                 command, self.workdir, timeout_seconds, exists,
             )
@@ -791,24 +1017,65 @@ class DockerManager:
             exit_code, output = -1, f"Error: {e}"
         return exit_code, output, time.monotonic() - started
 
-    def _path_exists(
+    def _path_test(
         self,
         container: Container,
         timeout_seconds: float,
         cancel: threading.Event | None,
         path: str,
+        test: str = "-e",
     ) -> bool:
-        """Whether *path* may exist in *container* (the here-document guard's probe).
+        """Whether *path* may pass ``test <test>`` in *container* (the guards' probe).
 
-        The probe is an exec like any command (:meth:`_exec`), so the
-        command's deadline and a Stop bound it.  A probe that gave no
-        answer (timed out or stopped) counts as existing: the copy is
-        refused, never run on a target nobody checked.
+        ``-e`` (the default) asks whether the path exists, the
+        here-document guard's question; ``-d`` whether it is a
+        directory, the question about a ``cd``.  The probe is an exec
+        like any command (:meth:`_exec`), so the command's deadline and
+        a Stop bound it.  A probe that gave no answer (timed out or
+        stopped) fails closed either way: it counts as existing, so a
+        copy is refused rather than run on a target nobody checked, and
+        as no directory, so a ``cd`` nobody checked authorizes no
+        rewrite after it.
         """
         exit_code, _ = self._exec(
-            container, f"test -e {shlex.quote(path)}", timeout_seconds, cancel,
+            container, f"test {test} {shlex.quote(path)}", timeout_seconds, cancel,
         )
-        return exit_code != 1
+        return exit_code == 0 if test == "-d" else exit_code != 1
+
+    def read_bytes(
+        self,
+        path: str,
+        max_bytes: int = _MAX_BINARY_READ_BYTES,
+        timeout_seconds: float = 60,
+    ) -> bytes:
+        """Return the bytes of the file *path* in the container.
+
+        One exec prints the file's size and its base64
+        (:data:`_FETCH_SCRIPT`), so neither the text decoding nor the
+        output cap of :meth:`Bash` touches the bytes; a file over
+        *max_bytes* is not fetched.  What ``Read`` attaches an image or
+        a PDF with, and an appending here-document reads the current
+        text with.
+
+        Args:
+            path: The file's path in the container (a relative one
+                resolves against the working directory).
+            max_bytes: The largest file fetched.
+            timeout_seconds: Deadline for the exec.
+
+        Returns:
+            The file's bytes.
+
+        Raises:
+            OSError: When the file is missing, unreadable or over
+                *max_bytes*, or the fetch timed out or was stopped.
+            KISSError: If no container is open.
+        """
+        container = self._open_container()
+        script = _FETCH_SCRIPT.format(path=shlex.quote(path), max=max_bytes)
+        exit_code, output = self._exec(container, script, timeout_seconds, self.stop_event)
+        tool_interrupt.raise_if_interrupted()
+        return fetched_bytes(path, max_bytes, exit_code, output)
 
     def _exec(
         self,
@@ -857,7 +1124,7 @@ class DockerManager:
             that lands while the worker's final item is being taken
             still wins over a known exit code.
         """
-        run = _ExecRun(self, container.id, command)
+        run = _ExecRun(self, container, command)
         threading.Thread(
             target=run.run_worker, name=f"docker-exec-worker-{run.token[:8]}", daemon=True,
         ).start()
@@ -937,7 +1204,7 @@ class DockerManager:
         )
         return str(resp["Id"])
 
-    def _kill_exec(self, token: str) -> None:
+    def _kill_exec(self, token: str, container: Container | None = None) -> None:
         """Kill the container-side processes of a timed-out exec.
 
         Without this the hung command keeps running (and holding the
@@ -949,12 +1216,17 @@ class DockerManager:
 
         Args:
             token: The unique tag given to the exec's environment.
+            container: The container the exec was created in (the
+                reaper passes its run's own, which outlives a ``close()``
+                of an attached manager); the manager's current one when
+                ``None``.
         """
-        # Snapshot: the reaper's poll loop calls this without the
-        # lifecycle lock, so a concurrent close() can null
-        # ``self.container`` after its own liveness check.  A closed container took the tagged
-        # process tree with it — nothing is left to kill.
-        container = self.container
+        if container is None:
+            # Snapshot: called without the lifecycle lock, so a concurrent
+            # close() can null ``self.container`` after a liveness check.
+            # A closed container took the tagged process tree with it —
+            # nothing is left to kill.
+            container = self.container
         if container is None:
             return
         try:
@@ -1024,6 +1296,15 @@ class DockerManager:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             print(f"Failed to remove container {container_id}: {e}")
+            # A failed stop leaves the container running and the plain
+            # remove refused: force it, as the failure path of open()
+            # does.  A container still not removed keeps its name on the
+            # manager (the handle is dropped, as there) so a later close()
+            # retries by name instead of forgetting a running container
+            # and deleting the shared directory it still mounts.
+            self._discard_container()
+            if self.container_name is not None:
+                return
 
         self.container = None
         self.container_name = None
@@ -1033,11 +1314,11 @@ class DockerManager:
     def _discard_container(self) -> None:
         """Force-remove the container :meth:`open` created, by handle or by its name.
 
-        The failure path of :meth:`open` and the no-handle path of
-        :meth:`close`: a container the daemon made but whose handle
-        never reached ``self.container`` (a Stop inside
-        ``containers.create()``) is found by ``container_name``.  A
-        name the daemon never created (the create call itself failed)
+        The failure path of :meth:`open`, and the no-handle and
+        refused-remove paths of :meth:`close`: a container the daemon
+        made but whose handle never reached ``self.container`` (a Stop
+        inside ``containers.create()``) is found by ``container_name``.
+        A name the daemon never created (the create call itself failed)
         is a no-op; any other failure to remove is reported and leaves
         the name on the manager, so a later :meth:`close` retries.
         """

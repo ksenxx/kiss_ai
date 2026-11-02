@@ -159,7 +159,7 @@ def test_timeout_hands_back_a_running_job_whose_result_wait_collects(
 
     model = StandInModelServer(responder)
     try:
-        result = _run_parent(home, daemon, model, "PARENT run a slow child with a 1s bound")
+        result = _run_parent(home, daemon, model, "PARENT run a slow sub-agent with a 1s bound")
         assert result.success is True, result
         assert "parent done" in result.text
         notice = parent_steps[1]
@@ -219,7 +219,7 @@ def test_kill_after_the_notice_stops_the_sub_task(
 
     model = StandInModelServer(responder)
     try:
-        result = _run_parent(home, daemon, model, "PARENT start a child and kill it")
+        result = _run_parent(home, daemon, model, "PARENT start a sub-agent and kill it")
         assert result.success is True, result
         assert "is still running after 1s as job agent-" in parent_steps[1]
         assert observed["live_before_kill"] is True
@@ -260,7 +260,7 @@ def test_finish_is_rejected_once_with_live_jobs_and_the_parents_end_kills_them(
 
     model = StandInModelServer(responder)
     try:
-        result = _run_parent(home, daemon, model, "PARENT start a job and finish at once")
+        result = _run_parent(home, daemon, model, "PARENT start a sub-agent job and finish at once")
         assert result.success is True, result
         # The first finish (step 2) was rejected with the gate text; the
         # second (step 3) ended the task.

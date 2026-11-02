@@ -128,7 +128,7 @@ class TestEventWriterThreadRace:
         th._stop_event_writer()
         import json as _json
 
-        th._event_queue.put(
+        th._event_deque.append(
             (task_id, _json.dumps({"type": "text_delta", "text": "x"}),
              time.time(), th._current_db_path())
         )

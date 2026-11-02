@@ -29,7 +29,6 @@ import pytest
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.coding import coding_sea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.edit_guards import HEREDOC_UNRESOLVED_VERDICT
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.tool_verdict import ALLOW, refuse
@@ -329,22 +328,14 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     )
     for command in ("kill -9 1234", "rm -rf /app/build", "rm -rf /apps", "rm -rf /tmp/x"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
-    # a foreground sleep of SLEEP_POLL_SECONDS or more is a poll: refused in favour
-    # of bash_job; short sleeps, python's time.sleep and a background job's own
-    # sleeps are not
-    for command, seconds in (("(make &); sleep 100; tail -3 build.log", "100"),
-                             ("cd /tmp && sleep 60; grep BEST c.log", "60"),
-                             ("while true; do sleep 10; done", "10"),
-                             ("[ -f x ] && sleep 30s", "30")):
-        verdict = plain.on_tool_call("Bash", {"command": command})
-        assert verdict == refuse(coding_sea.SLEEP_VERDICT.format(seconds=seconds)), command
-    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "sleep 20"]'}) == \
-        refuse(coding_sea.SLEEP_VERDICT.format(seconds="20"))
-    for command in ("sleep 2; cat log", "python3 -c 'import time; time.sleep(100)'",
-                    "grep sleep 100 notes.txt", "./sleep 100",
-                    "nohup sh -c 'sleep 1; sleep 301' >/dev/null 2>&1 &",
-                    "cat > run.sh <<'EOF'\n#!/bin/sh\nsleep 100\nEOF"):
+    # a foreground sleep, long or short, is the Bash tool's business (it waits on
+    # the running job instead of sleeping): the harness refuses none of them
+    for command in ("(make &); sleep 100; tail -3 build.log", "cd /tmp && sleep 60; grep BEST x",
+                    "while true; do sleep 10; done", "[ -f x ] && sleep 30s", "sleep 2; cat log",
+                    "python3 -c 'import time; time.sleep(100)'", "./sleep 100",
+                    "nohup sh -c 'sleep 1; sleep 301' >/dev/null 2>&1 &"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
+    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "sleep 20"]'}) == ALLOW
     assert plain.on_tool_call("Bash", {"command": "sleep 100; make", "background": True}) == ALLOW
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
@@ -359,22 +350,19 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     args = {"command": "pytest -q"}
     assert plain.on_tool_call("Bash", args) == ALLOW
     assert args["timeout_seconds"] == coding_sea.DEFAULT_SHELL_TIMEOUT
-    # a here-document that creates a file passes (no container here: nothing
-    # exists, so every target is new); a target the shell resolves at run time
-    # is refused as a possible rewrite; the live-container test covers an
-    # existing target.  A multi-line sed -i or a Python rewrite is refused.
+    # a here-document, a Python rewrite or a multi-line sed -i is the Bash tool's
+    # business too (it applies a rewrite as a Write/Edit through the agent): the
+    # harness lets them all through, a target resolved at run time included
     for command in ("cat > /app/x.py <<'EOF'\nprint(1)\nEOF", "cat <<EOF | tee /app/x\nhi\nEOF",
                     "ls\ncat <<EOF >> /app/log\nline\nEOF",
                     "python3 - <<'EOF'\nprint(open('/app/x').read())\nEOF",
                     "cat <<EOF\nhello\nEOF", "grep -c '<<' /app/x.py > /dev/null",
-                    "cmd 2>&1 | head"):
+                    "cmd 2>&1 | head", "cat > \"$OUT\" <<EOF\nx\nEOF",
+                    "sed -i 's/a/b\\nc/' /app/x.py",
+                    "cat > run.sh <<'EOF'\n#!/bin/sh\nsleep 100\nEOF"):
         assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
     assert plain.on_tool_call("run_commands_parallel",
                               {"commands": '["ls", "cat > /app/x <<EOF\\nx\\nEOF"]'}) == ALLOW
-    dynamic = plain.on_tool_call("Bash", {"command": "cat > \"$OUT\" <<EOF\nx\nEOF"})
-    assert dynamic == refuse(HEREDOC_UNRESOLVED_VERDICT.format(path="$OUT"))
-    sed = plain.on_tool_call("Bash", {"command": "sed -i 's/a/b\\nc/' /app/x.py"})
-    assert not sed.allowed and "Edit(" in sed.text
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
     assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900
@@ -404,21 +392,29 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     # no clock: a success claim is checked at once.  No container here, so the
     # agent's verifier is "missing": refused up to MAX_VERIFIER_REFUSALS
     # times, then the run is let go, as a finish no check vouched for
-    missing = refuse(coding_sea.VERIFIER_MISSING_VERDICT.format(path=coding_sea.VERIFIER_PATH))
-    assert gated.on_tool_call("finish", {"success": "true"}) == missing
-    for _ in range(coding_sea.MAX_VERIFIER_REFUSALS - 1):
-        assert gated.on_tool_call("finish", {"success": True}) == missing
+    verdict = coding_sea.VERIFIER_MISSING_VERDICT.format(path=coding_sea.VERIFIER_PATH)
+    rounds = coding_sea.MAX_GATE_ROUNDS
+    assert gated.on_tool_call("finish", {"success": "true"}) == refuse(
+        coding_sea.gate_refusal(1, rounds, [verdict]))
+    for round_number in range(2, coding_sea.MAX_VERIFIER_REFUSALS + 1):
+        assert gated.on_tool_call("finish", {"success": True}) == refuse(
+            coding_sea.gate_refusal(round_number, rounds, [verdict]))
     trajectory = tmp_path / "trajectory.jsonl"
     before = trajectory.stat().st_size
     assert not coding_sea.ended_unchecked(trajectory, before)
-    assert gated.on_tool_call("finish", {"success": True}) == ALLOW
+    # past the cap the finish goes through as unverified, with the caveat on the summary
+    capped: dict[str, object] = {"success": True}
+    assert gated.on_tool_call("finish", capped) == ALLOW
+    assert "Delivered after 3 refused finish rounds" in str(capped["summary_in_html"])
+    assert "Checks did not run: the agent&#x27;s verifier" in str(capped["summary_in_html"])
     assert gated.on_tool_call("finish", {}) == ALLOW
     assert coding_sea.ended_unchecked(trajectory, before)
     unverified = [e for e in coding_sea.trajectory_events(trajectory, before)
                   if e["event"] == "unverified_finish"]
     assert [e["refusals"] for e in unverified] == [3]
     gated2 = harness(finish_gate=True, workdir="/testbed")
-    assert gated2.on_tool_call("finish", {"success": True}) == missing
+    assert gated2.on_tool_call("finish", {"success": True}) == refuse(
+        coding_sea.gate_refusal(1, rounds, [verdict]))
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == refuse(blocked)
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == ALLOW
     # the ledger gate: an edit under the workdir is refused (twice at most) until
@@ -435,9 +431,13 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert plain.on_tool_call("Write", {"file_path": "/app/x", "content": ""}) == ALLOW  # no gate
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
     gate_events = [e for e in events
-                   if e.get("tool") == "finish" and e["args"] == {"success": True}]
+                   if e.get("tool") == "finish" and e["args"].get("success") is True]
     assert [e["blocked"] for e in gate_events] == [False, True, True, False, True]
-    assert [e["result"] for e in events if e["event"] == "verifier"] == ["missing"] * 4
+    # four gated success claims ran the verifier (the fifth claim was past the refusal
+    # cap: skipped), and the give-up ran it once more
+    assert [e["result"] for e in events if e["event"] == "verifier"] == ["missing"] * 5
+    stages = [(e["stage"], e["outcome"]) for e in events if e["event"] == "gate_stage"]
+    assert stages.count(("verifier", "skipped")) == 1 and stages.count(("verifier", "fail")) == 4
     assert [e["turn"] for e in events if e["event"] == "implicit_finish"] == [0, 0]
     # the prompt carries the environment rule and no benchmark-specific wording; the trial
     # config takes the gate from the environment

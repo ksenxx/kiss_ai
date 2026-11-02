@@ -52,6 +52,7 @@ import hmac
 import json
 import logging
 import secrets
+import socket
 import threading
 import time
 from concurrent.futures import Future
@@ -66,6 +67,7 @@ from websockets.sync.server import Server, ServerConnection, serve
 from kiss.core.brand import BRAND, PRODUCT_NAME, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import LockTimeoutError, locked_call
 from kiss.core.user_config import load_config
 from kiss.core.utils import atomic_write_text
 
@@ -170,13 +172,20 @@ def start_if_enabled() -> None:
 
 
 class _Connection:
-    """One authenticated extension connection, its send lock and its commands."""
+    """One authenticated extension connection, its send lock and its commands.
+
+    The locks are reentrant because task threads take them through
+    :func:`~kiss.core.locked.locked_call`: a Stop (an injected
+    ``KeyboardInterrupt``) landing right after a plain ``with``'s
+    acquire would leave the lock held by a dead thread (CPython
+    gh-74174), wedging every later command.
+    """
 
     def __init__(self, ws: ServerConnection):
         self.ws = ws
-        self.lock = threading.Lock()  # serializes sends
+        self.lock = threading.RLock()  # serializes sends
         self.pending: dict[int, Future] = {}
-        self.pending_lock = threading.Lock()
+        self.pending_lock = threading.RLock()
 
 
 class ChromeBridge:
@@ -188,7 +197,7 @@ class ChromeBridge:
     """
 
     _instance: ChromeBridge | None = None
-    _instance_lock = threading.Lock()
+    _instance_lock = threading.RLock()  # taken through locked_call: Stop-safe
 
     @classmethod
     def instance(cls, takeover: bool = False) -> ChromeBridge:
@@ -209,13 +218,16 @@ class ChromeBridge:
         Raises:
             ChromeBridgeError: if the server cannot start (see :meth:`start`).
         """
-        with cls._instance_lock:
-            if cls._instance is None:
-                bridge = cls()
-                bridge.start(takeover=takeover)
-                atexit.register(bridge.stop)
-                cls._instance = bridge
-            return cls._instance
+        return locked_call(cls._instance_lock, cls._instance_locked, takeover)
+
+    @classmethod
+    def _instance_locked(cls, takeover: bool) -> ChromeBridge:
+        if cls._instance is None:
+            bridge = cls()
+            bridge.start(takeover=takeover)
+            atexit.register(bridge.stop)
+            cls._instance = bridge
+        return cls._instance
 
     @classmethod
     def shutdown(cls) -> None:
@@ -224,10 +236,14 @@ class ChromeBridge:
         The daemon calls this on shutdown; the next :meth:`instance` call
         starts a fresh server.  A no-op when no bridge was started.
         """
-        with cls._instance_lock:
-            bridge, cls._instance = cls._instance, None
+        bridge = locked_call(cls._instance_lock, cls._forget_instance_locked)
         if bridge is not None:
             bridge.stop()
+
+    @classmethod
+    def _forget_instance_locked(cls) -> ChromeBridge | None:
+        bridge, cls._instance = cls._instance, None
+        return bridge
 
     def __init__(self, port: int = 0, write_config: bool = True):
         self._port = port
@@ -238,7 +254,8 @@ class ChromeBridge:
         self._connected = threading.Event()
         # Held while _conn and _connected change together: a drop that checks
         # "is this still the live connection?" must not clear a newer one.
-        self._conn_lock = threading.Lock()
+        # Reentrant: task threads take it through locked_call (see _Connection).
+        self._conn_lock = threading.RLock()
         self._server: Server | None = None
 
     @property
@@ -374,54 +391,93 @@ class ChromeBridge:
             )
         msg_id = next(self._ids)
         fut: Future = Future()
-        with conn.pending_lock:
-            conn.pending[msg_id] = fut
         # The deadline covers queueing behind other sends too: a caller whose
         # command never got on the wire inside its timeout fails instead of
         # stacking up behind a wedged peer.
         deadline = time.monotonic() + timeout
-        if not conn.lock.acquire(timeout=max(timeout, 0.0)):
-            with conn.pending_lock:
-                conn.pending.pop(msg_id, None)
-            raise ChromeBridgeError(
-                f"the extension connection stayed busy past {timeout:.0f}s; "
-                f"'{cmd}' was not sent"
-            )
-        # The extension's deadline runs a little short of ours (a tenth, at
-        # most _REPLY_MARGIN_SECS): its "deadline exceeded" reply arrives
-        # while we still wait, instead of our timeout dropping the connection
-        # and every other command in flight.
+        # Registered through completion inside one try, every lock taken
+        # through locked_call: a Stop (an injected KeyboardInterrupt) landing
+        # anywhere in between, including right after a blocking acquire
+        # returned (CPython gh-74174), leaves neither the entry nor a lock
+        # behind.
+        try:
+            locked_call(conn.pending_lock, conn.pending.__setitem__, msg_id, fut)
+            try:
+                locked_call(
+                    conn.lock, self._send, conn, msg_id, cmd, args, deadline,
+                    acquire_timeout=max(deadline - time.monotonic(), 0.0),
+                )
+            except LockTimeoutError:
+                raise ChromeBridgeError(
+                    f"the extension connection stayed busy past {timeout:.0f}s; "
+                    f"'{cmd}' was not sent"
+                ) from None
+            try:
+                return fut.result(max(deadline - time.monotonic(), 0.0))
+            except TimeoutError:
+                # A peer that stops answering would wedge every later command
+                # behind its stuck socket; drop it so the extension reconnects
+                # fresh.  The socket is shut down before the close: a close
+                # alone waits up to websockets' close_timeout (10 s) for a
+                # close frame this peer does not send, and blocks behind a
+                # sender stuck in sendall(), which holds the protocol mutex;
+                # the shutdown fails that write, gives the peer end-of-file
+                # and makes the close return at once.
+                if self._conn is conn:
+                    self._drop_connection(conn, "command timed out")
+                    _shutdown_socket(conn.ws.socket)
+                    try:
+                        conn.ws.close()
+                    except Exception:  # noqa: BLE001 - already gone
+                        logger.debug("Exception caught", exc_info=True)
+                raise ChromeBridgeError(
+                    f"the extension did not answer '{cmd}' within {timeout:.0f}s"
+                ) from None
+        finally:
+            locked_call(conn.pending_lock, conn.pending.pop, msg_id, None)
+
+    def _send(
+        self, conn: _Connection, msg_id: int, cmd: str, args: dict[str, Any] | None, deadline: float
+    ) -> None:
+        """Write the command frame to *conn* (its send lock held) before *deadline*.
+
+        The extension's deadline runs a little short of ours (a tenth, at
+        most _REPLY_MARGIN_SECS): its "deadline exceeded" reply arrives
+        while we still wait, instead of our timeout dropping the connection
+        and every other command in flight.
+
+        The socket write has no deadline of its own: once a peer that
+        stopped draining its socket has filled the buffers, ``sendall``
+        blocks for good.  A watchdog shuts the socket down when the
+        deadline passes mid-write (``shutdown`` takes none of websockets'
+        mutexes and fails the blocked write), and the connection is then
+        dropped like any other failed send.  The watchdog is bound to
+        *conn*'s socket and cancelled once the write returned, so it never
+        cuts a later, healthy connection.
+
+        Raises:
+            ChromeBridgeError: the frame could not be written; the
+                connection is dropped.
+        """
         budget = max(deadline - time.monotonic(), 0.0)
         timeout_ms = round((budget - min(budget / 10, _REPLY_MARGIN_SECS)) * 1000)
+        frame = json.dumps({"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms})
+        cut = threading.Event()
+        watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut))
         try:
-            conn.ws.send(json.dumps(
-                {"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms}
-            ))
+            watchdog.start()
+            conn.ws.send(frame)
         except Exception as e:
-            with conn.pending_lock:
-                conn.pending.pop(msg_id, None)
             if self._conn is conn:
                 self._drop_connection(conn, "send failed")
+            if cut.is_set():
+                raise ChromeBridgeError(
+                    f"the extension stopped reading; '{cmd}' could not be sent within "
+                    f"the {budget:.0f}s left of its timeout"
+                ) from None
             raise ChromeBridgeError(f"lost the extension connection: {e}") from e
         finally:
-            conn.lock.release()
-        try:
-            return fut.result(max(deadline - time.monotonic(), 0.0))
-        except TimeoutError:
-            with conn.pending_lock:
-                conn.pending.pop(msg_id, None)
-            # A peer that stops answering would wedge every later command
-            # behind its stuck socket; drop it so the extension reconnects
-            # fresh and any sender blocked in sendall() is released.
-            if self._conn is conn:
-                self._drop_connection(conn, "command timed out")
-                try:
-                    conn.ws.close()
-                except Exception:  # noqa: BLE001 - already gone
-                    logger.debug("Exception caught", exc_info=True)
-            raise ChromeBridgeError(
-                f"the extension did not answer '{cmd}' within {timeout:.0f}s"
-            ) from None
+            watchdog.cancel()
 
     # -- connection handling (server thread) -------------------------------
 
@@ -480,16 +536,50 @@ class ChromeBridge:
             fut.set_exception(ChromeBridgeError(str(msg.get("error", "extension error"))))
 
     def _drop_connection(self, conn: _Connection, reason: str) -> None:
-        with self._conn_lock:
+        # Also run on task threads (call()'s timeout path, stop()), so both
+        # sections go through locked_call (see _Connection).
+        def forget() -> None:
             if self._conn is conn:
                 self._conn = None
                 self._connected.clear()
-        with conn.pending_lock:
+
+        def take_pending() -> list[Future]:
             pending = list(conn.pending.values())
             conn.pending.clear()
-        for fut in pending:
+            return pending
+
+        locked_call(self._conn_lock, forget)
+        for fut in locked_call(conn.pending_lock, take_pending):
             if not fut.done():
                 fut.set_exception(ChromeBridgeError(reason))
+
+
+def _cut_socket(sock: socket.socket, cut: threading.Event) -> None:
+    """Watchdog body of :meth:`ChromeBridge._send`: fail a write blocked on a full buffer.
+
+    ``shutdown`` wakes the thread blocked in ``sendall`` with an error
+    (and the connection's reader with end-of-file) without taking any
+    of websockets' mutexes, which that thread holds.
+
+    Args:
+        sock: The connection's socket.
+        cut: Set before the shutdown, so the sender can tell the deadline
+            from any other write failure.
+    """
+    cut.set()
+    _shutdown_socket(sock)
+
+
+def _shutdown_socket(sock: socket.socket) -> None:
+    """Shut *sock* down both ways: a blocked write fails and the peer gets end-of-file.
+
+    Takes none of websockets' mutexes, so it works from any thread while
+    a sender holds them; a socket the peer already closed is left alone.
+    """
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:  # already closed by the peer
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _proof(key: str, message: str) -> str:

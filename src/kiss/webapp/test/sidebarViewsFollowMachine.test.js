@@ -397,9 +397,11 @@ async function testAFileOfTheMachineIsSavedAndReloadedThere() {
   assert.strictEqual(reloads[0].machine, 'gpu-box');
   assert.strictEqual(reloads[0].path, '/srv/proj/main.py');
   assert.strictEqual(reloads[0].workDir, '/srv/proj');
+  // The machine's daemon echoes the request's token on its reply.
   send(win, {
     type: 'fileContent',
     tabId: chat,
+    token: reloads[0].token,
     machine: 'gpu-box',
     path: '/srv/proj/main.py',
     name: 'main.py',

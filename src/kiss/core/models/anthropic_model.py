@@ -22,7 +22,7 @@ from anthropic.resources.messages import Messages
 
 from kiss.core import stop_signal
 from kiss.core.brand import HOME_DIR
-from kiss.core.kiss_error import KISSError, ModelRefusalError
+from kiss.core.kiss_error import KISSError, ModelRefusalError, OutputCapError
 from kiss.core.models.model import (
     _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -45,7 +45,12 @@ from kiss.core.models.model import (
     text_of_parts,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_error, stop_or_stall_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    RequestAbortWatchdog,
+    stop_error,
+    stop_or_stall_error,
+)
 
 if TYPE_CHECKING:
     from kiss.core.models.model_info import ModelInfo
@@ -149,8 +154,11 @@ Adaptive thinking may spend some of it before the reply; ``stop_reason ==
 "max_tokens"`` is fine.  Raised to ``budget_tokens + 1`` when manual
 extended thinking is configured, which the API requires."""
 KEEP_ALIVE_TIMEOUT_SECONDS = 30.0
-"""HTTP timeout of a keep-alive ping (a cache read plus a one-word reply);
-with retries off this bounds the wait for a ping in flight."""
+"""Bound of a keep-alive ping (a cache read plus a one-word reply): the
+SDK's HTTP timeout between bytes and, through a
+:class:`~kiss.core.models.stream_abort.RequestAbortWatchdog`, the whole
+request's deadline; with retries off this bounds the wait for a ping in
+flight."""
 
 
 def _last_assistant_tool_use_ids(messages: list[Any]) -> list[str]:
@@ -159,6 +167,12 @@ def _last_assistant_tool_use_ids(messages: list[Any]) -> list[str]:
         if isinstance(message, dict) and message.get("role") == "assistant":
             return [call_id for _name, call_id in iter_assistant_tool_calls(message) if call_id]
     return []
+
+
+def _is_tool_use(block: Any) -> bool:
+    """Return whether a raw response content block (SDK object or dict) is a ``tool_use``."""
+    block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+    return block_type == "tool_use"
 
 
 def cache_creation_tokens(usage: Any) -> tuple[int, int]:
@@ -1321,10 +1335,33 @@ class AnthropicModel(Model):
         self._raise_on_refusal(response)
 
         stop_reason = getattr(response, "stop_reason", None)
-        blocks = self._normalize_content_blocks(getattr(response, "content", None))
+        raw_blocks = list(getattr(response, "content", None) or [])
+        if stop_reason == "max_tokens" and raw_blocks and _is_tool_use(raw_blocks[-1]):
+            # The cap stopped generation inside the last block, whose
+            # ``input`` is a partial parse; every tool_use block before it
+            # was completed before the model moved on.  Decided on the raw
+            # content: normalization drops an empty or whitespace-only text
+            # block, so a completed tool followed by one the cap landed in
+            # would otherwise be taken for the cut-off block.
+            raw_blocks.pop()
+        blocks = self._normalize_content_blocks(raw_blocks)
 
-        if stop_reason == "max_tokens":
-            blocks = [b for b in blocks if b.get("type") != "tool_use"]
+        if (
+            stop_reason == "max_tokens"
+            and tools
+            and not any(b.get("type") == "tool_use" for b in blocks)
+        ):
+            # A tool-bearing turn with no tool call left is unusable
+            # (a tool-less caller may still read the cut-off text).
+            # The cut-off request was still billed.
+            self._rejected_response = response
+            raise OutputCapError(
+                f"Model {self.model_name} hit its output-token cap "
+                f'(stop_reason="max_tokens") before completing a tool call, so '
+                f"its text and any tool-call arguments are incomplete. Raise "
+                f"max_tokens or lower reasoning_effort.",
+                stop_reason="max_tokens",
+            )
 
         content = text_of_parts(blocks)
 
@@ -1397,8 +1434,16 @@ class AnthropicModel(Model):
         # TypeError on every ping and the cache would silently go cold.
         kwargs["timeout"] = KEEP_ALIVE_TIMEOUT_SECONDS
         # No SDK retries: a failed ping is just a cold cache, and the agent
-        # thread waits for this request when the tool call ends.
-        return self.client.with_options(max_retries=0).messages.create(**kwargs)
+        # thread waits for this request when the tool call ends.  The SDK
+        # timeout only bounds the silence between bytes, so the watchdog
+        # gives the whole request the same deadline and aborts it at once
+        # when the task is stopped (the keep-alive thread carries the
+        # task's stop event).  Nothing else sends through the client while
+        # a ping is in flight: the agent thread is inside the tool call.
+        with RequestAbortWatchdog(
+            self.client._client, KEEP_ALIVE_TIMEOUT_SECONDS, "anthropic-keepalive-abort-watchdog"
+        ):
+            return self.client.with_options(max_retries=0).messages.create(**kwargs)
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]

@@ -140,14 +140,88 @@ function tabInfo(t) {
   return { id: t.id, windowId: t.windowId, title: t.title, url: t.url, active: t.active, status: t.status };
 }
 
+// A command's deadline (handleCommand's limit) travels into every stage
+// of an evaluate: once it has passed, the command was answered "exceeded"
+// and its queue slot released, so no stage that has not started its side
+// effects yet may start them (a renderer that was busy for the whole
+// deadline must not run the injection once it recovers, nor the CSP
+// fallback's debugger attach).
+function pastDeadline(limit) {
+  return Date.now() >= limit.at;
+}
+
+function deadlineError(limit) {
+  return new Error(`command exceeded its ${limit.ms / 1000}s deadline`);
+}
+
+// The tokens of a script's directive prologue, each matched where
+// lastIndex points (sticky) so the scan below never backtracks: the
+// whitespace and comments between tokens, a string literal (a
+// backslash escapes the next character, or a CRLF), and the operators
+// that continue an expression after a string literal, before which
+// automatic semicolon insertion does not end the statement (a ++ or
+// -- after a line break is a restricted production: it does; a dot
+// before a digit starts a number; in / instanceof followed by an
+// identifier character, an escape or a non-ASCII letter are names).
+const TRIVIA = /\s+|\/\/[^\n\r\u2028\u2029]*|\/\*[\s\S]*?\*\//y;
+const STRING_LITERAL = /'(?:[^'\\\n\r]|\\(?:\r\n|[\s\S]))*'|"(?:[^"\\\n\r]|\\(?:\r\n|[\s\S]))*"/y;
+const CONTINUES_EXPRESSION =
+  /[[(`,?:=<>*\/%&|^]|\.(?!\d)|\+(?!\+)|-(?!-)|!=|(?:in|instanceof)(?![\w$\\]|[^\x00-\x7f\s])/y;
+const LINE_BREAK = /[\n\r\u2028\u2029]/;
+
+// Index of the first character after the whitespace and comments at pos.
+function skipTrivia(script, pos) {
+  TRIVIA.lastIndex = pos;
+  while (TRIVIA.exec(script)) pos = TRIVIA.lastIndex;
+  return pos;
+}
+
+// Whether the script's directive prologue (the string literal
+// statements it opens with, ECMAScript 11.2.1) holds a 'use strict'
+// directive. A string literal is such a statement when a semicolon,
+// the end of the script, or a line break before a token that cannot
+// continue the expression ends it; 'use strict'.length and
+// 'use strict'\n+ x are expressions, not directives. The prologue
+// ends at the first statement that is not a lone string literal.
+function hasUseStrictDirective(script) {
+  let pos = 0;
+  for (;;) {
+    pos = skipTrivia(script, pos);
+    STRING_LITERAL.lastIndex = pos;
+    const literal = STRING_LITERAL.exec(script);
+    if (!literal) return false;
+    const literalEnd = STRING_LITERAL.lastIndex;
+    pos = skipTrivia(script, literalEnd);
+    if (script[pos] === ';') {
+      pos += 1;
+    } else if (pos < script.length) {
+      CONTINUES_EXPRESSION.lastIndex = pos;
+      if (!LINE_BREAK.test(script.slice(literalEnd, pos)) || CONTINUES_EXPRESSION.test(script)) {
+        return false;
+      }
+    }
+    if (literal[0].slice(1, -1) === 'use strict') return true;
+  }
+}
+
 // Injected by chrome.scripting.executeScript into the page's MAIN world.
 // The envelope distinguishes "script threw" from "script returned
 // undefined" — Chrome resolves an uncaught injected throw as a bare
 // {result: null}, which is indistinguishable from a null return. The
 // probe runs FIRST: cspBlocked can only be set before the user's code
 // has executed, so a matching error thrown by the script itself never
-// triggers a fallback that would replay its side effects.
-async function runCode(code) {
+// triggers a fallback that would replay its side effects. deadlineAt is
+// the command's deadline (Date.now() based, the same clock in the page):
+// an injection that waited on a busy renderer past it refuses the work,
+// since KISS was already told the command failed. The function runs in
+// the page's script scope, where a page's (or an earlier script's)
+// top-level `let Date` shadows the global, so the clock is read off the
+// global object itself: `this` of this sloppy plain call.
+async function runCode(code, deadlineAt) {
+  const page = this || globalThis;
+  if (page.Date.now() >= deadlineAt) {
+    return { ok: false, error: 'command exceeded its deadline before the page ran it' };
+  }
   try {
     // eslint-disable-next-line no-eval
     (0, eval)(''); // CSP probe: throws EvalError before any user code runs
@@ -162,12 +236,13 @@ async function runCode(code) {
   }
 }
 
-async function evalViaScripting(tabId, script) {
+async function evalViaScripting(tabId, script, limit) {
+  if (pastDeadline(limit)) throw deadlineError(limit);
   const [injection] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func: runCode,
-    args: [script],
+    args: [script, limit.at],
   });
   const r = injection && injection.result;
   if (!r) throw new Error('the page returned nothing (it may have navigated away)');
@@ -183,12 +258,49 @@ async function evalViaScripting(tabId, script) {
 // extension-injected code in the MAIN world; chrome.debugger is privileged
 // and bypasses page CSP. Attaching shows Chrome's "debugging this browser"
 // banner for the duration.
-async function evalViaDebugger(tabId, script) {
+//
+// chrome.debugger knows one attachment per tab, with no handle to name it
+// by: a detach is for whatever is attached right now. debuggerOwners
+// records which evalViaDebugger call owns the tab's attachment, so a
+// cleanup (the finally below, or the deadline's detachDebugger) only
+// detaches its own and never the attachment of the next command on the
+// tab, which may have attached while a timed-out command's debugger
+// call was still failing.
+const debuggerOwners = new Map(); // tabId -> the owner token of the live attachment
+
+function detachDebugger(tabId, owner) {
+  if (debuggerOwners.get(tabId) !== owner) return Promise.resolve();
+  debuggerOwners.delete(tabId);
+  return chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+async function evalViaDebugger(tabId, script, limit) {
+  if (pastDeadline(limit)) throw deadlineError(limit);
   const target = { tabId };
   await chrome.debugger.attach(target, '1.3');
+  const owner = {};
+  debuggerOwners.set(tabId, owner);
+  limit.debuggerOwner = owner; // lets the deadline detach this attachment, and only this one
   try {
+    // The attach itself may have waited past the deadline: this attach
+    // is detached by the finally below, not by the deadline's one-shot
+    // detach, which ran before it existed.
+    if (pastDeadline(limit)) throw deadlineError(limit);
+    // The same gate runCode applies, in the page: the evaluation can
+    // queue behind a busy renderer past the deadline, and the deadline's
+    // detach does not cancel it. A statement before the script leaves
+    // the script's completion value (what the agent gets back) as is,
+    // but ends its directive prologue: a script that opens with
+    // 'use strict' gets the directive restated ahead of the gate, so
+    // it runs as strict as it did unguarded. The gate shares the
+    // script's scope, so it names no identifier the script could
+    // shadow: a top-level `let Date = 1` hoists over the whole script
+    // and a bare `Date` here would be read in its temporal dead zone.
+    // `this` of a classic script is the global object, strict or not.
+    const gate = `if (this.Date.now() >= ${limit.at}) throw new this.Error('command exceeded its deadline before the page ran it');\n`;
+    const strict = hasUseStrictDirective(script) ? "'use strict';\n" : '';
     const resp = await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
-      expression: script,
+      expression: strict + gate + script,
       returnByValue: true,
       awaitPromise: true,
     });
@@ -198,18 +310,20 @@ async function evalViaDebugger(tabId, script) {
     }
     return resp.result && resp.result.value !== undefined ? resp.result.value : null;
   } finally {
-    await chrome.debugger.detach(target).catch(() => {});
+    await detachDebugger(tabId, owner);
   }
 }
 
-function evaluate(args) {
+function evaluate(args, limit) {
   const { tabId, script } = args;
-  return evalViaScripting(tabId, script).catch((e1) => {
+  return evalViaScripting(tabId, script, limit).catch((e1) => {
     // Only a CSP refusal (probe failed, the script never ran) may fall
     // back to the debugger; a script's own error must not replay its
-    // side effects in another world.
+    // side effects in another world, and a refusal learned after the
+    // deadline starts no debugger at all.
     if (!e1.cspBlocked) throw e1;
-    return evalViaDebugger(tabId, script).catch((e2) => {
+    if (pastDeadline(limit)) throw deadlineError(limit);
+    return evalViaDebugger(tabId, script, limit).catch((e2) => {
       throw new Error(`evaluate failed (page world blocked by CSP: ${e1.message}; debugger: ${e2.message})`);
     });
   });
@@ -411,10 +525,10 @@ const KISS_TYPE_JS = `(function (uid, text) {
 // CSP cascade. Args are interpolated, never the page's data: uid is checked
 // to be an integer and text is JSON-encoded, so a page cannot smuggle code
 // into these strings.
-function runInteraction(args, src, extra) {
+function runInteraction(args, src, extra, limit) {
   const uid = args.uid;
   if (!Number.isInteger(uid)) throw new Error(`command needs an integer 'uid' from a snapshot`);
-  return evaluate({ tabId: args.tabId, script: `(${src})(${uid}${extra || ''})` });
+  return evaluate({ tabId: args.tabId, script: `(${src})(${uid}${extra || ''})` }, limit);
 }
 
 function waitForLoad(tabId, timeoutMs) {
@@ -467,17 +581,17 @@ const COMMANDS = {
 
   evaluate,
 
-  async snapshot(args) {
-    return evaluate({ tabId: args.tabId, script: KISS_SNAPSHOT_JS });
+  async snapshot(args, limit) {
+    return evaluate({ tabId: args.tabId, script: KISS_SNAPSHOT_JS }, limit);
   },
 
-  click(args) {
-    return runInteraction(args, KISS_CLICK_JS);
+  click(args, limit) {
+    return runInteraction(args, KISS_CLICK_JS, '', limit);
   },
 
-  type_text(args) {
+  type_text(args, limit) {
     if (typeof args.text !== 'string' || !args.text) throw new Error("type_text needs a non-empty 'text'");
-    return runInteraction(args, KISS_TYPE_JS, `, ${JSON.stringify(args.text)}`);
+    return runInteraction(args, KISS_TYPE_JS, `, ${JSON.stringify(args.text)}`, limit);
   },
 
   async screenshot(args) {
@@ -552,7 +666,7 @@ async function handleCommand(sock, msg) {
       if (Date.now() >= limit.at) {
         throw new Error(`command waited out its ${budget / 1000}s deadline in the queue`);
       }
-      return fn(args);
+      return fn(args, limit); // the evaluate family rechecks the deadline at each stage
     };
     // Focus-mutating commands serialize globally; evaluate serializes per
     // tab (one debugger attach per tab at a time); read-only commands run
@@ -561,8 +675,11 @@ async function handleCommand(sock, msg) {
     if (FOCUS_MUTATING.has(msg.cmd)) {
       work = enqueue('focus', run, null, limit);
     } else if (msg.cmd === 'evaluate' || msg.cmd === 'snapshot' || msg.cmd === 'click' || msg.cmd === 'type_text') {
+      // At the deadline, a debugger this command attached (a wedged
+      // Runtime.evaluate) is detached; one attached by another command
+      // on the tab is not its to detach.
       work = enqueue(args.tabId || 0, run, () => {
-        chrome.debugger.detach({ tabId: args.tabId }).catch(() => {});
+        detachDebugger(args.tabId, limit.debuggerOwner);
       }, limit);
     } else {
       work = Promise.resolve().then(run);

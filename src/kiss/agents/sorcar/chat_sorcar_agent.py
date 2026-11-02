@@ -41,12 +41,14 @@ from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sea_commands import named_commands_help
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
+    _first_cleanup_error,
     canonical_tool_profile,
     classification_chooses_prompt,
     resolve_tool_profile,
 )
 from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.llm_reply import LLMReply
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict
@@ -133,6 +135,56 @@ def _safe_broadcast(broadcast: Any, event: dict[str, Any]) -> None:
         broadcast(event)
     except Exception:
         logger.warning("%s broadcast raised", event.get("type"), exc_info=True)
+
+
+def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
+    """Tell *run_printer* that *agent*'s run under *task_key* is over, then stop its recording.
+
+    Both hooks are duck-typed and optional.  The finish hook
+    (``JsonPrinter.agent_task_finished``) waits for the server's
+    ``STATE_LOCK``; a Stop landing in that wait would leave the state
+    the printer bridge created registered as an active task for the
+    daemon's lifetime, so the idempotent hook is called once more
+    before the Stop goes on.  ``stop_recording`` runs whatever the
+    hook did: it reads the thread's task binding, which the caller
+    restores next.
+
+    Args:
+        agent: The agent whose run is over.
+        run_printer: The printer the run was given.
+        task_key: The task id the run was registered under.
+    """
+    finished = getattr(run_printer, "agent_task_finished", None)
+    try:
+        if finished is not None:
+            _finish_printer_task(finished, agent, task_key)
+    finally:
+        stop_rec = getattr(run_printer, "stop_recording", None)
+        if stop_rec is not None:
+            try:
+                stop_rec()
+            except Exception:
+                pass
+
+
+def _finish_printer_task(finished: Callable[[Any, str], Any], agent: Any, task_key: str) -> None:
+    """Call the printer's finish hook *finished*; once more when a Stop interrupted it.
+
+    Args:
+        finished: The printer's ``agent_task_finished`` hook.
+        agent: The agent whose run is over.
+        task_key: The task id the run was registered under.
+    """
+    try:
+        finished(agent, task_key)
+    except Exception:
+        logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
+    except BaseException:
+        try:
+            finished(agent, task_key)
+        except Exception:
+            logger.warning("agent_task_finished(%r) raised", task_key, exc_info=True)
+        raise
 
 
 def _parse_result(result: str) -> dict[str, Any] | None:
@@ -468,11 +520,16 @@ class ChatSorcarAgent(SorcarAgent):
         parent_id = str((sub or {}).get("parent_task_id") or "")
         if parent_id:
             settings["Parent task id"] = parent_id
-        # One scratch directory per task, so concurrent siblings in the
-        # same work dir never share a file name (P12 of the 2026-10-24
-        # trajectory audit: two reviews read each other's tmp/paper.pdf).
-        settings["Scratch dir"] = f"./tmp/{self.last_task_id}/"
         return settings
+
+    def _scratch_dir(self) -> str:
+        """One scratch directory per task, ``./tmp/<task-id>/``.
+
+        Concurrent siblings in the same work dir then never share a file
+        name (P12 of the 2026-10-24 trajectory audit: two reviews read
+        each other's tmp/paper.pdf), and each task's verifier is its own.
+        """
+        return f"./tmp/{self.last_task_id}/"
 
     def _task_settings_payload(
         self,
@@ -638,6 +695,7 @@ class ChatSorcarAgent(SorcarAgent):
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
+        llm_response_hook: Callable[[LLMReply], Verdict] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
         live_browser: Any = None,
@@ -698,6 +756,7 @@ class ChatSorcarAgent(SorcarAgent):
             inherited_tools: Tools taken over from the dispatching task.
             llm_call_hook: Hook called before every LLM call.
             tool_call_hook: Hook called before every tool call.
+            llm_response_hook: Hook called after every model reply.
             use_memory: Per-run persistent-memory toggle.
             tool_profile: Tool profile name the toolset is cut down to;
                 the EFFECTIVE profile (``review`` for a reviewer
@@ -852,16 +911,11 @@ class ChatSorcarAgent(SorcarAgent):
         # ``_begin_run_usage_epoch``).  Classifier spend is held apart
         # until the ``finally`` below folds it, so nothing is lost here.
         self.reset_usage()
-        task_id, self._chat_id = _add_task(
-            history_prompt, chat_id=self._chat_id, extra=early_extra,
-        )
-        locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
         # ``super().run`` binds the printer from the *printer* argument
         # (``None`` gives a fresh console printer or none, never the one
         # an earlier run left in ``self.printer``), so the setup and
         # cleanup hooks below use the argument too.
         run_printer = printer
-        task_key = str(task_id)
         result_summary = ""
         parsed: dict[str, Any] | None = None
         # Whether ``super().run`` was reached.  Until then every live
@@ -871,10 +925,16 @@ class ChatSorcarAgent(SorcarAgent):
         # must fall back to this run's resolved settings.  (The usage
         # ledger is already this run's: see ``reset_usage`` above.)
         run_started = False
-        # Every remaining setup step (state registration, printer
-        # wiring, frequent-task recording, ...) must run inside the try
-        # below: an exception in any of them would otherwise bypass the
-        # cleanup and leave a permanently "running" task behind (F-14).
+        # Whether the run returned normally (the cleanup re-raises a
+        # Stop that landed in one of its own steps only then).
+        completed = False
+        # Every remaining setup step (the id's publication, state
+        # registration, printer wiring, frequent-task recording, ...)
+        # must run inside the try below: an exception in any of them
+        # would otherwise bypass the cleanup and leave a permanently
+        # "running" task behind (F-14).  The locals the cleanup reads
+        # are bound BEFORE the row is allocated, so the try can begin
+        # the instant its id is assigned.
         # The calling thread's previous task binding is restored on exit:
         # a side-channel task (``/update``, merge conflict resolution)
         # runs on a worker thread that then attributes the child's spend
@@ -885,7 +945,19 @@ class ChatSorcarAgent(SorcarAgent):
         # thread rewrote the offset.
         previous_task_id = ""
         broadcast = getattr(run_printer, "broadcast", None)
+        task_id, self._chat_id = _add_task(
+            history_prompt, chat_id=self._chat_id, extra=early_extra,
+        )
+        # No call between the assignment and the try: a Stop is delivered
+        # at a call's return, and one landing here would leave the row
+        # committed, unpublished and never finalised.
+        task_key = task_id
         try:
+            # The publication's lock wait is interruptible, so it lives
+            # inside the protected region: a Stop landing in it used to
+            # skip the whole cleanup, and the runner (which finds the
+            # row through ``last_task_id``) never learnt the id either.
+            locked_call(self._task_id_lock, setattr, self, "_last_task_id", task_id)
             if run_printer is not None:
                 tl = getattr(run_printer, "_thread_local", None)
                 if tl is not None:
@@ -969,6 +1041,7 @@ class ChatSorcarAgent(SorcarAgent):
                 inherited_tools=inherited_tools,
                 llm_call_hook=llm_call_hook,
                 tool_call_hook=tool_call_hook,
+                llm_response_hook=llm_response_hook,
                 use_memory=use_memory,
                 tool_profile=tool_profile,
                 live_browser=live_browser,
@@ -979,6 +1052,7 @@ class ChatSorcarAgent(SorcarAgent):
             )
             parsed = _parse_result(result)
             result_summary = _result_summary_text(result, parsed)
+            completed = True
             return result
         except Exception:
             result_summary = "Task failed"
@@ -987,73 +1061,101 @@ class ChatSorcarAgent(SorcarAgent):
             result_summary = "Task interrupted"
             raise
         finally:
-            # ``SorcarAgent.run``'s cleanup folds the pre-run classifier's
-            # spend, but a run stopped or failing before ``super().run``
-            # never gets there.  The fold is keyed and consumes the
-            # record, so after a normal run it is a no-op.
-            self._fold_classifier_usage()
-            self._last_result_summary = result_summary
-            if run_printer is not None:
-                finished = getattr(run_printer, "agent_task_finished", None)
-                if finished is not None:
+            # The cleanup steps are nested ``try``/``finally`` regions, as
+            # in ``SorcarAgent._finish_run``: the runner's Stop injects
+            # ``KeyboardInterrupt`` again while the thread is alive, and
+            # one landing in a step (the printer's finish hook waiting
+            # for ``STATE_LOCK``, say) must not skip the steps after it,
+            # or the recording stays open, the calling thread keeps the
+            # child's task binding and the row its running state.  The
+            # first exception a step raised is re-raised after the last
+            # step when the run was returning normally (the Stop must
+            # still be honoured), or logged and dropped when the run is
+            # already unwinding on an exception.
+            first: BaseException | None = None
+            try:
+                # ``SorcarAgent.run``'s cleanup folds the pre-run classifier's
+                # spend, but a run stopped or failing before ``super().run``
+                # never gets there.  The fold is keyed and consumes the
+                # record, so after a normal run it is a no-op.
+                self._fold_classifier_usage()
+            except BaseException as exc:  # noqa: BLE001 — held, see above
+                first = _first_cleanup_error(first, "_fold_classifier_usage", exc)
+            finally:
+                self._last_result_summary = result_summary
+                try:
+                    if run_printer is not None:
+                        _retire_printer_task(self, run_printer, task_key)
+                except BaseException as exc:  # noqa: BLE001
+                    first = _first_cleanup_error(first, "_retire_printer_task", exc)
+                finally:
                     try:
-                        finished(self, task_key)
-                    except Exception:
-                        logger.warning(
-                            "agent_task_finished(%r) raised", task_key, exc_info=True,
-                        )
-                stop_rec = getattr(run_printer, "stop_recording", None)
-                if stop_rec is not None:
-                    try:
-                        stop_rec()
-                    except Exception:
-                        pass
-                tl = getattr(run_printer, "_thread_local", None)
-                if tl is not None and getattr(tl, "task_id", "") == task_key:
-                    tl.task_id = previous_task_id
-            if not _skip_persistence:
-                # The agent's own verdict (sub-agents and CLI runs, which
-                # no server runner persists) rides on the row with the
-                # summary, so the history sidebar shows a
-                # finish(success=False) run as failed.
-                verdict = parsed.get("success") if parsed else None
-                _save_task_result(
-                    task_id=task_id,
-                    result=result_summary,
-                    success=verdict if isinstance(verdict, bool) else None,
-                )
-                # Once ``super().run`` started, the live model settings
-                # are this run's (``_reset`` resolved them); before that
-                # point they are unset or the previous run's, so the row
-                # keeps this run's resolved settings.  Usage is always
-                # read from the ledger: its epoch began right before the
-                # row was allocated, so a task stopped during setup
-                # still records any side-channel spend banked into it.
-                # The per-run resolved work_dir and
-                # budget are used either way: ``_reset`` sets the
-                # attributes to exactly these values on success, and
-                # ``self.work_dir`` / ``self.max_budget`` would otherwise
-                # carry a blank or the previous run's directory/budget
-                # into this row.
-                if run_started:
-                    final_model = self._launch_model_name or resolved_model
-                    final_is_parallel = self._is_parallel
-                else:
-                    final_model = resolved_model
-                    final_is_parallel = run_is_parallel
-                extra_payload = self._build_extra_payload(
-                    model=final_model,
-                    work_dir=resolved_work_dir,
-                    is_parallel=final_is_parallel,
-                    max_budget=resolved_budget,
-                )
-                # One coherent triple (see usage_snapshot): three
-                # property reads could tear across a concurrent
-                # abandoned-subagent reclaim.  Read and saved under
-                # TASK_USAGE_LOCK, so a sub-task's late charge either
-                # lands on the ledger before this read or finds the
-                # finished row and adds to it (charge_side_channel_usage).
-                locked_call(
-                    TASK_USAGE_LOCK, self._save_final_usage, extra_payload, task_id,
-                    agent_prompt, parsed, result_summary,
-                )
+                        if run_printer is not None:
+                            tl = getattr(run_printer, "_thread_local", None)
+                            if tl is not None and getattr(tl, "task_id", "") == task_key:
+                                tl.task_id = previous_task_id
+                    except BaseException as exc:  # noqa: BLE001
+                        first = _first_cleanup_error(first, "restore task binding", exc)
+                    finally:
+                        # A row whose id was never published (a Stop in
+                        # the publication above) is unknown to the
+                        # runner that would otherwise persist it, so it
+                        # is finalised here even under ``_skip_persistence``.
+                        if not _skip_persistence or self._last_task_id != task_id:
+                            try:
+                                # The agent's own verdict (sub-agents and
+                                # CLI runs, which no server runner
+                                # persists) rides on the row with the
+                                # summary, so the history sidebar shows a
+                                # finish(success=False) run as failed.
+                                verdict = parsed.get("success") if parsed else None
+                                _save_task_result(
+                                    task_id=task_id,
+                                    result=result_summary,
+                                    success=verdict if isinstance(verdict, bool) else None,
+                                )
+                                # Once ``super().run`` started, the live
+                                # model settings are this run's (``_reset``
+                                # resolved them); before that point they
+                                # are unset or the previous run's, so the
+                                # row keeps this run's resolved settings.
+                                # Usage is always read from the ledger:
+                                # its epoch began right before the row was
+                                # allocated, so a task stopped during
+                                # setup still records any side-channel
+                                # spend banked into it.  The per-run
+                                # resolved work_dir and budget are used
+                                # either way: ``_reset`` sets the
+                                # attributes to exactly these values on
+                                # success, and ``self.work_dir`` /
+                                # ``self.max_budget`` would otherwise carry
+                                # a blank or the previous run's
+                                # directory/budget into this row.
+                                if run_started:
+                                    final_model = self._launch_model_name or resolved_model
+                                    final_is_parallel = self._is_parallel
+                                else:
+                                    final_model = resolved_model
+                                    final_is_parallel = run_is_parallel
+                                extra_payload = self._build_extra_payload(
+                                    model=final_model,
+                                    work_dir=resolved_work_dir,
+                                    is_parallel=final_is_parallel,
+                                    max_budget=resolved_budget,
+                                )
+                                # One coherent triple (see usage_snapshot):
+                                # three property reads could tear across a
+                                # concurrent abandoned-subagent reclaim.
+                                # Read and saved under TASK_USAGE_LOCK, so
+                                # a sub-task's late charge either lands on
+                                # the ledger before this read or finds the
+                                # finished row and adds to it
+                                # (charge_side_channel_usage).
+                                locked_call(
+                                    TASK_USAGE_LOCK, self._save_final_usage, extra_payload,
+                                    task_id, agent_prompt, parsed, result_summary,
+                                )
+                            except BaseException as exc:  # noqa: BLE001
+                                first = _first_cleanup_error(first, "final save", exc)
+            if first is not None and completed:
+                raise first

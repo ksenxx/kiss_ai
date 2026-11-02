@@ -218,9 +218,9 @@ manifest (`[project.scripts]`, `bin`, `Makefile` targets), never from habit; a c
 - Describe the code as it is today; a removed behaviour is not current.
 - Never edit, commit or push in the repository; the memory is the only output.
 - Plain, specific prose. No filler, no marketing, no emoji.
-- When the `summary` tool exists, call it every ten steps: when a tool result's `Steps:` \
-footer ends in 9, make the next call `summary`; otherwise the 10th, 20th, ... call is \
-refused and must be repeated.
+- When the `summary` tool exists, call it every ten steps: when a tool result's `Steps:` footer \
+ends in 9, make the next call `summary`; otherwise the 10th, 20th, ... call is refused and must be \
+repeated.
 - The final `finish` summary is HTML (`<h3>`, `<p>`, `<ul>`), never Markdown.
 
 
@@ -238,6 +238,11 @@ refused and must be repeated.
   mangled by the tool call: the tool now cuts the title there and recovers the summary; when
   the result still looks wrong, rewrite the page once through the CLI `write-page --title
   --summary --file` (0fa4eae4 found three such pages late).
+- When the `Steps:` footer of a tool result ends in 9, make the next call `summary(...)`:
+  the 10th, 20th, ... call is otherwise refused and must be re-sent (6ffcfc37 step 30,
+  42ad3965 steps 20 and 30 each lost a Bash call this way).
+- `Read` takes `file_path`, `start_line` and `max_lines` only (7f5242ac passed `max_line`
+  and got a tool error instead of the page).
 """
 
 _resolved: dict[str, Path] = {}

@@ -49,7 +49,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         server = AgentServer()
         subs: list[tuple[Any, str]] = []
 
-        def _stub_subscribe(task_id: Any, tab_id: str) -> None:
+        def _stub_subscribe(task_id: Any, tab_id: str, headless: bool = False) -> None:
             subs.append((task_id, tab_id))
 
         server.printer.subscribe_tab = _stub_subscribe  # type: ignore[assignment]
@@ -98,7 +98,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         server = AgentServer()
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda task_id, tab_id: subs.append((task_id, tab_id))
+            lambda task_id, tab_id, headless=False: subs.append((task_id, tab_id))
         )
 
         try:
@@ -131,7 +131,7 @@ class TestReattachRunningChatTaskIdDisambiguation:
         server = AgentServer()
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda task_id, tab_id: subs.append((task_id, tab_id))
+            lambda task_id, tab_id, headless=False: subs.append((task_id, tab_id))
         )
 
         try:
@@ -198,7 +198,7 @@ class TestReplaySessionSubscribesRunningSubagent:
         server.printer.broadcast = events.append  # type: ignore[assignment]
         subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda task_id, tab_id: subs.append((task_id, tab_id))
+            lambda task_id, tab_id, headless=False: subs.append((task_id, tab_id))
         )
 
         parent_state = agent_state.AgentState(

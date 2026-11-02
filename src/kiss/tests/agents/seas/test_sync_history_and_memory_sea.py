@@ -24,6 +24,7 @@ import stat
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +69,9 @@ pytestmark = posix_only("drives the engine through a bash ssh stand-in")
 # real client would (exit 255); ``flaky<N>`` dies after the number of calls
 # in $FLAKY_AFTER_flaky<N>.  A machine with a ``pysite`` directory in its
 # home runs python with it on PYTHONPATH, so a ``sitecustomize.py`` there
-# can skew the machine's clock.
+# can skew the machine's clock.  A ``<host>.gate`` file under $REMOTE_ROOT
+# holds the machine's commands until the test removes it; the first one
+# to wait there creates ``<host>.gate.reached``.
 FAKE_SSH = """#!/bin/bash
 socket=""; master=no; control=""
 while [ $# -gt 0 ]; do
@@ -95,6 +98,8 @@ case "$host" in
 esac
 if [ "$master" = yes ]; then touch "$socket"; exit 0; fi
 if [ "$control" = exit ]; then rm -f "$socket"; exit 0; fi
+gate="$REMOTE_ROOT/$host.gate"
+if [ -e "$gate" ]; then touch "$gate.reached"; while [ -e "$gate" ]; do sleep 0.05; done; fi
 export HOME="$REMOTE_ROOT/$host"
 [ -d "$HOME/pysite" ] && export PYTHONPATH="$HOME/pysite"
 exec bash -c "$*"
@@ -205,6 +210,16 @@ def finish_task(path: Path, task_id: str) -> None:
     conn.execute("UPDATE events SET timestamp = ? WHERE task_id = ?", (time.time() - 3600, task_id))
     conn.commit()
     conn.close()
+
+
+def wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> bool:
+    """Poll *condition* every 20 ms until it holds (True) or *timeout* seconds pass (False)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def page_text(memory: MemoryDir, name: str) -> str:
@@ -529,6 +544,17 @@ def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
     stream = io.BytesIO()
     memory_delta.pack(other.root, ["note.md", "dom/deep.md"], stream)
     results: list[dict[str, Any]] = []
+    root_lock = Path(f"{memory.root}.lock")
+    at_root_lock = threading.Event()
+    real_lock = memory_delta._lock
+
+    def noticed_lock(descriptor: int, path: Path) -> None:
+        """The merge's own lock acquisition, flagging the test when it reaches the memory's lock."""
+        if path == root_lock:
+            at_root_lock.set()
+        real_lock(descriptor, path)
+
+    monkeypatch.setattr(memory_delta, "_lock", noticed_lock)
 
     def merge() -> None:
         results.append(
@@ -536,12 +562,16 @@ def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
         )
 
     # An agent is in the middle of a write: it holds the lock MemoryDir.write takes.
-    with exclusive_file_lock(Path(f"{memory.root}.lock"), timeout=5.0):
+    with exclusive_file_lock(root_lock, timeout=5.0):
         # daemon: a merge that never returns fails the joins below, not pytest's exit
         worker = threading.Thread(target=merge, daemon=True)
         worker.start()
+        # The merge reaches the memory's lock while the agent holds it, and waits there:
+        # the domain lock it takes next is not even created yet.
+        assert at_root_lock.wait(10.0), "the merge must take the memory's lock"
         worker.join(0.5)
         assert worker.is_alive(), "the merge must wait for the agent's write"
+        assert not (memory.root / "dom.lock").exists()
         memory.page_path("note").write_text(
             memory.page_path("note").read_text().replace("old", "agent's")
         )
@@ -564,6 +594,16 @@ def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
     ):
         memory_delta.unpack_and_merge(io.BytesIO(stream.getvalue()), memory.root, 0.0)
     assert page_text(MemoryDir(memory.root / "dom"), "deep") == "deep\n"
+    # The memory's own lock too (the domain locks are free): a merge that skipped
+    # it would go through here, whatever the worker's schedule above was, and
+    # overwrite the page once it is stamped older than the incoming one.
+    stamp_page(memory, "note", "2010-01-01T00:00:00Z")
+    with (
+        exclusive_file_lock(root_lock, timeout=5.0),
+        pytest.raises(TimeoutError, match="memories.lock still locked"),
+    ):
+        memory_delta.unpack_and_merge(io.BytesIO(stream.getvalue()), memory.root, 0.0)
+    assert page_text(memory, "note") == "agent's\n"
 
 
 def test_task_deletions_travel_but_spare_a_task_running_on_the_target(
@@ -667,7 +707,11 @@ def test_dry_run_changes_nothing_and_counts_what_would_travel(
 def test_machines_busy_writing_during_the_sync_lose_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Agents appending events and rewriting pages everywhere during the sync: no error, no loss."""
+    """Agents appending events and rewriting pages everywhere during the sync: no error, no loss.
+
+    The overlap is proven, not assumed: the sync waits at the stand-in
+    ssh's gate on alpha until every writer has completed a round.
+    """
     box = Sandbox(tmp_path, monkeypatch, "alpha", "beta")
     now = time.time()
     for host in ("", "alpha", "beta"):
@@ -681,6 +725,7 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
         make_db(box.db(host), {f"{host or 'local'}-live": live})
     stop = threading.Event()
     errors: list[BaseException] = []
+    writes = {host: 0 for host in ("", "alpha", "beta")}  # rounds each writer completed
 
     def hammer(host: str) -> None:
         try:
@@ -695,21 +740,49 @@ def test_machines_busy_writing_during_the_sync_lose_nothing(
                 conn.commit()
                 box.memory(host).write(f"{host or 'local'}-page", f"rewrite {seq}\n")
                 seq += 1
+                writes[host] = seq
             conn.close()
         except BaseException as exc:  # noqa: BLE001 — reported by the test, not lost on the thread
             errors.append(exc)
 
-    writers = [threading.Thread(target=hammer, args=(host,)) for host in ("", "alpha", "beta")]
-    for writer in writers:
-        writer.start()
+    # The sync's first command on alpha waits at the stand-in's gate until every writer has
+    # completed a round while the sync is in flight; both waits share one 30 s deadline after
+    # which the gate is lifted regardless, so a stalled writer fails the overlap assertion
+    # below instead of parking the sync.
+    gate = box.root / "remotes" / "alpha.gate"
+    reached = box.root / "remotes" / "alpha.gate.reached"
+    gate.touch()
+    overlap: dict[str, int] = {}  # rounds each writer completed while the sync waited
+
+    def lift_gate() -> None:
+        deadline = time.monotonic() + 30
+        try:
+            if wait_for(reached.exists, timeout=30):
+                seen = dict(writes)
+                wait_for(
+                    lambda: all(writes[host] > seen[host] for host in writes),
+                    timeout=deadline - time.monotonic(),
+                )
+                overlap.update({host: writes[host] - seen[host] for host in writes})
+        finally:
+            gate.unlink()
+
+    # daemon: a thread that never ends fails the assertions below, not pytest's exit
+    threads = [threading.Thread(target=hammer, args=(host,), daemon=True) for host in writes]
+    threads.append(threading.Thread(target=lift_gate, daemon=True))
+    for thread in threads:
+        thread.start()
     try:
         reports = box.run()
     finally:
         stop.set()
-        for writer in writers:
-            writer.join()
+        deadline = time.monotonic() + 30
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     assert errors == []
+    assert [thread.is_alive() for thread in threads] == [False] * 4
+    assert overlap and min(overlap.values()) >= 1, overlap
     assert [report.error for report in reports] == ["", ""]
     union = {task: 20 for tasks in before.values() for task in tasks}
     for host in ("", "alpha", "beta"):
@@ -804,7 +877,7 @@ def test_memory_delta_script_modes_run_with_a_bare_python(tmp_path: Path) -> Non
     MemoryDir(memory).write("note", "hello\n")
     script = str(peer_sync.MEMORY_DELTA_PATH)
     probe = subprocess.run(
-        [sys.executable, script, "probe", str(memory)], capture_output=True, check=True
+        [sys.executable, script, "probe", str(memory)], capture_output=True, check=True, timeout=60
     )
     report = json.loads(probe.stdout)
     assert set(report["entries"]) == {"note.md"} and abs(report["now"] - time.time()) < 60
@@ -813,6 +886,7 @@ def test_memory_delta_script_modes_run_with_a_bare_python(tmp_path: Path) -> Non
         input=b'["note.md"]',
         capture_output=True,
         check=True,
+        timeout=60,
     )
     other = tmp_path / "other"
     merged = subprocess.run(
@@ -820,13 +894,14 @@ def test_memory_delta_script_modes_run_with_a_bare_python(tmp_path: Path) -> Non
         input=packed.stdout,
         capture_output=True,
         check=True,
+        timeout=60,
     )
     assert json.loads(merged.stdout)["counts"]["added"] == 1
     assert (other / "note.md").read_bytes() == (memory / "note.md").read_bytes()
-    assert subprocess.run([sys.executable, script], capture_output=True).returncode == 2
+    assert subprocess.run([sys.executable, script], capture_output=True, timeout=60).returncode == 2
     assert (
         subprocess.run(
-            [sys.executable, script, "bogus", str(memory)], capture_output=True
+            [sys.executable, script, "bogus", str(memory)], capture_output=True, timeout=60
         ).returncode
         == 2
     )

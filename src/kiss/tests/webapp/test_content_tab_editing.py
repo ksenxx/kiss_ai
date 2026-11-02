@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.server.web_server import _file_version
 from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
@@ -173,10 +174,10 @@ class TestContentTabEditing:
             assert len(saves) == 1
             assert saves[0]["path"] == str(path)
             assert saves[0]["content"] == _SOURCE + "gamma = 3"
-            st = path.stat()
-            # The stamp sent is the one the file had when it was OPENED.
-            assert saves[0]["version"].endswith(f":{len(_SOURCE)}")
-            assert saves[0]["version"] != f"{st.st_mtime_ns}:{st.st_size}"
+            # The stamp sent is the one of the content the file had when
+            # it was OPENED, not of what the save wrote.
+            assert saves[0]["version"] == _file_version(_SOURCE.encode())
+            assert saves[0]["version"] != _file_version(path.read_bytes())
             assert saves[0]["force"] is False
             # token = "<content tab id>:<save sequence>"
             tab_id = page.get_attribute(".chat-tab.content-tab", "data-tab-id")
@@ -219,7 +220,7 @@ class TestContentTabEditing:
             # reported (the file as written by save #1), not the stale
             # open-time stamp — otherwise it would have been a conflict.
             assert saves[1]["version"] != saves[0]["version"]
-            assert saves[1]["version"].endswith(f":{len(_SOURCE + 'one = 1')}")
+            assert saves[1]["version"] == _file_version((_SOURCE + "one = 1").encode())
             assert path.read_text() == _SOURCE + "one = 1\ntwo = 2"
         finally:
             context.close()
