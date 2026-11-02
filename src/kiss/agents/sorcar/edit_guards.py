@@ -42,6 +42,7 @@ import json
 import os
 import posixpath
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,7 +244,24 @@ def _operands(program: str, args: list[Word]) -> list[Word]:
     return operands
 
 
-def rewrite_guard(command: str) -> str | None:
+def _unguarded(
+    cwd: str | None, targets: list[Word], guarded: Callable[[str], bool] | None,
+) -> bool:
+    """Whether a rewrite of every file of *targets* may run as written.
+
+    With *guarded* (see :func:`rewrite_guard`) that is so when each
+    target resolves in *cwd* to a path *guarded* does not guard; a
+    target only the shell resolves is guarded.  Without it nothing is.
+    """
+    if guarded is None or not targets:
+        return False
+    paths = [resolve(cwd, target) for target in targets]
+    return all(path is not None and not guarded(path) for path in paths)
+
+
+def rewrite_guard(
+    command: str, cwd: str | None = None, guarded: Callable[[str], bool] | None = None,
+) -> str | None:
     """Return the refusal of a shell command that rewrites a file the way ``Edit`` should.
 
     Refused: ``sed -i`` whose script contains a newline escape (a
@@ -254,15 +272,31 @@ def rewrite_guard(command: str) -> str | None:
     tool log.  A heredoc that only prints the transformed text
     (read-only analysis) is not a rewrite.
 
+    With *guarded*, a rewrite of files that are not guarded runs as
+    written: the ``sed -i`` when every file operand resolves to such a
+    path, the python heredoc when every file it writes
+    (:func:`python_written_paths`) is a literal resolving to one; a
+    path the program builds at run time (an f-string, ``sys.argv``) may
+    name any file and keeps the refusal.  The 2026-11-01 audit counted
+    63 of 68 such refusals on scratch files.
+
     Args:
         command: The shell command as the model wrote it.
+        cwd: The absolute POSIX directory it starts in, where a relative
+            file resolves; ``None`` when unknown.
+        guarded: Whether a rewrite of the absolute bash path given is
+            refused (an existing file outside the scratch directories);
+            ``None`` refuses every rewrite, as before.
 
     Returns:
         The refusal text naming the ``Edit`` call to make (with the file
         and the strings when the command names them literally), or ``None``.
     """
-    for simple in simple_commands(command, None):
+    commands = simple_commands(command, cwd)
+    for simple in commands:
         if _is_multiline_sed_inplace(simple):
+            if _unguarded(simple.cwd, _operands("sed", simple.argv()[1:]), guarded):
+                continue
             operand, edits = sed_edit(simple)
             file = "<the file>" if operand is None else json.dumps(operand.text)
             call = (
@@ -283,6 +317,13 @@ def rewrite_guard(command: str) -> str | None:
         and _PYTHON_WRITE.search(command)
     ):
         program = heredoc_text(command)
+        if guarded is not None and program is not None:
+            written = python_written_paths(program)
+            python = [c for c in commands if c.reads_heredoc() and c.program().startswith("python")]
+            if written is not None and python and _unguarded(
+                python[0].cwd, [Word(path, True) for path in written], guarded,
+            ):
+                return None
         path, edits, _ = python_edit(program) if program is not None else (None, [], False)
         file = "<the literal path>" if path is None else json.dumps(path)
         call = (
@@ -1193,6 +1234,136 @@ def python_edit(program: str) -> tuple[str | None, list[tuple[str, str, bool]], 
     return path, [], False
 
 
+def python_written_paths(program: str) -> list[str] | None:
+    """Return the literal paths of every file the python *program* writes, or ``None``.
+
+    A file is written by ``open(p, <mode>)`` for a mode holding ``w``,
+    ``a``, ``x`` or ``+`` (as an argument or the ``mode`` keyword), by
+    ``p.open(<such a mode>)``, or by ``p.write_text(...)`` /
+    ``p.write_bytes(...)``, anywhere in the program; *p* is a string
+    literal, ``Path(<literal>)`` or a name bound exactly once in the
+    whole program, by an assignment.  ``None`` when the program does
+    not parse, writes no file this reading sees, or writes one whose
+    path it builds at run time (an f-string, ``sys.argv``, a name bound
+    twice: assigned again, or also a parameter, loop target or import):
+    it may then write any file, and a guard must assume the worst.
+
+    Args:
+        program: The python source.
+    """
+    try:
+        tree = ast.parse(program)
+    except (SyntaxError, ValueError):
+        return None
+    stores = _bound_names(tree)
+    names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and stores[node.targets[0].id] == 1
+        ):
+            literal = _literal_path(node.value, {})
+            if literal is not None:
+                names[node.targets[0].id] = literal
+    written: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = _write_target(node)
+        if target is None:
+            continue
+        literal = _literal_path(target, names) if target is not _UNKNOWN else None
+        if literal is None:
+            return None
+        written.append(literal)
+    return written or None
+
+
+#: A write whose target or mode is not a literal: it may name any file.
+_UNKNOWN = ast.Name("?")
+
+
+def _bound_names(tree: ast.AST) -> Counter[str]:
+    """Count how many times each name is bound anywhere in *tree*, in any scope.
+
+    Assignment and loop targets, ``with ... as``, walrus targets,
+    function and lambda parameters, ``except ... as``, ``global`` /
+    ``nonlocal`` declarations, function and class names, imports and
+    the captures of a ``match`` pattern (``case p:``, ``case [*p]:``,
+    ``case {**p}:``) all bind a name; a name bound more than once may
+    hold a value this reading cannot follow (a parameter shadowing a
+    module-level path).
+    """
+    bound: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound[node.id] += 1
+        elif isinstance(node, ast.arg):
+            bound[node.arg] += 1
+        elif isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar) and node.name:
+            bound[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound[node.rest] += 1
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            bound.update(node.names)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            bound[node.name] += 1
+        elif isinstance(node, ast.alias):
+            bound[(node.asname or node.name).partition(".")[0]] += 1
+    return bound
+
+
+def _write_target(call: ast.Call) -> ast.expr | None:
+    """Return the path expression *call* writes a file at (:data:`_UNKNOWN` when unclear).
+
+    ``open(p, mode)`` / ``p.open(mode)`` for a mode that writes;
+    ``p.write_text(...)`` / ``p.write_bytes(...)``.  ``None`` for a call
+    that writes no file (a read, another function).
+    """
+    func = call.func
+    if isinstance(func, ast.Attribute) and func.attr in ("write_text", "write_bytes"):
+        return func.value
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    if isinstance(func, ast.Name) and func.id == "open":
+        if None in keywords:
+            return _UNKNOWN  # ``**kwargs`` may carry the file and the mode
+        if not call.args and "file" not in keywords:
+            return None  # no file to open
+        receiver = call.args[0] if call.args else keywords["file"]
+        arguments = call.args[1:]
+    elif isinstance(func, ast.Attribute) and func.attr == "open":
+        receiver, arguments = func.value, call.args
+    else:
+        return None
+    if None in keywords:
+        return _UNKNOWN  # ``**kwargs`` may carry the mode
+    mode = keywords.get("mode", arguments[0] if arguments else None)
+    if mode is None:
+        return None  # a read
+    if not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
+        return _UNKNOWN
+    return receiver if set(mode.value) & set("wax+") else None
+
+
+def _literal_path(node: ast.expr, names: dict[str, str]) -> str | None:
+    """Return the path *node* names: a string, ``Path(<string>)`` or a name of *names*."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Path"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return _literal_path(node.args[0], names)
+    return None
+
+
 _SED_NULL_DATA = frozenset({"-z", "--null-data"})
 _SED_EDIT_OPTIONS = frozenset({"-i", "--in-place"}) | _SED_NULL_DATA
 _SED_PATTERN_METACHARACTERS = ".*[]^$"
@@ -1471,23 +1642,27 @@ def heredoc_targets(command: str) -> list[str]:
     return [word.text for _, word in _heredoc_writes(command, None, copies_only=False)]
 
 
-def heredoc_guard(command: str, cwd: str | None, exists: Callable[[str], bool]) -> str | None:
-    """Refuse a ``cat``/``tee`` here-document copy into a file that exists or may exist.
+def heredoc_guard(command: str, cwd: str | None, guarded: Callable[[str], bool]) -> str | None:
+    """Refuse a ``cat``/``tee`` here-document copy into a guarded file, or one that may be.
 
     A copy into a file that does not exist yet creates it and may run.
     A copy into an existing file, an append (``>>``, ``tee -a``)
     included, is a rewrite for ``Edit``/``Write``: it skips the
     read-before-modify rule and leaves no reviewable change in the tool
-    log.  A target holding an expansion (``"$OUT"``, ``~/x``), or a
-    relative one after a ``cd`` only the shell can resolve, cannot be
-    checked and is refused too.  ``/dev/`` targets are not files.
+    log.  A target holding an expansion the command did not assign
+    itself (``"$OUT"``, ``~/x``; ``T=tmp/x && cat > $T/f`` names
+    ``tmp/x/f``), or a relative one after a ``cd`` only the shell can
+    resolve, cannot be checked and is refused too.  ``/dev/`` targets
+    are not files.
 
     Args:
         command: The shell command as the model wrote it.
         cwd: The absolute POSIX directory the command starts in;
             ``None`` when unknown (every relative target is refused).
-        exists: Whether a path exists where the command runs (the host,
-            a container or an exec bridge's environment).
+        guarded: Whether a rewrite of the absolute bash path given is
+            refused where the command runs (the host, a container or an
+            exec bridge's environment): the file exists, and is not a
+            scratch file where the caller exempts those.
 
     Returns:
         :data:`HEREDOC_VERDICT` or :data:`HEREDOC_UNRESOLVED_VERDICT`, or
@@ -1497,7 +1672,7 @@ def heredoc_guard(command: str, cwd: str | None, exists: Callable[[str], bool]) 
         path = resolve(directory, target)
         if path is None:
             return HEREDOC_UNRESOLVED_VERDICT.format(path=target.text)
-        if not path.startswith("/dev/") and exists(path):
+        if not path.startswith("/dev/") and guarded(path):
             return HEREDOC_VERDICT.format(path=path)
     return None
 

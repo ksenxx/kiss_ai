@@ -17,20 +17,22 @@ The fix re-checks ``busy()`` and subscribes + broadcasts under ONE
 lock hold per viewer, exactly as ``_broadcast_status_end_to_viewers``
 already does for the end event.
 
-The window is made deterministic with the ``KISS_RACE_DELAY`` hook
-(``_race_delay()`` between the viewer scan and the per-viewer work):
-V's run is installed while A's worker sits in that delay.  The printer
-is a real ``JsonPrinter`` subclass that records what it broadcasts.
+The window is made deterministic through the ``_race_delay()`` test
+hook between the viewer scan and the per-viewer work: the test's stand-in
+holds A's worker there until V's run is installed, so the interleaving
+is fixed whatever the load (the ``KISS_RACE_DELAY`` sleep is capped at
+0.1 s, which a busy machine overshoots).  The printer is a real
+``JsonPrinter`` subclass that records what it broadcasts.
 """
 
 from __future__ import annotations
 
-import os
 import threading
-import time
 from typing import Any
 
-from kiss.server import agent_state
+import pytest
+
+from kiss.server import agent_state, task_runner
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
@@ -71,7 +73,9 @@ def _install_own_run(server: AgentServer, tab_id: str, chat_id: str) -> AgentSta
     return state
 
 
-def test_viewer_whose_run_lands_mid_subscribe_is_not_hijacked() -> None:
+def test_viewer_whose_run_lands_mid_subscribe_is_not_hijacked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat_id = "chat-subscribe-race"
     launcher, viewer = "launcher-tab", "viewer-tab"
     task_a = "task-a-row"
@@ -80,7 +84,14 @@ def test_viewer_whose_run_lands_mid_subscribe_is_not_hijacked() -> None:
     with server._state_lock:
         server._tab_chat_views[launcher] = chat_id
         server._tab_chat_views[viewer] = chat_id
-    os.environ["KISS_RACE_DELAY"] = "0.1"
+    scanned, own_run_installed = threading.Event(), threading.Event()
+
+    def hold_scan_to_subscribe_window() -> None:
+        """A's worker, past the viewer scan and off the lock: wait for V's run."""
+        scanned.set()
+        own_run_installed.wait(timeout=10)
+
+    monkeypatch.setattr(task_runner, "_race_delay", hold_scan_to_subscribe_window)
     try:
         worker = threading.Thread(
             target=server._subscribe_chat_viewers,
@@ -90,12 +101,13 @@ def test_viewer_whose_run_lands_mid_subscribe_is_not_hijacked() -> None:
         )
         worker.start()
         # Land the viewer's own run inside A's worker's race window.
-        time.sleep(0.03)
+        assert scanned.wait(timeout=10), "A's worker never reached the race window"
         _install_own_run(server, viewer, chat_id)
+        own_run_installed.set()
         worker.join(timeout=10)
         assert not worker.is_alive()
     finally:
-        os.environ.pop("KISS_RACE_DELAY", None)
+        own_run_installed.set()
         agent_state.agent_states.clear()
 
     with printer._lock:

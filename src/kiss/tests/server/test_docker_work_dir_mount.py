@@ -150,7 +150,11 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
         written = self.checkout / "index/notes/from_container.txt"
         assert written.read_text() == "written in the container\n"
         assert (self.checkout / NOTE).read_text() == NOTE_TEXT
-        containers = docker.from_env().containers.list(all=True)
+        # Sparse: a plain ``list()`` inspects every listed container, and the
+        # daemon is shared, so a foreign ``--rm`` container exiting between
+        # the list and its inspect raises ``NotFound`` here (see
+        # ``kiss.tests.agents.sorcar.docker_test_containers``).
+        containers = docker.from_env().containers.list(all=True, sparse=True)
         assert call["container_id"] not in {c.id for c in containers}
 
     def test_run_parallel_child_sees_the_same_mount(self) -> None:

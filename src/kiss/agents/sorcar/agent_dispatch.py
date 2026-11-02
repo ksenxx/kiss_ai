@@ -98,6 +98,7 @@ from kiss.agents.sorcar.sea_settings import (
 from kiss.agents.sorcar.useful_tools import (
     remap_vanished_worktree,
     rewrite_parent_repo_paths,
+    spill_report,
 )
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.kiss_error import BudgetExceededError
@@ -1019,12 +1020,39 @@ def notice_job_id(text: str) -> str:
     return match.group(1) if match else ""
 
 
+#: The start of a multi-session result
+#: (:func:`~kiss.agents.sorcar.relentless_agent._build_exhaustion_summary`).
+_PRIOR_SESSION = re.compile(r"\A\s*<h3>Previous Session 1</h3>\n")
+_FINAL_SESSION_MARKER = "\n\n---\n\n<h3>Final Session</h3>\n"
+_SESSION_SEPARATOR = "\n\n---\n\n"
+
+
 def result_summary(result: TaskResult) -> str:
     """Return the summary text to report for *result*.
 
     The run's text; a failed run without one reads ``"Task failed"``.
+    A run of several sessions stores every session's handoff summary
+    before the final one (``<h3>Previous Session N</h3>`` sections, as
+    the result panel shows them); the caller is given the final
+    session's summary alone, after a line saying how many sessions
+    there were: the handoff notes are a record for the user, not a
+    result for the calling agent, and a 42-child wave of them filled a
+    third of a context in the 2026-11-01 audit.
     """
-    return result.text or ("" if result.success else "Task failed")
+    text = result.text or ("" if result.success else "Task failed")
+    if not _PRIOR_SESSION.match(text):
+        return text
+    index = text.find(_FINAL_SESSION_MARKER)
+    marker = _FINAL_SESSION_MARKER if index > 0 else _SESSION_SEPARATOR
+    if index <= 0:
+        index = text.rfind(_SESSION_SEPARATOR)
+    if index <= 0:
+        return text
+    sessions = text[:index].count("<h3>Previous Session ") + 1
+    return (
+        f"(the last of {sessions} sessions; the earlier sessions' handoff notes are in the "
+        f"task's stored result)\n{text[index + len(marker):].strip()}"
+    )
 
 
 def format_dispatch_result(
@@ -2108,7 +2136,42 @@ def run_agents_parallel(
         for job in started:
             _abandon_job(job)
         raise
-    return str(yaml.safe_dump([_collect_job(job) for job in started], sort_keys=False))
+    entries = [_collect_job(job) for job in started]
+    report = str(yaml.safe_dump(entries, sort_keys=False))
+    if len(report) > DEFAULT_CONFIG.tool_output_max_chars:
+        shown = spill_report(parent_work_dir, "agents", report)
+        if shown is not None:
+            return digest_agent_results(entries, shown)
+    return report
+
+
+def digest_agent_results(entries: list[str], shown: str) -> str:
+    """Render the short form of a ``run_parallel`` result whose whole YAML is in a file.
+
+    One line per child: its number, ``success`` and the start of its
+    summary as text (or its job id when it is still running), then the
+    file to read for the rest.
+
+    Args:
+        entries: Each child's result text (:func:`format_dispatch_result`)
+            or job notice, in task order.
+        shown: The path of the file holding the whole YAML list.
+    """
+    lines = [f"{len(entries)} sub-tasks; the whole result is in {shown}, this is its digest:"]
+    for index, entry in enumerate(entries, 1):
+        try:
+            parsed = yaml.safe_load(entry)
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict) and "success" in parsed:
+            text = " ".join(re.sub(r"<[^>]+>", " ", str(parsed.get("summary") or "")).split())
+            status = "ok" if parsed["success"] else "FAILED"
+        else:
+            text = " ".join(entry.split())
+            status = f"running (job {notice_job_id(entry) or '?'})"
+        lines.append(f"[{index}/{len(entries)}] {status}: {text[:200]}"
+                     f"{'...' if len(text) > 200 else ''}")
+    return "\n".join(lines)
 
 
 @dataclass(eq=False)

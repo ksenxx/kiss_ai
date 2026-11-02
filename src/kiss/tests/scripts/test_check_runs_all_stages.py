@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -66,10 +67,15 @@ def test_all_passing_returns_empty(tmp_path: Path) -> None:
 def test_failed_uv_sync_stops_the_run(tmp_path: Path) -> None:
     """``uv sync`` is the prerequisite: when it fails nothing else runs."""
     marker = tmp_path / "must-not-run"
-    empty_project = tmp_path / "no-project"
-    empty_project.mkdir()
+    # A pyproject.toml uv cannot parse: with none at all uv walks up from
+    # ``--project`` and, under a ``--basetemp`` inside this repository, finds
+    # this project and syncs it for real (into the shared environment when
+    # the stages of a worktree run there), re-pointing its editable install.
+    broken_project = tmp_path / "broken-project"
+    broken_project.mkdir()
+    (broken_project / "pyproject.toml").write_text("[project\n")
     failed = run_checks([
-        (["uv", "sync", "--project", str(empty_project)], "Install dependencies (uv sync)"),
+        (["uv", "sync", "--project", str(broken_project)], "Install dependencies (uv sync)"),
         _touch_stage(marker, "Lint code (ruff)"),
     ])
     assert [name for name, _ in failed] == ["Install dependencies (uv sync)"]
@@ -191,3 +197,48 @@ def test_cached_verdict_round_trips_per_tree_and_mode(
     assert check.cached_verdict("f1", False) is None, "another mode"
     (tmp_path / "tmp" / "check-cache.json").write_text("not json")
     assert check.cached_verdict("f1", True) is None
+
+
+def test_the_sync_inside_a_worktree_leaves_the_shared_editable_install_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-01 (task 4aa14638): 19 ``check --full`` runs inside the task's
+    worktree each re-pointed the shared venv's editable ``kiss`` at the worktree."""
+    # pretend checkouts (never created): outside any worktree, which a pytest
+    # ``--basetemp`` under this repository would put ``tmp_path`` inside of
+    base = tmp_path if not check.in_worktree(tmp_path) else Path(tempfile.gettempdir()) / "x"
+    repo = base / "repo"
+    assert check.sync_command(repo) == ["uv", "sync"]
+    worktree = repo / check.WORKTREES_DIR / "kiss_wt-1-abc"
+    # --inexact as well: ``uv sync --no-install-project --dry-run`` on the
+    # shared environment would otherwise "uninstall kiss-agent-framework"
+    assert check.sync_command(worktree) == ["uv", "sync", "--inexact", "--no-install-project"]
+    # a project merely named like the directory is not a worktree
+    assert check.sync_command(repo / "kiss-worktrees-notes") == ["uv", "sync"]
+    # the real check runs on this checkout: a worktree checkout syncs dependencies only
+    expected = (
+        ["uv", "sync", "--inexact", "--no-install-project"] if check.in_worktree()
+        else ["uv", "sync"])
+    assert check.sync_command() == expected
+    # every later stage's ``uv run`` would sync (and so install) the project
+    # again: inside a worktree it runs on the environment as it is, a console
+    # script of the project as its module on the worktree's own source
+    assert check.uv_run("ruff", "src/", root=repo) == ["uv", "run", "ruff", "src/"]
+    assert check.uv_run("mypy", "src/", root=worktree) == ["uv", "run", "--no-sync", "mypy", "src/"]
+    assert check.project_script("sea", "kiss.agents.sorcar.sea_cli", "lint", root=repo) == [
+        "uv", "run", "sea", "lint"]
+    assert check.project_script("sea", "kiss.agents.sorcar.sea_cli", "lint", root=worktree) == [
+        "uv", "run", "--no-sync", "python", "-m", "kiss.agents.sorcar.sea_cli", "lint"]
+    assert check.stage_env(repo) is None
+    # the stages of a worktree run in the main checkout's environment (uv would
+    # otherwise build the worktree one of its own) on the worktree's sources
+    assert check.main_checkout(worktree) == repo.resolve() and check.main_checkout(repo) == repo
+    monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    env = check.stage_env(worktree)
+    assert env is not None and env["PYTHONPATH"].split(os.pathsep)[:2] == [
+        str(worktree / "src"), str(worktree / "projects")]
+    assert env["UV_PROJECT_ENVIRONMENT"] == str(repo.resolve() / ".venv")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/elsewhere/.venv")  # the caller's choice holds
+    assert (check.stage_env(worktree) or {})["UV_PROJECT_ENVIRONMENT"] == "/elsewhere/.venv"
+    assert all(uv_run[:2] == ["uv", "run"] for uv_run, _ in check.FIXERS)
+    assert ("--no-sync" in check.FIXERS[0][0]) == check.in_worktree()

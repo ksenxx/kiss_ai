@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **996 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **995 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -13,14 +13,14 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | Together AI | 105 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 487 |
+| OpenRouter | 486 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **952** generation-capable models
-- **800** function-calling-capable models
+- **951** generation-capable models
+- **801** function-calling-capable models
 - **7** embedding models
 - **30** decision models
 
@@ -550,7 +550,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (487)</strong></summary>
+<summary><strong>OpenRouter (486)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -774,8 +774,6 @@ Full model list:
 - `openrouter/nace-ai/drex-v2.0`
 - `openrouter/nex-agi/nex-n2.5-mini`
 - `openrouter/nex-agi/nex-n2.5-pro`
-- `openrouter/nousresearch/hermes-3-llama-3.1-405b`
-- `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
@@ -997,6 +995,7 @@ Full model list:
 - `openrouter/z-ai/glm-5.3`
 - `openrouter/z-ai/glm-5.3-flash`
 - `openrouter/z-ai/glm-5.3-flashx`
+- `openrouter/z-ai/glm-5.3-flashx-legal`
 - `openrouter/z-ai/glm-5.3-prime`
 - `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
