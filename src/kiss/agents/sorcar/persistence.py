@@ -23,11 +23,11 @@ Thread safety is achieved with:
 from __future__ import annotations
 
 import atexit
+import itertools
 import json
 import logging
 import math
 import os
-import queue
 import re
 import sqlite3
 import sys
@@ -35,6 +35,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
@@ -224,6 +225,12 @@ class _RWLock:
       bounded number of times, re-raising a newly injected exception
       only AFTER the repair committed.
 
+    * The wait loops run in :meth:`_await`'s own frame: CPython 3.13
+      raises an injected exception taken on a ``while`` loop's
+      back-edge outside the handlers of that frame (cpython #108214),
+      so a wait loop inside the acquisition's ``try`` would skip the
+      ``finally`` on a single stop and strand the held mutex.
+
     Residual window, deliberate and documented: the mutex itself can
     only be stranded if one injection interrupts an acquisition WHILE
     the mutex is held and a SECOND, separately timed injection then
@@ -357,13 +364,37 @@ class _RWLock:
         ref = _TokenRef(token, self._drop_reader_ref)
         try:
             self._cond.acquire()
-            while self._writer_alive() or self._any_alive(self._pending_refs):
-                self._cond.wait(timeout=self._WAIT_RECHECK_S)
+            self._await(self._readers_clear)
             self._reader_refs.add(ref)
             self._cond.release()
             yield
         finally:
             self._teardown(ref, token, writer=False)
+
+    def _readers_clear(self) -> bool:
+        """Return True when a reader may enter: no writer holds or awaits the lock."""
+        return not (self._writer_alive() or self._any_alive(self._pending_refs))
+
+    def _writers_clear(self) -> bool:
+        """Return True when a writer may enter: no writer holds the lock, no reader is active."""
+        return not (self._writer_alive() or self._any_alive(self._reader_refs))
+
+    def _await(self, clear: Callable[[], bool]) -> None:
+        """Wait on the held mutex until ``clear()`` holds.
+
+        A frame of its own on purpose: CPython 3.13 leaves a ``while``
+        loop's back-edge outside the exception table of the handlers of
+        its own frame (cpython #108214), so an injected stop raised on
+        the back-edge of a wait loop written inside an acquisition's
+        ``try`` skips the ``finally`` and strands the mutex this thread
+        holds.  Raised here, the stop reaches the acquisition at its
+        call of this method, which the ``finally`` does cover.
+
+        Args:
+            clear: The predicate that ends the wait.
+        """
+        while not clear():
+            self._cond.wait(timeout=self._WAIT_RECHECK_S)
 
     def write_lock(self) -> AbstractContextManager[None]:
         """Acquire exclusive write access (use as ``with lock.write_lock():``).
@@ -394,8 +425,7 @@ class _RWLock:
         try:
             self._cond.acquire()
             self._pending_refs.add(ref)
-            while self._writer_alive() or self._any_alive(self._reader_refs):
-                self._cond.wait(timeout=self._WAIT_RECHECK_S)
+            self._await(self._writers_clear)
             self._writer_ref = ref
             self._pending_refs.discard(ref)
             self._cond.release()
@@ -3563,33 +3593,6 @@ def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
         return (cursor.rowcount or 0) > 0
 
 
-def _add_task_usage(
-    task_id: str, tokens: int, cost: float, steps: int,
-) -> tuple[int, float, int] | None:
-    """Add post-run spend to a task row's ``tokens`` / ``cost`` / ``steps``.
-
-    Used when work done on the task's behalf AFTER its row was persisted
-    (the merge agent that resolves its auto-merge conflicts) must count
-    towards the task.  The add is one atomic ``UPDATE`` on the stored
-    values, so it is correct whether or not the live agent counters
-    still hold the task's own totals.
-
-    Args:
-        task_id: Primary key of the ``task_history`` row to update.
-        tokens: Tokens to add.
-        cost: USD to add.
-        steps: Steps to add.
-
-    Returns:
-        The row's new ``(tokens, cost, steps)``, or ``None`` when no
-        such row exists.
-    """
-    _flush_chat_events(task_id)
-    db = _get_db()
-    with _rw_lock.write_lock(), _immediate_txn(db):
-        return _add_usage_locked(db, task_id, tokens, cost, steps)
-
-
 def _add_usage_locked(
     db: sqlite3.Connection, task_id: str, tokens: int, cost: float, steps: int,
 ) -> tuple[int, float, int] | None:
@@ -4072,13 +4075,25 @@ def _delete_chat(chat_id: str) -> int:
     return removed
 
 
-_event_queue: queue.Queue = queue.Queue()
+#: Queued events, oldest first; ``append`` is one atomic C call, so a Stop
+#: injected into the producer lands before it (nothing queued) or after it
+#: (queued, will be written), never inside, and no counter can go stale.
+#: The writer persists the head of the deque in place and pops it only
+#: afterwards, so a writer that dies mid-batch leaves the batch for its
+#: replacement, and an event is persisted exactly when it has left the
+#: deque: a flusher waits for its target item to be gone (no counter that
+#: a death between two updates could leave wrong).  Producers append
+#: without ``_pending_cond``: a reader takes a snapshot in one C call
+#: (``list(_event_deque)``) rather than iterating the live deque, which an
+#: append would invalidate.
+_event_deque: deque[tuple[str, str, float, str]] = deque()
 _event_writer_thread: threading.Thread | None = None
 _event_writer_lock = threading.RLock()
 _event_writer_stop = threading.Event()
 _journal_lock = threading.RLock()
+#: Serialises the writer's pops and the flushers' reads of ``_event_deque``
+#: (always taken through ``locked_call``: task threads receive injected Stops).
 _pending_cond = threading.Condition()
-_pending_by_task: dict[str, int] = {}
 _next_seq_cache: dict[str, int] = {}
 _marked_has_events: set[str] = set()
 _caches_db_key: tuple[str, tuple[int, int] | None] | None = None
@@ -4161,37 +4176,37 @@ def _event_writer_loop(stop: threading.Event) -> None:
             ``_start_event_writer`` can never un-stop it.
     """
     while not stop.is_set():
-        try:
-            first = _event_queue.get(timeout=0.2)
-        except queue.Empty:
+        batch = locked_call(_pending_cond, _take_batch_locked)
+        if not batch:
             continue
-        if first is None:
-            _event_queue.task_done()
-            if stop.is_set():
-                return
-            continue
-        batch: list[tuple[str, str, float, str]] = [first]
-        deadline = time.monotonic() + _BATCH_WINDOW_S
-        shutdown_pending = False
-        while len(batch) < _BATCH_MAX:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                item = _event_queue.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if item is None:
-                _event_queue.task_done()
-                shutdown_pending = stop.is_set()
-                break
-            batch.append(item)
-        try:
-            _persist_batch_with_retry(batch)
-        finally:
-            _release_pending(batch)
-        if shutdown_pending:
-            return
+        _persist_batch_with_retry(batch)
+        locked_call(_pending_cond, _release_batch_locked, len(batch))
+
+
+def _take_batch_locked() -> list[tuple[str, str, float, str]]:
+    """Return up to ``_BATCH_MAX`` events from the head of the queue, leaving them queued.
+
+    Waits up to 0.2 s for a first event, then up to ``_BATCH_WINDOW_S``
+    for the batch to fill.  The caller holds ``_pending_cond``.
+    """
+    if not _event_deque:
+        _pending_cond.wait(0.2)
+    if not _event_deque:
+        return []
+    deadline = time.monotonic() + _BATCH_WINDOW_S
+    while len(_event_deque) < _BATCH_MAX:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        _pending_cond.wait(remaining)
+    return list(itertools.islice(_event_deque, _BATCH_MAX))
+
+
+def _release_batch_locked(n: int) -> None:
+    """Pop the *n* persisted head events and wake the flushers; caller holds ``_pending_cond``."""
+    for _ in range(n):
+        _event_deque.popleft()
+    _pending_cond.notify_all()
 
 
 def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
@@ -5108,77 +5123,27 @@ def _queue_chat_event(
             unrelated task in the new database (see
             :func:`_current_db_path`).
     """
-    # Build the complete queue item BEFORE reserving: ``json.dumps``
-    # raises TypeError on a non-serialisable value, and a reservation
-    # with no matching queue item is never released by the writer, so
-    # ``_flush_chat_events(task_id)`` would then spin forever.
+    # Build the complete item first: ``json.dumps`` raises TypeError on a
+    # non-serialisable value.  The single ``append`` publishes it; the
+    # wake-up is best effort (the writer polls every 0.2 s anyway), so a
+    # Stop injected anywhere in here leaves nothing half-done.
     item = (
         task_id,
         event if isinstance(event, str) else json.dumps(event),
         time.time(),
         origin_db_path or _current_db_path(),
     )
-    _reserve_pending(task_id)
-    try:
-        # The queue is unbounded, so this never blocks; the guard only
-        # rolls the reservation back if an injected stop (or any other
-        # BaseException) lands between the reserve and the publication.
-        _event_queue.put_nowait(item)
-    except BaseException:
-        _unreserve_pending(task_id)
-        raise
+    _event_deque.append(item)
     _start_event_writer()
+    locked_call(_pending_cond, _pending_cond.notify_all)
 
 
 @locked(_pending_cond)
-def _reserve_pending(task_id: str) -> None:
-    """Record one queued-but-unwritten event for *task_id*."""
-    _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
-
-
-def _decrement_pending_locked(task_id: str) -> None:
-    """Drop one pending reservation of *task_id*; caller holds ``_pending_cond``."""
-    remaining = _pending_by_task.get(task_id, 0) - 1
-    if remaining > 0:
-        _pending_by_task[task_id] = remaining
-    else:
-        _pending_by_task.pop(task_id, None)
-
-
-def _unreserve_pending(task_id: str) -> None:
-    """Roll back one :func:`_reserve_pending` whose item never reached the queue.
-
-    Unlike :func:`_release_pending` this must NOT call
-    ``_event_queue.task_done()`` — nothing was enqueued.
-    """
-    locked_call(_pending_cond, _unreserve_pending_locked, task_id)
-
-
-def _unreserve_pending_locked(task_id: str) -> None:
-    """Drop one reservation of *task_id* and wake waiters; caller holds ``_pending_cond``."""
-    _decrement_pending_locked(task_id)
-    _pending_cond.notify_all()
-
-
-def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:
-    """Mark every event in *batch* as no longer pending and wake waiters."""
-    locked_call(_pending_cond, _release_batch_locked, batch)
-    for _ in batch:
-        _event_queue.task_done()
-
-
-def _release_batch_locked(batch: list[tuple[str, str, float, str]]) -> None:
-    """Drop the reservations of *batch* and wake waiters; caller holds ``_pending_cond``."""
-    for task_id, _ev, _ts, _origin in batch:
-        _decrement_pending_locked(task_id)
-    _pending_cond.notify_all()
-
-
 def _pending_count(task_id: str | None) -> int:
     """Return the number of unwritten events, optionally for one task."""
     if task_id is None:
-        return int(_event_queue.unfinished_tasks)
-    return _pending_by_task.get(task_id, 0)
+        return len(_event_deque)
+    return sum(1 for item in list(_event_deque) if item[0] == task_id)
 
 
 def _flush_chat_events(task_id: str | None = None) -> None:
@@ -5200,18 +5165,39 @@ def _flush_chat_events(task_id: str | None = None) -> None:
             updating task A must not be delayed by a high-volume run
             in task B.  ``None`` waits for every queued event.
     """
-    while not locked_call(_pending_cond, _pending_drained, task_id):
+    target = locked_call(_pending_cond, _flush_target, task_id)
+    while target is not None and not locked_call(_pending_cond, _left_the_queue, target):
         _start_event_writer()
     _replay_failed_events()
 
 
-def _pending_drained(task_id: str | None) -> bool:
-    """Return True when no event of *task_id* is pending; else wait one tick.
+def _flush_target(task_id: str | None) -> tuple[str, str, float, str] | None:
+    """Return the queued event after which every event of *task_id* queued so far is persisted.
 
+    ``None`` for *task_id* covers every queued event; ``None`` is returned
+    when nothing of the task's is queued.  The caller holds
+    ``_pending_cond``, which keeps the head of the queue in place;
+    producers may still append, so the scan runs on a snapshot.  It runs
+    from the newest end, so a task flushing its own events (the common
+    case) finds its last one at once.
+    """
+    queued = list(_event_deque)
+    if task_id is None:
+        return queued[-1] if queued else None
+    for item in reversed(queued):
+        if item[0] == task_id:
+            return item
+    return None
+
+
+def _left_the_queue(target: tuple[str, str, float, str]) -> bool:
+    """Return True once *target* was popped by the writer; else wait one tick.
+
+    Pops are FIFO, so every event queued before *target* is gone too.
     The caller holds ``_pending_cond``.  The wait is skipped when no
     writer is alive, so the caller starts one before retrying.
     """
-    if _pending_count(task_id) == 0:
+    if target not in _event_deque:
         return True
     writer = _event_writer_thread
     if writer is not None and writer.is_alive():
@@ -5234,7 +5220,7 @@ def _stop_event_writer() -> None:
         t, stop = locked_call(_event_writer_lock, _writer_and_stop)
         if t is not None:
             stop.set()
-            _event_queue.put_nowait(None)  # unbounded queue: never raises queue.Full
+            locked_call(_pending_cond, _pending_cond.notify_all)
             t.join(timeout=5)
             if t.is_alive():
                 logger.warning(
@@ -5243,7 +5229,7 @@ def _stop_event_writer() -> None:
                 )
                 return
             locked_call(_event_writer_lock, _forget_writer, t)
-        if not _event_queue.unfinished_tasks:
+        if not _pending_count(None):
             break
     locked_call(_caches_lock, _clear_seq_caches)
 

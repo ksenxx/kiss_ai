@@ -241,6 +241,30 @@ def broadcast_to_conn(
     printer.broadcast(event)
 
 
+def request_generation(cmd: dict[str, Any]) -> int:
+    """Return the ``generation`` *cmd* carries, 0 when none (or malformed).
+
+    A machine link stamps its requests with a generation of its own
+    (``machines.MachineLink.request``) and takes only the frame echoing
+    it as the answer: a reply type the daemon also pushes unasked
+    (``myModelsData`` for another client's edit, ``machines`` for a
+    registry change) echoes it to the requester, so a pushed frame, or
+    the late answer to an earlier request, never passes for the
+    answer.  A page's command carries none, and its reply stays as it
+    was.  Echoed to the requester only: links count from 0 each, so
+    another link's number may be the same.
+    """
+    return _parse_int(cmd.get("generation", 0)) or 0
+
+
+def _my_models_event(models: list[dict[str, str]], generation: int) -> dict[str, Any]:
+    """Return a ``myModelsData`` event listing *models*, echoing *generation* when not 0."""
+    event: dict[str, Any] = {"type": "myModelsData", "models": models}
+    if generation:
+        event["generation"] = generation
+    return event
+
+
 def _any_running(task_ids: list[str], chat_id: str = "") -> bool:
     """Whether a live agent state runs one of *task_ids* (or a task of *chat_id*).
 
@@ -374,6 +398,7 @@ class _CommandsMixin:
             conn_id: str = "",
             replay_id: str = "",
             reopen: bool = False,
+            recovery: bool = False,
         ) -> None: ...
         def _defer_replay(
             self,
@@ -674,6 +699,13 @@ class _CommandsMixin:
                     state_key,
                     chat_id=chat_id,
                     tab_id=tab_id,
+                    # A dispatched child's parent, known from admission
+                    # on: until the worker allocates the child's row,
+                    # ``_any_running`` can tell the child is live only
+                    # by this, so a ``deleteTask`` / ``deleteChat`` of
+                    # the parent meanwhile is refused instead of
+                    # removing the row the child will nest under.
+                    parent_task_id=str(cmd.get("parentTaskId", "") or "") or None,
                     server_owned=True,
                     stop_event=threading.Event(),
                 )
@@ -1365,7 +1397,12 @@ class _CommandsMixin:
         queued on, not to a successor task that re-armed the tab.
         ``""`` (no row yet — the narrow window between ``run()`` entry
         and ``_add_task``) makes the caller emit a transient echo
-        rather than mis-attribute the prompt to a previous task.
+        rather than mis-attribute the prompt to a previous task.  The
+        agent's id counts only when it is *owner*'s own registry key
+        (the state is re-keyed to its row on allocation): an agent
+        carried over from the tab's previous task still names THAT
+        task's row until the new run allocates its own, and an echo
+        stamped with it would be persisted as a turn of the old task.
 
         Args:
             owner: The running-task state that accepted the prompt.
@@ -1383,6 +1420,8 @@ class _CommandsMixin:
         if _reruns_after_teardown(owner):
             return None
         owner_task = _persisted_task_id(owner.agent)
+        if owner_task != owner.task_id:
+            owner_task = ""
         if not owner_task:
             owner.unattributed_prompt_echoes.append(prompt)
         return remember, owner_task
@@ -1895,6 +1934,11 @@ class _CommandsMixin:
 
         ``reopen: true`` marks a sub-agent tab the user asked for again
         (an expanded fan-out panel), see ``_replay_session``.
+
+        ``recovery: true`` is a ``daemon_client`` run reconnecting after
+        a dropped connection: it gets its subscription and transcript
+        back, but a tab the user closed meanwhile is not reopened, see
+        ``_replay_session``.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
@@ -1915,6 +1959,7 @@ class _CommandsMixin:
             conn_id=conn_id,
             replay_id=replay_id,
             reopen=cmd.get("reopen") is True,
+            recovery=cmd.get("recovery") is True,
         )
         if replay_id:
             self._broadcast_to_conn(
@@ -2018,7 +2063,7 @@ class _CommandsMixin:
         when it opens, so the pages open here before the stream are
         shown on that daemon's surfaces too.
         """
-        self._broadcast_to_conn(self.browser_tabs.snapshot_event(), cmd.get("connId", ""))
+        self.browser_tabs.send_snapshot(cmd.get("connId", ""))
 
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
@@ -2391,12 +2436,13 @@ class _CommandsMixin:
         Answers the settings panel's Custom Models subpanel with a
         ``myModelsData`` event, stamped with the sender's ``connId`` so
         one window opening its settings panel never repaints another
-        window's list mid-edit.
+        window's list mid-edit (and echoing the command's
+        ``generation``, see :func:`request_generation`).
         """
         from kiss.core.models.model_info import list_custom_models
 
         self._broadcast_to_conn(
-            {"type": "myModelsData", "models": list_custom_models()},
+            _my_models_event(list_custom_models(), request_generation(cmd)),
             cmd.get("connId", ""),
         )
 
@@ -2499,18 +2545,25 @@ class _CommandsMixin:
         """Thread body of :meth:`_reply_from_thread`."""
         self._broadcast_to_conn({"type": reply_type, **echo, **report()}, conn_id)
 
-    def _broadcast_my_models(self) -> None:
-        """Broadcast the current custom-model list to every client.
+    def _broadcast_my_models(self, cmd: dict[str, Any]) -> None:
+        """Broadcast the current custom-model list to every client, answering *cmd*.
 
         Mutations are broadcast UNstamped (no ``connId``): the file is
         shared by every window, so all open settings panels must repaint
         after an add / edit / delete, not only the one that clicked.
+        A machine link's command (one carrying a ``generation``, see
+        :func:`request_generation`) is answered besides with a copy
+        stamped with its ``connId`` and echoing it: the link takes that
+        one, and skips the broadcast as it skips every other client's.
         """
         from kiss.core.models.model_info import list_custom_models
 
-        self.printer.broadcast({
-            "type": "myModelsData", "models": list_custom_models(),
-        })
+        models = list_custom_models()
+        self.printer.broadcast(_my_models_event(models, 0))
+        if generation := request_generation(cmd):
+            self._broadcast_to_conn(
+                _my_models_event(models, generation), cmd.get("connId", ""),
+            )
 
     def _cmd_save_my_model(self, cmd: dict[str, Any]) -> None:
         """Add or update one custom model in ``~/.kiss/MY_MODELS.json``.
@@ -2545,7 +2598,7 @@ class _CommandsMixin:
         if error:
             self._send_error_to_sender(error, cmd)
             return
-        self._broadcast_my_models()
+        self._broadcast_my_models(cmd)
 
     def _send_error_to_sender(self, error: str, cmd: dict[str, Any]) -> None:
         """Answer a failed ``~/.kiss`` file mutation with an ``error`` event.
@@ -2576,7 +2629,7 @@ class _CommandsMixin:
         if error:
             self._send_error_to_sender(error, cmd)
             return
-        self._broadcast_my_models()
+        self._broadcast_my_models(cmd)
 
     def _cmd_add_trick(self, cmd: dict[str, Any]) -> None:
         """Append a promptlet to the home directory's ``MY_INJECTION.md``.

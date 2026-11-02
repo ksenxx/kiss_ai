@@ -38,7 +38,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_subagent_tabs_two_clients import _fan_out
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
-PARENT_PROMPT = "fan out one child conc1018"
+PARENT_PROMPT = "fan out one sub-agent conc1018"
 CHILD_MARK = "CONC1018CHILD"
 STEP_TOOL = "conc1018_step"
 
@@ -100,6 +100,9 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
             self_agent.model_name = str(kwargs.get("model_name") or "")
             self_agent.work_dir = str(kwargs.get("work_dir") or ".")
             prompt = str(kwargs.get("prompt_template", ""))
+            # What the real ``run`` records: the dispatcher reads it to see
+            # that the task asks for a sub-agent (a same-family child).
+            self_agent.task_description = prompt
             if CHILD_MARK in prompt:
                 step_release.wait(timeout=60)
                 printer.print(

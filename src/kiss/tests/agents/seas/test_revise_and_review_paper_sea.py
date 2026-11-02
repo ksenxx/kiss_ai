@@ -102,6 +102,15 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert sea_commands.base_settings([agent]) == agent.settings({})
     assert_no_removed_getters(sea)
     assert "strong accept" in agent.description()
+    # The task text names the rounds as sub-agents, so the dispatcher lets the
+    # coordinator run a writer of its own model family (same_family_conflict).
+    shaped = agent.prompt("  Writing: a paper. Review: strict.  ")
+    assert shaped.startswith("Writing: a paper. Review: strict.\n\nRun each writing round as a")
+    assert sea.WRITE_PAPER_SEA in shaped and sea.REVIEW_PAPER_SEA in shaped
+    assert fanout_guard.asks_for_sub_agents(shaped)
+    assert not fanout_guard.asks_for_sub_agents("Writing: a paper. Review: strict.")
+    assert fanout_guard.same_family_conflict(
+        "claude-opus-5-5", "claude-opus-5-5", ["write the paper"], shaped, review=False) == ""
 
 
 def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas() -> None:
@@ -131,14 +140,18 @@ def test_writer_task_first_round_and_revision_rounds() -> None:
     assert "Writing instructions from the user:\nWrite for NeurIPS 2027 at /w/p/p.tex.\n" in first
     assert "Notes from the loop coordinator" not in first
     assert "review at" not in first
-    # The writer rules end with the AI discovery loop the rules point at
-    # ("below"): the loop lives in the ``/discover`` SEA, not in ``SYSTEM.md``.
-    assert first.endswith(
-        "report what is left undone.\n\n" + discover_sea.DISCOVERY_INSTRUCTIONS
-    )
-    assert first.count(discover_sea.SECTION_HEADING) == 1
+    # The writer rules end with the ``/discover`` block they point at ("below"): the
+    # SEA's own help text and how to run it, never a copy of its loop text.
+    assert first.endswith("report what is left undone.\n\n" + sea._DISCOVER_RULES.rstrip())
+    assert f"- `/discover`: {discover_sea.DiscoverSea().description()}\n" in first
+    assert 'run_agent(agent="discover", task=<task>' in first
+    assert '"Do not change this repository"' in first and "`git apply <path>`" in first
+    assert "reports `best.patch` with the dev and\nheld-out metrics" in first
+    assert discover_sea.DISCOVERY_INSTRUCTIONS not in first
+    assert discover_sea.SECTION_HEADING not in first
     assert "Do not run a review of your own" in first
-    assert "Follow the AI discovery loop below" in first and "ablation" in first
+    assert "run that search\n  through `/discover` as the block below says" in first
+    assert "ablation" in first
 
     later = sea.writer_task(
         "Write for NeurIPS 2027.", 3, "/w/reports/p-round2-review.txt", " YCSB allowed. \n"

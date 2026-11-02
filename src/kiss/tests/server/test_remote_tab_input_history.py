@@ -52,7 +52,7 @@ class TestRemoteTabInputHistory(RemoteTabsHarness):
 
     async def test_prompt_and_ask_line_of_a_bound_tab_are_in_the_history(self) -> None:
         tab = "tab-history"
-        await self._fan_out(tab)  # "Fan out" runs on box; its sub-agent is held
+        await self._fan_out(tab)  # "Fan out to a sub-agent" runs on box; its sub-agent is held
         await self._send({"type": "appendUserMessage", "tabId": tab, "prompt": ASK_LINE})
         # The echo proves the machine handled the line as a live message
         # of its running task; it is relayed after the forward, which the
@@ -62,18 +62,18 @@ class TestRemoteTabInputHistory(RemoteTabsHarness):
 
         history = await self._input_history()
         self.assertIn(ASK_LINE, history, "the /ask line typed during the remote run")
-        self.assertIn("Fan out", history, "the prompt that started the remote run")
+        self.assertIn("Fan out to a sub-agent", history, "the prompt that started the remote run")
         # The task itself is still the machine's alone: no local history row.
-        self.assertNotIn("Fan out", await self._titles(mach.LOCAL_MACHINE))
-        self.assertIn("Fan out", await self._titles("box"))
+        self.assertNotIn("Fan out to a sub-agent", await self._titles(mach.LOCAL_MACHINE))
+        self.assertIn("Fan out to a sub-agent", await self._titles("box"))
 
         _FinishingModel.released.set()
         await self._run_until_idle(tab)
         # A finished run changes nothing: the texts are kept, not the task.
         history = await self._input_history()
         self.assertIn(ASK_LINE, history)
-        self.assertIn("Fan out", history)
-        self.assertNotIn("Fan out", await self._titles(mach.LOCAL_MACHINE))
+        self.assertIn("Fan out to a sub-agent", history)
+        self.assertNotIn("Fan out to a sub-agent", await self._titles(mach.LOCAL_MACHINE))
 
     async def test_an_answer_to_the_machine_is_not_history(self) -> None:
         """A ``userAnswer`` forwarded to the machine is an answer, not prompt history."""

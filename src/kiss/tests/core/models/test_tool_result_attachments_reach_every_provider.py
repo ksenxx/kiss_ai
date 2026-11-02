@@ -78,7 +78,7 @@ def _payload_is_present(body: dict[str, Any], data: bytes) -> bool:
 
 _ANTHROPIC_MODEL = "claude-tool-attachment-under-test"
 _GEMINI_MODEL = "gemini-tool-attachment-under-test"
-_OPENAI_MODEL = "tool-attachment-under-test"
+_OPENAI_MODEL = "gpt-tool-attachment-under-test"  # an openai-family name: a model that sees
 
 _TOOL_NAME = "Read"
 _TOOL_CALL_ID = "call_read_1"
@@ -447,26 +447,40 @@ class TestAnImageFromAToolReachesTheModel:
         assert _payload_is_present(body, png_bytes)
 
 
-class TestATransportThatCannotCarryBytesSaysSo:
-    """The CLI transports take one text prompt and must admit the loss."""
+def _without_vision_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blank every HTTP provider key, so the vision bridge has no model to describe with."""
+    from kiss.core import config as config_module
+    from kiss.core.models.model_info import _NATIVE_PROVIDERS, OPENAI_COMPATIBLE_PROVIDERS
 
-    def test_claude_code_states_the_image_was_not_shown(
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, provider.api_key_name, "")
+    for _prefix, _label, api_key_name in _NATIVE_PROVIDERS:
+        if api_key_name is not None:
+            monkeypatch.setattr(config_module.DEFAULT_CONFIG, api_key_name, "")
+
+
+class TestATransportThatCannotCarryBytesSaysSo:
+    """The CLI transports take one text prompt: a vision model describes the bytes, or the
+    prompt admits the loss.  Without a vision model configured, the loss is admitted."""
+
+    def test_claude_code_states_the_image_was_not_described(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         png_bytes: bytes,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The prompt says the attachment could not be shown, and it is logged."""
+        """The prompt says the attachment could not be described, and it is logged."""
+        _without_vision_models(monkeypatch)
         prompt = claude_prompt_after_tool_result(
             tmp_path, monkeypatch, _screenshot_result(png_bytes)
         )
-        assert "could not be shown" in prompt
-        assert "image/png" in prompt
+        assert "image/png attachment 1 could not be described" in prompt
+        assert "the model you run on (cc/opus) cannot see images" in prompt
         assert base64.b64encode(png_bytes).decode("ascii") not in prompt
         assert "attachment" in caplog.text
 
-    def test_codex_states_the_image_was_not_shown(
+    def test_codex_states_the_image_was_not_described(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -474,11 +488,12 @@ class TestATransportThatCannotCarryBytesSaysSo:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Codex must make the same statement Claude Code makes."""
+        _without_vision_models(monkeypatch)
         prompt = codex_prompt_after_tool_result(
             tmp_path, monkeypatch, _screenshot_result(png_bytes)
         )
-        assert "could not be shown" in prompt
-        assert "image/png" in prompt
+        assert "image/png attachment 1 could not be described" in prompt
+        assert "the model you run on (codex/default) cannot see images" in prompt
         assert base64.b64encode(png_bytes).decode("ascii") not in prompt
         assert "attachment" in caplog.text
 

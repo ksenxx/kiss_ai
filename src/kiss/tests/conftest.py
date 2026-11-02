@@ -49,6 +49,7 @@ import os
 import random
 import shutil
 import socket
+import subprocess
 import sys
 import sysconfig
 import tempfile
@@ -59,6 +60,12 @@ from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+# Imported whole before any test thread can start the import lazily:
+# ``pytest.approx`` reads ``sys.modules["numpy"]`` without the import
+# lock and fails on a half-initialised module ("partially initialized
+# module 'numpy' has no attribute 'isscalar'") when a background thread
+# (a memory search's ``VectorIndex.search``) is importing it meanwhile.
+import numpy  # noqa: F401
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
@@ -334,6 +341,24 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+@functools.cache
+def host_sed_is_gnu() -> bool:
+    """Return whether the ``sed`` on PATH is GNU sed, asked once with ``sed --version``.
+
+    The shell-rewrite conversions model GNU sed, and the tests that
+    check them against the host ``sed -i`` as the oracle skip without
+    it: BSD sed (macOS) takes the script as the backup suffix of ``-i``
+    and fails, and has no ``-z`` and no ``\\n`` in a replacement.
+    """
+    try:
+        version = subprocess.run(
+            ["sed", "--version"], capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return version.returncode == 0 and "GNU sed" in version.stdout
+
+
 def seed_worktree(agent: Any, wt: Any) -> None:
     """Make *wt* the only pending worktree of the :class:`SorcarAgent` *agent* (``None``: none).
 
@@ -347,6 +372,24 @@ def seed_worktree(agent: Any, wt: Any) -> None:
     from kiss.agents.sorcar.git_worktree import _repo_key
 
     agent._wts = {} if wt is None else {_repo_key(wt): wt}
+
+
+def executor_of(agent: Any) -> Any:
+    """Install and return the :class:`KISSAgent` executor holding *agent*'s live model.
+
+    ``SorcarAgent.run`` keeps the model of the session it drives on
+    ``agent._current_executor``, which the ``set_model`` tool swaps.  A
+    test that drives the real tool outside a run gives the agent an
+    executor the same way and addresses the model through it.
+
+    Args:
+        agent: A ``SorcarAgent`` (or subclass) instance.
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    executor = KISSAgent(f"{agent.name} executor")
+    agent._current_executor = executor
+    return executor
 
 
 def find_free_port() -> int:

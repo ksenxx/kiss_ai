@@ -41,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from kiss.core.kiss_agent import _NON_RETRYABLE_PHRASES, KISSAgent
+from kiss.core.models import model_families
 from kiss.core.models.model_info import (
     MODEL_INFO,
     ModelInfo,
@@ -174,6 +175,10 @@ def _register_synthetic_pair(
                 fallback=fb,
             ),
         )
+    # Repeated empty turns fail over to a model of another family when
+    # the machine has one configured; the declared pair stays the only
+    # choice here.
+    monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
 
 
 class TestNonRetryablePhrases:

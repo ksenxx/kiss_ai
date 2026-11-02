@@ -11,11 +11,16 @@
 // reported the suite at once and never killed its group: the process
 // lived on.  Two suites leave one behind:
 //
-//  1. hung.coverage.js, a coverage gate whose suite hangs.  The gate's
-//     CHILD_TIMEOUT_MS (90 s, below the runner's 120 s cap) kills only
-//     the suite process, then the gate exits and is reported; with the
-//     old 300 s gate timeout the runner's group kill came first and
-//     ended the suite's worker with the gate.
+//  1. hung.coverage.js, a coverage gate that starts the worker and then
+//     runs its suite, which hangs: the gate's CHILD_TIMEOUT_MS (90 s,
+//     below the runner's 120 s cap) ends the suite, then the gate exits
+//     and is reported, and only the runner's group kill ends the worker.
+//     The gate starts the worker itself, before its timeout is armed,
+//     so that the worker's pid is on record whatever the suite does: a
+//     suite slow to start on a loaded host could otherwise be killed
+//     before writing it, and the runner be blamed for a worker that was
+//     never started.  (What a gate's suite leaves behind is cleaned up
+//     by the gate itself: coverageGateRetiresSuiteGroup_wave4.)
 //  2. leaky.test.js, a plain suite that exits leaving a worker running.
 //
 // Who killed each worker is checked as in conc1018_m_runall_grandchild:
@@ -33,8 +38,8 @@ const os = require('os');
 const path = require('path');
 const {spawnSync} = require('child_process');
 
-// Long enough for the gate's suite to start node, spawn its worker and
-// write its pid file on a loaded host.
+// The gate's cap on its hung suite; nothing has to happen within it (the
+// gate records its worker's pid before arming it), so it is just short.
 const GATE_TIMEOUT_MS = 2000;
 
 if (process.platform !== 'linux') {
@@ -80,15 +85,15 @@ print(json.dumps({"status": proc.returncode, "fates": fates}))
 
 /** A suite that starts a `sleep` worker with stdio 'ignore' (left in the
  * suite's process group), records the worker's pid in `pidFile`, then
- * hangs or exits. */
-function suiteSource(pidFile, hangs) {
+ * runs the statement `then`. */
+function suiteSource(pidFile, then) {
   return [
     "'use strict';",
     "const {spawn} = require('child_process');",
     "const fs = require('fs');",
     "const worker = spawn('sleep', ['300'], {stdio: 'ignore'});",
     `fs.writeFileSync(${JSON.stringify(pidFile)}, String(worker.pid));`,
-    hangs ? 'setInterval(function () {}, 1000);' : 'process.exit(0);',
+    then,
     '',
   ].join('\n');
 }
@@ -114,15 +119,18 @@ function testReportedSuitesTakeTheirWorkersWithThem() {
     );
     fs.writeFileSync(
       path.join(dir, 'hung.coverage.js'),
-      "require('./coverage_gate').runCovered('hung.test.js', 'hung');\n",
+      suiteSource(
+        path.join(pidDir, 'hung'),
+        "require('./coverage_gate').runCovered('hung.test.js', 'hung');",
+      ),
     );
     fs.writeFileSync(
       path.join(dir, 'hung.test.js'),
-      suiteSource(path.join(pidDir, 'hung'), true),
+      "'use strict';\nsetInterval(function () {}, 1000);\n",
     );
     fs.writeFileSync(
       path.join(dir, 'leaky.test.js'),
-      suiteSource(path.join(pidDir, 'leaky'), false),
+      suiteSource(path.join(pidDir, 'leaky'), 'process.exit(0);'),
     );
     const res = spawnSync(
       'python3',

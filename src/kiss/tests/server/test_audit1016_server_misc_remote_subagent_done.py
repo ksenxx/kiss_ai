@@ -60,9 +60,12 @@ class _NestedFanOutModel(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
         _NestedFanOutModel.calls += 1
         if _NestedFanOutModel.calls <= 2:
+            # The child's task asks for a sub-agent too, so its own
+            # same-family fan-out (the grandchild) is allowed.
             function = {
                 "name": "run_parallel",
-                "arguments": json.dumps({"tasks": json.dumps(["Say hi from below"])}),
+                "arguments": json.dumps(
+                    {"tasks": json.dumps(["Say hi from below via a sub-agent"])}),
             }
         else:
             function = {
@@ -153,7 +156,7 @@ class TestRemoteNestedSubagentRelay(IsolatedAsyncioTestCase):
     async def test_nested_new_tab_is_relayed_before_any_resume(self) -> None:
         tab = "tab-parent"
         await self._send({
-            "type": "submit", "prompt": "Fan out", "tabId": tab,
+            "type": "submit", "prompt": "Fan out to a sub-agent", "tabId": tab,
             "machine": "box", "model": "gpt-4o-mini", "workDir": self.tmpdir,
         })
         announced: list[tuple[str, str]] = []  # (parent_tab_id, task_id)

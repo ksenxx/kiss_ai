@@ -383,6 +383,50 @@ def _serve_inert_script(route) -> None:
     route.fulfill(status=200, content_type="application/javascript", body="")
 
 
+# A semanticscholar.org paper URL and the Crossref answer for its slug's
+# words (shape of api.crossref.org/works?query.bibliographic=... on
+# 1 Nov 2026, trimmed to the selected fields).
+_S2_PAPER_URL = (
+    "https://www.semanticscholar.org/paper/Real-content-paper-Doe-Roe/"
+    "0123456789abcdef0123456789abcdef01234567"
+)
+_CROSSREF_ANSWER = {
+    "status": "ok",
+    "message-type": "work-list",
+    "message": {
+        "total-results": 2,
+        "items": [
+            {
+                "DOI": "10.1000/real.1",
+                "title": ["Real content paper <with> markup"],
+                "author": [
+                    {"given": "Jane", "family": "Doe"},
+                    {"given": "Rob", "family": "Roe"},
+                    {"name": "The Consortium"},
+                ],
+                "container-title": ["Journal of Tests"],
+                "issued": {"date-parts": [[2024, 5]]},
+                "is-referenced-by-count": 7,
+                "abstract": (
+                    "<jats:p>An <jats:italic>abstract</jats:italic>  of the paper.</jats:p>"
+                ),
+                "URL": "https://doi.org/10.1000/real.1",
+            },
+            {"DOI": "10.1000/other.2", "title": ["Another paper"], "issued": {}},
+        ],
+    },
+}
+
+
+def _serve_aws_captcha_page(route) -> None:
+    """Answer like semanticscholar.org does from this network: the AWS WAF puzzle."""
+    route.fulfill(status=405, content_type="text/html", body=_AWS_CAPTCHA_PAGE)
+
+
+def _serve_crossref_answer(route) -> None:
+    route.fulfill(status=200, content_type="application/json", body=json.dumps(_CROSSREF_ANSWER))
+
+
 @pytest.fixture(scope="module")
 def server():
     """Yield the base URL of a local server serving the probe pages."""
@@ -526,25 +570,29 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
         web_stealth.stop_virtual_display()
     assert len(os.listdir("/proc/self/fd")) == fds_before
     assert atexit._ncallbacks() == callbacks_before
-    # Descriptor exhaustion: the pipe still fits but Popen's own pipe does
-    # not; the tool falls back to headless and closes both pipe ends.
+    # Descriptor exhaustion: with two descriptors of headroom the pipe
+    # still fits but Popen's own pipe does not; with none, not even the
+    # pipe does (where a descriptor another thread opened meanwhile lands
+    # the two-headroom case under load).  Either way the tool falls back
+    # to headless and closes whatever pipe ends it opened.
     # Earlier tests leave holes in the descriptor table (closed browser
     # sockets), and the kernel hands out the lowest free number, so first
     # plug every hole: the loop ends once a plug lands above the old top.
-    highest = max(int(fd) for fd in os.listdir("/proc/self/fd"))
-    plugs: list[int] = []
-    while not plugs or plugs[-1] < highest:
-        plugs.append(os.open(os.devnull, os.O_RDONLY))
-    highest = plugs[-1]
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (highest + 3, hard))
-    try:
-        assert web_stealth.virtual_display() is None
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-        for fd in plugs:
-            os.close(fd)
-    assert len(os.listdir("/proc/self/fd")) == fds_before
+    for headroom in (2, 0):
+        highest = max(int(fd) for fd in os.listdir("/proc/self/fd"))
+        plugs: list[int] = []
+        while not plugs or plugs[-1] < highest:
+            plugs.append(os.open(os.devnull, os.O_RDONLY))
+        highest = plugs[-1]
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (highest + 1 + headroom, hard))
+        try:
+            assert web_stealth.virtual_display() is None
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+            for fd in plugs:
+                os.close(fd)
+        assert len(os.listdir("/proc/self/fd")) == fds_before
 
     # No Xvfb binary on PATH -> no display -> the launch falls back to
     # real headless mode (with its headed user agent, see
@@ -1238,8 +1286,227 @@ def test_aws_waf_puzzle_after_token_challenge_gets_the_puzzles_short_wait(tool, 
     assert 4.5 <= elapsed < 10, elapsed
 
 
+def test_semanticscholar_puzzle_is_answered_from_crossref(tool, server):
+    """A semanticscholar page kept behind the AWS WAF puzzle is looked up on Crossref.
+
+    The site answers paper and search pages from this network with the
+    puzzle even for an un-automated Chrome, so after the puzzle's short
+    wait the tool opens Crossref's works API for the slug's words and
+    renders its JSON as a page: the note names the vendor, the terms and
+    the count; the tree shows title, authors, year, venue, DOI link,
+    citation count and the abstract without its JATS markup.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+    tool._context.route("https://api.crossref.org/**", _serve_crossref_answer)
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(_S2_PAPER_URL)
+        elapsed = time.monotonic() - start
+        title = _main(tool, "document.title")
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: www.semanticscholar.org answered with a bot-protection"), first
+    assert "(AWS WAF CAPTCHA puzzle)" in first and "show_browser()" in first
+    assert "'Real content paper Doe Roe' was looked up on Crossref" in first, first
+    assert "2 work(s) found" in first
+    assert f"show_browser() and then go_to_url('{_S2_PAPER_URL}')" in first
+    assert title == "Crossref: Real content paper Doe Roe"
+    assert "Page: Crossref: Real content paper Doe Roe" in tree
+    assert tool._page.url.startswith(
+        "https://api.crossref.org/works?query.bibliographic=Real+content+paper+Doe+Roe&rows=5&"
+    )
+    assert 'heading "Real content paper <with> markup" [level=2]' in tree
+    assert "Jane Doe, Rob Roe, The Consortium (2024). Journal of Tests" in tree
+    assert 'link "https://doi.org/10.1000/real.1"' in tree
+    assert "Cited by 7 (Crossref)" in tree
+    assert "An abstract of the paper." in tree and "jats" not in tree
+    assert 'heading "Another paper" [level=2]' in tree and "Cited by 0 (Crossref)" in tree
+    assert "Begin" not in tree
+    assert 3 <= elapsed < 15, elapsed
+
+
+@pytest.mark.parametrize(
+    "crossref",
+    [
+        lambda route: route.abort("failed"),
+        lambda route: route.fulfill(
+            status=503, content_type="text/html", body="<title>503</title><p>Service unavailable"
+        ),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"status": "failed", "message-type": "validation-failure", "message": []}',
+        ),
+    ],
+    ids=["aborted", "html-503", "not-a-works-list"],
+)
+def test_semanticscholar_puzzle_is_reported_when_crossref_fails(tool, server, crossref):
+    """Without a Crossref works list the puzzle is reported as any other block, its page showing."""
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+    tool._context.route("https://api.crossref.org/**", crossref)
+    try:
+        tree = tool.go_to_url(_S2_PAPER_URL)
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: www.semanticscholar.org answered with a bot-protection"), first
+    assert "(AWS WAF CAPTCHA puzzle)" in first and "Crossref" not in first
+    assert "use another source for the same information" in first
+    assert "Page: Human Verification" in tree and "Begin" in tree
+    assert tool._page.url == _S2_PAPER_URL
+
+
+def test_semanticscholar_search_is_answered_from_crossref(tool, server):
+    """A search page's query goes to Crossref as a bibliographic query for ten works."""
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+    tool._context.route("https://api.crossref.org/**", _serve_crossref_answer)
+    try:
+        tree = tool.go_to_url("https://www.semanticscholar.org/search?q=Real%20content&sort=x")
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert "'Real content' was looked up on Crossref" in first, first
+    assert tool._page.url.startswith(
+        "https://api.crossref.org/works?query.bibliographic=Real+content&rows=10&"
+    )
+    assert 'heading "Real content paper <with> markup" [level=2]' in tree
+
+
+def test_semanticscholar_puzzle_stays_when_the_user_can_see_it(tool, server, monkeypatch):
+    """A page shown to the user is not swapped for Crossref: they may be solving the puzzle."""
+    tool.go_to_url(f"{server}/inert")
+    monkeypatch.setattr(tool, "_user_sees_page", lambda: True)
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+    tool._context.route("https://api.crossref.org/**", _serve_crossref_answer)
+    try:
+        tree = tool.go_to_url(_S2_PAPER_URL)
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert "(AWS WAF CAPTCHA puzzle)" in first and "Crossref" not in first, first
+    assert "Page: Human Verification" in tree and tool._page.url == _S2_PAPER_URL
+
+
+def test_user_sees_page_in_the_browser_tab_a_window_or_their_own_chrome(tool, server):
+    """The predicate behind the puzzle's stay: headed Chromium on Xvfb is not visible."""
+    tool.go_to_url(f"{server}/inert")
+    assert tool._user_sees_page() is False
+    for attribute, value in (("_live", True), ("_headless", False), ("_attached_url", "http://x")):
+        before = getattr(tool, attribute)
+        setattr(tool, attribute, value)
+        try:
+            assert tool._user_sees_page() is True, attribute
+        finally:
+            setattr(tool, attribute, before)
+    assert tool._user_sees_page() is False
+
+
+@pytest.mark.parametrize(
+    ("afterwards", "reason"),
+    [
+        (lambda route: route.abort("failed"), "Error"),
+        (
+            lambda route: route.fulfill(
+                status=503, content_type="text/html", body="<title>503</title>Service unavailable"
+            ),
+            "HTTP 503",
+        ),
+    ],
+    ids=["aborted", "http-503"],
+)
+def test_semanticscholar_puzzle_not_reopened_is_said_so(tool, server, afterwards, reason):
+    """When Crossref fails and the puzzle page cannot be reopened, the note says both."""
+    tool.go_to_url(f"{server}/inert")
+    hits = {"n": 0}
+
+    def puzzle_then_nothing(route) -> None:
+        hits["n"] += 1
+        if hits["n"] == 1:
+            _serve_aws_captcha_page(route)
+        else:
+            afterwards(route)
+
+    tool._context.route("https://*.awswaf.com/**", _serve_inert_script)
+    tool._context.route("https://www.semanticscholar.org/**", puzzle_then_nothing)
+    tool._context.route("https://api.crossref.org/**", lambda route: route.abort("failed"))
+    try:
+        tree = tool.go_to_url(_S2_PAPER_URL)
+    finally:
+        tool._context.unroute("https://api.crossref.org/**")
+        tool._context.unroute("https://www.semanticscholar.org/**")
+        tool._context.unroute("https://*.awswaf.com/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: www.semanticscholar.org answered with a bot-protection"), first
+    assert "Crossref (api.crossref.org) gave no answer" in first
+    assert f"could not be reopened afterwards ({reason})" in first, first
+    assert f"Call go_to_url('{_S2_PAPER_URL}') again" in first
+    assert "complete the check" not in first
+    assert hits["n"] == 3  # the puzzle, then the two attempts to reopen it
+
+
+def test_content_fallback_names_crossref_for_semanticscholar_pages():
+    """Paper pages with a title slug and searches with a query map to Crossref, nothing else."""
+    fallback = web_stealth.content_fallback
+    fields = "DOI,title,author,container-title,issued,abstract,is-referenced-by-count,URL"
+    assert fallback(_S2_PAPER_URL) == (
+        "https://api.crossref.org/works?query.bibliographic=Real+content+paper+Doe+Roe"
+        f"&rows=5&select={fields}",
+        "Real content paper Doe Roe",
+    )
+    assert fallback(
+        "https://semanticscholar.org/paper/Meta-Learning%3A-a-survey-Lee/"
+        "0123456789ABCDEF0123456789abcdef01234567/"
+    ) == (
+        "https://api.crossref.org/works?query.bibliographic=Meta+Learning%3A+a+survey+Lee"
+        f"&rows=5&select={fields}",
+        "Meta Learning: a survey Lee",
+    )
+    assert fallback("https://www.semanticscholar.org/search?q=Differential%20Testing&sort=x") == (
+        "https://api.crossref.org/works?query.bibliographic=Differential+Testing"
+        f"&rows=10&select={fields}",
+        "Differential Testing",
+    )
+    # The host is what counts: case, a port and userinfo do not change it.
+    for authority in (
+        "WWW.SemanticScholar.org",
+        "www.semanticscholar.org:443",
+        "u:p@semanticscholar.org",
+    ):
+        assert fallback(f"https://{authority}/search?q=Differential%20Testing") == (
+            "https://api.crossref.org/works?query.bibliographic=Differential+Testing"
+            f"&rows=10&select={fields}",
+            "Differential Testing",
+        ), authority
+    assert fallback("https://www.semanticscholar.org@evil.example/search?q=x") is None
+    # No words to look up: the id alone, an empty query, other pages, other hosts.
+    paper_id = "0123456789abcdef0123456789abcdef01234567"
+    assert fallback(f"https://www.semanticscholar.org/paper/{paper_id}") is None
+    assert fallback("https://www.semanticscholar.org/search?q=%20") is None
+    assert fallback("https://www.semanticscholar.org/search") is None
+    assert fallback("https://www.semanticscholar.org/author/Jane-Doe/1234") is None
+    assert fallback("https://www.semanticscholar.org/") is None
+    assert fallback("https://api.semanticscholar.org/graph/v1/paper/search?query=x") is None
+    assert fallback("https://www.google.com/search?q=semanticscholar") is None
+
+
 def test_bench_verdict_tells_expected_puzzles_from_other_blocks(tool, server):
-    """The bench passes a known puzzle only for its vendor, with the agent's note."""
+    """The bench passes a known puzzle only when Crossref answered for its vendor's puzzle."""
     spec = importlib.util.spec_from_file_location(
         "web_stealth_bench", _REPO_ROOT / "scripts" / "web_stealth_bench.py"
     )
@@ -1251,13 +1518,60 @@ def test_bench_verdict_tells_expected_puzzles_from_other_blocks(tool, server):
     try:
         puzzle = f"{server}/aws-captcha"
         result = tool.go_to_url(puzzle)
-        # A page that is not in the list is simply blocked.
+        # A page that is not in the list is simply blocked, and so is a
+        # listed page whose puzzle got no Crossref answer.
         assert bench.verdict(tool, puzzle, result).startswith("BLOCKED(AWS WAF CAPTCHA puzzle)")
         bench.KNOWN_PUZZLES[puzzle] = (web_stealth.AWS_WAF_CAPTCHA, "Real content")
-        assert bench.verdict(tool, puzzle, result).startswith("PUZZLE(AWS WAF CAPTCHA puzzle)")
-        # Another vendor's block on the same page is not the expected puzzle.
-        bench.KNOWN_PUZZLES[puzzle] = (web_stealth.CLOUDFLARE_CHALLENGE, "Real content")
         assert bench.verdict(tool, puzzle, result).startswith("BLOCKED(AWS WAF CAPTCHA puzzle)")
+        tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+        tool._context.route("https://api.crossref.org/**", _serve_crossref_answer)
+        try:
+            result = tool.go_to_url(_S2_PAPER_URL)
+        finally:
+            tool._context.unroute("https://api.crossref.org/**")
+            tool._context.unroute("https://www.semanticscholar.org/**")
+        # The Crossref page for the expected vendor's puzzle counts as loaded ...
+        bench.KNOWN_PUZZLES[_S2_PAPER_URL] = (web_stealth.AWS_WAF_CAPTCHA, "real content paper")
+        assert bench.verdict(tool, _S2_PAPER_URL, result).startswith(
+            "FALLBACK(AWS WAF CAPTCHA puzzle) Note: www.semanticscholar.org"
+        )
+        # ... also when listed among several labels the site answers with ...
+        bench.KNOWN_PUZZLES[_S2_PAPER_URL] = (
+            (web_stealth.CLOUDFLARE_CHALLENGE, web_stealth.AWS_WAF_CAPTCHA),
+            "Real content",
+        )
+        assert bench.verdict(tool, _S2_PAPER_URL, result).startswith(
+            "FALLBACK(AWS WAF CAPTCHA puzzle) Note:"
+        )
+        # ... not for another vendor's, nor unlisted, nor when Crossref's
+        # works (not the page title, which names the words searched for)
+        # lack the paper.
+        bench.KNOWN_PUZZLES[_S2_PAPER_URL] = (web_stealth.CLOUDFLARE_CHALLENGE, "Real content")
+        assert bench.verdict(tool, _S2_PAPER_URL, result).startswith("BLOCKED(None) Note:")
+        del bench.KNOWN_PUZZLES[_S2_PAPER_URL]
+        assert bench.verdict(tool, _S2_PAPER_URL, result).startswith("BLOCKED(None) Note:")
+        bench.KNOWN_PUZZLES[_S2_PAPER_URL] = (web_stealth.AWS_WAF_CAPTCHA, "Doe Roe")
+        assert bench.verdict(tool, _S2_PAPER_URL, result) == (
+            "BLOCKED(AWS WAF CAPTCHA puzzle) Crossref lists no work titled 'Doe Roe'"
+        )
+        empty = {"status": "ok", "message": {"items": []}}
+        tool._context.route("https://www.semanticscholar.org/**", _serve_aws_captcha_page)
+        tool._context.route(
+            "https://api.crossref.org/**",
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(empty)
+            ),
+        )
+        try:
+            result = tool.go_to_url(_S2_PAPER_URL)
+        finally:
+            tool._context.unroute("https://api.crossref.org/**")
+            tool._context.unroute("https://www.semanticscholar.org/**")
+        assert "0 work(s) found" in result.splitlines()[0]
+        bench.KNOWN_PUZZLES[_S2_PAPER_URL] = (web_stealth.AWS_WAF_CAPTCHA, "real content paper")
+        assert bench.verdict(tool, _S2_PAPER_URL, result).startswith(
+            "BLOCKED(AWS WAF CAPTCHA puzzle) Crossref lists no work"
+        )
     finally:
         tool._context.unroute("https://*.awswaf.com/**")
     # The content page (the site's policy relaxed) is OK; an unrecognised

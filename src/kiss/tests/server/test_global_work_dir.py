@@ -191,9 +191,11 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         then reports the same directory to both."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
-        await self._send(
-            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
-        )
+        # The first pick is seen adopted before the second is sent: the
+        # two commands travel on separate connections, whose handlers
+        # run concurrently, so nothing else orders B after A (once per
+        # ~16k-test run A landed last and the persisted value was A).
+        await self._pick_work_dir(writer_a, reader_a, self.dir_a)
         await self._send(
             writer_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )

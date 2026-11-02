@@ -12,11 +12,17 @@ without a ``timeout``.  Both tests below failed against that helper.
 
 from __future__ import annotations
 
+import os
+import shlex
 import subprocess
+import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from kiss.core.processes import popen_process_group
 from kiss.tests.agents.seas.conftest import git, seed_repo
 from kiss.tests.conftest import posix_only
 
@@ -81,13 +87,71 @@ def test_global_git_config_does_not_reach_the_test_repositories(
     assert git(repo, "log", "-1", "--format=%ct") == "1893456000"
 
 
+def _dead(pid: int) -> bool:
+    """Whether no process *pid* runs any more (gone, or a zombie init has not reaped yet)."""
+    try:
+        os.kill(pid, 0)
+        stat = Path(f"/proc/{pid}/stat").read_text() if sys.platform == "linux" else ""
+    except (ProcessLookupError, FileNotFoundError):
+        return True
+    return stat.rsplit(") ", 1)[-1].startswith("Z")
+
+
+class _EditorUp:
+    """Profile hook of the test's thread: the helper's timeout starts once the editor runs.
+
+    ``run_process_group`` starts git and then waits for it with the
+    timeout.  Between the two, at the return of ``popen_process_group``,
+    the hook waits (at most 30 s) until the editor has written its pid,
+    so git's own start-up on a loaded machine cannot use up the short
+    timeout before it has spawned the editor the test watches.
+    """
+
+    def __init__(self, pidfile: Path) -> None:
+        self.pidfile = pidfile
+        self.pid: int | None = None
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        """Wait for the editor's pid when git has just been started."""
+        if event != "return" or frame.f_code is not popen_process_group.__code__:
+            return
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self.pidfile.exists() and (text := self.pidfile.read_text().strip()):
+                self.pid = int(text)
+                return
+            time.sleep(0.02)
+
+
 @posix_only("GIT_EDITOR runs through sh")
 def test_a_stuck_git_command_times_out(tmp_path: Path) -> None:
-    """A git command that waits on a human (an editor here) fails instead of hanging."""
+    """A git command that waits on a human (an editor here) fails instead of hanging.
+
+    The editor dies with git: the helper kills git's process group, so the
+    editor's ``sleep`` is gone once the timeout has been raised (audit
+    2026-11-01, T4 F4: a plain ``subprocess.run`` timeout killed git alone
+    and left the editor shell and its sleep running).
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "alice@example.com")
     git(repo, "config", "user.name", "Alice")
-    with pytest.raises(subprocess.TimeoutExpired):
-        git(repo, "commit", "--allow-empty", env={"GIT_EDITOR": "sh -c 'sleep 2'"}, timeout=0.5)
+    # The editor records its pid, then sleeps on in that same process.  git runs
+    # it through ``sh -c``; the pid file is a quoted positional argument of the
+    # inner shell, so a tmp_path with spaces (or quotes) in it stays one word.
+    pidfile = tmp_path / "editor.pid"
+    editor = f"sh -c 'echo $$ > \"$1\"; exec sleep 30' sh {shlex.quote(str(pidfile))}"
+    up = _EditorUp(pidfile)
+    previous = sys.getprofile()
+    sys.setprofile(up)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            git(repo, "commit", "--allow-empty", env={"GIT_EDITOR": editor}, timeout=1.0)
+    finally:
+        sys.setprofile(previous)
+    assert up.pid is not None, "the editor did not start within 30 s"
+    deadline = time.monotonic() + 10
+    while not _dead(up.pid):
+        assert time.monotonic() < deadline, f"the editor (pid {up.pid}) outlived the timed-out git"
+        time.sleep(0.02)

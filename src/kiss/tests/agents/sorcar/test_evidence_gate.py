@@ -26,10 +26,13 @@ def test_hedges_and_writing_commands_are_recognised() -> None:
     for command in ("echo x > f.txt", "cat a >> log", "tee out.txt", "cp a b", "mv a b",
                     "sed -i s/a/b/ f", "sed --in-place s/a/b/ f", "git apply p.diff",
                     "pip install x", "make -j8", "touch f", "cat <<EOF\nx\nEOF", "mkdir d",
-                    "a -> b"):
+                    "a -> b", "rm hello.py", "rm -rf build", "ls | xargs rm", "rmdir d",
+                    "unlink f", "git rm -q a.py", "git mv a.py b.py", "git restore f",
+                    "git clean -fd", "git switch main"):
         assert eg.writes_files({"command": command}), command
     for command in ("pytest -q", "ls -la", "cmd 2>&1 | head", "cmd > /dev/null", "cmd &> /dev/null",
-                    "grep -n x f", "git status", "git diff"):
+                    "grep -n x f", "git status", "git diff", "docker run --rm img pytest",
+                    "perform -x"):
         assert not eg.writes_files({"command": command}), command
     assert eg.writes_files({"commands": '["ls", "echo 1 > f"]'})
     assert not eg.writes_files({"commands": '["ls", "pwd"]'})
@@ -89,24 +92,26 @@ def test_sorcar_agent_guard_installs_the_gate_for_runs_with_edit_tools() -> None
     agent = ChatSorcarAgent("evidence")
     with tempfile.TemporaryDirectory() as work_dir:
         agent.work_dir = work_dir
+        agent._begin_task(None)
         done = {"success": True, "summary_in_html": "Done."}
-        # a read-only run (a reviewer) is never gated
+        hedged = {"success": True, "summary_in_html": "Done, but untested."}
+        # a read-only run (a reviewer) is never gated, hedged or not
         agent._run_tool_names = frozenset({"Bash", "Read", "finish"})
         assert agent._guard_tool_call("Bash", {"command": "echo x > f"}) is None
-        assert agent._guard_tool_call("finish", done) is None
-        assert not agent._evidence_gate.unchecked_change
-        # a full run: an unchecked edit passes (the interactive gate does not
-        # track changes), a hedged success is refused once
+        assert agent._guard_tool_call("finish", hedged) is None
+        # a full run that writes prose: an unchecked write passes (the run
+        # changed no code, so only the hedge check applies), a hedged
+        # success is refused once
         agent._run_tool_names = frozenset({"Bash", "Read", "Edit", "Write", "finish"})
-        write_args = {"file_path": f"{work_dir}/f", "content": "x"}
+        write_args = {"file_path": f"{work_dir}/notes.md", "content": "x"}
         assert agent._guard_tool_call("Write", write_args) is None
-        assert agent._evidence_gate.unchecked_change
+        assert agent._coding_gate.evidence.unchecked_change
+        assert not agent._coding_gate.armed
         assert agent._guard_tool_call("finish", done) is None
-        hedged = {"success": True, "summary_in_html": "Done, but untested."}
         refusal = agent._guard_tool_call("finish", hedged)
         assert refusal is not None and '"untested"' in refusal
         assert agent._guard_tool_call("finish", hedged) is None
         # a new task starts with a fresh gate
         agent._begin_task(None)
-        assert not agent._evidence_gate.used
+        assert not agent._coding_gate.evidence.used
         assert agent._guard_tool_call("finish", hedged) is not None

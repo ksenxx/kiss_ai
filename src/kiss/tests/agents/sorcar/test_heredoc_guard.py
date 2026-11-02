@@ -93,7 +93,9 @@ def test_heredoc_may_create_but_not_rewrite_a_file(work: Path) -> None:
         # a pipe at the end of the heredoc line goes on after the body
         ("cat <<EOF |\nnew\nEOF\ntee notes.md", notes),
     ):
-        assert tools.Bash(command, "rewrite") == _refusal(target), command
+        # Since 2026-10-31 a single copy into a file not shown names the Read
+        # and Write to make after the verdict; the file is not touched.
+        assert tools.Bash(command, "rewrite").startswith(_refusal(target)), command
     assert notes.read_text() == "old\n"
     assert (work / "my notes.md").read_text() == "old\n"
     assert (work / "new.txt").read_text() == "fresh\n"
@@ -104,13 +106,16 @@ def test_cd_moves_where_relative_targets_resolve(work: Path) -> None:
     """``cd`` is followed in the shell that runs it; a subshell's ``cd`` ends with it."""
     tools = UsefulTools(work_dir=str(work))
     log = work / "sub" / "log.txt"
-    assert tools.Bash("cd sub && cat >> log.txt <<'EOF'\ntwo\nEOF", "append") == _refusal(log)
+    # Since 2026-10-31 a ``cd DIR &&`` copy is read as the copy itself (not shown: the
+    # refusal names the Read and Write to make); a ``cd`` on its own line is not.
+    assert tools.Bash("cd sub && cat >> log.txt <<'EOF'\ntwo\nEOF", "append").startswith(
+        _refusal(log))
     assert tools.Bash("cd sub\ncat >> log.txt <<'EOF'\ntwo\nEOF", "append") == _refusal(log)
     assert tools.Bash("{ cd sub; cat >> log.txt <<'EOF'\ntwo\nEOF\n}", "group") == (
         _refusal(log))
     assert tools.Bash(f"cd {work}/sub; cat > ../notes.md <<'EOF'\nx\nEOF", "rewrite") == (
         _refusal(work / "notes.md"))
-    assert tools.Bash('cd "sub dir" && cat > x.md <<EOF\nnew\nEOF', "quoted") == (
+    assert tools.Bash('cd "sub dir" && cat > x.md <<EOF\nnew\nEOF', "quoted").startswith(
         _refusal(work / "sub dir" / "x.md"))
     # A cd in a subshell, a pipeline or the background leaves this shell where it was.
     for command in ("(cd sub && pwd)\ncat > notes.md <<EOF\nnew\nEOF",
@@ -216,7 +221,7 @@ def test_parallel_and_background_commands_are_guarded(work: Path) -> None:
     assert _refusal(work / "notes.md") in report
     assert (work / "made.txt").read_text() == "m\n"
     out = tools.Bash("cat >> notes.md <<EOF\nm\nEOF", "bg", background=True)
-    assert out == _refusal(work / "notes.md")
+    assert out.startswith(_refusal(work / "notes.md"))
     assert (work / "notes.md").read_text() == "old\n"
 
 

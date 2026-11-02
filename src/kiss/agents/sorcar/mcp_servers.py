@@ -359,7 +359,7 @@ _RESERVED_BASENAMES = frozenset(
 )
 
 
-def _token_file_name(server_name: str) -> str:
+def _token_file_name(server_name: str, server_url: str = "") -> str:
     """Return an injective, filesystem-safe token file name.
 
     Plain ``_sanitize`` maps distinct names such as ``a/b`` and
@@ -372,12 +372,22 @@ def _token_file_name(server_name: str) -> str:
     which keeps distinct names distinct even after case folding.
     Windows reserved device basenames (``con``, ``nul``, ...) are
     prefixed as well.
+
+    With a *server_url* the digest is always there and covers name
+    and URL together: two configurations of one name at different
+    servers (the same name in two projects, a project override of a
+    user configuration) keep separate credential files, so neither is
+    ever handed the other's bearer token.  Only the name-only file is
+    historical: it was written before credentials were kept per URL,
+    and no server reads it now (its user signs in once more).
     """
     safe = _sanitize(server_name)
     reserved = safe.lower() in _RESERVED_BASENAMES
-    if safe == server_name and server_name == server_name.lower() and not reserved:
+    plain = safe == server_name and server_name == server_name.lower() and not reserved
+    if plain and not server_url:
         return f"{safe}.json"
-    digest = hashlib.sha256(server_name.encode("utf-8")).hexdigest()[:12]
+    identity = f"{server_name}\n{server_url}" if server_url else server_name
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
     prefix = "s_" if reserved else ""
     return f"{prefix}{safe}.{digest}.json"
 
@@ -386,13 +396,18 @@ class FileTokenStorage:
     """MCP SDK :class:`~mcp.client.auth.TokenStorage` backed by a JSON file.
 
     Tokens and the dynamically registered client information for one
-    server are stored together at ``$KISS_HOME/mcp_auth/<server>.json``
-    with mode ``0600``.
+    server are stored together under ``$KISS_HOME/mcp_auth/`` with mode
+    ``0600``, in a file of the server's name and URL
+    (:func:`_token_file_name`; the URL is recorded in the file as
+    ``server_url`` too, the file name's digest being opaque).  The
+    runtime provider and the sign-in both give the URL; a storage
+    built from the name alone addresses the historical name-only file.
     """
 
-    def __init__(self, server_name: str) -> None:
-        self.path = mcp_auth_dir() / _token_file_name(server_name)
+    def __init__(self, server_name: str, server_url: str = "") -> None:
+        self.path = mcp_auth_dir() / _token_file_name(server_name, server_url)
         self._lock_path = self.path.with_suffix(".lock")
+        self.server_url = server_url
 
     def _read(self) -> dict[str, Any]:
         """Read the stored JSON payload (empty dict when absent/bad)."""
@@ -417,6 +432,8 @@ class FileTokenStorage:
             os.chmod(self.path.parent, 0o700)
         except OSError:  # pragma: no cover — permission error
             logger.debug("could not chmod auth dir", exc_info=True)
+        if self.server_url:
+            data["server_url"] = self.server_url
         atomic_write_text(self.path, json.dumps(data, indent=2) + "\n", mode=0o600)
 
     def _load(self, data: dict[str, Any], key: str, model: Any) -> Any:

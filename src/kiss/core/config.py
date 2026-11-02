@@ -17,7 +17,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from kiss.core.brand import HOME_DIR
-from kiss.core.context_compaction import COMPACTION_START_TOKENS, COMPACTION_STEP_TOKENS
+from kiss.core.context_compaction import (
+    COMPACTION_START_TOKENS,
+    COMPACTION_STEP_TOKENS,
+    COMPACTION_TARGET_FRACTION,
+)
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
 
@@ -472,7 +476,19 @@ class Config(BaseModel):
         default_factory=lambda: _env_int("KISS_COMPACTION_STEP_TOKENS", COMPACTION_STEP_TOKENS),
         description=(
             "Context growth (tokens) after a compaction before the next one is "
-            "considered (KISS_COMPACTION_STEP_TOKENS)."
+            "considered while the context is below the compaction target "
+            "(KISS_COMPACTION_STEP_TOKENS)."
+        ),
+    )
+    compaction_target_fraction: float = Field(
+        default_factory=lambda: env_float(
+            "KISS_COMPACTION_TARGET_FRACTION", COMPACTION_TARGET_FRACTION
+        ),
+        description=(
+            "Share of the model's context window past which every step considers a "
+            "compaction of old tool outputs and arguments, so the context stays near "
+            "that size instead of growing to the hand-off limit (0 disables the "
+            "target; KISS_COMPACTION_TARGET_FRACTION)."
         ),
     )
     routine_turn_effort: str = Field(
@@ -499,6 +515,14 @@ class Config(BaseModel):
             "Default budget of characters one Bash / whole-file Read / memory_list "
             "result keeps in the conversation (head and tail are kept; the rest is "
             "spilled to tmp/tool-out/) (KISS_TOOL_OUTPUT_DEFAULT_CHARS)."
+        ),
+    )
+    bash_detach_seconds: int = Field(
+        default_factory=lambda: _env_int("KISS_BASH_DETACH_SECONDS", 120),
+        description=(
+            "Grace period in seconds after which a foreground Bash call whose "
+            "timeout_seconds is longer goes on as a background job instead of "
+            "blocking the turn; 0 disables (KISS_BASH_DETACH_SECONDS)."
         ),
     )
     context_limit_fraction: float = Field(

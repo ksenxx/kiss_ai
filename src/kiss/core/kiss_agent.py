@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import inspect
 import json
@@ -24,28 +25,39 @@ from kiss.core.context_compaction import (
     CHARS_PER_TOKEN,
     COMPACTION_MIN_STEP_GAP,
     apply_compaction,
+    compaction_target_tokens,
     dropped_chars,
     plan_compaction,
     should_compact,
 )
+from kiss.core.event_sink import bind_printer
 from kiss.core.kiss_error import (
     BudgetExceededError,
+    ContentFilterError,
     ContextWindowExceededError,
     KISSError,
     ModelRefusalError,
+    OutputCapError,
+    StepLimitExceededError,
 )
+from kiss.core.llm_reply import LLMReply, zero_usage
 from kiss.core.models.model import (
     Attachment,
+    Model,
     hand_off_conversation,
+    plain_io,
     render_tool_call,
     strip_system_cache_break,
 )
+from kiss.core.models.model_families import fallback_of_another_family, same_family
 from kiss.core.models.model_info import (
     MODEL_INFO,
     calculate_cost,
     declared_fallback,
+    get_cache_discount,
     get_fallback_model,
     get_max_context_length,
+    is_known_model,
     model,
 )
 from kiss.core.models.stream_abort import is_stall_error, stop_error
@@ -60,10 +72,17 @@ from kiss.core.tool_interrupt import (
     drain_pending_interrupt,
     end_tool_call,
     new_tool_call,
+    raise_if_interrupted,
     register_tool_call,
     unregister_tool_call,
 )
-from kiss.core.tool_verdict import REISSUE_REMINDER, Verdict, refusal_result
+from kiss.core.tool_verdict import (
+    REISSUE_REMINDER,
+    ToolRedirect,
+    Verdict,
+    followup_result,
+    refusal_result,
+)
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -110,9 +129,13 @@ NATIVE_TOOLS_CONTINUE_MSG = (
     "instead of describing it in text; otherwise continue working.**"
 )
 # ``model_config`` keys that name the caller's endpoint and its credentials;
-# they belong to the provider that just failed and do not travel to the
-# implicit OpenRouter-twin fallback.
+# they belong to the provider that just failed and do not travel to a
+# fallback of another provider (the OpenRouter twin, another family).
 _ENDPOINT_CONFIG_KEYS = frozenset({"base_url", "api_key", "extra_headers"})
+# The reasoning effort of the one retry of a request the output-token cap
+# cut short, and the levels at or below which such a retry changes nothing.
+RETRY_EFFORT = "low"
+_LOW_EFFORT_LEVELS = frozenset({"low", "minimal", "none"})
 CONTEXT_LIMIT_FRACTION = (
     DEFAULT_CONFIG.context_limit_fraction
     if 0.0 < DEFAULT_CONFIG.context_limit_fraction <= 1.0
@@ -146,14 +169,32 @@ class _UsageTotals(NamedTuple):
     of a model response without its cost (or vice versa): a stop that
     lands anywhere inside a response-accounting update either leaves
     the previous complete triple or the next complete triple.
+
+    ``helper_mark`` is the model's cumulative helper spend
+    (``Model.helper_usage``) already included in the totals, so
+    ``KISSAgent._bill_helper_usage`` bills each helper dollar exactly
+    once with the same single store, wherever a stop lands.
     """
 
     budget_used: float
     total_tokens_used: int
     step_count: int
+    helper_mark: tuple[object, float, int] = (None, 0.0, 0)
 
 
 _ZERO_USAGE = _UsageTotals(0.0, 0, 0)
+
+
+def _helper_usage_of(model: object) -> tuple[object, float, int] | None:
+    """Return *model*'s cumulative helper spend (``Model.helper_usage``).
+
+    ``None`` for no model or a duck-typed stand-in without a real record.
+    """
+    usage = getattr(model, "helper_usage", None)
+    record = usage() if callable(usage) else None
+    if isinstance(record, tuple) and len(record) == 3:
+        return record
+    return None
 
 
 class NativeTurn:
@@ -173,6 +214,10 @@ class NativeTurn:
         error: The fatal error a call raised (a limit hit, a sub-agent's
             budget exceeded), kept for the agent thread to raise once the
             turn ends; every further call of the turn is refused.
+        ended: The run-ending verdict (:func:`~kiss.core.tool_verdict.end_run`)
+            the ``tool_call_hook`` gave a call of the turn, kept for the
+            agent thread to end the run with once the turn ends; every
+            further call of the turn is refused.
         closed: Set once the turn's bridge has closed; a call that
             returns after that leaves the agent's conversation alone.
     """
@@ -180,6 +225,7 @@ class NativeTurn:
     def __init__(self) -> None:
         self.calls = 0
         self.error: Exception | None = None
+        self.ended: Verdict | None = None
         self.closed = threading.Event()
 
 
@@ -190,6 +236,26 @@ class _EmptyModelResponseError(KISSError):
     registered fallback: unlike normal prompt/validation ``KISSError``s, the
     agent loop can swap to the fallback model and continue the same task.
     """
+
+
+def _failure_reason(error: KISSError) -> str:
+    """Describe what the model returned, for the fail-over warning.
+
+    Args:
+        error: A :class:`ContentFilterError`, :class:`ModelRefusalError`,
+            :class:`OutputCapError` or :class:`_EmptyModelResponseError`.
+
+    Returns:
+        A phrase naming the provider's stop reason, e.g. ``a content
+        filter stop (stop_reason="content_filter")``.
+    """
+    if isinstance(error, ContentFilterError):
+        return f'a content filter stop (stop_reason="{error.stop_reason}")'
+    if isinstance(error, ModelRefusalError):
+        return f'a safety refusal (stop_reason="{error.stop_reason}")'
+    if isinstance(error, OutputCapError):
+        return f'an output cap cut-off (stop_reason="{error.stop_reason}")'
+    return "repeated empty responses"
 
 
 ROUTINE_TOOLS = frozenset(
@@ -212,12 +278,12 @@ _MISSING = object()
 def is_routine_turn(name: str, args: dict[str, Any], result: str, refused: bool) -> bool:
     """Return whether the model turn after this tool call is a routine one.
 
-    Routine turns (P14 of the 2026-10-24 trajectory audit) are the one
-    after a refused call, a :data:`ROUTINE_TOOLS` call, a ``bash_job`` /
-    ``agent_job`` ``wait`` that ended with the job still running (the
-    model only waits again), or a ``Read`` whose window was unchanged
-    and already in the context.  Planning, debugging and review turns
-    are never routine: a wait that returned a finished job's result
+    Routine turns are the one after a refused call, a
+    :data:`ROUTINE_TOOLS` call, a ``bash_job`` / ``agent_job`` ``wait``
+    that ended with the job still running (the model only waits again),
+    or a ``Read`` whose window was unchanged and already in the context.
+    Planning, debugging and review turns are never routine: a wait that
+    returned a finished job's result
     (a test run, a reviewer's findings) is one of those.
 
     Args:
@@ -241,6 +307,20 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     """Return the arguments dict of a function call, or {} if absent/malformed."""
     raw_args = function_call.get("arguments")
     return raw_args if isinstance(raw_args, dict) else {}
+
+
+def _call_in_context[T](
+    context: contextvars.Context, call: Callable[..., T], /, *args: Any, **kwargs: Any
+) -> T:
+    """Call ``call(*args, **kwargs)`` under a copy of *context*, on whatever thread this runs.
+
+    A thread the framework starts (a bridge's request handler) begins
+    with an empty context, so the agent thread's context variables (a
+    :func:`~kiss.core.base.collecting_trajectories` scope) are copied
+    in; a fresh copy per call, since a context may be entered by one
+    thread at a time.
+    """
+    return context.copy().run(call, *args, **kwargs)
 
 
 def unknown_argument_hint(
@@ -404,9 +484,12 @@ class KISSAgent(Base):
         replaced with ONE store, so a concurrent :meth:`usage_snapshot`
         reads either the previous totals or all zeros, never a mix.
         Called at construction, by :meth:`_reset` and by the task runner
-        before a run (``task_runner._zero_usage_counters``).
+        before a run (``task_runner._zero_usage_counters``).  Helper
+        spend the model already holds belongs to an earlier run, so the
+        mark starts at it.
         """
-        self._usage_totals = _ZERO_USAGE
+        mark = _helper_usage_of(getattr(self, "model", None)) or _ZERO_USAGE.helper_mark
+        self._usage_totals = _ZERO_USAGE._replace(helper_mark=mark)
         self.tool_calls_made = 0
         """Tool calls other than ``finish`` the model issued during the
         current run (blocked ones included: the model still acted).
@@ -417,6 +500,14 @@ class KISSAgent(Base):
         """The name of the latest refused tool call, until the model
         calls that tool again or reads the re-issue reminder
         (:meth:`_guarded_execute_tool`); ``None`` when nothing is owed."""
+        self._redirect_ended: Verdict | None = None
+        """The run-ending verdict a hook gave the call a running tool
+        redirected to (:meth:`_execute_redirected`), carried out to
+        :meth:`_guarded_execute_tool` as the redirecting call's own."""
+        self._keeping_cache_warm = False
+        """Whether a tool call is running under
+        :meth:`_execute_tool_keeping_cache_warm`: a call nested in it (a
+        :class:`ToolRedirect` follow-up) starts no second ping thread."""
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -424,6 +515,15 @@ class KISSAgent(Base):
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
+        self.llm_response_hook: Callable[[LLMReply], Verdict] | None = None
+        self.tool_result_hook: Callable[[str, dict[str, Any], str, bool], None] | None = None
+        """Called after every tool call the loop or a redirect made, with the
+        tool's name, its arguments, the result text the model reads and
+        whether the call was refused (the text is then the refusal).  A
+        call a hook refused and a call made inside another (a redirected
+        ``Edit`` and its follow-up) are reported too, each with its own
+        result, so a reader needs no pairing of a turn's calls with its
+        results.  ``SorcarAgent`` installs it for its coding gate."""
         self.reset_usage()
         self.budget_check_hook: Callable[[], None] | None = None
         self.budget_status_hook: Callable[[], tuple[float, float]] | None = None
@@ -463,8 +563,16 @@ class KISSAgent(Base):
         self._routine_next_turn = False
         self._routine_call = False
         self._routine_effort = ""
+        # The effort of the next call when it retries a request the
+        # output-token cap cut short (``_retry_at_low_effort``), and
+        # whether the current request already had that retry.
+        self._retry_effort = ""
+        self._low_effort_retried = False
         # Characters of the last step's tool results (footer "+N tokens").
         self._last_results_chars = 0
+        # ``_reset`` sets it from the run's model config; a step driven
+        # without a run (a test's ``_execute_step``) reads the default.
+        self._plain_io = False
         self._fallback_used = False
         self._refusal_retried = False
         self._reset_progress_trackers()
@@ -511,6 +619,9 @@ class KISSAgent(Base):
         if model_config is not None:
             model_config = dict(model_config)
         self._model_config: dict[str, Any] | None = model_config
+        # Under ``plain_io`` the model reads no usage line; the printer and
+        # the trajectory still get it.
+        self._plain_io = plain_io(model_config)
 
         token_callback = self.printer.token_callback if self.printer else None
         thinking_callback = self.printer.thinking_callback if self.printer else None
@@ -533,6 +644,11 @@ class KISSAgent(Base):
                 token_callback=token_callback,
                 thinking_callback=thinking_callback,
             )
+        # A helper the model runs on this agent's behalf (a vision bridge
+        # description) checks the limits before each paid call, so a batch
+        # of them stops at the cap; hand_off_conversation carries the hook
+        # to a replacement model.
+        self.model.limit_check = self._check_limits
 
     def _reset_progress_trackers(self) -> None:
         """Clear the text-only-turn counter and last text.
@@ -588,6 +704,7 @@ class KISSAgent(Base):
         print_prompts: bool = True,
         llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
+        llm_response_hook: Callable[[LLMReply], Verdict] | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -642,13 +759,29 @@ class KISSAgent(Base):
                 :attr:`tool_call_guard`; allowing does not override a guard
                 block. An implicit finish (text-only turns) also consults the
                 hook (with ``("finish", {})``) and is suppressed when the hook
-                refuses. Default is None (no hook).
+                refuses. :func:`~kiss.core.tool_verdict.end_run` ends the
+                run instead: the call does not run, no later call of the
+                turn runs, and the verdict's text becomes the run's result
+                in the registered ``finish`` tool's contract. Default is
+                None (no hook).
+            llm_response_hook (Callable | None): Optional hook called after
+                every billed model call of the agentic loop with an
+                :class:`~kiss.core.llm_reply.LLMReply` (the reply's text,
+                its tool calls, its token usage and cost, the agent's
+                totals), before any tool call of the reply runs; a tool
+                Codex ran natively during the turn has run already. It
+                returns a :class:`~kiss.core.tool_verdict.Verdict`:
+                ``ALLOW`` lets the reply be acted on, any other verdict
+                (``end_run(result)``) ends the run with the verdict's text
+                as the result and none of the reply's tool calls run.
+                Default is None (no hook).
 
         Returns:
             str: The result of the agent's task.
         """
         self.llm_call_hook = llm_call_hook
         self.tool_call_hook = tool_call_hook
+        self.llm_response_hook = llm_response_hook
         try:
             if system_prompt:
                 model_config = dict(model_config) if model_config else {}
@@ -677,9 +810,19 @@ class KISSAgent(Base):
             if not self.is_agentic:
                 return self._run_non_agentic()
 
-            return self._run_agentic_loop()
+            # Records made by tools and hooks during the run (a gate stage)
+            # reach this run's event log through the thread's printer.
+            previous_printer = bind_printer(self.printer)
+            try:
+                return self._run_agentic_loop()
+            finally:
+                bind_printer(previous_printer)
 
         finally:
+            # Spend the model still holds (a description made in the last
+            # step before the step limit, or before an error ended the
+            # run) joins the totals before they are saved.
+            self._bill_helper_usage()
             self._save()
 
     def _setup_tools(self, tools: list[Callable[..., Any]] | None) -> None:
@@ -732,35 +875,49 @@ class KISSAgent(Base):
         self._print_result(response_text)
         return str(response_text)
 
-    def _try_switch_to_fallback(self, reason: str = "a non-retryable error") -> str | None:
-        """Swap ``self.model`` to the registered fallback model, if any.
+    def _try_switch_to_fallback(
+        self, reason: str = "a non-retryable error", other_family: bool = False
+    ) -> str | None:
+        """Swap ``self.model`` to a fallback model, if one is available.
 
         Consulted by :meth:`_run_agentic_loop` after a recoverable
-        model-level failure: a non-retryable provider error (model gated /
-        deprecated, credit balance too low, etc.) or repeated empty turns
-        from a provider adapter.  If
-        :func:`kiss.core.models.model_info.get_fallback_model` names a
-        fallback for the current model (one declared in the catalog, or
-        the model's OpenRouter twin when ``OPENROUTER_API_KEY`` is
-        configured), this method:
+        model-level failure.  A non-retryable provider error (model gated
+        / deprecated, credit balance too low, etc.) is the provider's
+        problem, so the fallback is
+        :func:`kiss.core.models.model_info.get_fallback_model`: the one
+        declared in the catalog, else the model's OpenRouter twin when
+        ``OPENROUTER_API_KEY`` is configured.  A safety refusal, a
+        content-filter stop, an output-cap cut-off or repeated empty
+        turns (``other_family=True``) are shared by every model of the
+        family, so the fallback is
+        :func:`kiss.core.models.model_families.fallback_of_another_family`:
+        a model of another family when one is configured, the declared
+        fallback or twin only when nothing else is.  This method:
 
         1. Guards against repeated swaps within a single run (only one
            fallback is allowed per :meth:`run` invocation).
         1. Rebuilds the model via :func:`kiss.core.models.model_info.model`
            using the ``model_config`` originally passed to :meth:`run`
-           and the printer's streaming callbacks.  A fallback declared
+           and the printer's streaming callbacks.  The fallback declared
            in the catalog keeps the caller's endpoint overrides
            (``base_url``, ``api_key``, ``extra_headers``: it lives where
-           the user pointed); the implicit OpenRouter twin is a different
-           provider, so those keys are dropped and the twin routes
-           through OpenRouter with the configured OpenRouter key instead
-           of re-using the endpoint and credentials that just failed.
+           the user pointed); any other fallback is a different
+           provider, so those keys are dropped and it routes with its
+           own configured key instead of re-using the endpoint and
+           credentials that just failed.
         1. Copies the primary model's conversation history onto the
            new model so no context is lost.
         1. Rebuilds :attr:`_cached_tools_schema` so
            :meth:`_execute_step` calls the fallback provider's schema
            (Anthropic-vs-OpenAI-vs-Gemini all differ).
-        1. Emits a visible ``system_prompt`` event announcing the swap.
+        1. Emits a visible ``system_prompt`` warning naming the old and
+           the new model and the stop reason, and saying so when the
+           same family was the only choice.
+
+        Args:
+            reason: What the model returned, named in the warning.
+            other_family: Whether the failure is one the whole family
+                shares, so a model of another family is preferred.
 
         Returns:
             The new model name on a successful swap, or ``None`` when no
@@ -769,11 +926,15 @@ class KISSAgent(Base):
         """
         if self._fallback_used:
             return None
-        new_name = get_fallback_model(self.model_name)
+        if other_family and is_known_model(self.model_name):
+            new_name = fallback_of_another_family(self.model_name)
+        else:
+            # A model outside the catalog has no family to fail over from.
+            new_name = get_fallback_model(self.model_name)
         if not new_name or new_name == self.model_name:
             return None
         fallback_config = self._model_config
-        if fallback_config and declared_fallback(self.model_name) is None:
+        if fallback_config and new_name != declared_fallback(self.model_name):
             fallback_config = {
                 k: v for k, v in fallback_config.items() if k not in _ENDPOINT_CONFIG_KEYS
             } or None
@@ -786,18 +947,82 @@ class KISSAgent(Base):
             thinking_callback=thinking_cb,
         )
         new_model.initialize("")
-        hand_off_conversation(self.model, new_model)
-        self.model = new_model
         old_name = self.model_name
-        self.model_name = new_name
-        self._cached_tools_schema = self.model._build_openai_tools_schema(self.function_map)
+        self.switch_model(new_model, new_name)
         self._fallback_used = True
+        note = (
+            "; no other model family is configured"
+            if other_family and same_family(new_name, old_name)
+            else ""
+        )
         if self.printer:
             self.printer.print(
-                f"Model {old_name} returned {reason}; switching to fallback model: {new_name}",
+                f"Switched model from {old_name} to {new_name} after {reason}{note}",
                 type="system_prompt",
             )
         return new_name
+
+    def switch_model(self, new_model: Model, new_name: str) -> None:
+        """Continue the run on the initialized *new_model*, named *new_name*.
+
+        Shared by the fallback swap and Sorcar's ``set_model`` tool.  The
+        live conversation is handed off (:func:`hand_off_conversation`)
+        and the ``llm_call_hook`` boundary moves with it, so the messages
+        appended since the last LLM call (the tool results of the
+        switching step) stay new to the hook although the hand-off may
+        change the message count.  Gemini keeps its thought signatures
+        in a side map keyed by tool-call id, which ``initialize()``
+        cleared on the new model: a Gemini-to-Gemini switch carries them
+        over, or a signature-enforcing model would reject the next
+        request.  The cached tools schema is rebuilt for the new model.
+
+        Args:
+            new_model: The initialized model that continues the conversation.
+            new_name: Its model name.
+        """
+        self._llm_hook_conversation_index = hand_off_conversation(
+            self.model, new_model, self._llm_hook_conversation_index
+        )
+        old_signatures = getattr(self.model, "_thought_signatures", None)
+        new_signatures = getattr(new_model, "_thought_signatures", None)
+        if isinstance(old_signatures, dict) and isinstance(new_signatures, dict):
+            new_signatures.update(old_signatures)
+        self.model = new_model
+        self.model_name = new_name
+        if self.function_map:
+            self._cached_tools_schema = new_model._build_openai_tools_schema(self.function_map)
+
+    def _retry_at_low_effort(self, error: OutputCapError) -> bool:
+        """Arrange one retry, at reasoning effort ``low``, of a request the cap cut short.
+
+        The retry re-sends the same conversation (the adapter appended
+        nothing for the cut-off turn) with :data:`RETRY_EFFORT` applied
+        for that one call by :meth:`_turn_effort`.  No retry is arranged
+        when the model takes no effort parameter (no catalog ``thinking``
+        level), already runs at a low level, or this request had its
+        retry already: the caller then fails over to another family.
+
+        Args:
+            error: The cut-off the adapter reported.
+
+        Returns:
+            Whether the next call retries the request at low effort.
+        """
+        info = MODEL_INFO.get(self.model.model_name)
+        if self._low_effort_retried or info is None or not info.thinking:
+            return False
+        effort = str(self.model.model_config.get("reasoning_effort") or info.thinking)
+        if effort in _LOW_EFFORT_LEVELS:
+            return False
+        self._low_effort_retried = True
+        self._retry_effort = RETRY_EFFORT
+        if self.printer:
+            self.printer.print(
+                f"Retrying the request at reasoning effort {RETRY_EFFORT} after "
+                f"{error.stop_reason}",
+                type="system_prompt",
+            )
+        return True
 
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
@@ -812,20 +1037,25 @@ class KISSAgent(Base):
             try:
                 result = self._execute_step()
                 consecutive_errors = consecutive_stalls = 0
+                self._low_effort_retried = False
                 if result is not None:
+                    self._bill_helper_usage()  # the result event carries the final totals
                     self._print_result(result)
                     return result
             except KISSError as e:  # pragma: no cover – requires model to fail mid-step
                 logger.debug("Exception caught", exc_info=True)
-                if isinstance(e, _EmptyModelResponseError | ModelRefusalError):
-                    reason = (
-                        'a safety refusal (stop_reason="refusal")'
-                        if isinstance(e, ModelRefusalError)
-                        else "repeated empty responses"
+                if isinstance(e, OutputCapError) and self._retry_at_low_effort(e):
+                    continue
+                if isinstance(e, _EmptyModelResponseError | ModelRefusalError | OutputCapError):
+                    # The whole family shares a refusal, a filter or a
+                    # cap, so the fallback is another family when one is
+                    # configured.
+                    new_name = self._try_switch_to_fallback(
+                        reason=_failure_reason(e), other_family=True
                     )
-                    new_name = self._try_switch_to_fallback(reason=reason)
                     if new_name is not None:
                         consecutive_errors = 0
+                        self._low_effort_retried = False
                         self._reset_progress_trackers()
                         continue
                     if isinstance(e, ModelRefusalError) and not self._refusal_retried:
@@ -863,7 +1093,7 @@ class KISSAgent(Base):
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)
 
-        raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
+        raise StepLimitExceededError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _execute_step(self) -> str | None:
         """Execute a single step in the ReAct loop.
@@ -899,9 +1129,23 @@ class KISSAgent(Base):
             function_calls, response_text, _response = self._billed_model_call(
                 self._generate_with_tools
             )
-        except Exception:
+        except Exception as e:
             if turn.error is not None:
                 raise turn.error
+            if turn.ended is not None:
+                # The run ended on a natively run tool call before the
+                # turn failed (a stream that broke, a Codex process that
+                # died): the verdict is the run's result, what came after
+                # it is not — within the limits, as on a turn that
+                # returned: the failed turn's usage is billed above.
+                logger.warning(
+                    "Step %d: the turn failed after a hook ended the run: %s", self.step_count, e
+                )
+                self._add_message(
+                    "model", f"[the turn failed after the run ended: {e}]", start_timestamp
+                )
+                self._check_limits()
+                return self._ended_run_result(turn.ended)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call —
@@ -912,7 +1156,7 @@ class KISSAgent(Base):
         if response_text and response_text.strip():
             self._last_response_text = response_text
         usage_info = self._get_usage_info_string()
-        self.model.set_usage_info_for_messages(usage_info)
+        self.model.set_usage_info_for_messages("" if self._plain_io else usage_info)
         if self.printer:
             self.printer.print(
                 usage_info,
@@ -932,6 +1176,31 @@ class KISSAgent(Base):
             raise turn.error
         if turn.calls or any(fc["name"] != "finish" for fc in function_calls):
             self._check_limits()
+        # A run-ending verdict on a natively run tool call (recorded by
+        # :meth:`_execute_tool_on_helper_thread`), or on this reply (the
+        # response hook), ends the run now; none of the reply's tool calls
+        # run.  The reply itself is in the trajectory either way, and the
+        # response hook sees every reply, this one included: the earlier
+        # verdict keeps precedence over the hook's.
+        ended = turn.ended
+        if self.llm_response_hook is not None:
+            verdict = self.llm_response_hook(
+                LLMReply(
+                    response_text or "",
+                    [{"name": fc["name"], "arguments": _call_args(fc)} for fc in function_calls],
+                    zero_usage() | (self.last_call_usage or {}),
+                    self.step_count,
+                    self.budget_used,
+                    self.total_tokens_used,
+                )
+            )
+            if ended is None and not verdict.allowed:
+                ended = verdict
+        if ended is not None:
+            self._add_message(
+                "model", _with_usage_footer(response_text, usage_info), start_timestamp
+            )
+            return self._ended_run_result(ended)
 
         if not function_calls:
             self._add_message(
@@ -947,7 +1216,7 @@ class KISSAgent(Base):
                 self.model.add_message_to_conversation("user", NATIVE_TOOLS_CONTINUE_MSG)
                 return None
             self._consecutive_no_tool_calls += 1
-            refusal: str | None = None
+            refusal: Verdict | None = None
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
                 if not response_text or not response_text.strip():
                     raise _EmptyModelResponseError(
@@ -965,6 +1234,8 @@ class KISSAgent(Base):
                 # is what the model reads next, since a one-shot veto
                 # (Sorcar's unmerged-worktree gate) is spent on it.
                 refusal = self._tool_call_refusal("finish", {})
+                if refusal is not None and refusal.ends_run:
+                    return self._ended_run_result(refusal)
                 if refusal is None:
                     logger.info(
                         "Implicit finish: agent=%s step=%d text-only response "
@@ -978,7 +1249,7 @@ class KISSAgent(Base):
                         f"{self._consecutive_no_tool_calls} consecutive turns "
                         f"without calling finish."
                     )
-            retry_msg = refusal or (
+            retry_msg = (refusal.text if refusal is not None else "") or (
                 "**Your response MUST have at least one function call. "
                 "Your response has 0 function calls. If you have completed "
                 "the task, call the `finish` tool now with your final "
@@ -1012,14 +1283,22 @@ class KISSAgent(Base):
             self._mark_routine_turn(fc, response_str, blocked is not None)
             call_reprs.append(render_tool_call(fc["name"], _call_args(fc)))
             function_results.append((name, {"result": response_str}))
+            if blocked is not None and blocked.ends_run:
+                # The hook ended the run on this call: the calls after it
+                # in the turn do not run.
+                finish_result = self._ended_run_result(blocked)
+                break
             if name == "finish" and blocked is None:
+                # The task is done: the calls after ``finish`` in the
+                # turn do not run (a second finish would replace this
+                # result, a mutating call would act after the outcome).
                 finish_result = response_str
-            else:
-                try:
-                    self._check_limits()
-                except KISSError as e:
-                    limit_error = e
-                    break
+                break
+            try:
+                self._check_limits()
+            except KISSError as e:
+                limit_error = e
+                break
 
         tool_call_timestamp = int(time.time())
         self._add_message(
@@ -1053,7 +1332,8 @@ class KISSAgent(Base):
         # characters per token), shown in the footer so an oversized
         # output is noticed by the model that asked for it.
         self._last_results_chars = sum(len(str(r["result"])) for _, r in function_results)
-        self.model.set_usage_info_for_messages(self._get_usage_info_string())
+        if not self._plain_io:
+            self.model.set_usage_info_for_messages(self._get_usage_info_string())
         self.model.add_function_results_to_conversation_and_return(function_results)
         return None
 
@@ -1085,6 +1365,8 @@ class KISSAgent(Base):
         ]
         turn = self._native_turn
         execute = functools.partial(
+            _call_in_context,
+            contextvars.copy_context(),
             self._execute_tool_on_helper_thread,
             stop_event=stop_signal.get_thread_stop_event(),
             printer_binding=self.printer.thread_binding() if self.printer else None,
@@ -1096,23 +1378,28 @@ class KISSAgent(Base):
         finally:
             turn.closed.set()
 
-    def _guarded_execute_tool(self, function_call: dict[str, Any]) -> tuple[str, str, str | None]:
+    def _guarded_execute_tool(
+        self, function_call: dict[str, Any]
+    ) -> tuple[str, str, Verdict | None]:
         """Execute one tool call the way the agent loop does: hook, guard, then tool.
 
         The :attr:`tool_call_hook` is called before EVERY tool call (its
         contract), so it runs first; a refusal is the result the model
         sees.  Allowing means "no objection", not "must execute": the
         framework's :attr:`tool_call_guard` may still block the call.  A
-        long-running call keeps the prompt cache warm meanwhile.
+        long-running call keeps the prompt cache warm meanwhile.  The
+        :attr:`tool_result_hook` reads the result (a refusal included)
+        before a pending re-issue reminder is appended to it.
 
         Args:
             function_call: The tool call dict with ``name`` and
                 ``arguments``.
 
         Returns:
-            tuple[str, str, str | None]: (function_name, function_response_string,
-            blocked) where *blocked* is the refusal text when the call was
-            not executed, else ``None``.
+            tuple[str, str, Verdict | None]: (function_name, function_response_string,
+            blocked) where *blocked* is the refusing verdict when the call
+            was not executed (its ``ends_run`` says whether the run ends
+            on it), else ``None``.
         """
         name = function_call["name"]
         args = _call_args(function_call)
@@ -1120,13 +1407,33 @@ class KISSAgent(Base):
             self.tool_calls_made += 1
         blocked = self._tool_call_refusal(name, args)
         if blocked is not None:
-            self._refused_call = name
-            return (*self._execute_tool(function_call, blocked=blocked), blocked)
-        if is_long_running_call(name, args):
-            name, response = self._execute_tool_keeping_cache_warm(function_call)
+            # A refused finish is owed no re-issue: the gate's verdict says
+            # what to do next, and a reminder to "re-issue it now" sent
+            # the model straight back into the gate, a wasted round each
+            # time.
+            self._refused_call = None if name == "finish" else name
+            name, response = self._execute_tool(function_call, blocked=blocked.text)
+            settled = True
         else:
-            name, response = self._execute_tool(function_call)
-        return name, self._with_reissue_reminder(name, response), None
+            owed = self._refused_call
+            self._redirect_ended = None
+            if is_long_running_call(name, args):
+                name, response = self._execute_tool_keeping_cache_warm(function_call)
+            else:
+                name, response = self._execute_tool(function_call)
+            # A call this one redirected to (ToolRedirect) was refused or
+            # settled the refusal inside: the model owes the re-issue at
+            # its next step, not in this result, as for a call of its own.
+            settled = self._refused_call != owed
+            # A hook ended the run on a call this one redirected to (or
+            # on its follow-up): the run ends on this call, whose result
+            # (the note, the nested refusal) is what the turn records.
+            blocked = self._redirect_ended
+        if self.tool_result_hook is not None:
+            self.tool_result_hook(name, args, response, blocked is not None)
+        if not settled:
+            response = self._with_reissue_reminder(name, response)
+        return name, response, blocked
 
     def _with_reissue_reminder(self, name: str, response: str) -> str:
         """Return *response*, the result of an allowed call of *name*, settling a pending refusal.
@@ -1139,7 +1446,8 @@ class KISSAgent(Base):
         appended, so the model reads, at the very step it chooses what
         to do next, that the refused call still has to be made.  An
         allowed ``finish`` ends the run and its result is the task's
-        result, so it carries no reminder.
+        result, so it carries no reminder; a refused ``finish`` is never
+        recorded as owed (:meth:`_guarded_execute_tool`).
         """
         refused = self._refused_call
         self._refused_call = None
@@ -1158,18 +1466,28 @@ class KISSAgent(Base):
 
         Codex calls KISS tools over MCP, and each call reaches the
         bridge of :meth:`_native_tools_exposed` on a fresh server thread
-        while the agent's thread waits for the turn to end.  Both the
-        stop event (``kiss.core.stop_signal``) and the printer's task
-        routing are thread-local, so they are re-bound here before the
-        call takes the normal :meth:`_guarded_execute_tool` path —
-        otherwise the tool's events would reach no tab and the task's
-        Stop would not reach the tool.  The call is recorded in the
+        while the agent's thread waits for the turn to end.  The stop
+        event (``kiss.core.stop_signal``), the printer's task routing
+        and the event sink's printer (``kiss.core.event_sink``, what a
+        tool or hook publishes a gate stage through) are thread-local,
+        so they are re-bound here before the call takes the normal
+        :meth:`_guarded_execute_tool` path — otherwise the tool's events
+        would reach no tab, its records would be dropped and the task's
+        Stop would not reach the tool.  The agent thread's context
+        variables (a :func:`~kiss.core.base.collecting_trajectories`
+        scope) come along the same way: the bridge calls this under a
+        copy of that context (:func:`_call_in_context`), so a helper
+        agent the tool creates belongs to the run like one created on
+        the agent's thread.  The call is recorded in the
         trajectory as it happens, since the step's own record comes
         later; the model's conversation is the model's to keep.  The
         limits are checked after every call, as in the ordinary tool
         loop; a fatal error (a limit hit, a sub-agent's budget exceeded)
         is kept on *turn* for :meth:`_execute_step` to raise once the
-        turn ends, and every further call of that turn is refused.
+        turn ends, and every further call of that turn is refused.  A
+        run-ending verdict of the ``tool_call_hook`` is kept on *turn*
+        the same way, for :meth:`_execute_step` to end the run with;
+        every further call of the turn gets a refused result.
 
         A call the turn's end abandoned (a Stop waited out the tool, see
         :meth:`~kiss.core.models.codex_mcp_bridge.ToolBridge._wait_for_calls`)
@@ -1202,6 +1520,12 @@ class KISSAgent(Base):
             self.printer.adopt_thread_binding(printer_binding)
         if turn.error is not None:
             raise KISSError(f"The run is ending: {turn.error}")
+        if turn.ended is not None:
+            # A plain refused result, not an error: the bridge would report
+            # an error as fatal and the run must end with the verdict.
+            name = function_call["name"]
+            return name, refusal_result(name, f"The run has ended: {turn.ended.text}")
+        previous_printer = bind_printer(self.printer)
         try:
             name, response, blocked = self._guarded_execute_tool(function_call)
             if turn.closed.is_set():
@@ -1212,6 +1536,9 @@ class KISSAgent(Base):
                 "model", render_tool_call(function_call["name"], _call_args(function_call))
             )
             self._add_message("user", f"[{name}]: {response}")
+            if blocked is not None and blocked.ends_run:
+                turn.ended = blocked
+                return name, response
             self._check_limits()
         except Exception as e:
             turn.error = e
@@ -1219,6 +1546,8 @@ class KISSAgent(Base):
         except BaseException as e:
             turn.error = KISSError(f"Tool {function_call['name']} stopped: {e}")
             raise turn.error from e
+        finally:
+            bind_printer(previous_printer)
         return name, response
 
     def _mark_routine_turn(self, function_call: dict[str, Any], result: str, refused: bool) -> None:
@@ -1253,6 +1582,11 @@ class KISSAgent(Base):
         Returns:
             The ``(name, result)`` pair of :meth:`_execute_tool`.
         """
+        if self._keeping_cache_warm:
+            # Nested in a call already kept warm (a ToolRedirect's
+            # follow-up): its pings cover this call, and the model object
+            # takes one ping thread at a time.
+            return self._execute_tool(function_call, blocked=None)
         keep_alive = PromptCacheKeepAlive(
             self.model,
             self.function_map,
@@ -1260,10 +1594,12 @@ class KISSAgent(Base):
             self._prompt_cache_touched_at,
             max_pings=keep_alive_max_pings(self.model_name),
         )
+        self._keeping_cache_warm = True
         try:
             with keep_alive:
                 return self._execute_tool(function_call, blocked=None)
         finally:
+            self._keeping_cache_warm = False
             # A Stop landing on ``__exit__``'s entry skips its join: stop
             # the pings again here (idempotent) before reading them.
             keep_alive.stop()
@@ -1294,29 +1630,51 @@ class KISSAgent(Base):
         except KISSError:
             return None
 
+    def _compaction_target(self) -> int | None:
+        """Return the steady-state context target in tokens, ``None`` when the target is off."""
+        fraction = DEFAULT_CONFIG.compaction_target_fraction
+        if not 0.0 < fraction <= 1.0:
+            return None
+        try:
+            window: int | None = get_max_context_length(self.model.model_name)
+        except KISSError:
+            window = None
+        return compaction_target_tokens(window, DEFAULT_CONFIG.compaction_start_tokens, fraction)
+
     def _maybe_compact_conversation(self) -> None:
-        """Compact old tool outputs once the context crosses the next threshold.
+        """Compact old tool outputs and arguments once the context is past its threshold.
 
         Runs before a model call when ``DEFAULT_CONFIG.tool_output_compaction``
         is on and the last response's context size reached
         ``_next_compaction_at`` (100k tokens, then every further 100k of
-        growth) and at least :data:`~kiss.core.context_compaction.COMPACTION_MIN_STEP_GAP`
+        growth) or the steady-state target (:meth:`_compaction_target`,
+        past which every step is a candidate), and at least
+        :data:`~kiss.core.context_compaction.COMPACTION_MIN_STEP_GAP`
         steps passed since the last compaction.  The compaction is a
         full prompt-cache miss, so it is applied only when
         :func:`~kiss.core.context_compaction.should_compact` finds the
         drop worth it; a skipped compaction is re-planned on every later
-        step, since more results age out of the kept window.
+        step, since more results age out of the kept window.  Every
+        compaction applied is published as a ``compaction`` event with
+        the tokens it removed, so the event log shows what the context
+        would have cost.
         """
         if not DEFAULT_CONFIG.tool_output_compaction:
             return
-        if self.context_tokens_used < self._next_compaction_at:
+        target = self._compaction_target()
+        above_target = target is not None and self.context_tokens_used >= target
+        if self.context_tokens_used < self._next_compaction_at and not above_target:
             return
         if self.step_count - self._last_compaction_step < COMPACTION_MIN_STEP_GAP:
             return
         plan = plan_compaction(self.model.conversation)
         dropped_tokens = dropped_chars(plan) // CHARS_PER_TOKEN
         if not should_compact(
-            self.context_tokens_used, dropped_tokens, self._handoff_context_tokens()
+            self.context_tokens_used,
+            dropped_tokens,
+            self._handoff_context_tokens(),
+            target,
+            get_cache_discount(self.model.model_name),
         ):
             logger.debug(
                 "Skipped compaction dropping ~%d of %d context tokens: agent=%s step=%d",
@@ -1328,20 +1686,34 @@ class KISSAgent(Base):
             return
         self._next_compaction_at = self.context_tokens_used + DEFAULT_CONFIG.compaction_step_tokens
         self._last_compaction_step = self.step_count
+        results = sum(replacement.kind == "result" for replacement in plan)
         compacted = apply_compaction(plan)
         logger.info(
-            "Compacted %d old tool outputs (~%d of %d context tokens): agent=%s step=%d",
-            compacted,
+            "Compacted %d old tool outputs and %d arguments (~%d of %d context tokens): "
+            "agent=%s step=%d",
+            results,
+            compacted - results,
             dropped_tokens,
             self.context_tokens_used,
             self.name,
             self.step_count,
         )
+        if self.printer:
+            self.printer.print(
+                "",
+                type="compaction",
+                step=self.step_count,
+                context_tokens=self.context_tokens_used,
+                dropped_tokens=dropped_tokens,
+                results=results,
+                arguments=compacted - results,
+                target_tokens=target,
+            )
         if self.context_reset_hook is not None:
             self.context_reset_hook()
 
-    def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> str | None:
-        """Return the refusal text of the vetoes on calling *name* with *args*, or ``None``.
+    def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> Verdict | None:
+        """Return the refusing verdict of the vetoes on calling *name* with *args*, or ``None``.
 
         The caller's :attr:`tool_call_hook` is consulted first (it sees
         every call); only when it allows does the framework's
@@ -1353,14 +1725,71 @@ class KISSAgent(Base):
             args: The call's arguments.
 
         Returns:
-            str | None: The hook's or the guard's refusal text, or
-            ``None`` when neither objects.
+            Verdict | None: The hook's refusing verdict (a
+            :func:`~kiss.core.tool_verdict.end_run` one ends the run),
+            the guard's refusal text as a refusing verdict, or ``None``
+            when neither objects.
         """
         if self.tool_call_hook is not None:
             verdict = self.tool_call_hook(name, args)
             if not verdict.allowed:
-                return verdict.text
-        return None if self.tool_call_guard is None else self.tool_call_guard(name, args)
+                return verdict
+        if self.tool_call_guard is None:
+            return None
+        text = self.tool_call_guard(name, args)
+        return None if text is None else Verdict(False, text)
+
+    def _ended_run_result(self, verdict: Verdict) -> str:
+        """Return the run's result for a hook's run-ending *verdict*.
+
+        The verdict's text is the result, in the registered ``finish``
+        tool's contract (:meth:`_result_in_finish_contract`) with the
+        verdict's ``success``, so the caller reads a hook-ended run like
+        a run the model finished.
+
+        Args:
+            verdict: The :func:`~kiss.core.tool_verdict.end_run` verdict.
+        """
+        logger.info(
+            "Run ended by a hook: agent=%s step=%d success=%s result=%r",
+            self.name,
+            self.step_count,
+            verdict.success,
+            verdict.text[:200],
+        )
+        return self._result_in_finish_contract(verdict.text, verdict.text, verdict.success)
+
+    def _result_in_finish_contract(self, summary: str, result: str, success: bool) -> str:
+        """Return a result the run did not get from a ``finish`` call, in ``finish``'s contract.
+
+        Callers like RelentlessAgent register the structured
+        :func:`kiss.core.utils.finish` and parse the result as YAML, so
+        returning raw text would silently drop the success/is_continue
+        metadata.  The result is terminal (``is_continue=False``), so
+        RelentlessAgent does not resume the run.
+
+        Args:
+            summary: The ``summary_in_html`` of a
+                ``finish(success, is_continue, summary_in_html)`` contract.
+            result: The ``result`` of a ``finish(result)`` contract, and
+                the result itself when the registered ``finish`` has
+                neither parameter (or there is none).
+            success: The ``success`` of a structured contract.
+        """
+        finish_fn = self.function_map.get("finish")
+        params: set[str] = set()
+        if finish_fn is not None:
+            try:
+                params = set(inspect.signature(finish_fn).parameters)
+            except (TypeError, ValueError):  # pragma: no cover — exotic callable
+                params = set()
+        if "summary_in_html" in params:
+            assert finish_fn is not None
+            return str(finish_fn(success=success, is_continue=False, summary_in_html=summary))
+        if "result" in params:
+            assert finish_fn is not None
+            return str(finish_fn(result=result))
+        return result
 
     def _implicit_finish_result(self, explanation: str) -> str:
         """Build the result for an implicit finish.
@@ -1386,21 +1815,8 @@ class KISSAgent(Base):
             str: The implicit result in the registered finish contract.
         """
         text = self._last_response_text.strip()
-        finish_fn = self.function_map.get("finish")
-        params: set[str] = set()
-        if finish_fn is not None:
-            try:
-                params = set(inspect.signature(finish_fn).parameters)
-            except (TypeError, ValueError):  # pragma: no cover — exotic callable
-                params = set()
-        if "summary_in_html" in params:
-            summary = explanation + (f" Last status from the model: {text}" if text else "")
-            assert finish_fn is not None
-            return str(finish_fn(success=True, is_continue=False, summary_in_html=summary))
-        if "result" in params:
-            assert finish_fn is not None
-            return str(finish_fn(result=text or explanation))
-        return text or explanation
+        summary = explanation + (f" Last status from the model: {text}" if text else "")
+        return self._result_in_finish_contract(summary, text or explanation, True)
 
     def _print_tool_call(self, name: str, args: dict[str, Any], call_id: int) -> None:
         """Emit the ``tool_call`` event that opens the UI's panel for one call.
@@ -1468,10 +1884,19 @@ class KISSAgent(Base):
             if function_name != "finish":
                 register_tool_call(token)
             self._print_tool_call(function_name, function_args, token.call_id)
+            if token.interrupted:
+                # The call started interrupted: a Stop accepted on the
+                # call it is nested in landed before it was registered
+                # (register_tool_call).  No watchdog need cover it, and
+                # the tool may never look at its event, so it is not
+                # run; an injection that raced this check is drained.
+                raise_if_interrupted()
             try:
                 if function_name not in self.function_map:  # pragma: no cover
                     raise KISSError(f"Function {function_name} is not a registered tool")
                 function_response = str(self.function_map[function_name](**function_args))
+            except ToolRedirect as redirect:
+                function_response = self._execute_redirected(redirect)
             except BudgetExceededError:
                 raise
             except (Exception, SystemExit) as e:
@@ -1528,6 +1953,65 @@ class KISSAgent(Base):
 
         return function_name, function_response
 
+    def _execute_redirected(self, redirect: ToolRedirect) -> str:
+        """Make the call a tool raised *redirect* for, as if the model had issued it.
+
+        The call goes through :meth:`_guarded_execute_tool`, so the
+        :attr:`tool_call_hook`, the :attr:`tool_call_guard`, the
+        ``tool_call``/``tool_result`` events and the refusal bookkeeping
+        all apply to it, and so does the :attr:`ToolRedirect.followup`
+        call (the rest of a compound command), made the same way once
+        the redirected call went through: not refused, not interrupted,
+        and its result opening with neither ``Error`` (the tools'
+        convention for a call that failed) nor ``Failed to call`` (the
+        tool raised).  Only the original call counts in
+        :attr:`tool_calls_made`.
+
+        A run-ending verdict on either call is kept on
+        :attr:`_redirect_ended`, for :meth:`_guarded_execute_tool` to
+        return as the redirecting call's own.  A Stop accepted on the
+        redirecting call (the panel the user sees; nested calls run
+        under it, see :mod:`kiss.core.tool_interrupt`) is checked before
+        the redirected call and after each nested call, so the chain
+        ends as interrupted instead of running on.
+
+        Args:
+            redirect: The call to make, the note its result opens with
+                and the follow-up call, if any.
+
+        Returns:
+            The note, a newline, and the redirected call's result (the
+            refusal text when a hook or guard stopped it); with a
+            follow-up, then the line naming it and its result, or the
+            line saying it was not made.
+
+        Raises:
+            ToolCallInterrupted: When the redirecting call was interrupted.
+        """
+        counted = self.tool_calls_made
+        call = {"name": redirect.name, "arguments": redirect.arguments}
+        try:
+            raise_if_interrupted()
+            _, response, blocked = self._guarded_execute_tool(call)
+            raise_if_interrupted()
+            result = f"{redirect.note}\n{response}"
+            if redirect.followup is not None:
+                name, arguments = redirect.followup
+                after = None
+                if blocked is None and not response.startswith(
+                    ("Error", "Failed to call", USER_INTERRUPTED_MESSAGE)
+                ):
+                    _, after, blocked = self._guarded_execute_tool(
+                        {"name": name, "arguments": arguments}
+                    )
+                    raise_if_interrupted()
+                result += "\n" + followup_result(name, arguments, after, redirect.name)
+            if blocked is not None and blocked.ends_run:
+                self._redirect_ended = blocked
+        finally:
+            self.tool_calls_made = counted
+        return result
+
     def _check_limits(self) -> None:
         """Check budget and context limits, raise KISSError if exceeded.
 
@@ -1540,6 +2024,7 @@ class KISSAgent(Base):
         Raises:
             KISSError: If the agent's budget or context limit is exceeded.
         """
+        self._bill_helper_usage()
         if self.budget_used >= self.max_budget:
             raise BudgetExceededError(f"Agent {self.name} budget exceeded.")
         if self.budget_check_hook is not None:
@@ -1552,6 +2037,38 @@ class KISSAgent(Base):
                 f"{get_max_context_length(self.model.model_name):,} context tokens "
                 f"(limit {CONTEXT_LIMIT_FRACTION:.0%})."
             )
+
+    def _bill_helper_usage(self) -> None:
+        """Add what the model's helpers spent on this agent's behalf to its totals.
+
+        A model that cannot see has a vision model describe the
+        attachments of a tool result (``Model.tool_result_text_and_attachments``);
+        those calls happen outside ``_billed_model_call``, so the model keeps
+        their cumulative cost and tokens (``Model.helper_usage``) for this
+        fold, which precedes every limit check so the budget cap covers
+        them, the result event, and every exit of ``run`` (the step
+        limit, an error) so the saved totals include them.  They are no
+        steps of this agent.  The part above the totals' ``helper_mark``
+        is billed and the mark advanced in ONE totals store, and the
+        model's record is never consumed, so a stop landing anywhere
+        bills each helper dollar exactly once.  A record of another
+        epoch (the model was reset or replaced since the mark) is
+        unbilled in full.  An agent checked before ``run`` set its
+        model, and a duck-typed model stand-in, have nothing to fold.
+        """
+        record = _helper_usage_of(getattr(self, "model", None))
+        totals = self._usage_totals
+        if record is None or record == totals.helper_mark:
+            return
+        epoch, cost, tokens = record
+        mark_epoch, billed_cost, billed_tokens = totals.helper_mark
+        if mark_epoch is epoch:
+            cost, tokens = cost - billed_cost, tokens - billed_tokens
+        self._usage_totals = totals._replace(
+            budget_used=totals.budget_used + max(cost, 0.0),
+            total_tokens_used=totals.total_tokens_used + max(tokens, 0),
+            helper_mark=record,
+        )
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
         """Adds callable tools to the agent's function map.
@@ -1573,24 +2090,30 @@ class KISSAgent(Base):
 
     @contextlib.contextmanager
     def _turn_effort(self) -> Iterator[None]:
-        """Lower the model's reasoning effort for one routine turn, when configured.
+        """Lower the model's reasoning effort for one turn, when asked to.
 
-        ``DEFAULT_CONFIG.routine_turn_effort`` names the effort of a
-        turn that follows a refused call, a ``summary`` or memory tool,
-        a ``bash_job`` / ``agent_job`` wait or an unchanged ``Read``
-        (:func:`is_routine_turn`); empty (the default) changes nothing.
-        The override is applied only to a model whose catalog entry
-        carries a ``thinking`` level (one that accepts an effort
-        parameter), through the ``reasoning_effort`` key every adapter
-        reads when it builds the request, and restored afterwards.
-        ``_routine_call`` records the decision for the ``llm_call``
+        Two turns ask for it.  ``DEFAULT_CONFIG.routine_turn_effort``
+        names the effort of a turn that follows a refused call, a
+        ``summary`` or memory tool, a ``bash_job`` / ``agent_job`` wait or
+        an unchanged ``Read`` (:func:`is_routine_turn`); empty (the
+        default) changes nothing.  :attr:`_retry_effort` names the effort
+        of the retry of a request the output-token cap cut short
+        (:meth:`_retry_at_low_effort`) and is consumed here.  The
+        override is applied only to a model whose catalog entry carries
+        a ``thinking`` level (one that accepts an effort parameter),
+        through the ``reasoning_effort`` key every adapter reads when it
+        builds the request, and restored afterwards.  ``_routine_call``
+        and ``_routine_effort`` record the decision for the ``llm_call``
         event so ``cost_report`` can compare routine and other calls.
         """
         self._routine_call = self._routine_next_turn
         self._routine_next_turn = False
-        level = DEFAULT_CONFIG.routine_turn_effort
+        level = self._retry_effort or (
+            DEFAULT_CONFIG.routine_turn_effort if self._routine_call else ""
+        )
+        self._retry_effort = ""
         info = MODEL_INFO.get(self.model.model_name)
-        if not (level and self._routine_call and info is not None and info.thinking):
+        if not (level and info is not None and info.thinking):
             self._routine_effort = ""
             yield
             return
@@ -1655,20 +2178,20 @@ class KISSAgent(Base):
         try:
             result = call()
         except Exception as e:
-            self._bill_failed_call(started)
+            self._bill_failed_call(started, e)
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
                 ) from e
             raise
-        except BaseException:
-            self._bill_failed_call(started)
+        except BaseException as e:
+            self._bill_failed_call(started, e)
             raise
         self._update_tokens_and_budget_from_response(result[-1])
         self._print_llm_call(started)
         return result
 
-    def _bill_failed_call(self, started: float) -> None:
+    def _bill_failed_call(self, started: float, error: BaseException | None = None) -> None:
         """Account a generation call that raised (a provider error or a Stop).
 
         The model may have been billed for a call that then failed: a
@@ -1685,12 +2208,21 @@ class KISSAgent(Base):
 
         Args:
             started: ``time.time()`` taken right before the call.
+            error: What the call raised.  A typed cut-off or refusal
+                (``OutputCapError``, ``ModelRefusalError``) names the
+                provider's ``stop_reason``, which fills the record when
+                the billed partial response does not carry it (a streamed
+                usage chunk has no ``finish_reason``).
         """
         try:
             take_partial = getattr(self.model, "take_partial_usage_response", None)
             partial = take_partial() if callable(take_partial) else None
             if partial is not None:
                 self._update_tokens_and_budget_from_response(partial)
+            usage = self.last_call_usage
+            stop_reason = getattr(error, "stop_reason", None)
+            if usage is not None and stop_reason and not usage.get("stop_reason"):
+                usage["stop_reason"] = stop_reason
             self._print_llm_call(started)
         except Exception:
             logger.warning("Billing a failed model call raised", exc_info=True)
@@ -1783,10 +2315,9 @@ class KISSAgent(Base):
             # is simply unaccounted, exactly as if the stop had landed
             # before the call) or the next complete triple.
             totals = self._usage_totals
-            self._usage_totals = _UsageTotals(
-                totals.budget_used + cost,
-                totals.total_tokens_used + call_tokens,
-                totals.step_count,
+            self._usage_totals = totals._replace(
+                budget_used=totals.budget_used + cost,
+                total_tokens_used=totals.total_tokens_used + call_tokens,
             )
         except KISSError:
             raise

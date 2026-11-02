@@ -132,7 +132,9 @@ def build_provider(cfg: MCPServerConfig, redirect_handler: Any, callback_handler
     """
     from mcp.client.auth import OAuthClientProvider
 
-    storage = FileTokenStorage(cfg.name)
+    # Bound to the URL: a same-named configuration of another server
+    # must not be handed this one's credentials (see FileTokenStorage).
+    storage = FileTokenStorage(cfg.name, cfg.url)
     provider = OAuthClientProvider(
         server_url=cfg.url,
         client_metadata=client_metadata(),
@@ -256,7 +258,7 @@ class MCPLoginSession:
             ToolCallInterrupted: When the calling tool call was stopped
                 while waiting (checked between slices, as in :meth:`wait`).
         """
-        storage = FileTokenStorage(cfg.name)
+        storage = FileTokenStorage(cfg.name, cfg.url)
         if not seed_preregistered_client(storage, cfg.name):
             drop_stale_registration(storage)
         session = locked_call(cls._start_lock, cls._replace_active, cfg)

@@ -49,6 +49,7 @@ from kiss.core.user_config import API_KEY_ENV_VARS, get_current_api_keys
 from kiss.core.utils import config_to_dict
 from kiss.server.autocomplete import ranked_function_calling_models
 from kiss.server.helpers import model_vendor
+from kiss.tests.conftest import executor_of
 from kiss.tests.core.models.anthropic_sse_harness import (
     ScriptedAnthropicServer,
     text_message_stream,
@@ -1155,9 +1156,9 @@ def _reloaded_catalog() -> dict[str, model_info.ModelInfo]:
     return catalog
 
 
-def _live_claude(agent: Any) -> AnthropicModel:
-    """Return *agent*'s live model, which must be the Claude adapter."""
-    live = agent.model
+def _live_claude(executor: Any) -> AnthropicModel:
+    """Return *executor*'s live model, which must be the Claude adapter."""
+    live = executor.model
     assert isinstance(live, AnthropicModel)
     return live
 
@@ -1179,25 +1180,26 @@ def test_set_model_keeps_each_provider_on_its_own_credential(monkeypatch) -> Non
     agent: Any = SorcarAgent("test-bedrock-switch")
     agent._use_web_tools = False
     set_model = next(t for t in agent._get_tools() if callable(t) and t.__name__ == "set_model")
-    agent.model = model_info.model("claude-opus-4-6")
-    agent.model_name = "claude-opus-4-6"
-    agent.model.initialize("hi")
+    executor = executor_of(agent)
+    executor.model = model_info.model("claude-opus-4-6")
+    executor.model_name = "claude-opus-4-6"
+    executor.model.initialize("hi")
 
     set_model(_OPUS)
-    live = _live_claude(agent)
+    live = _live_claude(executor)
     assert live.model_name == _OPUS and live.bedrock is True
     assert live.api_key == "bedrock-token"
     assert live.client.api_key == "bedrock-token"
 
     set_model("claude-opus-4-6")
-    live = _live_claude(agent)
+    live = _live_claude(executor)
     assert live.bedrock is False
     assert live.api_key == "anthropic-token"
     assert live.client.api_key == "anthropic-token"
 
     live.api_key = "task-specific-anthropic-key"
     set_model("claude-sonnet-4-6")
-    live = _live_claude(agent)
+    live = _live_claude(executor)
     assert live.api_key == "task-specific-anthropic-key"
     assert live.client.api_key == "task-specific-anthropic-key"
 

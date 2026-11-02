@@ -365,15 +365,23 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
         # Exactly what the daemon does for a run of the script, plus the
         # method checks ``/<name> check`` makes.
         check = check_sea(path, require_description=False)
-        seas, merged = check.seas, check.settings
-        # The per-class dicts (the script's own ``settings`` over ``{}``
-        # and what its bases lay under it) are not in ``check``, which
-        # carries the merge a run gets: the ``settings`` methods run once
-        # more for the ``redundant-key`` comparison.
-        declared = own_settings(seas[-1])
     except SeaError as exc:
         findings.append(Finding(path, "broken", str(exc)))
         return findings
+    seas, merged = check.seas, check.settings
+    # The per-class dicts (the script's own ``settings`` over ``{}``
+    # and what its bases lay under it) are not in ``check``, which
+    # carries the merge a run gets: the ``settings`` methods run once
+    # more for the ``redundant-key`` comparison.
+    try:
+        declared = own_settings(seas[-1])
+    except SeaError:
+        # The script's ``settings`` reads what its bases lay under it
+        # (``not settings["use_web_tools"]``), which ``{}`` lacks.  The
+        # run's merge above passed, so the script is not broken; it
+        # just has no own dict to compare, and the checks below that
+        # read one find nothing.
+        declared = {}
     inherited = inherited_settings(seas[-1])
     for key, value in declared.items():
         if key not in META_SETTINGS and key in inherited and inherited[key] == value:

@@ -659,7 +659,7 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
     model = StandInModelServer(responder)
     try:
         result = sorcar.run(
-            "PARENT start two background agents",
+            "PARENT start two background sub-agents",
             work_dir=str(home.repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,

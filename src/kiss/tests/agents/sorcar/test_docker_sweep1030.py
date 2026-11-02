@@ -19,9 +19,18 @@
   probe is now an ``_exec`` like any command.  The original hang needs
   a daemon that stalls on one request, which cannot be arranged against
   a real daemon without a fault-injecting proxy (a test double), so the
-  tests below pin the probe's three outcomes instead: the target is
-  absent (the copy runs), present (refused), or the probe was stopped
-  (refused, nothing runs).
+  tests below pin the probe's outcomes instead.  Since 2026-10-31 a
+  literal here-document copy is not refused but raised as the ``Write``
+  it stands for (:class:`~kiss.core.tool_verdict.ToolRedirect`, made by
+  the agent through its hook and events; ``Bash`` itself touches
+  nothing), whether the target is absent or present: a copy into an
+  absent file creates it, one over an existing file is the hook's to
+  refuse, and a stopped task's redirected ``Write`` returns the stopped
+  result and writes nothing.  The probe now serves an append (``>>``),
+  whose current text is read from the container, and
+  ``run_commands_parallel``, which cannot redirect.  A stopped probe
+  counts as "present" and the stopped read makes the append an error:
+  nothing runs.
 """
 
 from __future__ import annotations
@@ -32,9 +41,11 @@ from collections.abc import Iterator
 
 import pytest
 
-from kiss.agents.sorcar.docker_manager import DockerManager
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager
 from kiss.agents.sorcar.docker_tools import DockerTools
+from kiss.core.tool_verdict import ALLOW, ToolRedirect, refuse
 from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
+from kiss.tests.agents.sorcar.test_docker_parity_2026_10_31 import _Harness
 
 pytestmark = [
     pytest.mark.slow,
@@ -69,32 +80,112 @@ def test_a_traceback_failure_stops_the_edit_batch(env: DockerManager) -> None:
     assert env.Bash("cat -v /tmp/latin1.txt", "dump").startswith("oneM-^?\ntwo\n")
 
 
-def test_a_heredoc_creates_a_new_file(env: DockerManager) -> None:
-    """The probe answers "absent": the copy runs."""
+def test_a_heredoc_into_a_new_file_is_made_as_a_write(env: DockerManager) -> None:
+    """A copy into an absent target is the ``Write`` of its body; ``Bash`` creates nothing."""
     env.Bash("rm -f /tmp/probe_new.txt", "clean")
-    result = env.Bash("cat > /tmp/probe_new.txt <<'EOF'\nfresh\nEOF", "create")
-    assert not result.startswith("REFUSED:"), result
-    assert env.Bash("cat /tmp/probe_new.txt", "cat").startswith("fresh")
+    with pytest.raises(ToolRedirect) as info:
+        env.Bash("cat > /tmp/probe_new.txt <<'EOF'\nfresh\nEOF", "create")
+    redirect = info.value
+    assert redirect.name == "Write"
+    assert redirect.arguments == {"file_path": "/tmp/probe_new.txt", "content": "fresh\n"}
+    assert redirect.followup is None
+    assert redirect.note.startswith('Applied as Write(file_path="/tmp/probe_new.txt"'), (
+        redirect.note
+    )
+    assert env.Bash("test -e /tmp/probe_new.txt; echo $?", "check").startswith("1")
 
 
-def test_a_heredoc_over_an_existing_file_is_refused(env: DockerManager) -> None:
-    """The probe answers "present": refused, the file keeps its content."""
+def test_a_heredoc_over_an_existing_file_is_made_as_a_write(env: DockerManager) -> None:
+    """A copy over a present target is the ``Write`` of its body; an append reads the text."""
     env.Bash("printf 'kept\\n' > /tmp/probe_old.txt", "seed")
-    result = env.Bash("cat > /tmp/probe_old.txt <<'EOF'\nclobbered\nEOF", "rewrite")
-    assert result.startswith("REFUSED:") and "/tmp/probe_old.txt" in result, result
-    assert env.Bash("cat /tmp/probe_old.txt", "cat").startswith("kept")
+    with pytest.raises(ToolRedirect) as info:
+        env.Bash("cat > /tmp/probe_old.txt <<'EOF'\nclobbered\nEOF", "rewrite")
+    assert info.value.name == "Write"
+    assert info.value.arguments == {"file_path": "/tmp/probe_old.txt", "content": "clobbered\n"}
+    assert env.Bash("cat /tmp/probe_old.txt", "cat").startswith("kept\n")
+    # The probe answers "present" and the current text is fetched from the container.
+    with pytest.raises(ToolRedirect) as info:
+        env.Bash("cat >> /tmp/probe_old.txt <<'EOF'\nmore\nEOF", "append")
+    assert info.value.name == "Write"
+    assert info.value.arguments == {"file_path": "/tmp/probe_old.txt", "content": "kept\nmore\n"}
+    assert info.value.note.startswith("Appended through Write("), info.value.note
+    assert env.Bash("cat /tmp/probe_old.txt", "cat").startswith("kept\n")
 
 
 def test_a_stopped_probe_refuses_and_runs_nothing(env: DockerManager) -> None:
-    """A Stop ends the probe unanswered: the target counts as existing, nothing runs."""
+    """A Stop ends the probe unanswered: the target counts as present, the append is an error."""
     env.Bash("rm -f /tmp/probe_stopped.txt", "clean")
     env.stop_event = threading.Event()
     env.stop_event.set()
     try:
-        result = env.Bash("cat > /tmp/probe_stopped.txt <<'EOF'\nx\nEOF", "create")
+        result = env.Bash("cat >> /tmp/probe_stopped.txt <<'EOF'\nx\nEOF", "append")
+        # A plain copy needs no probe: it is the Write the (stopped) agent would make.
+        with pytest.raises(ToolRedirect) as info:
+            env.Bash("cat > /tmp/probe_stopped.txt <<'EOF'\nx\nEOF", "create")
     finally:
         env.stop_event = None
-    assert result.startswith("REFUSED:"), result
+    assert result.startswith("Error: cannot append to /tmp/probe_stopped.txt: "), result
+    assert info.value.arguments == {"file_path": "/tmp/probe_stopped.txt", "content": "x\n"}
+    assert env.Bash("test -e /tmp/probe_stopped.txt; echo $?", "check").startswith("1")
+
+
+def test_a_heredoc_creates_a_new_file(env: DockerManager) -> None:
+    """A copy into an absent file is made as the Write it stands for, through the agent."""
+    h = _Harness(env)
+    env.Bash("rm -f /tmp/probe_new.txt", "clean")
+    command = "cat > /tmp/probe_new.txt <<'EOF'\nfresh\nEOF"
+    result = h.call("Bash", command=command, description="create")
+    assert result == (
+        'Applied as Write(file_path="/tmp/probe_new.txt", content="fresh\\n"), whose result '
+        "follows:\nSuccessfully wrote 6 characters to /tmp/probe_new.txt"
+    ), result
+    assert h.hook_calls == [
+        ("Bash", {"command": command, "description": "create"}),
+        ("Write", {"file_path": "/tmp/probe_new.txt", "content": "fresh\n"}),
+    ]
+    assert h.tool_calls() == ["Bash", "Write"]
+    assert env.read_bytes("/tmp/probe_new.txt") == b"fresh\n"
+
+
+def test_a_heredoc_over_an_existing_file_is_the_hooks_to_refuse(env: DockerManager) -> None:
+    """A copy over an existing file reaches the hook as the Write; its refusal keeps the content."""
+    h = _Harness(env)
+    env.Bash("printf 'kept\\n' > /tmp/probe_old.txt", "seed")
+    command = "cat > /tmp/probe_old.txt <<'EOF'\nclobbered\nEOF"
+    h.verdict = refuse("keep it")
+    result = h.call("Bash", command=command, description="rewrite")
+    assert result == (
+        'Applied as Write(file_path="/tmp/probe_old.txt", content="clobbered\\n"), whose result '
+        "follows:\nREFUSED: the Write call did NOT run and had no effect. keep it"
+    ), result
+    assert h.hook_calls[-1] == (
+        "Write", {"file_path": "/tmp/probe_old.txt", "content": "clobbered\n"},
+    )
+    assert env.read_bytes("/tmp/probe_old.txt") == b"kept\n"
+    # Allowed, the same copy replaces the content as the shell would have.
+    h.verdict = ALLOW
+    result = h.call("Bash", command=command, description="rewrite")
+    assert result.endswith("Successfully wrote 10 characters to /tmp/probe_old.txt"), result
+    assert env.read_bytes("/tmp/probe_old.txt") == b"clobbered\n"
+
+
+def test_a_stopped_task_writes_nothing(env: DockerManager) -> None:
+    """With the Stop set, the redirected Write is killed: the stopped result, no file."""
+    h = _Harness(env)
+    env.Bash("rm -f /tmp/probe_stopped.txt", "clean")
+    env.stop_event = threading.Event()
+    env.stop_event.set()
+    try:
+        result = h.call(
+            "Bash", command="cat > /tmp/probe_stopped.txt <<'EOF'\nx\nEOF", description="create",
+        )
+    finally:
+        env.stop_event = None
+    assert result == (
+        'Applied as Write(file_path="/tmp/probe_stopped.txt", content="x\\n"), whose result '
+        f"follows:\n{STOPPED_MESSAGE}\n[exit code: -1]"
+    ), result
+    assert h.tool_calls() == ["Bash", "Write"]
     assert env.Bash("test -e /tmp/probe_stopped.txt; echo $?", "check").startswith("1")
 
 

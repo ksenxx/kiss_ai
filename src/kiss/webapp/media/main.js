@@ -1309,8 +1309,10 @@
       contentSaveToken: '',
       contentSaveTimer: null,
       contentSaveBar: null,
-      // False, or the chat tab id a pending reload was requested as.
+      // False, or the token of the pending reload (reloadContentTab),
+      // and the buffer's version when it was requested.
       contentReloadRequested: false,
+      contentReloadVersionId: 0,
       // A previewable (.md/.html) content tab renders its PREVIEW by
       // default with an "Edit source" toggle in the Save bar (see
       // renderPreviewableContent): which surface is showing (kept
@@ -4833,16 +4835,35 @@
   }
 
   // Re-read the file from disk into the tab, dropping its edits: the
-  // flag lets handleFileContent replace a dirty tab's editor, which it
+  // token lets handleFileContent replace a dirty tab's editor, which it
   // otherwise refuses to do (a click on the file's link must not throw
   // the user's unsaved work away).
-  // The flag holds the id of the chat tab the request is sent as (the
-  // daemon echoes it on the reply), so a failed reply can be matched to
-  // this reload and not to another chat's open of the same path.
+  // Every reload has its own `reload:` token (the daemon echoes it on
+  // the reply, success or error), so the reply settles this reload and
+  // no other open of the path -- another chat's or another machine's,
+  // or the reload of a tab closed meanwhile, which has no taker.  The
+  // buffer's version taken here tells the reply whether the user typed
+  // again while it was on its way: those edits were never consented
+  // away.
+  let contentReloadSeq = 0;
   function reloadContentTab(tab) {
-    const requester = tab.ownerTabId || activeTabId;
-    tab.contentReloadRequested = requester;
-    api.send(contentTabCommand(tab, {type: 'openFile', tabId: requester}));
+    contentReloadSeq += 1;
+    tab.contentReloadRequested = 'reload:' + contentReloadSeq;
+    tab.contentReloadVersionId = contentVersionId(tab);
+    api.send(
+      contentTabCommand(tab, {
+        type: 'openFile',
+        tabId: tab.ownerTabId || activeTabId,
+        token: tab.contentReloadRequested,
+      }),
+    );
+  }
+
+  /** The version of *tab*'s editor buffer (0 when the tab has no editor). */
+  function contentVersionId(tab) {
+    return tab.contentEditor
+      ? tab.contentEditor.getModel().getAlternativeVersionId()
+      : 0;
   }
 
   function handleFileSaved(ev) {
@@ -5394,6 +5415,20 @@
       ownerTabId === undefined || ownerTabId === null || ownerTabId === ''
         ? activeTabId
         : String(ownerTabId);
+    // A reload's reply echoes the `reload:` token reloadContentTab sent
+    // and settles the tab still awaiting that very token.  The reply of
+    // a reload whose tab closed meanwhile has no taker: it is dropped
+    // rather than reopening the closed file in a new tab (or toasting
+    // its error).  Any other token (a picture nobody awaits any more,
+    // see handleInlineImageContent) is an ordinary open.
+    const reloadToken =
+      String(ev.token || '').indexOf('reload:') === 0 ? ev.token : '';
+    const reloadTab = reloadToken
+      ? tabs.find(
+          t => t.isContentTab && t.contentReloadRequested === reloadToken,
+        )
+      : null;
+    if (reloadToken && !reloadTab) return;
     if (ev.error) {
       // tableak-coverage:start
       // A background task's failed file open is that task's problem. Toasting
@@ -5407,20 +5442,12 @@
       }
       // tableak-coverage:end
       // A failed reload keeps the tab's edits, so the next click on
-      // the file's link must protect them again. Only a reply to the
-      // chat that requested the reload counts (the reply echoes the
-      // request's tabId): another chat's failed open of the same path
-      // must not cancel this tab's in-flight reload, or its success
-      // reply would only reveal a line instead of replacing the text.
-      tabs.forEach(t => {
-        if (
-          t.isContentTab &&
-          t.contentPath === ev.path &&
-          t.contentReloadRequested === owner
-        ) {
-          t.contentReloadRequested = false;
-        }
-      });
+      // the file's link must protect them again. Only the reload's own
+      // reply counts: another chat's or another machine's failed open
+      // of the same path must not cancel this tab's in-flight reload,
+      // or its success reply would only reveal a line instead of
+      // replacing the text.
+      if (reloadTab) reloadTab.contentReloadRequested = false;
       return;
     }
     const path = ev.path || '';
@@ -5437,25 +5464,33 @@
     // One content tab per path, like one editor per file in VS Code --
     // per machine: the same path on two machines is two files.  A
     // browser tab (its "path" is a URL) or a terminal tab (none) is
-    // never that file's tab.
-    const existing = tabs.find(t => {
-      return (
-        t.isContentTab &&
-        !t.isBrowserTab &&
-        !t.isTerminalTab &&
-        t.contentPath === path &&
-        String(t.ownerBrowseMachine || '') === machine
-      );
-    });
+    // never that file's tab.  A reload's reply is its own tab's.
+    const existing =
+      reloadTab ||
+      tabs.find(t => {
+        return (
+          t.isContentTab &&
+          !t.isBrowserTab &&
+          !t.isTerminalTab &&
+          t.contentPath === path &&
+          String(t.ownerBrowseMachine || '') === machine
+        );
+      });
     if (existing) {
       // Unsaved edits win over a fresh copy of the file: like VS Code,
       // opening a file that is already open in a dirty editor merely
       // brings that editor forward (and jumps to the requested line).
-      // Only an explicit reload replaces the text, and only the reply
-      // to the chat that asked for it is that reload (as in the error
-      // path above): another chat's open of the same path meanwhile
-      // must neither replace the edits nor consume the pending reload.
-      const reloading = existing.contentReloadRequested === owner;
+      // Only an explicit reload replaces the text, and only its own
+      // reply is that reload (as in the error path above): another
+      // chat's open of the same path meanwhile must neither replace
+      // the edits nor consume the pending reload.  Nor may the reload
+      // itself once the user typed again while its reply was on its
+      // way (the buffer's version moved on): those edits were never
+      // consented away, so the reply keeps the editor like a plain
+      // open does, and a new reload has to be asked for.
+      const reloading =
+        !!reloadTab &&
+        contentVersionId(existing) === existing.contentReloadVersionId;
       // The bytes a live editor already shows (a double-click's second
       // reply, a link clicked twice) likewise only jump to the line:
       // rebuilding the editor would drop the caret, scroll and undo
@@ -5480,7 +5515,7 @@
       } else {
         renderContentView(existing, ev);
       }
-      if (reloading) existing.contentReloadRequested = false;
+      if (reloadTab) existing.contentReloadRequested = false;
       // In the split layout a file opened to be seen goes through the
       // pane even when it is the one shown there: the pane may be
       // folded away or under the task-info panel (showInContentPane).
@@ -6322,6 +6357,11 @@
       if (activeDraft && !saved && !target.inputValue) {
         target.inputValue = activeDraft;
       }
+      // A content tab taking the screen (stacked surface) restores no
+      // chat: blank the chat surface, as a local close does (closeTab),
+      // or the chat closed elsewhere keeps its timer, spinner, task and
+      // transcript alive under the file.
+      if (target.isContentTab) clearChatSurface();
       activateAdjacentTab(target);
     }
     savedActiveTabId = '';
@@ -7481,6 +7521,17 @@
   }
 
   /**
+   * The machine a subpanel reply is from: a forwarded reply's, '' for
+   * this daemon's own.
+   *
+   * @param {{forwarded?: boolean, machine?: string}} ev The reply.
+   * @returns {string} The machine, as panelsMachine names it.
+   */
+  function replyMachine(ev) {
+    return ev.forwarded ? String(ev.machine) : '';
+  }
+
+  /**
    * Whether a subpanel reply is for the machine the subpanels show: a
    * forwarded one for that machine, or this daemon's own while this
    * daemon is shown.
@@ -7489,8 +7540,7 @@
    * @returns {boolean} Whether to render it.
    */
   function panelReplyShown(ev) {
-    const from = ev.forwarded ? String(ev.machine) : '';
-    return from === panelsMachine;
+    return replyMachine(ev) === panelsMachine;
   }
 
   /**
@@ -7551,9 +7601,10 @@
    * Empty the five subpanels while the machine they now show answers.
    * A job or machine being added keeps its typed values: the add form
    * reopens with them when the new machine's jobs or machines arrive
-   * (an add in flight went to the machine left behind, whose reply is
-   * dropped, so Save works again).  A row's editor is closed: it edits
-   * a job of the machine left behind.
+   * (an add in flight went to the machine left behind: its reply
+   * answers that machine's save, never the form on show, so Save works
+   * again).  A row's editor is closed: it edits a job of the machine
+   * left behind.
    */
   function clearSidebarPanels() {
     const draft =
@@ -7907,12 +7958,55 @@
   let scheduleAdd = null;
   let machineAdd = null;
 
+  // The saves those forms sent and still await the reply to, oldest
+  // first ({machine, action, key, state}: the machine the subpanels
+  // showed, the cronAction or machineAction, the job or machine it
+  // named -- the daemon echoes both -- and the form's state above).
+  // The reply to a save closes or re-arms the form that sent it, not
+  // whichever form is open when it lands: a form cancelled with its
+  // save in flight and the one saved in its place both await a reply,
+  // and the first reply answers the first.  A save outlives a machine
+  // change: the subpanels may be back on its machine, with its draft
+  // saved again, before its reply comes, and that reply answers the
+  // first save, not the second (a reply for a machine no longer shown
+  // retires its save, see the cronJobs and machines events).
+  const pendingCronSaves = [];
+  const pendingMachineSaves = [];
+
+  /**
+   * Take, off *pending*, the oldest save a reply answers: the same
+   * action naming the same job or machine (a reply naming none, from
+   * a daemon that does not echo them, answers the oldest of the
+   * action), sent to the machine the reply is from.
+   *
+   * @param {Array<{machine: string, action: string, key: string, state: Object}>} pending
+   *     pendingCronSaves or pendingMachineSaves.
+   * @param {string|undefined} action The reply's `action`.
+   * @param {*} key The reply's `jobId` or `name` (undefined when it
+   *     carries none).
+   * @param {string} machine The machine the reply is from (replyMachine).
+   * @returns {Object|null} The form state that sent the save, or null
+   *     when the reply answers no save awaited (a poll, another
+   *     action, a save the disconnect released meanwhile).
+   */
+  function takePendingSave(pending, action, key, machine) {
+    const i = pending.findIndex(
+      p =>
+        p.machine === machine &&
+        p.action === action &&
+        (key == null || p.key === String(key)),
+    );
+    return i < 0 ? null : pending.splice(i, 1)[0].state;
+  }
+
   /**
    * The daemon connection dropped: no save an open in-place form sent
    * will be answered, so its Save works again (and the add forms no
    * longer await a reply).
    */
   function releaseSidebarFormSaves() {
+    pendingCronSaves.length = 0;
+    pendingMachineSaves.length = 0;
     if (scheduleEdit) scheduleEdit.saving = false;
     if (scheduleAdd) scheduleAdd.saving = false;
     if (machineAdd) machineAdd.saving = false;
@@ -8097,6 +8191,12 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleEdit = {id: job.id, values: saved, saving: true};
+        pendingCronSaves.push({
+          machine: panelsMachine,
+          action: 'update',
+          key: String(job.id),
+          state: scheduleEdit,
+        });
         cronAction({
           action: 'update',
           jobId: job.id,
@@ -8160,6 +8260,12 @@
       saved => {
         if (sidebarFormOffline(scheduleStatus)) return false;
         scheduleAdd = {values: saved, saving: true};
+        pendingCronSaves.push({
+          machine: panelsMachine,
+          action: 'create',
+          key: '',
+          state: scheduleAdd,
+        });
         cronAction({
           action: 'create',
           name: saved.name,
@@ -8220,11 +8326,17 @@
         ? ''
         : 'No scheduled jobs. Click + to schedule one, or ask Sorcar, e.g. "every morning at 9 summarize my email".');
     scheduleStatus.classList.toggle('is-error', Boolean(error));
-    if (ev.action === 'update' && scheduleEdit && scheduleEdit.saving) {
+    const saved = takePendingSave(
+      pendingCronSaves,
+      ev.action,
+      ev.jobId,
+      replyMachine(ev),
+    );
+    if (saved && saved === scheduleEdit) {
       if (error) scheduleEdit.saving = false;
       else scheduleEdit = null;
     }
-    if (ev.action === 'create' && scheduleAdd && scheduleAdd.saving)
+    if (saved && saved === scheduleAdd)
       scheduleAdd = error ? {values: scheduleAdd.values, saving: false} : null;
     // An editor whose job is gone (deleted from another surface, or by
     // the cron agent) has nothing to edit: drop it, or it would reopen
@@ -8365,6 +8477,12 @@
       saved => {
         if (sidebarFormOffline(machinesStatusLine)) return false;
         machineAdd = {values: saved, saving: true};
+        pendingMachineSaves.push({
+          machine: panelsMachine,
+          action: 'add',
+          key: String(saved.name),
+          state: machineAdd,
+        });
         api.machineAction(
           panelCommand({
             action: 'add',
@@ -8437,7 +8555,13 @@
     machinesStatusLine.textContent =
       error || (rows.length ? '' : 'No machines.');
     machinesStatusLine.classList.toggle('is-error', Boolean(error));
-    if (ev.action === 'add' && machineAdd && machineAdd.saving)
+    const saved = takePendingSave(
+      pendingMachineSaves,
+      ev.action,
+      ev.name,
+      replyMachine(ev),
+    );
+    if (saved && saved === machineAdd)
       machineAdd = error ? {values: machineAdd.values, saving: false} : null;
     for (const m of rows) {
       const reachable = m.status === 'reachable';
@@ -9655,13 +9779,15 @@
    * @param {string} machine The machine the file is on ('' for this one).
    * @param {boolean} [background] Open the tab without leaving the
    *     current one ("Open to the Side"); the drawer then stays.
+   * @param {string} [owner] The chat tab the file is opened for (the
+   *     reply is routed to it); the current one by default.
    */
-  function openWorkspaceFile(path, workDir, machine, background) {
+  function openWorkspaceFile(path, workDir, machine, background, owner) {
     const msg = {
       type: 'openFile',
       path: path,
       workDir: workDir || sidebarWorkDir(),
-      tabId: activeTabId,
+      tabId: owner || activeTabId,
     };
     if (background) msg.background = true;
     api.send(onMachine(msg, machine));
@@ -11568,9 +11694,15 @@
     );
   }
 
-  /** Request the side-by-side diff of a graph file row (see handleGitShow). */
-  function openScmFileDiff(row) {
-    const workDir = row.dataset.scmWorktree || scmWorkDir || sidebarWorkDir();
+  /**
+   * Request the side-by-side diff of a graph file row (see handleGitShow).
+   *
+   * @param {HTMLElement} row The file row.
+   * @param {{workDir: string, tabId: string, machine: string}} [target]
+   *     The target captured when a context menu was opened on the row
+   *     (scmFileTarget); read now for a click.
+   */
+  function openScmFileDiff(row, target) {
     sendGitShow(
       {
         sha: row.dataset.scmCommit || '',
@@ -11578,8 +11710,23 @@
         origPath: row.dataset.scmOrigPath || '',
         mode: 'diff',
       },
-      {workDir: workDir, tabId: activeTabId, machine: scmMachine},
+      target || scmFileTarget(row),
     );
+  }
+
+  /**
+   * The repository (the row's worktree), machine and chat tab a Source
+   * Control file row's action is aimed at, read now.
+   *
+   * @param {HTMLElement} row The file row.
+   * @returns {{workDir: string, tabId: string, machine: string}} The target.
+   */
+  function scmFileTarget(row) {
+    return {
+      workDir: row.dataset.scmWorktree || scmWorkDir || sidebarWorkDir(),
+      tabId: activeTabId,
+      machine: scmMachine,
+    };
   }
 
   /** The visible (rendered) items matching *selector* under *root*. */
@@ -11814,8 +11961,10 @@
     const token = nextSidebarToken('fs');
     // The machine the entries are on, captured when the action was
     // picked (the tree may show another machine by the time a
-    // confirmation or an overwrite retry sends it).
+    // confirmation or an overwrite retry sends it), and the chat the
+    // action was picked in, which owns what its reply opens.
     if (typeof request.machine !== 'string') request.machine = explorerMachine;
+    if (typeof request.tabId !== 'string') request.tabId = activeTabId;
     pendingSidebarRequests.set(token, request);
     api.fsAction(
       onMachine(
@@ -11827,7 +11976,7 @@
           query: request.query || '',
           overwrite: request.overwrite === true,
           workDir: workDir,
-          tabId: activeTabId,
+          tabId: request.tabId,
           token: token,
         },
         request.machine,
@@ -11904,11 +12053,14 @@
     // and let the Source Control view know.
     // Only the Cut entry this move consumed is spent: a NEWER Cut made
     // while the move reply was in flight must survive, or the user's
-    // pending Paste silently loses its entries.
+    // pending Paste silently loses its entries.  The clipboard is
+    // machine-scoped: the same path Cut on another machine is another
+    // entry.
     if (
       request.action === 'move' &&
       explorerClipboard &&
       explorerClipboard.cut &&
+      explorerClipboard.machine === String(request.machine || '') &&
       explorerClipboard.paths.indexOf(request.path) >= 0
     ) {
       const left = explorerClipboard.paths.filter(p => p !== request.path);
@@ -11933,12 +12085,20 @@
       toggleExplorerDir(targetNode.row, true);
     }
     if (request.action === 'newFile' && ev.path) {
-      // Like VS Code, a new file opens in an editor right away.
-      openWorkspaceFile(
-        ev.path,
-        request.root || explorerRoot,
-        request.machine || '',
-      );
+      // Like VS Code, a new file opens in an editor right away -- for
+      // the chat that created it: a reply landing after a switch to
+      // another chat opens the editor in the creator's workspace
+      // without leaving the chat on screen, and a creator closed
+      // meanwhile gets no editor.
+      const owner = String(request.tabId || '');
+      if (getTab(owner))
+        openWorkspaceFile(
+          ev.path,
+          request.root || explorerRoot,
+          request.machine || '',
+          owner !== activeTabId,
+          owner,
+        );
     }
     // The editors and the Compare pick of the machine the action ran
     // on: the same path on another machine is another file.
@@ -12739,24 +12899,28 @@
   function scmCommitMenuItems(commit) {
     const sha = commit.sha;
     const short = String(sha).slice(0, 7);
+    // The repository and chat the menu was opened on, captured now: the
+    // view may follow another machine or working directory (a tab
+    // switch, the daemon's binding) while the menu stays open, and the
+    // commit belongs to this repository.
+    const target = gitTarget();
     return [
       {
         id: 'open-changes',
         label: 'Open Changes',
-        run: () => sendGitShow({sha: sha, subject: commit.subject}),
+        run: () => sendGitShow({sha: sha, subject: commit.subject}, target),
       },
       {separator: true},
       {
         id: 'checkout-detached',
         label: 'Checkout (Detached)',
-        run: () => sendGitAction('checkoutDetached', sha),
+        run: () => sendGitAction('checkoutDetached', sha, null, target),
       },
       {separator: true},
       {
         id: 'create-branch',
         label: 'Create Branch...',
         run: () => {
-          const target = gitTarget();
           promptText({
             id: 'git-create-branch',
             message: 'New branch from ' + short,
@@ -12774,7 +12938,6 @@
         id: 'create-tag',
         label: 'Create Tag...',
         run: () => {
-          const target = gitTarget();
           promptText({
             id: 'git-create-tag',
             message: 'New tag at ' + short,
@@ -12791,14 +12954,13 @@
       {
         id: 'cherry-pick',
         label: 'Cherry Pick',
-        run: () => sendGitAction('cherryPick', sha),
+        run: () => sendGitAction('cherryPick', sha, null, target),
       },
       {separator: true},
       {
         id: 'compare-with',
         label: 'Compare with...',
         run: () => {
-          const target = gitTarget();
           promptText({
             id: 'git-compare-with',
             message: 'Compare ' + short + ' with a branch, tag or commit',
@@ -12831,20 +12993,25 @@
     const sha = row.dataset.scmCommit || '';
     const relPath = row.dataset.scmRelPath || '';
     const absPath = row.dataset.scmPath || '';
+    // Captured now, as scmCommitMenuItems captures its target: the
+    // file belongs to the repository the menu was opened on.
+    const target = scmFileTarget(row);
     if (sha) {
       // A file of a commit (MenuId.SCMHistoryItemChangeContext): Open
       // Changes is the same side-by-side diff a click opens.
+      const repoTarget = gitTarget();
       return [
         {
           id: 'open-changes',
           label: 'Open Changes',
-          run: () => openScmFileDiff(row),
+          run: () => openScmFileDiff(row, target),
         },
         {
           id: 'open-file',
           label: 'Open File',
           enabled: row.dataset.scmStatus !== 'D',
-          run: () => sendGitShow({sha: sha, path: relPath, mode: 'file'}),
+          run: () =>
+            sendGitShow({sha: sha, path: relPath, mode: 'file'}, repoTarget),
         },
       ];
     }
@@ -12856,12 +13023,7 @@
         id: 'open-file',
         label: 'Open File',
         enabled: !deleted,
-        run: () =>
-          openWorkspaceFile(
-            absPath,
-            row.dataset.scmWorktree || scmWorkDir,
-            scmMachine,
-          ),
+        run: () => openWorkspaceFile(absPath, target.workDir, target.machine),
       },
       {separator: true},
       {
@@ -12881,7 +13043,7 @@
       items.unshift({
         id: 'open-changes',
         label: 'Open Changes',
-        run: () => openScmFileDiff(row),
+        run: () => openScmFileDiff(row, target),
       });
     }
     return items;
@@ -15393,13 +15555,15 @@
    * session. Their in-flight keys go with them, so the same paths are
    * checked afresh if the tab's transcript is rebuilt.
    *
+   * The transcript's lazy pictures go the same way (forgetReplayImages).
+   *
    * The released entries are returned so a transcript replacement that
    * fails half way can hand them back (restorePendingFileLinks) along
    * with the transcript it restores.
    *
    * @param {string} tabId The tab whose transcript is being discarded.
-   * @returns {{spans: Array<Element>, checks: Array<string>}} What was
-   *   released.
+   * @returns {{spans: Array<Element>, checks: Array<string>,
+   *   images: Array<HTMLImageElement>}} What was released.
    */
   function forgetPendingFileLinks(tabId) {
     const owner = String(tabId);
@@ -15410,7 +15574,11 @@
         spans.push(span);
       }
     }
-    return {spans, checks: dropPendingPathChecksOf(owner)};
+    return {
+      spans,
+      checks: dropPendingPathChecksOf(owner),
+      images: forgetReplayImages(owner),
+    };
   }
 
   /**
@@ -15418,12 +15586,14 @@
    * transcript's candidate spans wait for the daemon's answer again and
    * its in-flight keys dedupe later checks of the same paths.
    *
-   * @param {{spans: Array<Element>, checks: Array<string>}} released
+   * @param {{spans: Array<Element>, checks: Array<string>,
+   *   images: Array<HTMLImageElement>}} released
    *   The return value of forgetPendingFileLinks.
    */
   function restorePendingFileLinks(released) {
     for (const span of released.spans) _pendingFileLinkSpans.add(span);
     for (const key of released.checks) _pendingPathChecks.add(key);
+    restoreReplayImages(released.images);
   }
 
   /**
@@ -15485,6 +15655,10 @@
         el.setAttribute('data-link-tab', fresh);
       }
     }
+    // The lazy pictures not shown yet follow too: they are dropped
+    // with the transcript under the id the tab closes with.
+    for (const img of lazyReplayImages)
+      if (img.dataset.replayOwner === old) img.dataset.replayOwner = fresh;
     dropPendingPathChecksOf(old);
     reissueFileLinkChecks(fresh);
   }
@@ -17006,6 +17180,13 @@
   // is fetched (getReplayImage) once its <img> comes into view, which
   // a folded panel's or a hidden tab's never does.
   const pendingReplayImages = new Map();
+  // Every lazy picture not shown yet (watched by the observer, or
+  // asked for): forgetReplayImages drops a discarded transcript's
+  // with it.  The observer would otherwise keep them -- and the
+  // detached transcript around them -- for the rest of the session,
+  // and a sighting it queued before the discard would still ask the
+  // daemon for them.
+  const lazyReplayImages = new Set();
   let replayImageSeq = 0;
   const replayImageObserver =
     typeof IntersectionObserver === 'function'
@@ -17029,6 +17210,7 @@
     // An exported copy is never on screen; a page without the
     // observer (an old browser) fetches at once.
     if (_shareExportReplay) return;
+    lazyReplayImages.add(img);
     if (replayImageObserver) replayImageObserver.observe(img);
     else requestReplayImage(img);
   }
@@ -17036,9 +17218,46 @@
   /** The observer's callback: fetch each picture that came into view. */
   function onReplayImagesShown(entries) {
     entries.forEach(entry => {
-      if (!entry.isIntersecting) return;
+      // A sighting queued before the picture's transcript was dropped
+      // is nothing to fetch.
+      if (!entry.isIntersecting || !lazyReplayImages.has(entry.target)) return;
       replayImageObserver.unobserve(entry.target);
       requestReplayImage(entry.target);
+    });
+  }
+
+  /**
+   * Drop the lazy pictures of a transcript that is going away (see
+   * forgetPendingFileLinks): no longer watched, no longer awaited.
+   *
+   * @param {string} owner The tab whose transcript is being discarded.
+   * @returns {Array<HTMLImageElement>} The dropped pictures, for
+   *     restoreReplayImages.
+   */
+  function forgetReplayImages(owner) {
+    const dropped = [];
+    for (const img of Array.from(lazyReplayImages)) {
+      if (img.dataset.replayOwner !== owner) continue;
+      lazyReplayImages.delete(img);
+      if (replayImageObserver) replayImageObserver.unobserve(img);
+      dropped.push(img);
+    }
+    for (const [token, img] of Array.from(pendingReplayImages))
+      if (img.dataset.replayOwner === owner) pendingReplayImages.delete(token);
+    return dropped;
+  }
+
+  /**
+   * Watch again the pictures forgetReplayImages dropped: the transcript
+   * they belong to is back (a replacement that failed half way).
+   *
+   * @param {Array<HTMLImageElement>} imgs The dropped pictures.
+   */
+  function restoreReplayImages(imgs) {
+    imgs.forEach(img => {
+      lazyReplayImages.add(img);
+      if (replayImageObserver) replayImageObserver.observe(img);
+      else requestReplayImage(img);
     });
   }
 
@@ -17068,6 +17287,7 @@
     const img = ev.token ? pendingReplayImages.get(ev.token) : undefined;
     if (!img) return;
     pendingReplayImages.delete(ev.token);
+    lazyReplayImages.delete(img);
     img.classList.remove('tr-img-lazy');
     if (ev.b64 && ev.mime) {
       // Property assignment (never innerHTML): a data: URI in an
@@ -20108,8 +20328,7 @@
           setShareInFlight(false);
           tabs.forEach(t => {
             // A "Reload from disk" whose reply was swallowed is dead
-            // too; left armed, the next plain open of the file would
-            // replace the editor and drop edits typed after the outage.
+            // too: nothing awaits its token any more.
             t.contentReloadRequested = false;
             failContentSave(t, 'Save failed: the server connection dropped');
           });
@@ -20568,10 +20787,14 @@
         // the sheet shows a remote machine) is not painted.
         if (ev.forwarded && ev.error) {
           notifySettingsMachineError(ev);
+          // The machine's refusal of a custom-model save, when one is
+          // awaited: its draft comes back.
+          restoreRefusedCustomModelSave(String(ev.machine));
           break;
         }
         if (!replyIsForSettings(ev)) break;
         myModels = Array.isArray(ev.models) ? ev.models : [];
+        confirmCustomModelSave();
         // The edited model vanished (deleted from another window, or
         // renamed by this very edit's save): drop the edit state so the
         // boxes stop claiming to edit an entry that no longer exists.
@@ -20657,8 +20880,19 @@
       // (panelReplyShown); a poll's answer for the machine shown
       // before, or this daemon's own push while a machine is shown,
       // is dropped.
+      // A dropped reply still answers the save it is for (the form
+      // that sent it is gone with its machine): that save must not
+      // be left for a later reply of the same action and name to
+      // answer once the subpanels are back on its machine.
       case 'cronJobs':
         if (panelReplyShown(ev)) renderCronJobs(ev);
+        else
+          takePendingSave(
+            pendingCronSaves,
+            ev.action,
+            ev.jobId,
+            replyMachine(ev),
+          );
         break;
       case 'machines':
         // This daemon's registry is the drop-down's list whichever
@@ -20669,7 +20903,15 @@
           // The reply may relabel the machine the Machine row names.
           updateMetaTaskDetails(metaShownSettings);
         }
-        if (!panelReplyShown(ev)) break;
+        if (!panelReplyShown(ev)) {
+          takePendingSave(
+            pendingMachineSaves,
+            ev.action,
+            ev.name,
+            replyMachine(ev),
+          );
+          break;
+        }
         lastMachinesEvent = {
           machines: ev.machines,
           error: ev.error,
@@ -20883,6 +21125,8 @@
         if (!isAddressed(ev)) {
           relayUpdateStatus(ev.text, true);
           relayTrickAddError(ev.text);
+          // Likewise a custom-model save this daemon refused.
+          restoreRefusedCustomModelSave('');
         }
         break;
       case 'notice':
@@ -23674,7 +23918,8 @@
       // which filters by extension rather than by MIME type.  Whichever way
       // the photo arrives, prepareAttachment() converts it to JPEG.
       input.accept = 'image/*,.heic,.heif,application/pdf';
-      input.onchange = handleFileSelect;
+      const owner = activeTabId;
+      input.onchange = e => handleFileSelect(e, owner);
       input.click();
     });
     FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
@@ -24490,6 +24735,16 @@
         // The field now holds the user's own value.
         if (e.target && e.target.id) settingsEditedFields.add(e.target.id);
         if (e.target && e.target.id === 'cfg-max-budget') syncMaxBudgetNote();
+        // Typed into a Custom Models box while an Add or Save awaits
+        // its answer: a refusal must leave this newer typing alone
+        // (restoreRefusedCustomModelSave).
+        if (
+          pendingCustomModelSave &&
+          e.target &&
+          CUSTOM_MODEL_BOX_IDS.includes(e.target.id)
+        ) {
+          pendingCustomModelSave.typed = true;
+        }
       };
       settingsPanel.addEventListener('input', noteSettingsEdit);
       settingsPanel.addEventListener('change', noteSettingsEdit);
@@ -25048,20 +25303,25 @@
   /**
    * Fill `slot` with the bytes of `file`, or drop it and explain why.
    *
-   * The tab's own lists are captured up front: the user may switch tabs while
-   * a photo is being converted, and the outcome belongs to the tab that
-   * picked the file, not to whichever tab is on screen when it lands.
+   * The tab's own lists are passed in (readFileAsAttachment captures
+   * them up front): the user may switch tabs while a photo is being
+   * converted, and the outcome belongs to the tab that picked the
+   * file, not to whichever tab is on screen when it lands.
    *
    * Preparation is bounded: a decoder or reader that never calls back is
    * reported through the same error chip as a failed conversion, so the
    * send waiting in attachmentsReady() is released instead of latched.
    *
+   * Args:
+   *   file: The File.
+   *   slot: Its slot in `ownerFiles`.
+   *   ownerFiles: The picking tab's attachment list.
+   *   ownerErrors: The picking tab's attachment error list.
+   *
    * Returns:
    *   A promise for whether the slot now holds a usable attachment.
    */
-  async function fillAttachmentSlot(file, slot) {
-    const ownerFiles = attachments;
-    const ownerErrors = attachErrors;
+  async function fillAttachmentSlot(file, slot, ownerFiles, ownerErrors) {
     try {
       const ready = await withDeadline(
         prepareAttachment(file),
@@ -25093,19 +25353,30 @@
   }
 
   /**
-   * Add `file` to the pending attachments of the active chat tab.
+   * Add `file` to the pending attachments of the active chat tab, or of
+   * `owner` (a picker's chat, which may have left the screen since).
    *
    * A placeholder chip appears immediately and keeps the slot's position
    * while the file is read (and, for a camera HEIC, converted); the send
-   * button stays disabled until every slot is filled.
+   * button stays disabled until every slot is filled.  A file of a chat
+   * in the background goes into that chat's parked lists (the ones a
+   * switch to it brings back), with no chip until then.
    *
    * Args:
    *   file: A File from the picker, a paste or a drop.
+   *   owner: The chat tab the file is for; the active one by default.
    *
    * Returns:
    *   A promise that settles once the slot is filled or has been dropped.
    */
-  function readFileAsAttachment(file) {
+  function readFileAsAttachment(file, owner) {
+    const parked = owner && owner.id !== activeTabId ? owner : null;
+    const files = parked
+      ? parked.attachments || (parked.attachments = [])
+      : attachments;
+    const errors = parked
+      ? parked.attachErrors || (parked.attachErrors = [])
+      : attachErrors;
     const slot = {
       name: file.name || 'attachment',
       type: attachMimeOf(file),
@@ -25120,8 +25391,8 @@
     slot.removed = new Promise(resolve => {
       slot.notifyRemoved = () => resolve(true);
     });
-    attachments.push(slot);
-    slot.promise = fillAttachmentSlot(file, slot);
+    files.push(slot);
+    slot.promise = fillAttachmentSlot(file, slot, files, errors);
     updateInputDisabled();
     renderFileChips();
     return slot.promise;
@@ -25492,11 +25763,24 @@
     tab.unackedQuestion = question;
   }
 
-  function handleFileSelect(e) {
+  /**
+   * The native picker the Upload button opened delivered its files:
+   * attach them to the chat the picker was opened in.  The picker
+   * stays open while a `tabs_state` may close that chat (nothing is
+   * attached then) or the user switch to another (the files go into
+   * the opening chat's own parked attachments), never into whichever
+   * chat is on screen now.
+   *
+   * @param {Event} e The input's change event.
+   * @param {string} owner The chat tab the picker was opened in.
+   */
+  function handleFileSelect(e, owner) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    const tab = getTab(owner);
+    if (!tab) return;
     Array.from(files).forEach(file => {
-      readFileAsAttachment(file);
+      readFileAsAttachment(file, tab);
     });
   }
 
@@ -28841,6 +29125,8 @@
    */
   function switchSettingsMachine(machine) {
     settingsMachine = machine;
+    // The other machine's answer to a save is not for these boxes.
+    pendingCustomModelSave = null;
     clearConfigForm();
     myModels = [];
     renderCustomModels();
@@ -29390,6 +29676,26 @@
   // snapshot (the boxes may have been populated before this panel
   // open's configData reply arrived).
   let lastCustomCfgValues = null;
+  // The saveMyModel sent and not answered yet ({machine, originalName
+  // -- null for an Add -- values, typed}).  Add and Save clear or put
+  // back the boxes at once (the daemon's myModelsData repaints the
+  // list), but the daemon may still refuse the save: the client-side
+  // validation knows only the last list, and another surface may have
+  // taken the name since, or the file could not be written.  The
+  // refusal -- an unaddressed `error` from this daemon, a forwarded
+  // myModelsData carrying `error` from a remote machine -- brings the
+  // draft back (restoreRefusedCustomModelSave) instead of losing it,
+  // unless the user typed into the boxes meanwhile (`typed`, set by
+  // the settings sheet's input listener): that newer typing stands.
+  let pendingCustomModelSave = null;
+  // The Custom Models boxes: the name, and the three shared with the
+  // config form's custom-endpoint fields.
+  const CUSTOM_MODEL_BOX_IDS = [
+    'cfg-custom-model-name',
+    'cfg-custom-endpoint',
+    'cfg-custom-api-key',
+    'cfg-custom-headers',
+  ];
 
   /** Read the Custom Models boxes. @returns {object} Trimmed values. */
   function readCustomModelBoxes() {
@@ -29567,6 +29873,12 @@
       apiKey: values.apiKey,
       headers: values.headers,
     };
+    pendingCustomModelSave = {
+      machine: settingsMachine,
+      originalName: customModelEditName,
+      values: values,
+      typed: false,
+    };
     if (customModelEditName !== null) {
       msg.originalName = customModelEditName;
       api.saveMyModel(settingsCommand(msg));
@@ -29579,6 +29891,68 @@
     // keep what the user typed — they are also the config form's
     // custom-endpoint fields.
     if (nameInp) nameInp.value = '';
+  }
+
+  /**
+   * The sheet's machine listed its custom models: a save awaiting its
+   * answer is done once the list holds the entry as sent -- the saved
+   * name with every value sent (the daemon writes all of them) and,
+   * for a rename, the old name gone.  The daemon broadcasts every
+   * surface's save to all: another surface's list that merely names
+   * the same model (it took the name first, or saved other values)
+   * answers nothing, and the refusal that follows still finds the
+   * draft to bring back.
+   */
+  function confirmCustomModelSave() {
+    const pending = pendingCustomModelSave;
+    if (!pending || pending.machine !== settingsMachine) return;
+    const v = pending.values;
+    const saved = myModels.some(
+      m =>
+        m &&
+        m.name === v.name &&
+        (m.endpoint || '') === v.endpoint &&
+        (m.api_key || '') === v.apiKey &&
+        (m.headers || '') === v.headers,
+    );
+    const renamed =
+      pending.originalName !== null && pending.originalName !== v.name;
+    if (
+      saved &&
+      (!renamed || !myModels.some(m => m && m.name === pending.originalName))
+    )
+      pendingCustomModelSave = null;
+  }
+
+  /**
+   * The daemon of *machine* ('' for this one) refused the save it was
+   * sent: bring the draft back for a fix.  An edit reopens on the model
+   * it edited (gone meanwhile: nothing to edit), an Add gets its
+   * cleared name back -- while the sheet still shows that machine, and
+   * unless a newer edit is open or the user typed into the boxes since
+   * (a newer Add draft, say): those stand.
+   *
+   * @param {string} machine The machine whose refusal arrived.
+   */
+  function restoreRefusedCustomModelSave(machine) {
+    const pending = pendingCustomModelSave;
+    if (!pending || pending.machine !== machine) return;
+    pendingCustomModelSave = null;
+    if (
+      settingsMachine !== machine ||
+      customModelEditName !== null ||
+      pending.typed
+    )
+      return;
+    if (pending.originalName === null) {
+      const nameInp = document.getElementById('cfg-custom-model-name');
+      if (nameInp && !nameInp.value) nameInp.value = pending.values.name;
+      return;
+    }
+    const model = myModels.find(m => m && m.name === pending.originalName);
+    if (!model) return;
+    startCustomModelEdit(model);
+    writeCustomModelBoxes(pending.values);
   }
 
   /** Repaint the #custom-models-list rows from myModels. */

@@ -497,7 +497,8 @@ class VectorIndex:
         Idempotent and safe to race with other processes doing the same.
         The random ``generation`` identifies this index file, so a deleted
         and rebuilt index never matches a change token cached from the old
-        file (see :meth:`_rows`).
+        file (see :meth:`_rows`) nor the snapshot of a sync started on the
+        old file (see :meth:`_write`).
         """
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages ("
@@ -602,6 +603,11 @@ class VectorIndex:
         with the column default ``0`` and are matched (or blindly replaced
         by that process) until every writer runs this version.  Both are
         healed by the next sync because the ``sha256`` check is unaffected.
+        The snapshot also records the file's ``generation``: a batch that
+        finds another one (the file was deleted and rebuilt by
+        :meth:`clear` + ``sync`` meanwhile, which restarts the ``revision``
+        counter, so the snapshot's tokens could match the new rows by
+        coincidence) is skipped whole and left to the next sync.
 
         Args:
             verify: Hash every page even when its stat key matches (used by
@@ -616,6 +622,8 @@ class VectorIndex:
         """
         unchanged = 0
         with closing(self._connect()) as conn:
+            meta = conn.execute("SELECT value FROM meta WHERE key = 'generation'").fetchone()
+            generation = meta[0]
             stored = {
                 row[0]: (bytes(row[1]), row[2], row[3], row[4])
                 for row in conn.execute(
@@ -663,7 +671,7 @@ class VectorIndex:
         stale = sorted(stored.keys() - on_disk)
         report = SyncReport(added=0, updated=0, removed=0, unchanged=unchanged)
         if restats:
-            report = self._write(stored, [], restats, [], report)
+            report = self._write(stored, [], restats, [], report, generation)
         for batch in _batches(pending):
             if cancel is not None and cancel.is_set():
                 break
@@ -693,9 +701,9 @@ class VectorIndex:
                         key,
                     )
                 )
-            report = self._write(stored, rows, [], [], report)
+            report = self._write(stored, rows, [], [], report, generation)
         if stale:
-            report = self._write(stored, [], [], stale, report)
+            report = self._write(stored, [], [], stale, report, generation)
         return report
 
     def _write(
@@ -705,6 +713,7 @@ class VectorIndex:
         restats: list[tuple[str, str, bytes]],
         stale: list[str],
         report: SyncReport,
+        generation: str,
     ) -> SyncReport:
         """Apply one batch of :meth:`sync` writes in a single transaction.
 
@@ -714,6 +723,8 @@ class VectorIndex:
             restats: ``(stat_key, filename, sha256)`` for unchanged rows.
             stale: Filenames whose rows should be deleted.
             report: Counts so far.
+            generation: The ``generation`` of the index file *stored* was
+                read from; nothing is written to a file with another one.
 
         Returns:
             *report* plus the writes that this transaction applied.
@@ -724,6 +735,10 @@ class VectorIndex:
             # Take the write lock up front so reading and advancing the
             # revision counter is atomic with the row writes it numbers.
             conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT value FROM meta WHERE key = 'generation'").fetchone()[0]
+            if current != generation:
+                logger.info("index rebuilt after this sync started; skipping this batch")
+                return report
             conn.executemany(
                 "UPDATE pages SET stat_key = ? WHERE filename = ? AND sha256 = ?"
                 f" AND input_format = '{EMBEDDING_INPUT_FORMAT}'",

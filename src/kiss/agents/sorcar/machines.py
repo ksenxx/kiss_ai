@@ -98,6 +98,7 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import LockTimeoutError
+from kiss.core.processes import IS_WINDOWS, kill_process_tree, popen_process_group
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,19 @@ LOCAL_MACHINE = "__local__"
 """``getHistory``'s ``machine`` value asking for the daemon's own rows only."""
 REQUEST_TIMEOUT = 8.0
 """Seconds one remote request may take before the machine counts as down."""
+CORRELATED_REPLIES = frozenset({"models", "history", "myModelsData", "machines"})
+"""The reply types the daemon answers with the request's ``generation`` echoed.
+
+A frame of one of these types that echoes none is not the answer
+(:meth:`MachineLink.request`): a list the daemon pushed to every
+connection unasked (``myModelsData`` for another client's edit,
+``machines`` for a change of its registry), or the answer to an
+earlier request still on its way, which no drain of the frames
+already received can tell from the answer.  A daemon says so with
+``echoesGeneration`` in its ``auth_ok``; one that does not (an older
+version) is read as before, the first frame of the type being the
+answer.
+"""
 DOWN_BACKOFF = 30.0
 """Seconds a cached link waits before trying a machine again, at most.
 
@@ -534,6 +548,10 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
     :data:`ENROLL_TIMEOUT` seconds), and only then publishes the pin
     and the registry entry, so a wrong address or password changes
     nothing (an existing machine of that name keeps its pin and entry).
+    The pin is published first; a Stop or a registry-write error
+    before the entry follows puts the previous pin back (or removes
+    the new one, for a new name), so the entry the registry still
+    holds keeps the certificate it was registered with.
     The staging file is removed however the call ends: a Stop's
     injected ``KeyboardInterrupt`` (the ``/machine add`` tool runs on
     the task thread) or a busy registry lock must not leave it behind.
@@ -560,13 +578,31 @@ def add_machine(name: str, address: str, password: str = "") -> Machine:
     cert.parent.mkdir(parents=True, exist_ok=True)
     staged = cert.with_name(f".{cert.name}.{os.getpid()}.{secrets.token_hex(4)}.new")
     try:
-        staged.write_text(pem, encoding="utf-8")
+        # Bytes as the PEM came: a text write would give the pin CRLF line ends on
+        # Windows, and the restore below (atomic_write_text) writes it back with LF.
+        staged.write_bytes(pem.encode("utf-8"))
         _first_handshake(machine, staged, deadline)
         with registry_lock():
-            os.replace(staged, cert)
             machines = [m for m in load_machines() if m.name != name]
             machines.append(machine)
-            save_machines(machines)
+            try:
+                previous: str | None = cert.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                previous = None
+            try:
+                os.replace(staged, cert)
+                save_machines(machines)
+            except BaseException:
+                # Unless the entry was published (the registry write
+                # went through; what failed came after it), the
+                # registry still names the daemon the previous pin
+                # verified, which must not be left unverifiable.
+                if machine not in load_machines():
+                    if previous is None:
+                        cert.unlink(missing_ok=True)
+                    else:
+                        atomic_write_text(cert, previous)
+                raise
     finally:
         staged.unlink(missing_ok=True)  # gone already once published
     return machine
@@ -766,6 +802,8 @@ class SshTunnel:
         self._last_line = ""
         # Set by the ssh process's output once it said its forward is up.
         self._up = threading.Event()
+        # Reads the ssh process's output to its end (:meth:`_read_output`).
+        self._reader: threading.Thread | None = None
 
     def alive(self) -> bool:
         """Return whether the ssh process runs, said its forward is up, and the port answers.
@@ -774,7 +812,7 @@ class SshTunnel:
         not alive even if the port answers: another program may hold it.
         """
         return (
-            self.process is not None and self.process.poll() is None
+            self.process is not None and not _exited(self.process)
             and self._up.is_set() and _port_accepts(self.local_port)
         )
 
@@ -824,26 +862,32 @@ class SshTunnel:
         )
         self._last_line = ""
         try:
-            self.process = subprocess.Popen(
+            # In a group of its own: a ``ProxyCommand`` of the user's
+            # ssh configuration is a child of ssh that ``_kill`` must
+            # take down with it, or it keeps ssh's output pipe (and
+            # the thread reading it) open after ssh is gone.
+            self.process = popen_process_group(
                 cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
         except OSError as exc:
             raise MachineError(f"ssh is not installed on this machine: {exc}") from exc
         taken = threading.Event()
-        reader = threading.Thread(
+        self._reader = threading.Thread(
             target=self._read_output,
             args=(self.process, f"bind [127.0.0.1]:{self.local_port}:", self._up, taken),
             daemon=True, name=f"ssh-tunnel-output {self.ssh}",
         )
-        reader.start()
+        self._reader.start()
         while not self._up.wait(0.05):
-            if taken.is_set() or self.process.poll() is not None:
-                with suppress(subprocess.TimeoutExpired):
-                    # Windows' ssh stays up after a failed bind.
-                    self.process.wait(min(1.0, _remaining(deadline)))
+            if taken.is_set() or _exited(self.process):
+                # Windows' ssh stays up after a failed bind: a moment to
+                # exit by itself, unreaped (``_kill`` signals its group
+                # before reaping it).
+                grace = time.monotonic() + min(1.0, _remaining(deadline))
+                while not _exited(self.process) and time.monotonic() < grace:
+                    time.sleep(0.05)
                 self._kill()
-                reader.join(timeout=2.0)
                 if taken.is_set():
                     return False
                 raise self._forward_error()
@@ -897,14 +941,47 @@ class SshTunnel:
             pass  # being opened: the login is fresh
 
     def _kill(self) -> None:
-        """Kill the ssh process, if any, and forget its port and readiness (under the lock)."""
+        """Kill ssh's group, if any, then reap ssh; forget port and readiness (under the lock).
+
+        The group is signalled while ssh is still ours to reap (nothing
+        here reaps it earlier: :func:`_exited` leaves an exited ssh a
+        zombie, which is still a member of its group), so the group id
+        names ssh's group and nobody else's, and a ``ProxyCommand``'s
+        helper that outlived an ssh which exited on its own goes down
+        with it.  Then the reader is joined (bounded) so a close leaves
+        no thread behind; a reader a Stop left unstarted (between its
+        creation and its start in :meth:`_forward`) cannot be joined
+        and is dropped with the process whose output it was to read.
+        """
         if self.process is not None:
-            if self.process.poll() is None:
-                self.process.kill()
-            self.process.wait()
+            if IS_WINDOWS or self.process.returncode is None:
+                kill_process_tree(self.process)
+            with suppress(subprocess.TimeoutExpired):
+                self.process.wait(timeout=5.0)
+            if self._reader is not None and self._reader.is_alive():
+                self._reader.join(timeout=2.0)
+            self._reader = None
             self.process = None
         self.local_port = 0
         self._up = threading.Event()
+
+
+def _exited(process: subprocess.Popen[bytes]) -> bool:
+    """Return whether *process* has exited, without reaping it.
+
+    ``Popen.poll`` reaps an exited child, and a reaped group leader no
+    longer reserves its group id (:func:`~kiss.core.processes.kill_process_group`),
+    while a zombie is still a member of its group: :meth:`SshTunnel._kill`
+    signals the group before it reaps, so the id still names ssh's group.
+    Windows has no zombies to keep: the process handle ``Popen`` holds
+    keeps the pid, polled or not.
+    """
+    if IS_WINDOWS or process.returncode is not None:
+        return process.poll() is not None
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:  # reaped meanwhile by a ``wait`` on another thread
+        return True
 
 
 def _free_port() -> int:
@@ -1059,6 +1136,7 @@ class MachineLink:
         self._ws: ClientConnection | None = None
         self._lock = threading.RLock()  # see SshTunnel: taken through locked_call
         self._generation = 0
+        self._echoes = False  # the daemon's ``echoesGeneration`` (see CORRELATED_REPLIES)
         self._health = health if health is not None else LinkHealth()
         self._retired = False
         # Stream handshakes in flight (:meth:`open_connection`), which
@@ -1246,12 +1324,21 @@ class MachineLink:
         try:
             send(ws, json.dumps(auth), timeout=_remaining(deadline))
             reply = recv_auth_reply(ws, timeout=_remaining(deadline))
+            if isinstance(reply, dict) and reply.get("type") == "auth_ok":
+                self._echoes = reply.get("echoesGeneration") is True
+                self._health.failures = 0
+                return ws
         except (ConnectionClosed, OSError, ValueError) as exc:
             ws.close()
             raise self._fail(f"{where} did not complete the handshake: {exc}") from exc
-        if isinstance(reply, dict) and reply.get("type") == "auth_ok":
-            self._health.failures = 0
-            return ws
+        except BaseException:
+            # A Stop's KeyboardInterrupt (the handshake runs on the task
+            # thread): the socket is nobody's until it is returned, so
+            # nothing else would close it, and its threads would keep
+            # answering the daemon's pings.  No machine failure, no
+            # back-off.
+            ws.close()
+            raise
         ws.close()
         if machine.ssh:
             raise self._fail(f"{where} does not trust this daemon's certificate{enroll_again}")
@@ -1269,9 +1356,11 @@ class MachineLink:
         answer (``recordFileUsage``): ``{}`` is returned once it is sent.
 
         The command is stamped with a fresh ``generation``; a reply that
-        echoes a ``generation`` must echo this one (``history`` does),
-        frames already buffered from before the command are discarded
-        and other frames the daemon pushes meanwhile are skipped.  A
+        echoes a ``generation`` must echo this one, and one of the
+        :data:`CORRELATED_REPLIES` must echo it when the daemon said it
+        does (``echoesGeneration`` in its ``auth_ok``); frames already
+        buffered from before the command are discarded and other
+        frames the daemon pushes meanwhile are skipped.  A
         reply the daemon sent in pieces (a ``fileContent`` of many MB:
         every frame but the last flagged ``more``) comes back joined
         into one.  With
@@ -1337,9 +1426,10 @@ class MachineLink:
         no longer, and the long budget of a slow exchange must not keep
         the request's thread in a dial that will not succeed.
         """
-        # A dial runs the sleep check itself (``_check_available``);
-        # only a kept socket needs it here.
-        if self._ws is not None and forget_after_sleep():
+        # A dial runs the sleep check itself (``_check_available``)
+        # and opens the forward again; only a kept socket needs
+        # either check here.
+        if self._ws is not None and (forget_after_sleep() or self._forward_gone()):
             self._drop()
         kept = self._ws is not None
         if self._ws is None:
@@ -1364,6 +1454,38 @@ class MachineLink:
                     f"{self.machine.name} ({self.machine.address()}) did not answer: {again}"
                 ) from again
 
+    def _forward_gone(self) -> bool:
+        """Return whether the kept socket's ssh forward is no longer the login's live one.
+
+        Under the lock.  The forward's ssh process exiting closes the
+        local port the socket is connected to, but the socket learns
+        of it on its reader thread: a request that wins the race with
+        that thread sends on the dead socket, and a close after the
+        send is never retried (:meth:`_exchange`), so the machine is
+        reported down instead of dialled again, which re-opens the
+        forward (:func:`tunnel_port`).  So the forward is asked
+        instead: its process has exited or was closed, or another lane
+        opened it again on a fresh local port the socket is not
+        connected to.  Never for a machine dialled directly.
+        """
+        if not self.machine.ssh:
+            return False
+        tunnel = self._tunnel
+        if tunnel is None:
+            tunnel = locked_call(_tunnels_lock, _tunnels.get, self.machine.ssh)
+        if tunnel is None:
+            return True
+        # One read: a close on another thread sets the process to None
+        # at any point (the tunnel's lock is not taken here).
+        process = tunnel.process
+        if process is None or _exited(process):
+            return True
+        assert self._ws is not None
+        try:
+            return int(self._ws.socket.getpeername()[1]) != tunnel.local_port
+        except OSError:  # closed under the request (:meth:`retire`)
+            return True
+
     def _exchange(
         self, cmd: dict[str, Any], reply_type: str, deadline: float, timeout: float,
         errors: bool,
@@ -1387,6 +1509,7 @@ class MachineLink:
         assert self._ws is not None
         self._generation += 1
         generation = self._generation
+        correlated = self._echoes and reply_type in CORRELATED_REPLIES
         sent = False
         try:
             # Bounded like the reads: a plain ``ws.send`` has no
@@ -1429,9 +1552,11 @@ class MachineLink:
                 msg = whole[0]
                 if not isinstance(msg, dict):
                     continue
-                if "generation" in msg and msg["generation"] != generation:
-                    continue
+                if msg.get("generation", generation) != generation:
+                    continue  # another request's answer
                 if msg.get("type") == reply_type:
+                    if correlated and "generation" not in msg:
+                        continue  # pushed for another client's edit, not an answer
                     if head is None and msg.get("more") is not True:
                         return msg
                     if head is None:

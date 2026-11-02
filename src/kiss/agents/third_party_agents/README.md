@@ -249,7 +249,8 @@ turns that fallback off.
   Sorcar's `connect_mcp_server(name)` tool (or `python -m kiss.agents.sorcar.mcp_oauth
   <name>`) runs the MCP authorization flow directly against the server: the client
   registers itself (CIMD or dynamic registration), you sign in and click Allow, and
-  the tokens land in `~/.kiss/mcp_auth/<server>.json`, where later runs refresh them.
+  the tokens land in `~/.kiss/mcp_auth/<server>.<digest>.json` (one file per server
+  name and URL, the file naming its URL), where later runs refresh them.
   Zoom's authorization server accepts only pre-registered apps: set
   `KISS_MCP_ZOOM_CLIENT_ID` / `KISS_MCP_ZOOM_CLIENT_SECRET` from an app that lists
   `http://localhost:53683/callback` as redirect URI.

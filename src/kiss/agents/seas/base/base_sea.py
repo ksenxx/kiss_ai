@@ -42,8 +42,9 @@ what the previous one returned: ``settings`` starts from ``{}``,
 assembled system prompt, ``tools`` from the run's built-in toolset,
 ``llm_call_hook`` from the messages of the LLM call, and
 ``tool_call_hook`` stops at the first refusing verdict (``refuse(text)``;
-``ALLOW`` allows — both importable from this module).
-The chaining is the launcher's job: a method must NOT call
+``ALLOW`` allows; ``end_run(result)`` ends the run — all three
+importable from this module), as ``llm_response_hook`` stops at the
+first ``end_run``.  The chaining is the launcher's job: a method must NOT call
 ``super()`` (the base's method runs anyway), and it must not
 expect to be called in a particular order relative to another.
 
@@ -77,9 +78,21 @@ from pathlib import Path
 from typing import Any
 
 from kiss.core.config import kiss_home
-from kiss.core.tool_verdict import ALLOW, Verdict, refuse
+from kiss.core.llm_reply import LLMReply
+from kiss.core.tool_schema import tool_schema
+from kiss.core.tool_verdict import ALLOW, Verdict, end_run, refuse
 
-__all__ = ["ALLOW", "BaseSea", "ChannelSea", "Verdict", "WorkerSea", "refuse"]
+__all__ = [
+    "ALLOW",
+    "BaseSea",
+    "ChannelSea",
+    "LLMReply",
+    "Verdict",
+    "WorkerSea",
+    "end_run",
+    "refuse",
+    "tool_schema",
+]
 
 WORKER_DEFAULTS: dict[str, Any] = {
     "auto_classify": False,
@@ -217,9 +230,17 @@ class BaseSea:
         """Return ``ALLOW`` to let the tool call *name*(*args*) run, else ``refuse(text)``.
 
         Called before every tool call of the run; the verdict is a
-        :class:`~kiss.core.tool_verdict.Verdict` (import ``ALLOW`` and
-        ``refuse`` from this module).  A refusal's text is returned to
-        the model as the tool's result.
+        :class:`~kiss.core.tool_verdict.Verdict` (import ``ALLOW``,
+        ``refuse`` and ``end_run`` from this module).  A refusal's text
+        is returned to the model as the tool's result.  ``end_run(result,
+        success=...)`` ends the run instead: the call does not run, no
+        later call of the same turn runs, and *result* becomes the
+        run's result (the ``summary`` of Sorcar's ``finish`` contract)
+        — for a rule of the SEA's own that says the task is over (the
+        report is accepted, the episode's turn budget is spent) without
+        waiting for the model to call ``finish``.  The agent also probes
+        this hook with ``("finish", {})`` before an implicit finish of a
+        model that only talks.
 
         The root layer's own rule: while a ``summary`` is due (see
         :class:`BaseSea`), every call but ``summary`` and ``finish`` is
@@ -246,6 +267,24 @@ class BaseSea:
         if self.has_summary_tool and self.step % SUMMARY_EVERY_STEPS == 0:
             self.summary_due = True
         return new_messages
+
+    def llm_response_hook(self, reply: LLMReply) -> Verdict:
+        """Return ``ALLOW`` to act on the model's *reply*, or ``end_run(result)`` to end the run.
+
+        Called after every model reply of the run, before any tool call
+        of the reply runs, with an :class:`~kiss.core.llm_reply.LLMReply`
+        (import it from this module): the reply's text, its tool calls
+        (``{"name", "arguments"}`` each), its token usage and cost
+        (``reply.usage["output_tokens"]``, ...) and the run's totals so
+        far.  ``end_run(result, success=...)`` ends the run with
+        *result*; none of the reply's tool calls run.  Together with
+        ``llm_call_hook``, which rewrites the next request, this is
+        every exchange with the model: what a domain rule needs to cap
+        the tokens of an episode or to end it on a reply that settles
+        the task.  A tool Codex ran natively during the turn has run
+        already.  The root layer allows every reply.
+        """
+        return ALLOW
 
     def register_as_model(self) -> bool:
         """Return whether the SEA is offered in the model picker next to the real models."""

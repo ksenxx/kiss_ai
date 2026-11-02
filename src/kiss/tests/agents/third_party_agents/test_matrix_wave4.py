@@ -333,12 +333,13 @@ def test_stop_while_scheduling_closes_the_coroutine_unstarted() -> None:
     assert busy.wait(5)
     coro = sleeper.sleep()
     try:
+        previous_trace = sys.gettrace()
         sys.settrace(_StopAfterScheduling(loop, None))
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(coro, timeout=60)
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
             release.set()
         # The loop runs callbacks in order: this one runs after the stopped one.
         backend._run(asyncio.sleep(0))
@@ -399,12 +400,13 @@ def test_stop_after_the_coroutine_started_cancels_it() -> None:
     assert loop is not None
     sleeper = _Sleeper()
     try:
+        previous_trace = sys.gettrace()
         sys.settrace(_StopAfterScheduling(loop, sleeper.started))
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(sleeper.sleep(), timeout=60)
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert sleeper.cancelled.wait(5)
     finally:
         backend.disconnect()

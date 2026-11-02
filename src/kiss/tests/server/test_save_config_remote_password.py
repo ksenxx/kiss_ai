@@ -43,6 +43,8 @@ from websockets.exceptions import ConnectionClosed
 from kiss.core.user_config import load_config
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_plain_http_loopback_and_frame_password import (
+    AUTH_OK,
+    AUTH_OK_LOCAL,
     _ServerCase,
 )
 
@@ -61,7 +63,7 @@ class TestSaveConfigRemotePassword(_ServerCase):
             additional_headers=self._forwarded,
         )
         await ws.send(json.dumps({"type": "auth", "password": pwd}))
-        self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": False})
+        self.assertEqual(await self._recv(ws), AUTH_OK)
         return ws
 
     async def _recv_until(self, ws: Any, *types: str) -> dict[str, Any]:
@@ -164,7 +166,7 @@ class TestSaveConfigRemotePassword(_ServerCase):
     async def test_an_empty_password_disables_remote_access(self) -> None:
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "token": self._token()}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": True})
+            self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
             await self._save(ws, "")
             await ws.send(json.dumps({"type": "ping"}))
             self.assertEqual((await self._recv(ws))["type"], "pong")
@@ -224,13 +226,13 @@ class TestSaveConfigRemotePassword(_ServerCase):
         remote_bare = await self._authed()
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "token": self._token()}))
-            self.assertEqual(await self._recv(ws), {"type": "auth_ok", "local": True})
+            self.assertEqual(await self._recv(ws), AUTH_OK_LOCAL)
             await self._save(ws, "")
         await self._assert_shut_out(remote_old, password=self.password)
         await self._assert_shut_out(remote_bare)
         # A loopback browser without a token is still served bare.
         async with connect(f"ws://127.0.0.1:{self._port}/ws") as loopback:
             await loopback.send(json.dumps({"type": "auth"}))
-            self.assertEqual(await self._recv(loopback), {"type": "auth_ok", "local": False})
+            self.assertEqual(await self._recv(loopback), AUTH_OK)
             await loopback.send(json.dumps({"type": "ping"}))
             self.assertEqual((await self._recv(loopback))["type"], "pong")

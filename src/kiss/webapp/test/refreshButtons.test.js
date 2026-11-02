@@ -132,9 +132,12 @@ async function testEditableFileButtonSitsInSaveBarAndReloadsFromDisk() {
   assert.strictEqual(asks[0].path, '/ws/a/notes.txt');
   assert.strictEqual(asks[0].tabId, 'a1', 'asked as the owning chat');
   assert.strictEqual(asks[0].workDir, '/ws/a');
+  assert.ok(asks[0].token, 'the reload carries its token');
+  // The daemon echoes the request's token on its reply.
   send(win, {
     type: 'fileContent',
     tabId: 'a1',
+    token: asks[0].token,
     path: '/ws/a/notes.txt',
     name: 'notes.txt',
     content: 'v2 on disk',

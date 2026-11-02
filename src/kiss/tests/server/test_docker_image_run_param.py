@@ -168,11 +168,17 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert self.container.status == "running"
 
     def test_run_parallel_children_share_the_parent_container(self) -> None:
-        """A ``run_parallel`` child attaches to the parent's container, not the host."""
+        """A ``run_parallel`` child attaches to the parent's container, not the host.
+
+        The parent's task asks for a sub-agent in so many words: since
+        2026-10-31 the same-family guard (``fanout_guard``) otherwise
+        refuses a single child of the caller's own model family as no
+        fan-out.
+        """
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls, run_parallel_task="child task")
         result = sorcar.run(
-            "parent task",
+            "parent task; use a sub-agent",
             work_dir=self.repo,
             use_web_tools=False,
             docker_image=f"container:{self.container.id}",

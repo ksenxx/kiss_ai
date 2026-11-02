@@ -992,6 +992,68 @@ async function main() {
     );
   });
 
+  await test('Schedule: a reply answers the form that sent the save it names, not the one open', () => {
+    const {win, posted} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    const list = el(win, 'meta-schedule-list');
+    const jobs = [job({id: 'a', name: 'A'}), job({id: 'b', name: 'B'})];
+    send(win, {type: 'cronJobs', jobs});
+    const editorOf = i => list.children[i].querySelector('form');
+    const save = form => form.querySelector('.sidebar-inline-form-save');
+    // A's editor sends its update and is cancelled; B's editor sends
+    // its update while A's reply is still on its way.
+    list.children[0].querySelector('.sidebar-item-edit').click();
+    editorOf(0).elements.what.value = 'a2';
+    save(editorOf(0)).click();
+    editorOf(0).querySelector('.sidebar-confirm-no').click();
+    list.children[1].querySelector('.sidebar-item-edit').click();
+    editorOf(1).elements.what.value = 'b2';
+    save(editorOf(1)).click();
+    eq(
+      posted.filter(m => m.type === 'cronAction').map(m => m.jobId),
+      ['a', 'b'],
+    );
+    // The daemon names the job each reply answers: A's success leaves
+    // B's editor waiting, and a reply naming a job no save awaits (the
+    // Delete of another row) says nothing about it either.
+    send(win, {
+      type: 'cronJobs',
+      jobs,
+      action: 'update',
+      jobId: 'a',
+      error: '',
+    });
+    assert.ok(editorOf(1), "A's acknowledgment keeps B's editor");
+    assert.ok(save(editorOf(1)).disabled, 'still waiting for its own');
+    send(win, {
+      type: 'cronJobs',
+      jobs,
+      action: 'remove',
+      jobId: 'b',
+      error: 'x',
+    });
+    assert.ok(save(editorOf(1)).disabled);
+    // B's refusal re-arms B's editor with its draft; its retry closes it.
+    send(win, {
+      type: 'cronJobs',
+      jobs,
+      action: 'update',
+      jobId: 'b',
+      error: 'no',
+    });
+    assert.ok(!save(editorOf(1)).disabled, "B's refusal re-arms it");
+    assert.strictEqual(editorOf(1).elements.what.value, 'b2');
+    save(editorOf(1)).click();
+    send(win, {
+      type: 'cronJobs',
+      jobs,
+      action: 'update',
+      jobId: 'b',
+      error: '',
+    });
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+  });
+
   await test('each Schedule row copies its exact task and shows it in the tooltip', async () => {
     const {win} = makePage();
     const {writes} = stubClipboard(win);

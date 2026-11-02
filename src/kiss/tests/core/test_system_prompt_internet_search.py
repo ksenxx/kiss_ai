@@ -27,7 +27,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import has_api_key_for_model
 
-TEST_MODELS = ["gemini-3-flash-preview", "gpt-5.4-mini", "claude-haiku-4-5"]
+TEST_MODELS = ["gemini-3.8-flash", "gpt-5.4-mini", "claude-haiku-4-5"]
 
 VISITED_URLS: list[str] = []
 
@@ -85,7 +85,19 @@ def _internet_urls() -> list[str]:
     return urls
 
 
+# Wall-clock bound of one live test.  A provider whose stream stalls is
+# aborted by the 180 s stall watchdog and retried up to
+# ``MAX_CONSECUTIVE_STALLS`` times per attempt (gemini-3-flash-preview on
+# 2026-11-01 held the test for 16 min once and past 15 min the next time,
+# and kept stalling past this bound in later complete runs, so the Gemini
+# entry of ``TEST_MODELS`` is gemini-3.8-flash since); a stalling provider
+# now fails the test by name after this many seconds instead of holding
+# the split.  A healthy run takes 20-120 s.
+LIVE_TEST_TIMEOUT_SECONDS = 600
+
+
 @pytest.mark.slow
+@pytest.mark.timeout(LIVE_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_current_info_task_triggers_internet_search(model_name: str) -> None:
     """A task needing current information must trigger real go_to_url calls."""
@@ -113,6 +125,7 @@ def test_current_info_task_triggers_internet_search(model_name: str) -> None:
     )
 
 
+@pytest.mark.timeout(LIVE_TEST_TIMEOUT_SECONDS)
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_confident_trivial_task_skips_internet_search(model_name: str) -> None:
     """A trivial arithmetic task the model is confident about must not search."""

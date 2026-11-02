@@ -35,8 +35,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from kiss.core import stop_signal
+from kiss.core.base import collecting_trajectories
 from kiss.core.kiss_agent import NATIVE_TOOLS_CONTINUE_MSG, KISSAgent
-from kiss.core.kiss_error import BudgetExceededError, KISSError
+from kiss.core.kiss_error import BudgetExceededError, ContextWindowExceededError, KISSError
+from kiss.core.llm_reply import LLMReply
 from kiss.core.models.codex_mcp_bridge import ServedCall, ToolBridge, toml_value
 from kiss.core.models.codex_model import (
     CODEX_INSTRUCTIONS_PREAMBLE,
@@ -45,7 +47,7 @@ from kiss.core.models.codex_model import (
 )
 from kiss.core.models.model import encode_binary_attachment
 from kiss.core.printer import Printer
-from kiss.core.tool_verdict import Verdict, refuse
+from kiss.core.tool_verdict import Verdict, end_run, refuse
 from kiss.core.utils import finish as structured_finish
 from kiss.tests.conftest import install_cli_script
 
@@ -182,10 +184,13 @@ FINISH_BLOCK = "```json\n" + json.dumps({
 
 # Call N of the fake plays ``turns[N]`` (the last turn repeats): it makes
 # the turn's MCP calls through the proxy (dying with exit 1 if one takes
-# longer than ``crash_after`` seconds), stays silent for the turn's
+# longer than ``crash_after`` seconds, or right after the calls when the
+# turn says ``die: "after-calls"``), stays silent for the turn's
 # ``hang`` seconds, then answers with the turn's text, in which
 # ``{names}`` stands for the sorted MCP tool list, ``{result}`` for the
-# first tool result and ``{results}`` for all of them.  ``thread.started``
+# first tool result and ``{results}`` for all of them, and completes the
+# turn with the turn's ``usage`` (3 input / 4 output tokens unless given),
+# dying with exit 1 after that when it says ``die: "after-usage"``.  ``thread.started``
 # goes out before anything else so the model's stall timeout starts from
 # a line, as with Codex.  Like Codex, it hands the proxy only the
 # ``env_vars`` the server config names (the bridge's secret).  It records
@@ -228,14 +233,18 @@ async def main():
                 except asyncio.TimeoutError:
                     os._exit(1)  # Codex died while the tool was still running
                 results.append(result.content[0].text)
+            if turn.get("die") == "after-calls":
+                os._exit(1)  # Codex died after its calls, before the turn completed
     await asyncio.sleep(turn.get("hang", 0))  # silence after the calls
     text = turn["text"].replace("{{names}}", str(names))
     text = text.replace("{{result}}", "".join(results[:1]))
     text = text.replace("{{results}}", " | ".join(results))
     print(json.dumps({{"type": "item.completed", "item": {{
         "type": "agent_message", "text": text}}}}), flush=True)
-    print(json.dumps({{"type": "turn.completed",
-                       "usage": {{"input_tokens": 3, "output_tokens": 4}}}}), flush=True)
+    usage = turn.get("usage") or {{"input_tokens": 3, "output_tokens": 4}}
+    print(json.dumps({{"type": "turn.completed", "usage": usage}}), flush=True)
+    if turn.get("die") == "after-usage":
+        os._exit(1)  # Codex died after reporting the turn's usage
 
 asyncio.run(main())
 """
@@ -366,6 +375,42 @@ def switch_things(name: str) -> str:
 switch_things.runs_between_turns = True  # type: ignore[attr-defined]
 
 
+HELPER_TRAJECTORIES: list[Path] = []
+
+
+def delegate(text: str) -> str:
+    """Run a helper agent on *text*, as a delegating tool (``run_agent``) does.
+
+    The helper is a second codex/* agent against the same fake, which
+    plays it the next turn of the script.
+
+    Args:
+        text: The helper's task.
+
+    Returns:
+        ``delegated: `` and the helper's summary.
+    """
+    helper = KISSAgent("bridge helper")
+    result = helper.run(
+        model_name="codex/gpt-5.5",
+        prompt_template=text,
+        tools=[structured_finish],
+        is_agentic=True,
+        verbose=False,
+    )
+    HELPER_TRAJECTORIES.append(helper.get_trajectory_path())
+    return "delegated: " + str(yaml.safe_load(result)["summary"])
+
+
+SEEN_REPLIES: list[LLMReply] = []
+
+
+def _record_reply(reply: LLMReply) -> Verdict:
+    """Keep every reply the response hook sees; allow it (an episode's token accounting)."""
+    SEEN_REPLIES.append(reply)
+    return Verdict(allowed=True)
+
+
 def _install_fake_codex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, turns: list[dict[str, Any]]
 ) -> Path:
@@ -396,6 +441,7 @@ def _run_fake_codex_agent(
     model_config: dict[str, Any] | None = None,
     tools: list[Any] | None = None,
     llm_call_hook: Any = None,
+    llm_response_hook: Any = None,
 ) -> tuple[KISSAgent, dict[str, Any], list[dict[str, Any]]]:
     """Run a codex/* KISSAgent against the fake MCP-client ``codex`` playing *turns*.
 
@@ -416,6 +462,7 @@ def _run_fake_codex_agent(
         verbose=False,
         tool_call_hook=tool_call_hook,
         llm_call_hook=llm_call_hook,
+        llm_response_hook=llm_response_hook,
         model_config=model_config,
     )
     payload = yaml.safe_load(result)
@@ -551,6 +598,110 @@ def test_tool_call_hook_applies_to_mcp_calls(
     assert tool_results[0] == (refused, True)  # then finish's own result
     assert f"shout={refused}" in calls[1]["prompt"]
     assert f"[Tool Result]: {refused}" in calls[1]["prompt"]
+
+
+def _end_on_stop(name: str, args: dict[str, Any]) -> Verdict:
+    """End the run on ``shout("stop now")``; a SEA's domain rule."""
+    if name == "shout" and args.get("text") == "stop now":
+        return end_run("<p>Episode over.</p>")
+    return Verdict(allowed=True)
+
+
+def test_end_run_verdict_on_the_bridge_ends_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``end_run`` verdict on a call Codex makes over MCP ends the run once the
+    turn returns: the call does not run, the turn's later call is refused, and
+    the verdict's text is the run's result in the finish contract."""
+    printer = _RecordingPrinter()
+    SEEN_STOP_EVENTS.clear()
+    turns: list[dict[str, Any]] = [{
+        "mcp_calls": [["shout", {"text": "hi"}], ["shout", {"text": "stop now"}],
+                      ["shout", {"text": "again"}]],
+        "text": "results={results}",
+    }]
+    turns.append({"mcp_calls": [], "text": FINISH_BLOCK})
+    SEEN_REPLIES.clear()
+    agent, payload, calls = _run_fake_codex_agent(
+        tmp_path, monkeypatch, printer, turns, tool_call_hook=_end_on_stop,
+        llm_response_hook=_record_reply,
+    )
+    assert payload == {"success": True, "is_continue": False, "summary": "<p>Episode over.</p>"}
+    assert len(calls) == 1, "the run ended with the turn: no second Codex turn"
+    assert len(SEEN_STOP_EVENTS) == 1, "only the first shout ran"
+    assert agent.tool_calls_made == 2, "the third call was refused before the hook"
+    assert [c for t, c, _ in printer.events if t == "tool_call"] == ["shout", "shout"]
+    transcript = " ".join(str(m["content"]) for m in agent.messages)
+    refused = "REFUSED: the shout call did NOT run and had no effect. <p>Episode over.</p>"
+    assert refused in transcript
+    # The response hook sees the reply that closed the turn, usage included,
+    # even though the tool verdict (which keeps precedence) had ended the run.
+    assert len(SEEN_REPLIES) == 1
+    assert SEEN_REPLIES[0].text.startswith("results=HI!")
+    assert SEEN_REPLIES[0].usage["output_tokens"] == 4 and SEEN_REPLIES[0].step == 1
+
+
+def test_end_run_verdict_survives_a_turn_that_fails_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex dies after a call whose hook ended the run: the verdict is the run's
+    result all the same, and the trajectory says what came after it."""
+    printer = _RecordingPrinter()
+    turns: list[dict[str, Any]] = [{
+        "mcp_calls": [["shout", {"text": "stop now"}]], "text": "never sent",
+        "die": "after-calls",
+    }]
+    agent, payload, calls = _run_fake_codex_agent(
+        tmp_path, monkeypatch, printer, turns, tool_call_hook=_end_on_stop
+    )
+    assert payload == {"success": True, "is_continue": False, "summary": "<p>Episode over.</p>"}
+    assert len(calls) == 1 and agent.step_count == 1
+    contents = [str(m["content"]) for m in agent.messages]
+    assert any(c.startswith("[the turn failed after the run ended: ") for c in contents), contents
+
+
+@pytest.mark.parametrize("die", ["after-usage", None])
+def test_a_turn_ended_by_a_verdict_still_meets_the_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, die: str | None
+) -> None:
+    """The usage a turn reports is billed whether the turn then returns or Codex
+    dies, and a limit it crosses ends the run with the limit's error, not with the
+    verdict a tool hook gave during the turn."""
+    printer = _RecordingPrinter()
+    # Past 70% of codex/gpt-5.5's 500k context in one turn.
+    turns: list[dict[str, Any]] = [{
+        "mcp_calls": [["shout", {"text": "stop now"}]], "text": "results={results}",
+        "usage": {"input_tokens": 400_000, "output_tokens": 4}, "die": die,
+    }]
+    with pytest.raises(ContextWindowExceededError, match="400,004 of 500,000 context tokens"):
+        _run_fake_codex_agent(tmp_path, monkeypatch, printer, turns, tool_call_hook=_end_on_stop)
+    assert len(AGENT_UNDER_TEST) and AGENT_UNDER_TEST[-1].total_tokens_used == 400_004
+
+
+@pytest.mark.parametrize("save", [True, False])
+def test_a_helper_agent_a_bridged_tool_creates_belongs_to_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save: bool
+) -> None:
+    """A tool Codex calls over MCP runs on a bridge thread; a helper agent it
+    creates there still belongs to the run's ``collecting_trajectories`` scope:
+    its file is collected, or not written when the scope says so."""
+    printer = _RecordingPrinter()
+    HELPER_TRAJECTORIES.clear()
+    turns: list[dict[str, Any]] = [
+        {"mcp_calls": [["delegate", {"text": "sub-task"}]], "text": "helper said {result}"},
+        {"mcp_calls": [], "text": FINISH_BLOCK},  # the helper's own turn
+        {"mcp_calls": [], "text": FINISH_BLOCK},  # the run's second turn
+    ]
+    with collecting_trajectories(save=save) as scope:
+        agent, payload, calls = _run_fake_codex_agent(
+            tmp_path, monkeypatch, printer, turns, tools=[delegate]
+        )
+    assert payload["success"] is True and len(calls) == 3
+    assert "[Tool Result]: delegated: <p>SHOUTED done.</p>" in calls[2]["prompt"]
+    assert len(HELPER_TRAJECTORIES) == 1
+    own, helper = agent.get_trajectory_path(), HELPER_TRAJECTORIES[0]
+    assert (own.exists(), helper.exists()) == (save, save)
+    assert set(scope.paths) == ({own, helper} if save else set())
 
 
 def test_stall_timeout_waits_while_a_bridged_tool_runs(

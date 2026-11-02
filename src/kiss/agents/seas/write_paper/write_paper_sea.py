@@ -291,7 +291,18 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   reviewers", do not retry with `run_agent`: do the check yourself read-only and mark the
   report "independent review not run".
 - `run_commands_parallel` takes a JSON array of strings: double every backslash, prefer
-  `grep -E 'a|b'` over `\\\\|`, and run multi-line Python through Bash with a heredoc."""
+  `grep -E 'a|b'` over `\\\\|`, and run multi-line Python through Bash with a heredoc.
+
+## Lessons from recent runs (rsi7d)
+
+- Before the first `Edit` of any artifact file (`artifact/tools/*.py`,
+  `artifact/README.md`, the .bib, a log), `Read` it (or the region you will change) in
+  this session: the first `Edit` of an unread file is refused and only shows the region,
+  so the same call is sent twice.
+- Inside a worktree, never put a parent-checkout path (`/home/ksen/kiss/...`) in a Bash
+  command; use the worktree path, or `git show main:<path>` for a file of the main branch.
+- Give every reviewer sub-agent an explicit `max_budget` (for example `"25"`); never let
+  it inherit the parent's remaining budget."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table

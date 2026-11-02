@@ -63,7 +63,10 @@ A tab stays bound while it exists: a later ``submit`` or
 ``machine`` brings it home, a ``resumeSession`` of a local chat or
 ``closeTab`` unbinds it
 (``closeTab`` is forwarded too, so the remote drops its tab; its task
-keeps running there as a closed local tab's would).  Losing the socket
+keeps running there as a closed local tab's would).  A machine's chat
+shows in one tab, as a local chat does: a ``resumeSession`` of it into
+another tab displaces the tab that showed it, closed on every surface
+(:meth:`RemoteTabs._displace_locked`).  Losing the socket
 ends the tab's running state with an ``error`` naming the machine.
 Either way the stream's sub-agent tabs end with a ``subagentDone`` of
 this daemon's: no frame of the machine reaches them any more.
@@ -292,6 +295,7 @@ class RemoteTab(MachineStream):
         replay_id = str(msg.get("replayId") or "")
         to: list[str] | None = []  # [] = every client, [conn] = that one, None = nobody
         adopt = ""
+        learnt = False  # the frame told the bound tab's chat
         spawn = ""  # the run's own new_tab, learnt to be ours by this frame
         restore: tuple[str, str, int] | None = None  # a path-only prompt's displaced title
         with self.lock:
@@ -338,6 +342,7 @@ class RemoteTab(MachineStream):
                 tab_id = str(msg["tabId"])
                 if tab_id == self.tab_id and not self.chat_id and msg.get("chat_id"):
                     self.chat_id = str(msg["chat_id"])
+                    learnt = True
                 if tab_id == self.tab_id and self.subagent:
                     spawn = self._own_run_frame(kind, msg)
                 if kind == "fileContent":
@@ -371,6 +376,10 @@ class RemoteTab(MachineStream):
                 # is global, as the daemon's own broadcast of it is: a
                 # peer that only addressed other tabs still gets it.
                 self._owner.deliver(str(msg.get("tabId") or ""), text)
+        if learnt:
+            # After the frame: closing the chat's other tab can wait on
+            # its socket's close handshake, the run's output must not.
+            self._owner.displace(self)  # takes the owner's lock: outside ours
 
     def _owns_sub_tab(self, tab_id: str) -> bool:
         """Whether *tab_id* is a tab of this stream's tasks (under ``lock``).
@@ -730,6 +739,64 @@ class RemoteTabs:
         if ended is not None:
             self._end_stream(ended, orphans)
 
+    def _displace_locked(self, tab: RemoteTab) -> list[tuple[RemoteTab, list[str], int]]:
+        """Take the other tabs showing *tab*'s machine's chat off their streams (under the lock).
+
+        One tab per chat, as the registry keeps for a local chat
+        (:meth:`~kiss.server.tab_registry.TabRegistry.update_tab`
+        displaces the tab bound to the chat before): a machine's chat
+        resumed into a second tab (another surface's CHATS-panel click,
+        landing before the first tab's replay told that surface the
+        chat is on screen) displaces the tab that showed it, as the
+        machine's daemon did on its side when it replayed the chat
+        into the new tab.  A stream carrying a sub-agent run of a local
+        task has no chat tab: it neither displaces (the machine
+        publishes no tab for the run either) nor is displaced (the
+        run's relay would end), and a stream that lost its tab
+        meanwhile displaces nothing.
+
+        Returns:
+            The displaced streams, each with the tabs it leaves behind
+            (what :meth:`_detach` returned) and the registry generation
+            its tab carries (the publication the stream owned: made
+            under this lock by :meth:`_publish`, re-stamped by anything
+            published for the tab since), for :meth:`_close_displaced`
+            outside the lock.
+        """
+        with tab.lock:
+            chat_id = tab.chat_id
+        if tab.subagent or not chat_id or self._tabs.get(tab.tab_id) is not tab:
+            return []
+        registry = self._backend._agent_server.tab_registry
+        displaced: list[tuple[RemoteTab, list[str], int]] = []
+        for other in list({id(t): t for t in self._tabs.values()}.values()):
+            if other is tab or other.subagent or other.machine.name != tab.machine.name:
+                continue
+            with other.lock:
+                same_chat = other.chat_id == chat_id
+            if same_chat:
+                ended, orphans = self._detach(other.tab_id)
+                if ended is not None:
+                    displaced.append((ended, orphans, registry.generation(other.tab_id)))
+        return displaced
+
+    def _close_displaced(self, displaced: list[tuple[RemoteTab, list[str], int]]) -> None:
+        """Finish off the streams :meth:`_displace_locked` retired and close their tabs.
+
+        Each stream ends as an unbound one does (:meth:`_end_stream`:
+        its sub-agent tabs end, its binding is announced gone) and its
+        tab leaves the registry as a ``closeTab`` of it would (every
+        surface closes it) -- unless something republished the tab
+        since it was displaced: the stream's end can wait on its
+        socket's close handshake, and a chat another surface resumed
+        into the tab meanwhile (a local chat: the tab is off its stream
+        by then) owns it now, so the close stands down
+        (:meth:`~kiss.server.server.AgentServer._close_tab_if_generation`).
+        """
+        for other, orphans, generation in displaced:
+            self._end_stream(other, orphans)
+            self._backend._agent_server._close_tab_if_generation(other.tab_id, generation)
+
     def _publish(self, tab_id: str, tab: RemoteTab, cmd: dict[str, Any], title: str) -> bool:
         """Publish *tab_id*, bound to *tab*'s stream, in the shared tab registry.
 
@@ -797,7 +864,13 @@ class RemoteTabs:
         the tab (the prompt) goes back to what it was -- unless a later
         publication (another submit, a resume) stamped the tab since,
         whose title stands
-        (:meth:`~kiss.server.tab_registry.TabRegistry.retitle_if_generation`).
+        (:meth:`~kiss.server.tab_registry.TabRegistry.retitle_if_generation`),
+        or the tab left its stream meanwhile (unbound, or displaced by
+        another tab of its chat): the restore is a publication of the
+        stream's own, and one landing after the displacement captured
+        the tab's generation would keep the tab from the close that
+        follows (:meth:`_close_displaced`).  Decided under the lock
+        the displacement takes.
 
         Args:
             tab_id: The bound tab.
@@ -806,7 +879,13 @@ class RemoteTabs:
             generation: The token of the bind's publication.
         """
         server = self._backend._agent_server
-        if title and server.tab_registry.retitle_if_generation(tab_id, title, generation):
+        with self._lock:
+            if tab_id not in self._tabs:
+                return
+            restored = bool(title) and server.tab_registry.retitle_if_generation(
+                tab_id, title, generation,
+            )
+        if restored:
             server._publish_tabs_state()
 
     def adopt(self, tab: RemoteTab, sub_tab_id: str) -> None:
@@ -819,6 +898,19 @@ class RemoteTabs:
             if self._tabs.get(tab.tab_id) is tab:
                 self._tabs[sub_tab_id] = tab
         self._announce(sub_tab_id, tab)
+
+    def displace(self, tab: RemoteTab) -> None:
+        """Displace the other tabs showing the chat *tab*'s stream just learnt it carries.
+
+        A tab bound by a submit learns its chat from the run's first
+        frame: the machine ran the task in the chat the tab already
+        had there, which another tab here may show meanwhile (a resume
+        of the chat).  The run's tab keeps the chat, as a local run's
+        does when its task starts (:meth:`_displace_locked`).
+        """
+        with self._lock:
+            displaced = self._displace_locked(tab)
+        self._close_displaced(displaced)
 
     def _resume(self, tab_id: str, task_id: str, conn_id: str, cmd: dict[str, Any]) -> bool:
         """Route a ``resumeSession``: a machine's chat binds the tab, a sub-agent task's joins it.
@@ -836,26 +928,38 @@ class RemoteTabs:
         replayed chat, whose ``new_tab`` this daemon never saw).  Any
         other resume into a bound tab, or one whose bind is still
         connecting, shows a local chat there: the tab is unbound (the
-        bind stands down) and the resume handled here.
+        bind stands down) and the resume handled here.  A sub-agent
+        tab on a stream leaves it for a chat (``chatId``) the same way,
+        but keeps it on a resume of a task the stream never saw: that
+        is the tab's own fetch, answered here with nothing running,
+        while the sub-agent runs on.
         """
         machine_name = str(cmd.get("machine", "") or "")
         if machine_name:
             tab = self._bind(tab_id, machine_name, cmd, str(cmd.get("title", "") or ""))
             if tab is None:
                 return True
-            with tab.lock:
-                # The tab shows this chat, at this task, from here on
-                # (a later ``ready`` replays those); taken from the
-                # click, not from the replay it gets, which can cross a
-                # later submit on the socket.
-                tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
-                tab.shown_task_id = str(cmd.get("taskId") or "")
-                if cmd.get("scoped") and conn_id:
-                    tab.stamp_replay(cmd, conn_id)
+            with self._lock:
+                with tab.lock:
+                    # The tab shows this chat, at this task, from here on
+                    # (a later ``ready`` replays those); taken from the
+                    # click, not from the replay it gets, which can cross a
+                    # later submit on the socket.
+                    tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
+                    tab.shown_task_id = str(cmd.get("taskId") or "")
+                    if cmd.get("scoped") and conn_id:
+                        tab.stamp_replay(cmd, conn_id)
+                # One tab per chat, as for a local chat: the tab that
+                # showed the chat is displaced in the critical section
+                # that claims it, so two resumes of the chat racing
+                # each other leave exactly one tab.
+                displaced = self._displace_locked(tab)
+            self._close_displaced(displaced)
             self._forward(tab, tab_id, cmd)
             return True
         ended: RemoteTab | None = None
         orphans: list[str] = []
+        unjoined = False  # a sub-agent tab left its stream for a local chat
         with self._lock:
             tab = next(
                 (t for t in self._tabs.values() if task_id and task_id in t.task_ids),
@@ -867,9 +971,13 @@ class RemoteTabs:
             if tab is None:
                 # A local chat shows in the tab: it leaves its own stream,
                 # and a bind still connecting for it stands down, as on a
-                # closeTab or newChat (both counted by _detach).
-                if previous is None or previous.tab_id == tab_id:
+                # closeTab or newChat (both counted by _detach).  A
+                # sub-agent tab leaves its parent's stream for a chat
+                # only (shown here whatever this daemon has of it); the
+                # stream's frames for the tab would land in that chat.
+                if previous is None or previous.tab_id == tab_id or cmd.get("chatId"):
                     ended, orphans = self._detach(tab_id)
+                    unjoined = previous is not None and previous.tab_id != tab_id
             else:
                 # One stream per tab: a tab bound to a machine, or on
                 # another run's stream, leaves it (its own stream ends)
@@ -883,16 +991,30 @@ class RemoteTabs:
                     tab.announced.pop(task_id, None)
                     if conn_id:
                         tab.stamp_replay(cmd, conn_id)
+                    # The tab is the stream's machine's from here on (a
+                    # sub-agent tab joining its parent's stream, or a
+                    # root tab moved to another): told before its
+                    # transcript, as a bound tab's binding precedes its
+                    # frames, so the chat header's drop-down shows the
+                    # machine for the sub-agent tab as for its parent.
+                    # Delivered under the stream's lock that just made
+                    # the tab one of its own: a frame of the tab already
+                    # on the stream (a history click's replay of a
+                    # finished sub-agent's transcript, which the machine
+                    # sends to every window after the parent's) is
+                    # relayed under that lock too, so it follows the
+                    # binding instead of landing in the gap before an
+                    # announcement made after the locks were released.
+                    # To every client, as :meth:`_announce` sends it.
+                    self.deliver("", _tab_machine_frame(tab_id, tab.machine.name))
         if ended is not None:
             self._end_stream(ended, orphans)
         if tab is None:
+            if unjoined:
+                # This machine's from here on: told before the local
+                # chat's transcript, as a bound tab's unbinding is.
+                self._announce(tab_id, None)
             return False
-        # The tab is the stream's machine's from here on (a sub-agent
-        # tab joining its parent's stream, or a root tab moved to
-        # another): told before its transcript, as a bound tab's
-        # binding precedes its frames, so the chat header's drop-down
-        # shows the machine for the sub-agent tab as for its parent.
-        self._announce(tab_id, tab)
         self._forward(tab, tab_id, cmd)
         return True
 
@@ -964,12 +1086,18 @@ class RemoteTabs:
         views learn of a binding as the registry changes (:meth:`_bind`,
         :meth:`_retire`), not here: a bind that finds the tab registered
         by another must find its stream wanted already.
+
+        A binding is a registry event, as ``new_tab`` and
+        ``subagentDone`` are: every client gets it, whatever tabs it
+        addressed so far (a surface shows the machine of every tab,
+        and a peer that addresses the tab later must already hold the
+        binding when the tab's frames start reaching it).
         """
         with self._lock:
             if self._tabs.get(tab_id) is not tab:
                 return
             machine_name = tab.machine.name if tab is not None else ""
-            self.deliver(tab_id, _tab_machine_frame(tab_id, machine_name))
+            self.deliver("", _tab_machine_frame(tab_id, machine_name))
 
     def deliver(self, tab_id: str, text: str) -> None:
         """Send one frame of the remote daemon, stamped with *tab_id*, to every client."""

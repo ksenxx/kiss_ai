@@ -1944,6 +1944,15 @@ async function run() {
     const doc = window.document;
     const msg = doc.getElementById('kiss-server-loading-msg');
     const realNow = window.Date.now;
+    // The lockout deadline is read off Date.now() as auth_locked arrives
+    // and the overlay tick runs on the fake interval clock, so the clock
+    // is frozen at `base` before the frame and moved by hand: on the
+    // real clock, 400 ms spent between the frame and the first tick
+    // (a scheduling or GC pause) would have run the lockout out before
+    // the tick looked at it.
+    const base = realNow();
+    let now = base;
+    window.Date.now = () => now;
     try {
       sockets[0].fireOpen();
       sockets[0].fireMessage({type: 'auth_locked', retry_after: 2});
@@ -1952,21 +1961,16 @@ async function run() {
         'Too many wrong passwords from this network. You can try again in 2 s.',
       );
       sockets[0].fireClose();
-      // The overlay tick runs on the fake interval clock, so Date.now()
-      // carries the elapsed time itself: 1.6 s puts the tick mid-band
-      // (400 ms left), clear of the edge where ceil() flips from 2 to 1.
-      window.Date.now = function () {
-        return realNow() + 1600;
-      };
+      // 1.6 s puts the tick mid-band (400 ms left), clear of the edge
+      // where ceil() flips from 2 to 1.
+      now = base + 1600;
       clock.tick(1000);
       assert.strictEqual(
         msg.textContent,
         'Too many wrong passwords from this network. You can try again in 1 s.',
         'the countdown ticks down while the lockout is still in force',
       );
-      window.Date.now = function () {
-        return realNow() + 2000;
-      };
+      now = base + 2000;
       clock.tick(1000);
       fireReconnect(pg);
       assert.ok(
@@ -1983,9 +1987,7 @@ async function run() {
         null,
         'no action button within the first seconds after the lockout ended',
       );
-      window.Date.now = function () {
-        return realNow() + 10000;
-      };
+      now = base + 10000;
       clock.tick(1000);
       assert.match(
         msg.textContent,

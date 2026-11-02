@@ -55,6 +55,7 @@ from kiss.core.processes import (
     kill_process_group,
     popen_process_group,
 )
+from kiss.core.tool_schema import declared_schema
 
 logger = logging.getLogger(__name__)
 
@@ -999,8 +1000,44 @@ FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
         # their subprocess runs with this cwd so native tools act on the
         # task's work tree, not the daemon's.  API adapters ignore it.
         "work_dir",
+        # ``True``: the model reads exactly what the agent and its tools
+        # say, without the framework's own additions (see ``plain_io``).
+        "plain_io",
     }
 )
+
+
+def plain_io(model_config: dict[str, Any] | None) -> bool:
+    """Return whether *model_config* asks for plain model I/O (``{"plain_io": True}``).
+
+    Under plain I/O the framework adds nothing of its own to what the
+    model reads: :class:`~kiss.core.kiss_agent.KISSAgent` appends no
+    usage line (``Steps: ..., Context: ..., Budget: ...``) to tool
+    results and user messages, and Sorcar sends the caller's system
+    prompt (a SEA's ``system_prompt`` return) as it is, without the
+    trailers it otherwise appends: the ``# Restricted tool profile`` and
+    ``# Web tools are off`` notes and the editor-file line
+    (:class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`), the
+    ``# MOST IMPORTANT INSTRUCTIONS`` block with the work dir and PID,
+    the ``# Task Settings`` section and the user's ``AGENTS.md``
+    (:class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent`).
+    The memory protocol stays when the run registers the memory tools
+    (a SEA turns them off with ``use_memory: false``), and so does the
+    way an adapter offers the run's tools: a native tool schema in the
+    request, or the ``## Available Tools`` text catalog the CLI-backed
+    models (``cc/*``, ``codex/*``) append to the system instruction.
+    The printer events and the trajectory keep the usage.  What a run
+    that must read
+    the same in every mode (a chat tab, a headless evaluation, a training
+    episode) sets, so the SEA controls the exact prompt; a SEA sets it
+    through its ``model_config`` setting.  A plain-I/O run that keeps the
+    default base prompt gets no note reconciling that prompt's rules with
+    a restricted toolset: such a run supplies its own prompt.
+
+    Args:
+        model_config: The run's model configuration, or ``None``.
+    """
+    return bool(model_config and model_config.get("plain_io"))
 
 
 def accepted_request_params(method: Any) -> frozenset[str]:
@@ -1104,6 +1141,21 @@ class Model(ABC):
         # A complete, billed response the adapter refused to use
         # (truncated, incomplete, refused); see take_partial_usage_response.
         self._rejected_response: Any = None
+        # Cumulative (epoch, USD, tokens, credited call keys) the model's
+        # helpers (the vision bridge's calls, see
+        # tool_result_text_and_attachments) spent on the agent's behalf in
+        # this conversation; see helper_usage.
+        self._helper_spent: tuple[object, float, int, frozenset[str]] = (
+            object(),
+            0.0,
+            0,
+            frozenset(),
+        )
+        # Called before a helper makes a paid call on the agent's behalf:
+        # KISSAgent installs its limit check here (and hand_off_conversation
+        # carries it to a replacement model) so a batch of descriptions
+        # stops at the budget cap instead of paying for every attachment.
+        self.limit_check: Callable[[], None] | None = None
         # Seconds of event-level silence tolerated before a streamed
         # request is aborted with a retryable TimeoutError.  Read here
         # once for every streaming transport (the key is in
@@ -1293,6 +1345,9 @@ class Model(ABC):
         self.conversation = []
         self.usage_info_for_messages = ""
         self._thinking_open = False
+        # A new epoch: helper spend of the previous run is not the next
+        # run's (the agent's mark starts at the old record).
+        self._helper_spent = (object(), 0.0, 0, frozenset())
 
     def rebind_callbacks(
         self,
@@ -1454,15 +1509,33 @@ class Model(ABC):
                 break
         return list(reversed(native))
 
+    def supports_images(self) -> bool:
+        """Return whether this model can see the images and PDFs a tool returns.
+
+        Decided from the model name by
+        :func:`~kiss.core.models.model_families.model_supports_images`;
+        a subclass whose transport knows better may override it.
+
+        Returns:
+            True when the attachments of a tool result reach the model as
+            pictures; False when :mod:`~kiss.core.models.vision_bridge`
+            must describe them in words instead.
+        """
+        from kiss.core.models.model_families import model_supports_images
+
+        return model_supports_images(self.model_name)
+
     def tool_result_text_and_attachments(
         self, result_dict: dict[str, Any]
     ) -> tuple[str, list[Attachment]]:
         """Split one tool result into provider-safe text and its attachments.
 
-        The three steps every adapter needs, in the one order that works:
+        The steps every adapter needs, in the one order that works:
         JSON-encode a structured result (a regex cannot be run over a dict),
         lift any binary payload out of the sentinel the tool embedded it in,
-        and append the usage line the framework shows the model.
+        replace an image or a PDF by a vision model's description when
+        this model cannot see it (:meth:`supports_images`), and append
+        the usage line the framework shows the model.
 
         Args:
             result_dict: One tool's result payload, as passed to
@@ -1470,9 +1543,35 @@ class Model(ABC):
 
         Returns:
             The text to put in the tool message, and the attachments the
-            tool produced (empty when it produced none).
+            tool produced, less the images and PDFs described in the text
+            because this model cannot see them (an audio clip stays for
+            the adapter's own content parts).
+
+        Raises:
+            KISSError: A description pushed the agent past its budget
+                (:attr:`limit_check`), so no further one is paid for.
         """
         text, attachments = parse_binary_attachments(_tool_result_to_string(result_dict))
+        if attachments and not self.supports_images():
+            from kiss.core.models.vision_bridge import describable, describe_attachments
+
+            # Only what the bridge can describe goes through it; an audio
+            # clip stays for the adapter, which carries it as its own
+            # content part (a model that cannot see may still hear).
+            pictures = [a for a in attachments if describable(a)]
+            if pictures:
+                # Spent on the agent's behalf, outside its billed model
+                # calls: each call is credited as it ends, even when a
+                # stop ends it (helper_usage), for the agent to bill.
+                described = describe_attachments(
+                    pictures,
+                    self.model_name,
+                    text,
+                    credit=self._credit_helper_usage,
+                    limit_check=self.limit_check,
+                )
+                text = f"{text}\n\n{described.text}"
+                attachments = [a for a in attachments if not describable(a)]
         if self.usage_info_for_messages:
             text = f"{text}\n\n{self.usage_info_for_messages}"
         return text, attachments
@@ -1690,6 +1789,45 @@ class Model(ABC):
         self._rejected_response = None
         return response
 
+    def _credit_helper_usage(self, cost: float, tokens: int, key: str) -> None:
+        """Add helper call *key*'s spend to :meth:`helper_usage`, once per key.
+
+        The vision bridge reports each description call here as soon as
+        the call ends, a stopped call's partial usage included, so the
+        spend reaches the agent even when the batch of descriptions never
+        returns.  ONE store, and a repeated *key* adds nothing, so a
+        caller may retry a credit a stop interrupted without billing it
+        twice.
+
+        Args:
+            cost: USD the call was billed.
+            tokens: Tokens the call used.
+            key: A key unique to the call.
+        """
+        epoch, spent, used, keys = self._helper_spent
+        if key not in keys:
+            self._helper_spent = (epoch, spent + cost, used + tokens, keys | {key})
+
+    def helper_usage(self) -> tuple[object, float, int]:
+        """Return what this model's helpers spent in this conversation.
+
+        A model that cannot see has a vision model describe the
+        attachments of a tool result
+        (:meth:`tool_result_text_and_attachments`).  Those calls are made
+        on the agent's behalf but outside the model calls the agent bills,
+        so their cost and tokens accumulate here (:meth:`_credit_helper_usage`);
+        the agent bills the part above the mark it keeps with its totals
+        (``KISSAgent._bill_helper_usage``, before every limit check, so
+        the budget cap covers them).  The record is never consumed, so
+        no interruption can lose or double it.
+
+        Returns:
+            ``(epoch, cost_usd, tokens)``: cumulative since the epoch
+            began (construction or :meth:`reset_conversation`).
+        """
+        epoch, spent, used, _ = self._helper_spent
+        return (epoch, spent, used)
+
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.
@@ -1765,6 +1903,10 @@ class Model(ABC):
     def _function_to_openai_tool(self, func: Callable[..., Any]) -> dict[str, Any]:
         """Converts a Python function to an OpenAI tool schema.
 
+        A schema the function declared with
+        :func:`~kiss.core.tool_schema.tool_schema` is used as declared;
+        otherwise the schema is derived from the signature and docstring.
+
         Args:
             func: The Python function to convert.
 
@@ -1772,6 +1914,16 @@ class Model(ABC):
             dict[str, Any]: The tool schema in OpenAI format.
         """
         description, doc, parameters = _tool_summary_and_params(func, func.__name__)
+        declared = declared_schema(func)
+        if declared is not None:
+            return {
+                "type": "function",
+                "function": {
+                    "name": func.__name__,
+                    "description": declared["description"] or description,
+                    "parameters": declared["parameters"],
+                },
+            }
         param_descriptions = _parse_docstring_params(doc)
 
         # Under ``from __future__ import annotations`` (PEP 563) the
@@ -1813,10 +1965,11 @@ class Model(ABC):
         }
 
 
-def hand_off_conversation(old: Model, new: Model) -> None:
+def hand_off_conversation(old: Model, new: Model, boundary: int = 0) -> int:
     """Continue *old*'s live conversation on *new* (a model switch mid-task).
 
-    Used by the agent's fallback and by Sorcar's ``set_model`` tool.
+    Used by :meth:`kiss.core.kiss_agent.KISSAgent.switch_model` (the
+    agent's fallback and Sorcar's ``set_model`` tool).
     Responses API items belong to the endpoint that produced them:
     OpenAI rejects Together's reasoning items (they lack ``summary``) and
     its item ids.  So when the two models talk to different endpoints
@@ -1824,17 +1977,34 @@ def hand_off_conversation(old: Model, new: Model) -> None:
     converted with :func:`responses_items_to_chat_messages`, which every
     adapter reads; on the same endpoint it is kept verbatim, so an
     OpenAI model keeps another OpenAI model's reasoning items.  The
-    usage line appended to messages carries over as well.
+    usage line appended to messages carries over as well, and so do
+    the helper spend record (:meth:`Model.helper_usage`), epoch included,
+    so the agent's mark stays valid and nothing is lost or billed twice,
+    and the agent's limit check (:attr:`Model.limit_check`).
 
     Args:
         old: The model the conversation ran on so far.
         new: The freshly initialized model that continues it.
+        boundary: An index into *old*'s conversation: the agent's
+            ``llm_call_hook`` boundary, from which the messages are new
+            to the hook.
+
+    Returns:
+        Where *boundary* lands in *new*'s conversation: unchanged when
+        the conversation is kept verbatim, else the length of the
+        converted prefix (the conversion maps each item to at most one
+        message, in order, so the converted tail starts there).
     """
     if getattr(old, "base_url", None) == getattr(new, "base_url", None):
         new.conversation = list(old.conversation)
+        landed = boundary
     else:
         new.conversation = responses_items_to_chat_messages(old.conversation)
+        landed = len(responses_items_to_chat_messages(old.conversation[:boundary]))
     new.usage_info_for_messages = old.usage_info_for_messages
+    new._helper_spent = old._helper_spent
+    new.limit_check = old.limit_check
+    return landed
 
 
 def _parse_docstring_params(docstring: str) -> dict[str, str]:
@@ -1984,6 +2154,17 @@ class CLITextModel(Model):
                 f"{self._cli_model_name} does not support attachments; they will be ignored."
             )
         self.conversation = [{"role": "user", "content": prompt}]
+
+    def supports_images(self) -> bool:
+        """Return False: a single text prompt cannot carry the bytes a tool returned.
+
+        The CLI's model may see images, but this transport has no
+        content-part shape to hand them over, so
+        :meth:`tool_result_text_and_attachments` has a vision model
+        describe them instead of leaving the note of
+        :meth:`_deliver_tool_result_attachments`.
+        """
+        return False
 
     def _deliver_tool_result_attachments(self, attachments: list[Attachment]) -> None:
         """State that this transport cannot show the bytes a tool returned.
@@ -3269,6 +3450,16 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
     tools_desc = []
     for func_name, func in function_map.items():
         summary, _doc, parameters = _tool_summary_and_params(func, func_name)
+        declared = declared_schema(func)
+        if declared is not None:
+            # A declared schema reaches this model as it reaches one that
+            # takes native tool definitions: whole, nested constraints
+            # (an inner object's required fields, enumerations, bounds) included.
+            tools_desc.append(
+                f"- **{func_name}**: {declared['description'] or summary}\n"
+                f"  Parameters (JSON schema): {json.dumps(declared['parameters'])}"
+            )
+            continue
         params = [
             f"    - {param_name} ({_annotation_name(param.annotation)})"
             for param_name, param in parameters.items()
@@ -3402,16 +3593,18 @@ def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
     Walks dicts and lists looking for any ``"tool_calls"`` key whose value
     is a list.  This supports both top-level ``{"tool_calls": [...]}``
     objects and tool_calls nested inside an outer wrapper such as
-    ``{"outer": {"tool_calls": [...]}}``.  The walk keeps its own stack:
-    ``json.loads`` accepts nesting far deeper than the interpreter's
-    recursion limit.
+    ``{"outer": {"tool_calls": [...]}}``.  A recognised list is not
+    walked into: the calls' ``arguments`` are data, and a document that
+    looks like an envelope passed as an argument must not become an
+    extra call.  The walk keeps its own stack: ``json.loads`` accepts
+    nesting far deeper than the interpreter's recursion limit.
 
     Args:
         obj: A parsed JSON value (dict, list, scalar).
 
     Returns:
         Lists of tool-call entries in encounter order (depth first, a
-        dict's own list before the ones nested in its values).
+        dict's own list before the ones nested in its other values).
     """
     out: list[list[Any]] = []
     stack = [obj]
@@ -3421,7 +3614,9 @@ def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
             tcs = node.get("tool_calls")
             if isinstance(tcs, list):
                 out.append(tcs)
-            stack.extend(reversed(node.values()))
+                stack.extend(reversed([v for k, v in node.items() if k != "tool_calls"]))
+            else:
+                stack.extend(reversed(node.values()))
         elif isinstance(node, list):
             stack.extend(reversed(node))
     return out

@@ -38,7 +38,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Browser, Page, ViewportSize, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.tests.conftest import goto_retrying_network_change
 
@@ -46,6 +47,21 @@ from kiss.tests.conftest import goto_retrying_network_change
 MAX_EDGE = 1568
 PHOTO_WIDTH = 2000
 PHOTO_HEIGHT = 1200
+
+_MOBILE_VIEWPORT = ViewportSize(width=390, height=844)
+
+WEBKIT_START_SECS = 60
+"""How long WebKit gets to start with its first page before the test is skipped by name.
+
+The page's deadline is the launch's (``launch_persistent_context``
+opens the two together); a page asked for after ``launch`` has none,
+and a WebKit whose web content process never comes up (Playwright's
+WebKit 2359 on macOS 26.6.2 starts but that process never gets its
+network connection, with or without this product) held the test for
+as long as the run allowed.  Like a Docker daemon that is not running,
+a browser that opens no page is a capability the machine lacks: the
+test skips and names it.
+"""
 
 
 def _write_gradient_png(path: Path, width: int, height: int) -> None:
@@ -199,16 +215,18 @@ async () => {
 """
 
 
-def _open_mobile_page(browser: Browser, port: int) -> Page:
-    """Open the remote chat in an iPhone-sized viewport."""
-    page = browser.new_page(
-        ignore_https_errors=True,
-        viewport={"width": 390, "height": 844},
-    )
+def _load_mobile_page(page: Page, port: int) -> Page:
+    """Load the remote chat in *page*, an iPhone-sized viewport, and wait for its composer."""
     goto_retrying_network_change(page, f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
     page.wait_for_selector("#more-btn", state="visible")
     assert page.evaluate("document.body.classList.contains('remote-chat')")
     return page
+
+
+def _open_mobile_page(browser: Browser, port: int) -> Page:
+    """Open the remote chat in a new iPhone-sized page of *browser*."""
+    page = browser.new_page(ignore_https_errors=True, viewport=_MOBILE_VIEWPORT)
+    return _load_mobile_page(page, port)
 
 
 @pytest.mark.timeout(300)
@@ -220,9 +238,20 @@ def test_webkit_attaches_iphone_heic_as_downscaled_jpeg(
     with sync_playwright() as p:
         if not Path(p.webkit.executable_path).exists():
             pytest.skip("Playwright WebKit is not installed (uv run playwright install webkit)")
-        browser = p.webkit.launch()
         try:
-            page = _open_mobile_page(browser, remote_port)
+            context = p.webkit.launch_persistent_context(
+                tmp_path / "webkit-profile",
+                timeout=WEBKIT_START_SECS * 1000,
+                ignore_https_errors=True,
+                viewport=_MOBILE_VIEWPORT,
+            )
+        except PlaywrightTimeoutError as exc:
+            pytest.skip(
+                f"Playwright's WebKit opens no page on this machine within {WEBKIT_START_SECS}s: "
+                f"{exc}"
+            )
+        try:
+            page = _load_mobile_page(context.pages[0], remote_port)
             _attach(page, heic)
             page.wait_for_selector(
                 "#file-chips .file-chip:not(.pending)", state="visible"
@@ -238,7 +267,7 @@ def test_webkit_attaches_iphone_heic_as_downscaled_jpeg(
                 "document.querySelectorAll('#file-chips .file-chip.error').length"
             )
         finally:
-            browser.close()
+            context.close()
 
     assert chip is not None, "the photo produced no attachment chip"
     assert "error" not in chip["cls"], f"conversion failed: {chip['text']}"

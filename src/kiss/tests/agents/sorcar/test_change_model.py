@@ -4,15 +4,16 @@
 # add your name here
 """Integration tests for the ``set_model`` tool on ``SorcarAgent``.
 
-``set_model(model_name)`` swaps the agent's live LLM model instance in
-place so the very next LLM call goes to the changed model.  These tests
-verify:
+``set_model(model_name)`` swaps the live LLM model instance of the
+agent's executor (the :class:`KISSAgent` a run holds in
+``_current_executor``) in place so the very next LLM call goes to the
+changed model.  These tests verify:
 
 * The tool appears in the agent's tool list.
 * Calling it without a live model just updates ``self.model_name``.
-* Calling it with a live model swaps ``self.model`` to a fresh instance
-  for the new model name while preserving the existing conversation
-  history, ``model_config``, and callbacks.
+* Calling it with a live model swaps the executor's ``model`` to a
+  fresh instance for the new model name while preserving the existing
+  conversation history, ``model_config``, and callbacks.
 * The cached tools schema is rebuilt so it stays consistent with the
   (possibly different) provider of the new model.
 * The same-name no-op short-circuits.
@@ -30,6 +31,7 @@ import kiss.core.user_config as user_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import model as model_factory
+from kiss.tests.conftest import executor_of
 
 
 def _find_tool(tools: list, name: str) -> Any:
@@ -56,17 +58,22 @@ def _make_agent() -> tuple[Any, list]:
     return agent, tools
 
 
-def _bootstrap_live_model(agent: Any, model_name: str) -> None:
-    """Attach a live ``OpenAICompatibleModel`` to *agent* without network I/O.
+def _bootstrap_live_model(agent: Any, model_name: str) -> Any:
+    """Give *agent* an executor holding a live ``OpenAICompatibleModel``; return it.
 
-    The OpenAI-compatible model's constructor only stores the
-    ``base_url`` and ``api_key`` — it does not make any network
-    request — so we can build one synchronously inside a unit test
-    with a fake endpoint and a fake key.
+    A run keeps the live model on the :class:`KISSAgent` executor in
+    ``agent._current_executor``, which ``set_model`` swaps.  The
+    OpenAI-compatible model's constructor only stores the ``base_url``
+    and ``api_key`` — it does not make any network request — so we can
+    build one synchronously inside a test with a fake endpoint and a
+    fake key.
     """
     config = {"base_url": "http://localhost:65535/v1", "api_key": "fake-key"}
-    agent.model = model_factory(model_name, model_config=config)
-    agent.model_name = model_name
+    executor = executor_of(agent)
+    executor.model = model_factory(model_name, model_config=config)
+    executor.model_name = model_name
+    agent.model_name = model_name  # as ``run(model_name=...)`` sets it
+    return executor
 
 
 @pytest.fixture(autouse=True)
@@ -151,7 +158,7 @@ class TestChangeModelLiveSwap:
 
     def test_swaps_to_new_instance(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
 
         old_model_obj = agent.model
@@ -164,7 +171,7 @@ class TestChangeModelLiveSwap:
 
     def test_conversation_preserved(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         agent.model.conversation = [
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "reply"},
@@ -182,7 +189,7 @@ class TestChangeModelLiveSwap:
 
     def test_model_config_preserved(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         original_base_url = getattr(agent.model, "base_url", None)
         original_api_key = getattr(agent.model, "api_key", None)
         set_model = _find_tool(tools, "set_model")
@@ -194,7 +201,7 @@ class TestChangeModelLiveSwap:
 
     def test_callbacks_preserved(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         tokens: list[str] = []
 
         def token_cb(t: str) -> None:
@@ -208,7 +215,7 @@ class TestChangeModelLiveSwap:
 
     def test_same_name_is_noop(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
         original = agent.model
 
@@ -222,7 +229,7 @@ class TestChangeModelLiveSwap:
 
         _save_last_model("claude-opus-4-7")
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
 
         set_model("model-b")
@@ -237,7 +244,7 @@ class TestChangeModelToolSchemaCache:
 
     def test_cached_schema_rebuilt_when_function_map_populated(self) -> None:
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
 
         def dummy_tool(x: str) -> str:
             """A dummy tool used to populate the schema cache."""
@@ -264,7 +271,7 @@ class TestChangeModelToolSchemaCache:
     def test_no_function_map_no_crash(self) -> None:
         """Calling set_model before tools are wired up must not crash."""
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         agent.function_map = {}
         agent._cached_tools_schema = None  # type: ignore[assignment]
         set_model = _find_tool(tools, "set_model")
@@ -284,7 +291,7 @@ class TestNextCallTargetsNewModel:
         that the next LLM call would target the new model.
         """
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
 
         set_model("model-c")
@@ -301,7 +308,7 @@ class TestPinnedModelDaemon:
 
         monkeypatch.setenv(PIN_TASK_MODEL_ENV, "1")
         agent, tools = _make_agent()
-        _bootstrap_live_model(agent, "model-a")
+        agent = _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
 
         result = set_model("model-b")

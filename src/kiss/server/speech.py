@@ -504,13 +504,16 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     - A "Here is the transcription:"-style preamble is stripped
       BEFORE parsing, so a preamble line never masks the language
       tag line that follows it.
-    - A JSON object (tried from the first ``{`` to the last ``}``)
+    - When the first line normalizes to a plausible language tag and
+      more lines follow, the tag and the remaining lines are returned
+      (the observed two-line shape, including trailing spaces on the
+      tag line).  Tried first: dictation that mentions a JSON object
+      (``en\\nPut {"enabled": true} in the config``) is text, not an
+      envelope.
+    - Otherwise a JSON envelope (an object tried from the first ``{``
+      to the last ``}`` that carries a ``text`` or ``language`` key)
       yields its string ``text`` value (else ``""``) and normalized
       ``language`` value.
-    - Otherwise, when the first line normalizes to a plausible
-      language tag and more lines follow, the tag and the remaining
-      lines are returned (the observed two-line shape, including
-      trailing spaces on the tag line).
     - Anything else falls back to the fence- and preamble-stripped
       reply as the text with no language.
 
@@ -525,6 +528,11 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     fenced = _FENCE_RE.match(stripped)
     candidate = fenced.group(1).strip() if fenced else stripped
     candidate = _PREAMBLE_RE.sub("", candidate).strip()
+    first, newline, rest = candidate.partition("\n")
+    if newline:
+        language = _normalize_language_tag(first)
+        if language is not None:
+            return rest.strip(), language
     start = candidate.find("{")
     end = candidate.rfind("}")
     if 0 <= start < end:
@@ -532,15 +540,10 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
             parsed: object = json.loads(candidate[start:end + 1])
         except ValueError:
             parsed = None
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and ("text" in parsed or "language" in parsed):
             raw_text = parsed.get("text")
             text = raw_text if isinstance(raw_text, str) else ""
             return text, _normalize_language_tag(parsed.get("language"))
-    first, newline, rest = candidate.partition("\n")
-    if newline:
-        language = _normalize_language_tag(first)
-        if language is not None:
-            return rest.strip(), language
     # Fall back to the fence-/preamble-stripped candidate — returning
     # the raw ``stripped`` here would forward literal ``` fences as
     # part of the user's dictated command.

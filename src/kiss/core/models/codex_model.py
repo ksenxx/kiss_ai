@@ -54,7 +54,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING, Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.codex_mcp_bridge import ToolBridge
+from kiss.core.models.codex_mcp_bridge import ToolBridge, toml_value
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
@@ -782,7 +782,9 @@ class CodexModel(CLITextModel):
         """
         cli = _find_codex_cli()
         args = [cli, "exec", "--json", "--skip-git-repo-check", *CODEX_LOCKDOWN_ARGS]
-        args.extend(["-c", f"model_instructions_file={json.dumps(instructions_file)}"])
+        # TOML, not JSON: json.dumps writes a non-BMP character (an emoji
+        # in TMPDIR) as a surrogate pair, which TOML rejects.
+        args.extend(["-c", f"model_instructions_file={toml_value(instructions_file)}"])
         if self._tool_bridge is not None:
             args.extend(self._tool_bridge.codex_args(CODEX_MCP_TOOL_TIMEOUT_SECONDS))
         if self._cli_model and self._cli_model != "default":

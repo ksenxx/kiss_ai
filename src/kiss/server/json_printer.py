@@ -97,8 +97,29 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # start time, chat / task / parent ids); broadcast once per
         # run by ``ChatSorcarAgent.run``.
         "task_settings",
+        # The framework's own records (``RECORD_EVENT_TYPES``): what a
+        # compaction removed, what each finish-gate stage found and cost,
+        # what a hand-off dropped.  Persisted so the event log answers
+        # cost and gate questions without the agent's trajectory file.
+        "compaction",
+        "gate_stage",
+        "handoff",
     }
 )
+
+RECORD_EVENT_TYPES = frozenset({"compaction", "gate_stage", "handoff"})
+"""Event types whose keyword fields are broadcast and persisted as they are."""
+
+
+def _jsonable(value: Any) -> Any:
+    """Return *value* as JSON can carry it (numbers, strings, bools, None; else its ``str``)."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    return str(value)
 
 #: Event types that, when broadcast WITH an explicit ``tabId`` AND a
 #: ``taskId``, are still recorded into that task's in-memory recording
@@ -777,6 +798,12 @@ class JsonPrinter(Printer):
         self._retired_recordings: dict[str, list[dict[str, Any]]] = {}
         self._subscribers: dict[str, set[str]] = {}
         self._subscriber_expiry: dict[str, float] = {}
+        # Subscribed tabs no surface shows any more: a tab closed in
+        # every web app while its task ran, kept subscribed because a
+        # headless client (a ``daemon_client`` run) addressed it (see
+        # ``cleanup_tab``).  Their copies reach that client only, and
+        # they are not viewers (``viewer_tab_ids``).
+        self._headless_tabs: set[str] = set()
         # Tabs whose picker currently shows a running agent's model
         # instead of their user's pick, and the model each running task
         # switched itself to (see broadcast_agent_model_pick).
@@ -861,7 +888,7 @@ class JsonPrinter(Printer):
         self._thread_local.task_id = self._coerce_task_id(binding)
 
     def subscribe_tab(
-        self, task_id: Any, tab_id: str,
+        self, task_id: Any, tab_id: str, headless: bool = False,
     ) -> list[dict[str, Any]] | None:
         """Subscribe *tab_id* to receive every event broadcast for *task_id*.
 
@@ -873,6 +900,9 @@ class JsonPrinter(Printer):
             task_id: The task identifier (``task_history.id`` int or
                 its string form).
             tab_id: The frontend tab id to subscribe.
+            headless: The subscription serves a local client only, no
+                surface shows the tab (see :meth:`cleanup_tab`); the
+                default makes the tab a viewer (again).
 
         Returns:
             The task's recording list (live, or retired and not yet
@@ -895,22 +925,26 @@ class JsonPrinter(Printer):
         # broadcast repainted the dead agent's model with the tab no
         # longer in _model_override_tabs — a stale label no later
         # restore could fix (restore early-returns for non-members).
-        return locked_call(self._model_pick_lock, self._subscribe_tab_locked, key, tab_id)
+        return locked_call(
+            self._model_pick_lock, self._subscribe_tab_locked, key, tab_id, headless,
+        )
 
     def _subscribe_tab_locked(
-        self, key: str, tab_id: str,
+        self, key: str, tab_id: str, headless: bool,
     ) -> list[dict[str, Any]] | None:
         """``subscribe_tab`` under ``_model_pick_lock``: subscribe, then catch up the model
         label."""
-        recording, catch_up = locked_call(self._lock, self._add_subscriber, key, tab_id)
+        recording, catch_up = locked_call(
+            self._lock, self._add_subscriber, key, tab_id, headless,
+        )
         if catch_up:
             self.broadcast_model_pick(catch_up, "agent", tab_id)
         return recording
 
     def _add_subscriber(
-        self, key: str, tab_id: str,
+        self, key: str, tab_id: str, headless: bool,
     ) -> tuple[list[dict[str, Any]] | None, str]:
-        """Under ``_lock``: add *tab_id* to *key*'s viewers.
+        """Under ``_lock``: add *tab_id* to *key*'s viewers (headless when *headless*).
 
         Returns the task's recording and the model the task's agent
         picked, if any: a tab joining a task whose agent already
@@ -923,6 +957,11 @@ class JsonPrinter(Printer):
             viewers = set()
             self._subscribers[key] = viewers
         viewers.add(tab_id)
+        if headless:
+            self._headless_tabs.add(tab_id)
+        else:
+            # A surface (re)opening the tab makes it a viewer again.
+            self._headless_tabs.discard(tab_id)
         catch_up = self._task_model_override.get(key, "")
         if catch_up:
             self._model_override_tabs.add(tab_id)
@@ -967,15 +1006,29 @@ class JsonPrinter(Printer):
         deactivated and removed here, and their per-task printer state
         is freed with :meth:`cleanup_task`, as no task runner frees it.
 
+        The task's buffered Bash output is flushed first, while the
+        state is still registered: a run stopped (or failed) between an
+        accepted ``bash_stream`` fragment and its timer flush has no
+        ``result`` print to flush it, and for a bridge-owned run no
+        task runner flushes it later either — ``cleanup_task`` would
+        drop the accepted text, and a flush after the unregister could
+        no longer file it under the task.  A server-owned run's buffer
+        is flushed here too; the runner's own flush before its terminal
+        ``result`` then finds it empty.
+
         Args:
             agent: The live agent instance.
             task_id: The task id the run was registered under.
         """
         key = self._coerce_task_id(task_id)
-        if locked_call(agent_state.STATE_LOCK, _unregister_bridge_state, agent, key):
-            # Not under ``STATE_LOCK``: ``cleanup_task`` waits out an
-            # in-flight bash flush, whose broadcast takes that lock.
-            self.cleanup_task(key)
+        try:
+            # Not under ``STATE_LOCK``: the flush's broadcast takes it.
+            self.flush_bash_output(key)
+        finally:
+            if locked_call(agent_state.STATE_LOCK, _unregister_bridge_state, agent, key):
+                # Not under ``STATE_LOCK``: ``cleanup_task`` waits out an
+                # in-flight bash flush, whose broadcast takes that lock.
+                self.cleanup_task(key)
 
     def charge_task_usage(
         self, task_agent: Any, task_id: str, budget: float, tokens: int, steps: int,
@@ -1092,6 +1145,46 @@ class JsonPrinter(Printer):
         """Under ``_lock``: the unexpired subscriber tab ids of *key*."""
         self._sweep_expired_subscribers()
         return list(self._subscribers.get(key) or ())
+
+    def _fanout_plan(self, task_id: Any) -> tuple[list[str], set[str]]:
+        """Return *task_id*'s fan-out targets and which of them are headless.
+
+        One lock hold for both, on the per-event delivery path.
+
+        Args:
+            task_id: The task identifier from the event's ``taskId``.
+
+        Returns:
+            ``(targets, headless)``: the subscriber tab ids, and the
+            subset no surface shows (see :meth:`cleanup_tab`), whose
+            copies go to the local peers that addressed them only.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return [], set()
+        return locked_call(self._lock, self._fanout_plan_locked, key)
+
+    def _fanout_plan_locked(self, key: str) -> tuple[list[str], set[str]]:
+        """``_fanout_plan`` under ``_lock``."""
+        targets = self._live_viewers(key)
+        return targets, {t for t in targets if t in self._headless_tabs}
+
+    def viewer_tab_ids(self, task_id: Any) -> list[str]:
+        """Return the tab ids showing *task_id* on some surface.
+
+        The fan-out targets of :meth:`_fanout_targets` minus the
+        headless ones: the tabs a web app has open for the task, which
+        is what a sub-agent spawn parents its tab under
+        (``SorcarAgent._subagent_parent_tab_id``).
+
+        Args:
+            task_id: The task identifier.
+
+        Returns:
+            The viewer tab ids; empty when no surface shows the task.
+        """
+        targets, headless = self._fanout_plan(task_id)
+        return [t for t in targets if t not in headless]
 
     def tasks_for_tab(self, tab_id: str) -> list[str]:
         """Return the task keys *tab_id* is currently subscribed to.
@@ -1591,7 +1684,9 @@ class JsonPrinter(Printer):
     def steps_offset(self, value: int) -> None:
         self._write_offset(self._steps_offsets, value)
 
-    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
+    def cleanup_tab(
+        self, tab_id: str, keep_task_id: Any = None, headless: bool = False,
+    ) -> None:
         """Remove *tab_id* from every subscriber and override set.
 
         Should be called when a frontend tab is closed.  The
@@ -1609,10 +1704,22 @@ class JsonPrinter(Printer):
         every window, so dropping and re-adding that subscription
         would fan a task event emitted in between out to no window.
 
+        A tab closed on every surface while its task runs passes that
+        task as *keep_task_id* with *headless* set when a headless
+        client addressed the tab (a ``daemon_client`` run's own
+        ``api-…`` tab): the run's copies are that client's only way to
+        see its result, so the subscription stays, but the tab is no
+        longer a viewer (:meth:`viewer_tab_ids`) and its copies reach
+        no web app (:meth:`WebSocketPrinter._fanout_stamped`).  A
+        surface resuming the chat into the tab subscribes it again and
+        clears the mark.
+
         Args:
             tab_id: The frontend tab identifier to drop.
             keep_task_id: A task whose subscription of *tab_id* is
                 left in place (``None`` drops every subscription).
+            headless: Mark the kept subscription as shown on no
+                surface.  Ignored without a kept task.
         """
         if not tab_id:
             return
@@ -1635,22 +1742,28 @@ class JsonPrinter(Printer):
             self._model_pick_lock,
             locked_call, self.delivery_lock,
             locked_call, self._lock,
-            self._unsubscribe_tab, tab_id, keep_key,
+            self._unsubscribe_tab, tab_id, keep_key, headless and bool(keep_key),
         )
 
-    def _unsubscribe_tab(self, tab_id: str, keep_key: str) -> None:
+    def _unsubscribe_tab(self, tab_id: str, keep_key: str, headless: bool) -> None:
         """Under ``_model_pick_lock``, ``delivery_lock`` and ``_lock``: drop *tab_id* from every
-        task but *keep_key*."""
+        task but *keep_key*, marked headless when *headless*."""
         self._model_override_tabs.discard(tab_id)
         self._sweep_expired_subscribers()
+        kept = False
         for task_key in list(self._subscribers.keys()):
             if task_key == keep_key:
+                kept = tab_id in self._subscribers[task_key]
                 continue
             viewers = self._subscribers[task_key]
             viewers.discard(tab_id)
             if not viewers:
                 self._subscribers.pop(task_key, None)
                 self._subscriber_expiry.pop(task_key, None)
+        if headless and kept:
+            self._headless_tabs.add(tab_id)
+        else:
+            self._headless_tabs.discard(tab_id)
 
     def cleanup_task(
         self,
@@ -1744,9 +1857,18 @@ class JsonPrinter(Printer):
             if subscriber_linger_seconds <= 0:
                 self._subscribers.pop(key, None)
                 self._subscriber_expiry.pop(key, None)
+                self._prune_headless_tabs()
             else:
                 self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
         self._sweep_expired_subscribers()
+
+    def _prune_headless_tabs(self) -> None:
+        """Under ``_lock``: forget headless marks of tabs subscribed to nothing any more."""
+        if self._headless_tabs:
+            subscribed: set[str] = set()
+            for viewers in self._subscribers.values():
+                subscribed |= viewers
+            self._headless_tabs &= subscribed
 
     def _pop_bash_state(self, key: str) -> _BashState | None:
         """Under ``_bash_lock``: remove *key*'s bash state, cancelling its flush timer."""
@@ -1766,10 +1888,14 @@ class JsonPrinter(Printer):
         if not self._subscriber_expiry:
             return
         now = time.monotonic()
+        expired = False
         for key, deadline in list(self._subscriber_expiry.items()):
             if now >= deadline:
                 del self._subscriber_expiry[key]
                 self._subscribers.pop(key, None)
+                expired = True
+        if expired:
+            self._prune_headless_tabs()
 
     def _buffer_bash_fragment(self, text: str) -> tuple[_BashState | None, bool]:
         """Under ``_lock``: append a bash_stream fragment to the task's buffer.
@@ -2351,8 +2477,19 @@ class JsonPrinter(Printer):
                     # effort it ran at ("" = the model's own).
                     "routine": bool(kwargs.get("routine", False)),
                     "effort": str(kwargs.get("effort") or ""),
+                    # Why the provider ended the response (``end_turn``,
+                    # ``max_tokens``, ``refusal``, ``content_filter``...): a
+                    # session lost to a filter or an output cap is then
+                    # visible in the event log instead of inferred.
+                    "stop_reason": str(kwargs.get("stop_reason") or ""),
                 }
             )
+            return
+        if type in RECORD_EVENT_TYPES:
+            # A record of something the framework did (a compaction, a
+            # finish-gate stage, a hand-off): the keyword fields are the
+            # event, persisted as given.
+            self.broadcast({"type": type, **{k: _jsonable(v) for k, v in kwargs.items()}})
             return
         if type == "result":
             # A flush timer armed by the last ``bash_stream`` fragment

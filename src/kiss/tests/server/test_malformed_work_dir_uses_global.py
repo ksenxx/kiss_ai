@@ -31,7 +31,11 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.core.user_config as vc
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import (
+    _MAX_LINE_BYTES,
+    RemoteAccessServer,
+    _generate_self_signed_cert,
+)
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 MALFORMED_WORK_DIRS: tuple[Any, ...] = (123, ["x"], {"x": 1}, True)
@@ -95,9 +99,12 @@ class TestMalformedWorkDirUsesGlobal(IsolatedAsyncioTestCase):
         is now B for both), then send *payloads* from A and return A's
         first reply of *reply_type*."""
         url = f"wss://127.0.0.1:{self.port}/ws"
+        # The daemon's frame limit, not the library's 1 MiB default: the
+        # ``ready`` fan-out replays the whole composer history, which
+        # holds every prompt the process's earlier tests submitted.
         async with (
-            connect(url, ssl=no_verify_ssl()) as ws_a,
-            connect(url, ssl=no_verify_ssl()) as ws_b,
+            connect(url, ssl=no_verify_ssl(), max_size=_MAX_LINE_BYTES) as ws_a,
+            connect(url, ssl=no_verify_ssl(), max_size=_MAX_LINE_BYTES) as ws_b,
         ):
             await self._auth(ws_a)
             await self._auth(ws_b)

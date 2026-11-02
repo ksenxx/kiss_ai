@@ -84,7 +84,9 @@ def test_wait_until_still_ends_at_exit_or_deadline(tmp_path: Path) -> None:
 
 def test_long_foreground_sleep_is_refused(tmp_path: Path) -> None:
     tools = UsefulTools(work_dir=str(tmp_path))
-    out = tools.Bash("sleep 295; echo x", "poll")
+    # Since 2026-10-31 only a sleep longer than the call's timeout is refused
+    # (a shorter one runs, or waits on a running job instead).
+    out = tools.Bash("sleep 295; echo x", "poll", timeout_seconds=200)
     assert out.startswith("REFUSED: the Bash call did NOT run: a foreground sleep of 295s")
     assert 'until="<regex' in out
     assert tools.Bash("sleep 0.1 && echo short", "short") == "short\n"

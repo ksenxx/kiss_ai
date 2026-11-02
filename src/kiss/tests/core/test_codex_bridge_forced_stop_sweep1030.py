@@ -23,8 +23,17 @@ from typing import Any
 
 from kiss.core import stop_signal
 from kiss.core.models.codex_mcp_bridge import BRIDGE_TOKEN_ENV, STOP_WAIT_SECONDS, ToolBridge
-from kiss.core.tool_interrupt import inject_async_exception
+from kiss.core.tool_interrupt import (
+    ToolCallInterrupted,
+    end_tool_call,
+    inject_async_exception,
+    new_tool_call,
+    register_tool_call,
+    unregister_tool_call,
+    wait_interruptible,
+)
 from kiss.server.task_runner import _TaskRunnerMixin
+from kiss.tests.server.pause import Pause
 
 SCHEMA = [
     {
@@ -48,6 +57,29 @@ class _SlowTool:
         self.started.set()
         try:
             time.sleep(TOOL_SECONDS)
+        finally:
+            self.ended_at.append(time.monotonic())
+        return call["name"], "done"
+
+
+class _PatientTool(_SlowTool):
+    """Executor whose tool works for four times STOP_WAIT_SECONDS unless it is interrupted.
+
+    Registered as the agent registers a tool call (``kiss_agent``), so the
+    bridge's interrupt reaches it: cooperatively through
+    ``wait_interruptible``, or injected after the grace period.
+    """
+
+    def __call__(self, call: dict[str, Any]) -> tuple[str, str]:
+        self.started.set()
+        token = new_tool_call(call["name"])
+        register_tool_call(token)
+        try:
+            wait_interruptible(threading.Event(), 4 * STOP_WAIT_SECONDS)
+            end_tool_call(token)
+        except ToolCallInterrupted:
+            unregister_tool_call(token)
+            return call["name"], "interrupted"
         finally:
             self.ended_at.append(time.monotonic())
         return call["name"], "done"
@@ -135,3 +167,27 @@ def test_a_keyboard_interrupt_without_a_stop_event_bounds_the_wait_too() -> None
 
     assert task.interrupted_at is not None
     assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at
+
+
+def test_a_keyboard_interrupt_during_the_listener_shutdown_still_bounds_the_wait() -> None:
+    """A Ctrl+C landing while the block's exit stops the listener, before the wait for the
+    running tool began, is held like one landing in the wait: the tool is interrupted and
+    the exit returns within STOP_WAIT_SECONDS, not once the tool would have ended by itself
+    (and not at once, with the tool still working)."""
+    tool = _PatientTool()
+    task = _TaskThread(tool, request_stop=False)
+    # The task thread is held as it enters the listener's shutdown, so the interrupt
+    # lands in that step for sure (released, the thread raises it right there).
+    shutdown = Pause(ToolBridge._stop_listener.__code__, lambda loc: True)
+    with shutdown:
+        task.start()
+        assert task.in_block.wait(10)
+        assert shutdown.paused.wait(10), "the block's exit never reached the listener shutdown"
+        injected_at = time.monotonic()
+        assert inject_async_exception(task.ident or 0, KeyboardInterrupt) == 1
+        shutdown.release()
+        task.join(STOP_WAIT_SECONDS + 10)
+
+    assert task.interrupted_at is not None
+    assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at, "the tool kept working"
+    assert task.interrupted_at - injected_at < STOP_WAIT_SECONDS + 1, "the wait was open-ended"

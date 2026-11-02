@@ -51,6 +51,8 @@ UPDATE_INTERVAL_S = 600.0
 UPDATE_BUDGET_USD = 1.0
 # Updates of tasks that stopped being polled are dropped after this long.
 _PRUNE_AFTER_S = 3600.0
+# How often a blocked ``_ChildStopEvent.wait`` re-checks the parent's event.
+_PARENT_STOP_POLL_S = 0.1
 
 # ``(parent_agent, task_id) -> (answer_html, cost_usd)``.
 TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
@@ -310,11 +312,14 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     model unless the script defines ``model()``, in the parent's work
     dir.
 
-    The child runs on the update thread, which is bound to the task's
-    stop event first: a Stop on the task's tab reaches the child the
-    way it reaches a ``run_parallel`` child (every stop check of the
-    child's loop polls that event), so a stopped task never leaves its
-    update child calling the model until its budget cap.
+    The child runs on the update thread, which is bound first to a stop
+    event of its own that observes the task's
+    (:class:`_ChildStopEvent`): a Stop on the task's tab reaches the
+    child the way it reaches a ``run_parallel`` child (every stop check
+    of the child's loop polls that event), so a stopped task never
+    leaves its update child calling the model until its budget cap;
+    a Stop on the child's own nested tab sets only the child's event,
+    so the task and its other children keep running.
 
     Its spend is charged to the task whatever way the run ends.  While
     the task still runs it is banked on *parent_agent*'s live counters,
@@ -355,8 +360,10 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     printer = getattr(parent_agent, "printer", None)
     # Before the child is built: the agent captures its thread's event
     # at construction for its tools, and the printer bridge records it
-    # as the child's own registry state's ``stop_event``.
-    stop_signal.set_thread_stop_event(_task_stop_event(task_id))
+    # as the child's own registry state's ``stop_event`` — the event a
+    # Stop on the child's nested tab sets, so it must not be the
+    # parent's own object.
+    stop_signal.set_thread_stop_event(_ChildStopEvent(_task_stop_event(task_id)))
     # The tab the chat pages show the parent under — for a sub-agent
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
@@ -393,6 +400,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             tools_hook=ask.tools_hook,
             llm_call_hook=ask.llm_call_hook,
             tool_call_hook=ask.tool_call_hook,
+            llm_response_hook=ask.llm_response_hook,
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
             max_budget=UPDATE_BUDGET_USD,
@@ -424,6 +432,49 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
                     parent_tab_id,
                 )
     return _extract_result_summary(result), budget
+
+
+class _ChildStopEvent(threading.Event):
+    """The stop event of an in-process child: its own, observing its parent's.
+
+    ``set`` (a Stop on the child's nested tab) sets only this event, so
+    the parent task and its other children keep running; ``is_set``
+    and ``wait`` also report the *parent* event once set (a Stop on the
+    task's tab), so the child ends with its task.  ``wait`` polls the
+    parent in bounded slices of :data:`_PARENT_STOP_POLL_S`, since a
+    ``set`` of the parent never wakes this event's own condition.
+
+    Args:
+        parent: The parent task's stop event, or ``None`` when the task
+            is no longer registered (nothing of it to observe).
+    """
+
+    def __init__(self, parent: threading.Event | None) -> None:
+        super().__init__()
+        self._parent = parent
+
+    def is_set(self) -> bool:
+        """Return whether this event or the parent's is set."""
+        return super().is_set() or (self._parent is not None and self._parent.is_set())
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until this event or the parent's is set, or *timeout* seconds pass.
+
+        Args:
+            timeout: Seconds to wait at most; ``None`` waits until set.
+
+        Returns:
+            Whether the event (own or parent's) is set.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            slice_s = _PARENT_STOP_POLL_S
+            if deadline is not None:
+                slice_s = min(slice_s, deadline - time.monotonic())
+                if slice_s <= 0:
+                    return False
+            super().wait(slice_s)
+        return True
 
 
 def _task_stop_event(task_id: str) -> threading.Event | None:
@@ -545,8 +596,8 @@ class TaskUpdateRunner:
         try:
             text, cost = self._run_sea(parent_agent, task_id)
         except KeyboardInterrupt as exc:
-            # The task was stopped while its update ran: the child shares
-            # the task's stop event and ends with it.
+            # The task (or this update alone) was stopped while the update
+            # ran: the child's stop event observes the task's and ends with it.
             error = "The task was stopped before this update finished."
             cost = getattr(exc, "task_update_cost", 0.0)
         except Exception as exc:
