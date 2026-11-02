@@ -100,7 +100,8 @@ def test_dispatch_result_returns_an_error_string_when_the_caller_cannot_be_read(
         parent_agent=_CallerWithBrokenWorktrees(),
     )
     assert isinstance(plan, dict), plan
-    del plan["alias"]  # as the job thread does before ``dispatch_result(**plan)``
+    for key in ("alias", "model_note"):  # as the job thread does before ``dispatch_result(**plan)``
+        del plan[key]
     result = agent_dispatch.dispatch_result(**plan)
     assert result == "Error: the sh agent task could not run: worktree table unreadable"
     assert (tmp_path / "sub").is_dir()
@@ -111,6 +112,10 @@ class _Caller:
 
     model_name = "m"
     work_dir = ""
+    # Asks for sub-agents: a child on the caller's own model family is not
+    # refused (``fanout_guard.same_family_conflict``), so the budget rule
+    # under test is reached.
+    task_description = "size the budgets of the sub-agents"
 
     def _subagent_budget_share(self, num_tasks: int) -> float:
         """Half of the remainder for one sub-task."""

@@ -30,6 +30,7 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.docker_manager import _KILL_WAIT_S, MAX_OUTPUT_CHARS, STOPPED_MESSAGE
 from kiss.agents.sorcar.exec_bridge import ExecBridge
+from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
 
 
 class _Bridge(ThreadingHTTPServer):
@@ -110,11 +111,11 @@ def test_stop_returns_within_kill_wait_even_when_the_kill_handler_is_slow() -> N
 def test_run_commands_parallel_applies_the_bash_shell_guards() -> None:
     with _bridge() as (server, bridge):
         refusal = bridge.Bash("rm -rf /", "refused")
-        assert refusal.startswith("Blocked:"), refusal
+        assert refusal == DESTRUCTIVE_VERDICT, refusal
         report = bridge.run_commands_parallel(json.dumps(["rm -rf /", "echo ok"]))
         assert server.commands == ["echo ok"], server.commands
     assert report.startswith("2 commands: 1 succeeded, 1 failed, 0 timed out.")
-    assert "Blocked:" in report
+    assert DESTRUCTIVE_VERDICT in report
 
 
 def test_run_commands_parallel_rejects_bad_arguments_like_the_other_tools() -> None:

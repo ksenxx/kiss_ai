@@ -63,14 +63,17 @@ _ONLY_CHECKS = (
 )
 
 #: Shell commands that change files: redirections (not to ``/dev/null``), here
-#: documents, copy/move/patch and in-place editors, ``--fix`` runs and builds
-#: (Make, CMake, Ninja), unless every Make target is a check (``make test``).
-#: Package tools are read word by word instead (:data:`WRITING_SUBCOMMANDS`).
+#: documents, copy/move/delete/patch and in-place editors (``rm`` the command,
+#: not the ``--rm`` option), ``--fix`` runs and builds (Make, CMake, Ninja),
+#: unless every Make target is a check (``make test``).  Package tools are
+#: read word by word instead (:data:`WRITING_SUBCOMMANDS`).
 WRITING_COMMAND = re.compile(
     r"(?<![<>&\d])>{1,2}(?!&)\s*(?!/dev/null)\S"
     r"|<<"
     r"|--fix\b"
-    r"|\b(?:tee|cp|mv|rsync|install|patch|touch|mkdir|dd|truncate|chmod|chown)\b"
+    r"|\b(?:tee|cp|mv|rsync|install|patch|touch|mkdir|rmdir|unlink|shred|dd|truncate"
+    r"|chmod|chown)\b"
+    r"|(?<!-)\brm\b"
     r"|\bsed\s+(?:-[a-zA-Z]*i|--in-place)"
     rf"|\b(?:make|cmake|ninja)\b(?!{_ONLY_CHECKS})"
 )
@@ -83,7 +86,8 @@ _APT = re.compile(r"(?:install|remove|purge|upgrade)\b")
 #: run pytest``, ``npm test``, ``git diff``) are checks.  ``npm run build``
 #: (Yarn's, pnpm's) builds too.
 WRITING_SUBCOMMANDS: dict[str, re.Pattern[str]] = {
-    "git": re.compile(r"(?:apply|checkout|stash|reset|revert|cherry-pick|merge|rebase|pull)\b"),
+    "git": re.compile(r"(?:apply|checkout|stash|reset|revert|cherry-pick|merge|rebase|pull"
+                      r"|rm|mv|clean|restore|switch)\b"),
     "pip": _PIP,
     "pip3": _PIP,
     "uv": re.compile(r"(?:add|remove|sync|lock|build)\b"),

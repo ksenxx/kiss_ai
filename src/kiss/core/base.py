@@ -5,12 +5,16 @@
 
 """Base agent class with common functionality for all KISS agents."""
 
+import contextlib
 import logging
 import re
 import shutil
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -58,6 +62,54 @@ if sys.platform == "win32":  # pragma: no branch
     SYSTEM_PROMPT_LITE += _WINDOWS_SUFFIX
 
 
+@dataclass
+class TrajectoryScope:
+    """The trajectory files of one run, as :func:`collecting_trajectories` collects them.
+
+    Attributes:
+        paths: The trajectory file every agent created under the scope
+            saved, in the order of the saves.
+        save: Whether those agents write their trajectory at all;
+            ``False`` leaves nothing on disk (a training loop that would
+            only delete the files).
+    """
+
+    paths: list[Path] = field(default_factory=list)
+    save: bool = True
+
+
+_trajectory_scope: ContextVar[TrajectoryScope | None] = ContextVar(
+    "kiss_trajectory_scope", default=None
+)
+
+
+@contextlib.contextmanager
+def collecting_trajectories(save: bool = True) -> Iterator[TrajectoryScope]:
+    """Collect the trajectory files of every agent created in the block.
+
+    Every :class:`Base` agent constructed while the block is active, on
+    the thread that entered it or on a thread the framework runs tools
+    on under a copy of its context (the Codex tool bridge's threads) —
+    a run's agent and every helper agent it creates (Sorcar's session
+    executors, its summarizer, the task classifier, the commit-message
+    writer, ...) — records the file it saves on the yielded
+    :class:`TrajectoryScope`, or saves none when *save* is ``False``.
+    What a headless runner uses to know every file a run wrote without
+    relying on the files' naming convention.  Scopes nest: the innermost
+    one applies.  A sub-agent dispatched through the daemon
+    (``run_agent``, ``run_parallel``) is another task, outside the scope.
+
+    Args:
+        save: Whether the agents of the block write their trajectories.
+    """
+    scope = TrajectoryScope(save=save)
+    token = _trajectory_scope.set(scope)
+    try:
+        yield scope
+    finally:
+        _trajectory_scope.reset(token)
+
+
 class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
@@ -98,6 +150,8 @@ class Base:
         self.budget_used = 0.0
         self.total_tokens_used = 0
         self.step_count = 0
+        # The run this agent was created for (see collecting_trajectories).
+        self._trajectory_scope = _trajectory_scope.get()
 
     @staticmethod
     def _take_agent_id() -> int:
@@ -174,11 +228,17 @@ class Base:
         trajectory visualizer, and trajectories are large enough that a
         truncate-then-stream write leaves a wide window in which a
         reader sees an empty or half-written document.
+
+        Under a :func:`collecting_trajectories` scope the path is
+        recorded on it, or nothing is written when the scope says so.
         """
-        atomic_write_text(
-            self.get_trajectory_path(),
-            dump_yaml(self._build_state_dict(), indent=2),
-        )
+        scope = self._trajectory_scope
+        if scope is not None and not scope.save:
+            return
+        path = self.get_trajectory_path()
+        atomic_write_text(path, dump_yaml(self._build_state_dict(), indent=2))
+        if scope is not None and path not in scope.paths:
+            scope.paths.append(path)
 
     def get_trajectory_path(self) -> Path:
         """Return the path where this agent's trajectory is/will be saved.

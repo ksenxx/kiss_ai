@@ -73,6 +73,9 @@ def _parent(repo: str) -> SorcarAgent:
     parent = SorcarAgent("run-config-parent")
     parent.model_name = PARENT_MODEL
     parent._launch_model_name = PARENT_MODEL
+    # Its task asks for sub-agents, so children on its own model family are
+    # not refused (``fanout_guard.same_family_conflict``).
+    parent.task_description = "PARENT run the sub-agents"
     parent.max_budget = 4.0
     parent.budget_used = 1.0
     setattr(parent, "_chat_id", "chat-parent")  # noqa: B010 - private attribute of the real agent
@@ -139,10 +142,13 @@ class Sea(BaseSea):
         """The explicit ``review`` wins over the script's ``shell``; the script beats the
         inherited budget."""
         parent = _parent(self.repo)
+        # The model is pinned to the parent's: a review left to inherit it
+        # would be moved to another model family for a second opinion.
         out = _run_agent(
             self.repo,
             "say hi",
             agent=str(self.sea),
+            model=PARENT_MODEL,
             tool_profile="review",
             timeout="45",
             parent_agent=parent,
@@ -155,9 +161,9 @@ class Sea(BaseSea):
             ran
         )
         assert "timeout=45s" in ran
-        # Inherited from the parent: its model, its chat and half its remaining budget.
+        # Inherited from the parent: its chat and half its remaining budget.
         inherited = ran.split("inherited=")[1].split(" ")[0].split(",")
-        assert {"model", "chat_id", "max_budget"} <= set(inherited), ran
+        assert {"chat_id", "max_budget"} <= set(inherited), ran
         # Only the inherited budget share was replaced; the explicit profile stood.
         assert ran.endswith("pinned=max_budget(1.5->0.75)"), ran
 

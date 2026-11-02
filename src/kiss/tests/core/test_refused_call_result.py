@@ -167,3 +167,37 @@ def test_the_latest_refusal_is_the_one_reminded_and_only_once() -> None:
         "build: ok" + REISSUE_REMINDER.format(name="lint"),
         "lint: clean",
     ]
+
+
+def test_a_refused_finish_owes_no_reminder() -> None:
+    """A finish refused by the hook (a gate verdict) is not reminded on the next call.
+
+    The verdict itself says what to do; a reminder to re-issue the finish
+    contradicted it and sent the model straight back into the gate.
+    """
+
+    def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
+        if turn == 0:
+            return _tool_call_response("Done.", "finish", {"result": "early"})
+        if turn == 1:
+            return _tool_call_response("Linting.", "lint", {})
+        return _tool_call_response("Done.", "finish", {"result": "OK"})
+
+    def gate(name: str, args: dict[str, Any]) -> Verdict:
+        if name == "finish" and args.get("result") == "early":
+            return refuse("Not finished: run lint first.")
+        return ALLOW
+
+    executions, tools = _tools()
+    requests_log: list[dict[str, Any]] = []
+    server = _serve(respond, requests_log)
+    try:
+        result, _agent = _run_agent(server, tools, tool_call_hook=gate)
+    finally:
+        server.shutdown()
+    assert result == "OK"
+    assert executions == ["lint"]
+    assert _results(requests_log[2]) == [
+        refusal_result("finish", "Not finished: run lint first."),
+        "lint: clean",
+    ]

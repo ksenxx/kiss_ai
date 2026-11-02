@@ -68,13 +68,14 @@ def test_foreground_command_does_not_run_in_a_directory_no_guard_checked(
     tools = UsefulTools(work_dir=str(worktree))
     remove = _RemoveAtLaunch(worktree)
     with Pause(UsefulTools._spawn.__code__, remove):
-        out = tools.Bash(COMMAND, "write the notes")
+        # a timeout within the detach grace keeps the command on the foreground path
+        out = tools.Bash(COMMAND, "write the notes", timeout_seconds=60)
     assert remove.calls == 1
     assert out.startswith("Error: ") and str(worktree) in out, out
     assert notes.read_text() == "old\n"
     assert not worktree.exists()
     # The next call picks the parent repository and checks it.
-    assert tools.Bash(COMMAND, "write the notes") == HEREDOC_VERDICT.format(path=notes)
+    assert tools.Bash(COMMAND, "write the notes").startswith(HEREDOC_VERDICT.format(path=notes))
     assert notes.read_text() == "old\n"
 
 

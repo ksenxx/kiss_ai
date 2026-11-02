@@ -72,15 +72,17 @@ def make_messages_db(
     store.mkdir(parents=True, exist_ok=True)
     db = store / "messages.db"
     conn = sqlite3.connect(db)
-    conn.executescript(_SCHEMA)
-    conn.executemany("INSERT INTO chats (jid, name, last_message_time) VALUES (?,?,?)", chats)
-    conn.executemany(
-        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me,"
-        " media_type) VALUES (?,?,?,?,?,?,?)",
-        messages,
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.executescript(_SCHEMA)
+        conn.executemany("INSERT INTO chats (jid, name, last_message_time) VALUES (?,?,?)", chats)
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me,"
+            " media_type) VALUES (?,?,?,?,?,?,?)",
+            messages,
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return db
 
 

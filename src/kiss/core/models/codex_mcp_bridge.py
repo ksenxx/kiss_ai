@@ -223,7 +223,8 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
         """Log a handler failure instead of printing a traceback to stderr.
 
         The usual cause is a proxy that went away (Codex exited) before
-        the reply was written.
+        the reply was written, or a connection that never sent its
+        request line within :attr:`_BridgeHandler.timeout`.
 
         Args:
             request: The connection the handler was serving.
@@ -234,6 +235,16 @@ class _BridgeServer(socketserver.ThreadingTCPServer):
 
 class _BridgeHandler(socketserver.StreamRequestHandler):
     """Handle one request: read a JSON line, answer with a JSON line."""
+
+    # Bound on each socket read and write (``StreamRequestHandler`` sets
+    # it on the accepted socket).  The proxy sends its request line the
+    # moment it connects and reads the reply at once, so a connection
+    # silent this long is a client that will never finish its line: the
+    # handler fails and its socket is closed instead of waiting for good,
+    # since ``ToolBridge._close`` joins only the handlers executing a
+    # call.  The tool's execution itself is no socket I/O and is not
+    # bounded by this.
+    timeout = 5.0
 
     def handle(self) -> None:
         """Dispatch the request to the tool list or the tool executor."""
@@ -373,21 +384,35 @@ class ToolBridge:
         refusal, set under the same lock the registration takes, is
         what keeps it from running a tool after the block.
 
-        The refusal and the wait both run in a ``finally``: a Stop
-        injected while the listener is shutting down must still
-        interrupt and await the calls already executing, or a long tool
-        would keep working on its daemon thread after the run returned.
+        A Stop (an injected ``KeyboardInterrupt``) landing while the
+        listener shuts down or the refusal is set must still interrupt
+        and await the calls already executing, or a long tool would keep
+        working on its daemon thread after the run returned.  A
+        ``finally`` is not enough: the exception lands at any bytecode,
+        inside the ``finally`` too, and skips the rest of it.  So each
+        step is retried until it completes (all three are idempotent)
+        and the exception is handed to the wait, which bounds it and
+        re-raises it at the end.
         """
-        try:
-            if _spawned(self._thread):
-                self._server.shutdown()
-                self._thread.join()
-        finally:
-            self._server.server_close()
-            locked_call(self._server.state_lock, self._server.refuse_new_calls)
-            self._wait_for_calls()
+        steps = [self._stop_listener, self._server.server_close, self._refuse_new_calls]
+        forced_stop: KeyboardInterrupt | None = None
+        while steps:
+            try:
+                steps[0]()
+                del steps[0]
+            except KeyboardInterrupt as e:
+                forced_stop = e
+        self._wait_for_calls(forced_stop)
 
-    def _wait_for_calls(self) -> None:
+    def _stop_listener(self) -> None:
+        if _spawned(self._thread):
+            self._server.shutdown()
+            self._thread.join()
+
+    def _refuse_new_calls(self) -> None:
+        locked_call(self._server.state_lock, self._server.refuse_new_calls)
+
+    def _wait_for_calls(self, forced_stop: KeyboardInterrupt | None = None) -> None:
         """Wait for the calls still executing; a Stop interrupts them and bounds the wait.
 
         Without a Stop the wait is open-ended: the tool's work (a file
@@ -407,12 +432,12 @@ class ToolBridge:
 
         A ``KeyboardInterrupt`` raised in this thread meanwhile (the
         daemon's forced Stop, injected a second after the stop event;
-        a Ctrl+C) is a Stop too: it is held until the bounded wait ends
-        and then re-raised, so it cannot cut the wait short and leave
-        an interrupted tool working after the run has returned.
+        a Ctrl+C) is a Stop too, as is *forced_stop*, one that landed
+        earlier in :meth:`_close`: it is held until the bounded wait
+        ends and then re-raised, so it cannot cut the wait short and
+        leave an interrupted tool working after the run has returned.
         """
         deadline: float | None = None
-        forced_stop: KeyboardInterrupt | None = None
         while True:
             try:
                 running = locked_call(self._server.state_lock, self._server.running_handlers)

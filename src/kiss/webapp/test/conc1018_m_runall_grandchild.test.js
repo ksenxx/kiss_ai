@@ -27,6 +27,12 @@
 // The runner is copied into a scratch directory holding one suite, with
 // its 2-minute SUITE_TIMEOUT_MS lowered to SHORT_TIMEOUT_MS, 1 s (the
 // constant is not configurable, by design: the copy is the only knob).
+// The runner arms that cap the moment it has spawned the suite; the copy
+// arms the short cap only once the suite has printed READY_MESSAGE, which
+// it does after writing its pid file, so that a suite slow to start on a
+// loaded host is not killed before it has written anything (that would
+// fail the checks below without any fault of the runner).  Until then a
+// generous watchdog, STARTUP_WATCHDOG_MS, caps a suite that never starts.
 
 'use strict';
 
@@ -37,10 +43,14 @@ const path = require('path');
 const {spawnSync} = require('child_process');
 
 const RUNNER = path.join(__dirname, 'run-all.js');
-// Long enough for the scratch suite to start node, spawn its `sleep`
-// grandchild and write the pid file on a loaded host; the runner's real
-// cap is its own business (makeScratchRunner patches only this value).
+// The scratch runner's cap on a suite that has printed READY_MESSAGE;
+// the runner's real cap is its own business (makeScratchRunner patches
+// only this value and when it is armed).
 const SHORT_TIMEOUT_MS = 1000;
+// Long enough for the scratch suite to start node, spawn its `sleep`
+// grandchild and write the pid file on a loaded host.
+const STARTUP_WATCHDOG_MS = 15000;
+const READY_MESSAGE = 'stalling suite started';
 
 // prctl(PR_SET_CHILD_SUBREAPER) is a Linux system call: on macOS and
 // Windows the helper below cannot adopt the suites' orphans, so the
@@ -121,9 +131,30 @@ function makeScratchRunner() {
   // The cap's value is the runner's business; only the declaration matters.
   const needle = /const SUITE_TIMEOUT_MS = [^;]+;/;
   assert.ok(needle.test(src), 'run-all.js still declares the timeout');
+  const armed = 'const timer = setTimeout(onTimeout, SUITE_TIMEOUT_MS);';
+  assert.ok(
+    src.includes(armed),
+    'run-all.js still arms the timeout once the suite is spawned',
+  );
+  // Only when the cap is armed changes: `onTimeout`, `report` and the
+  // exit/close handlers stay the runner's own.
+  const armedOnceReady = [
+    `let timer = setTimeout(onTimeout, ${STARTUP_WATCHDOG_MS});`,
+    "let startup = '';",
+    "child.stdout.on('data', chunk => {",
+    '  if (startup === null) return;',
+    '  startup += chunk;',
+    `  if (!startup.includes(${JSON.stringify(READY_MESSAGE)})) return;`,
+    '  startup = null;',
+    '  clearTimeout(timer);',
+    '  timer = setTimeout(onTimeout, SUITE_TIMEOUT_MS);',
+    '});',
+  ].join('\n  ');
   fs.writeFileSync(
     path.join(dir, 'run-all.js'),
-    src.replace(needle, `const SUITE_TIMEOUT_MS = ${SHORT_TIMEOUT_MS};`),
+    src
+      .replace(needle, `const SUITE_TIMEOUT_MS = ${SHORT_TIMEOUT_MS};`)
+      .replace(armed, () => armedOnceReady),
   );
   return dir;
 }
@@ -133,18 +164,20 @@ function makeScratchRunner() {
  * long-lived `sleep` grandchild and records "<suite pid> <grandchild
  * pid>" in `pidFile`.  `detached` puts the grandchild in its own
  * process group; `exits` makes the suite exit right away instead of
- * hanging.
+ * hanging; `startDelayMs` makes it sit idle that long before doing any
+ * of this, as a suite slow to start on a loaded host would.
  */
-function writeSuite(dir, pidFile, {detached, exits}) {
+function writeSuite(dir, pidFile, {detached, exits, startDelayMs = 0}) {
   fs.writeFileSync(
     path.join(dir, 'zz_stall.test.js'),
     [
       "'use strict';",
       "const {spawn} = require('child_process');",
       "const fs = require('fs');",
+      `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${startDelayMs});`,
       `const child = spawn('sleep', ['300'], {stdio: 'inherit', detached: ${detached}});`,
       `fs.writeFileSync(${JSON.stringify(pidFile)}, process.pid + ' ' + child.pid);`,
-      "console.log('stalling suite started');",
+      `console.log(${JSON.stringify(READY_MESSAGE)});`,
       exits ? 'process.exit(0);' : 'setInterval(function () {}, 1000);',
       '',
     ].join('\n'),
@@ -195,10 +228,7 @@ function assertTimedOutRun(r, message) {
   );
   assert.strictEqual(r.status, 1, `a timed-out suite fails the run\n${r.out}`);
   assert.ok(r.out.includes(message), `the timed-out suite is named\n${r.out}`);
-  assert.ok(
-    r.out.includes('stalling suite started'),
-    `output flushed\n${r.out}`,
-  );
+  assert.ok(r.out.includes(READY_MESSAGE), `output flushed\n${r.out}`);
   assert.ok(r.out.includes('0/1 suites passed'), r.out);
   // `status === 1` and the reaped fate already prove the runner acted on
   // the timeout; the elapsed bound only guards against a runner that
@@ -211,20 +241,25 @@ function assertTimedOutRun(r, message) {
   assert.strictEqual(r.fates.suite, 'not-ours', 'the runner reaped the suite');
 }
 
-function checkHangingSuiteTimesOut() {
-  withScratchRunner({detached: false, exits: false}, 'none', r => {
-    assertTimedOutRun(
-      r,
-      `zz_stall.test.js: no exit after ${SHORT_TIMEOUT_MS / 1000}s, killed`,
-    );
-    assert.strictEqual(
-      r.fates.grandchild,
-      'signal 9',
-      'the grandchild holding the pipe was killed with the suite',
-    );
-  });
+function checkHangingSuiteTimesOut(startDelayMs) {
+  withScratchRunner(
+    {detached: false, exits: false, startDelayMs},
+    'none',
+    r => {
+      assertTimedOutRun(
+        r,
+        `zz_stall.test.js: no exit after ${SHORT_TIMEOUT_MS / 1000}s, killed`,
+      );
+      assert.strictEqual(
+        r.fates.grandchild,
+        'signal 9',
+        'the grandchild holding the pipe was killed with the suite',
+      );
+    },
+  );
   console.log(
-    'ok - run-all.js reports and kills a hung suite whose grandchild holds its pipe',
+    'ok - run-all.js reports and kills a hung suite whose grandchild holds its pipe' +
+      (startDelayMs ? ` (suite started ${startDelayMs} ms late)` : ''),
   );
 }
 
@@ -264,6 +299,9 @@ function checkSigintKillsAndReaps() {
   );
 }
 
-checkHangingSuiteTimesOut();
+checkHangingSuiteTimesOut(0);
+// A suite that starts later than the short cap is still reported with
+// its output: the cap is armed by the suite's readiness, not its spawn.
+checkHangingSuiteTimesOut(SHORT_TIMEOUT_MS + 500);
 checkExitedSuiteWithPipeHolderTimesOut();
 checkSigintKillsAndReaps();

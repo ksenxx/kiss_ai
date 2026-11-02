@@ -136,19 +136,29 @@ def _is_valid_baseline(git_dir: str, sha: str) -> bool:
 
 
 def _flatten_changed(
-    listing: list[tuple[GitWorktree, list[str]]], primary: GitWorktree | None,
+    listing: list[tuple[GitWorktree, list[str] | None]], primary: GitWorktree | None,
 ) -> list[str]:
     """Merge per-worktree file lists into one.
 
     Files of *primary* (the worktree the task's work dir is in) stay
     relative to it; files of any other worktree are prefixed with that
-    repository's root.
+    repository's root.  A worktree whose files could not be listed
+    (``None``, see :meth:`_MergeFlowMixin._changed_files_of`)
+    contributes nothing; callers that may discard check for it with
+    :func:`_unreadable_worktrees` first.
     """
     files: list[str] = []
     for wt, names in listing:
         prefix = "" if wt is primary else f"{wt.repo_root}/"
-        files.extend(prefix + name for name in names)
+        files.extend(prefix + name for name in names or ())
     return sorted(set(files))
+
+
+def _unreadable_worktrees(
+    listing: list[tuple[GitWorktree, list[str] | None]],
+) -> list[GitWorktree]:
+    """The worktrees of *listing* whose changed files git could not enumerate."""
+    return [wt for wt, names in listing if names is None]
 
 
 def _pending_worktrees(agent: Any) -> list[GitWorktree]:
@@ -449,7 +459,12 @@ class _MergeFlowMixin:
             return False
         listing = self._list_pending(wt_agent)
         changed = _flatten_changed(listing, wt_agent._wt)
-        if not changed and discard_if_empty:
+        # A worktree whose changes git could not enumerate is not
+        # empty, it is unknown: it is kept and presented, never
+        # auto-discarded (its branch and files may hold the only copy of
+        # the task's work).
+        unreadable = _unreadable_worktrees(listing)
+        if not changed and not unreadable and discard_if_empty:
             with self._state_lock:
                 # Ownership re-check: the reads above ran outside the
                 # lock, so a new task may have started on the tab and
@@ -478,7 +493,8 @@ class _MergeFlowMixin:
                 # answer cannot go stale before it is acted on.
                 listing = self._list_pending(wt_agent)
                 changed = _flatten_changed(listing, wt_agent._wt)
-                if not changed:
+                unreadable = _unreadable_worktrees(listing)
+                if not changed and not unreadable:
                     # Automatic path: rescue git-ignored task output
                     # the changed-files probe cannot see (see
                     # SorcarAgent.discard).
@@ -491,8 +507,14 @@ class _MergeFlowMixin:
                 # tab busy and deferred disposal; nothing later
                 # would dispose it.
                 self._dispose_if_closed(tab_id)
-        if not changed:
+        if not changed and not unreadable:
             return False
+        for wt in unreadable:
+            logger.warning(
+                "Cannot list the changes of pending worktree %s (branch %s): git failed; "
+                "the worktree is kept for the user to merge or discard",
+                wt.wt_dir, wt.branch,
+            )
         # The singular fields describe the worktree the task's work dir
         # is in (the clients' file-link fallback directory and SCM
         # view); ``worktrees`` lists every pending worktree, one per
@@ -506,7 +528,7 @@ class _MergeFlowMixin:
                 "branch": wt.branch,
                 "worktreeDir": str(wt.wt_dir),
                 "originalBranch": wt.original_branch,
-                "changedFiles": files,
+                "changedFiles": files or [],
                 "hasConflict": self._conflict_of(wt),
             }
             for wt, files in listing
@@ -629,11 +651,11 @@ class _MergeFlowMixin:
             return []
         return _flatten_changed(self._list_pending(state.agent), state.agent._wt)
 
-    def _list_pending(self, wt_agent: Any) -> list[tuple[GitWorktree, list[str]]]:
+    def _list_pending(self, wt_agent: Any) -> list[tuple[GitWorktree, list[str] | None]]:
         """Pair every pending worktree of *wt_agent* with its changed files, probed once."""
         return [(wt, self._changed_files_of(wt)) for wt in _pending_worktrees(wt_agent)]
 
-    def _changed_files_of(self, wt: GitWorktree) -> list[str]:
+    def _changed_files_of(self, wt: GitWorktree) -> list[str] | None:
         """List files changed in *wt* vs its original branch.
 
         Detects both committed changes on the worktree branch and
@@ -643,11 +665,18 @@ class _MergeFlowMixin:
         edits and new files are included.  Falls back to a branch-
         to-branch diff when the worktree has already been removed.
 
+        An empty list is a VERIFIED clean worktree: callers auto-discard
+        on it.  When git cannot make the comparison (a missing object,
+        an unreadable index, a base that no longer resolves and no
+        unique commits to fall back on), the answer is ``None`` — the
+        changes are unknown, not absent.
+
         Args:
             wt: A pending worktree.
 
         Returns:
-            Sorted deduplicated list of relative file paths.
+            Sorted deduplicated list of relative file paths, or ``None``
+            when the changes could not be enumerated.
         """
         if not wt.original_branch:
             return []
@@ -668,25 +697,40 @@ class _MergeFlowMixin:
                 # Both sides of a rename are listed, as by a
                 # ``diff --no-renames``.
                 status = _git("status", "--porcelain", "-z", cwd=str(wt.wt_dir))
+                if status.returncode != 0:
+                    return None
                 files = [
                     path
                     for _code, old_name, new_name in _porcelain_entries(status.stdout)
                     for path in (old_name, new_name)
                     if path is not None
                 ]
-                files.extend(_git_paths(
+                unique = _git_paths(
                     str(wt.wt_dir), "log", "--pretty=format:", "--name-only", "--no-renames",
                     "HEAD", "--not", f"--exclude={wt.branch}", "--branches",
-                ) or ())
+                )
+                if unique is None:
+                    return None
+                files.extend(unique)
             files.extend(_capture_untracked(str(wt.wt_dir)))
             return sorted(set(files))
         base_ref = self._resolve_base_ref(
             str(wt.repo_root), wt.baseline_commit, wt.original_branch,
             tip=wt.branch,
         ) or wt.original_branch
-        return GitWorktreeOps._diff_name_only(
-            wt.repo_root, "--no-renames", base_ref, wt.branch,
+        files = _git_paths(
+            str(wt.repo_root), "diff", "--name-only", "--no-renames", base_ref, wt.branch,
         )
+        if files is None:
+            # Same fallback as above for a branch without a directory:
+            # the files of the commits unique to the branch.
+            files = _git_paths(
+                str(wt.repo_root), "log", "--pretty=format:", "--name-only", "--no-renames",
+                wt.branch, "--not", f"--exclude={wt.branch}", "--branches",
+            )
+            if files is None:
+                return None
+        return sorted(set(files))
 
     # ------------------------------------------------------------------
     # Worktree actions

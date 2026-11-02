@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiss.core.processes import run_process_group
+
 _PROBE_TIMEOUT = 5.0
 
 # Substrings (lower-cased) of an executable path or .desktop name that mark
@@ -225,11 +227,15 @@ def _which(command: str) -> str | None:
 
 
 def _run(argv: list[str]) -> str:
-    """Run *argv* and return its stripped stdout, or ``""`` on any failure."""
+    """Run *argv* and return its stripped stdout, or ``""`` on any failure.
+
+    The probe runs in its own process group so that a timeout kills the
+    helpers it spawned (``xdg-settings`` and ``xdg-mime`` are shell
+    scripts calling ``kreadconfig``, ``gio``, ``dbus-send``) and not
+    only the probe itself.
+    """
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=False
-        )
+        proc = run_process_group(argv, timeout=_PROBE_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return ""
     return proc.stdout.strip() if proc.returncode == 0 else ""

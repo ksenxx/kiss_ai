@@ -131,7 +131,12 @@ def test_openai_stall_after_usage_bills_observed_usage() -> None:
 
 
 def test_openai_success_leaves_no_partial_usage() -> None:
-    with _serve([*_CHAT_CHUNKS, b"data: [DONE]\n\n"], hold=False) as server:
+    # A finished turn carries its ``finish_reason`` before the usage
+    # chunk, as OpenAI sends it; the stall cases above stay finish-less
+    # (the adapter stops reading once finish_reason and usage are in).
+    finish = _chat([{"index": 0, "delta": {}, "finish_reason": "stop"}])
+    chunks = [_CHAT_CHUNKS[0], finish, _CHAT_CHUNKS[1], b"data: [DONE]\n\n"]
+    with _serve(chunks, hold=False) as server:
         model = _openai_model(server)
         text, response = model.generate()
         assert text == "hi"
@@ -328,7 +333,7 @@ def _recording_printer() -> JsonPrinter:
 
 
 def _tool_call_chunks(usage: dict[str, int]) -> list[bytes]:
-    """One streamed ``echo`` tool call followed by its usage chunk."""
+    """One streamed ``echo`` tool call, its ``finish_reason`` and its usage chunk."""
     call = {
         "index": 0,
         "id": "call_1",
@@ -338,6 +343,7 @@ def _tool_call_chunks(usage: dict[str, int]) -> list[bytes]:
     return [
         _chat([{"index": 0, "delta": {"role": "assistant", "tool_calls": [call]},
                 "finish_reason": None}]),
+        _chat([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]),
         _chat([], usage=usage),
     ]
 

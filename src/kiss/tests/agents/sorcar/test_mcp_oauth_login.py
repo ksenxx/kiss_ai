@@ -277,12 +277,13 @@ def _approve(auth_url: str) -> httpx.Response:
     return httpx.get(auth_url, follow_redirects=True, trust_env=False, timeout=20)
 
 
-def _tokens(name: str) -> Any:
-    return asyncio.run(FileTokenStorage(name).get_tokens())
+def _tokens(name: str, url: str = "") -> Any:
+    """The tokens stored for *name* at *url* (credentials are kept per name and URL)."""
+    return asyncio.run(FileTokenStorage(name, url).get_tokens())
 
 
-def _client_info(name: str) -> Any:
-    return asyncio.run(FileTokenStorage(name).get_client_info())
+def _client_info(name: str, url: str = "") -> Any:
+    return asyncio.run(FileTokenStorage(name, url).get_client_info())
 
 
 def _login(server: _AuthMCPServer, name: str = "authdemo") -> MCPLoginSession:
@@ -335,10 +336,10 @@ def test_login_stores_tokens_and_manager_connects(server: _AuthMCPServer, home: 
     assert [str(u) for u in registered.redirect_uris or []] == [mcp_oauth.MCP_REDIRECT_URI]
     assert registered.client_name == mcp_oauth.PRODUCT_NAME
 
-    tokens = _tokens("authdemo")
+    tokens = _tokens("authdemo", server.url)
     assert tokens is not None
     assert tokens.access_token in server.provider.access
-    assert _client_info("authdemo").client_id == query["client_id"]
+    assert _client_info("authdemo", server.url).client_id == query["client_id"]
 
     # An agent run now connects without any browser step.
     manager = MCPManager()
@@ -376,7 +377,7 @@ def test_manager_refreshes_expired_tokens(server: _AuthMCPServer, home: Path) ->
     server.provider.expires_in = 1
     _login(server)
     server.provider.expires_in = 3600
-    storage = FileTokenStorage("authdemo")
+    storage = FileTokenStorage("authdemo", server.url)
     assert storage.get_oauth_metadata() is not None
     old = storage._read()["tokens"]["access_token"]
     time.sleep(1.5)  # the access token expires; the refresh token stays valid
@@ -401,7 +402,7 @@ def test_login_refused_by_user(server: _AuthMCPServer, home: Path) -> None:
     answer = _session_answer(session)
     assert answer["ok"] is False
     assert answer["error"].startswith("MCP sign-in to 'authdemo' failed:")
-    assert _tokens("authdemo") is None
+    assert _tokens("authdemo", server.url) is None
 
 
 def test_new_session_replaces_running_one(server: _AuthMCPServer, home: Path) -> None:
@@ -631,7 +632,7 @@ def test_login_with_preregistered_client_skips_registration(
     session = _login(server)
     assert parse_qs(urlsplit(session.auth_url).query)["client_id"] == ["kiss-prereg"]
     assert server.provider.registrations == 0
-    assert _client_info("authdemo").client_id == "kiss-prereg"
+    assert _client_info("authdemo", server.url).client_id == "kiss-prereg"
 
 
 # ---------------------------------------------------------------------------
@@ -639,9 +640,9 @@ def test_login_with_preregistered_client_skips_registration(
 # ---------------------------------------------------------------------------
 
 
-def _store_registration(name: str, client_id: str, redirect_uri: str) -> None:
-    """Store a client registration for *name* plus a dead access token."""
-    storage = FileTokenStorage(name)
+def _store_registration(name: str, client_id: str, redirect_uri: str, url: str = "") -> None:
+    """Store a client registration for *name* at *url* plus a dead access token."""
+    storage = FileTokenStorage(name, url)
     info = OAuthClientInformationFull.model_validate(
         {
             **mcp_oauth.client_metadata().model_dump(mode="json", exclude_none=True),
@@ -672,7 +673,7 @@ def test_drop_stale_registration_only_for_other_redirect_uris(home: Path) -> Non
 
 
 def test_login_reregisters_a_stale_client(server: _AuthMCPServer, home: Path) -> None:
-    _store_registration("authdemo", "stale-client", "http://localhost:0/callback")
+    _store_registration("authdemo", "stale-client", "http://localhost:0/callback", server.url)
     session = _login(server)
     # The dead token forced a sign-in, and the stale registration was
     # replaced instead of being sent to the authorization endpoint.
@@ -680,10 +681,10 @@ def test_login_reregisters_a_stale_client(server: _AuthMCPServer, home: Path) ->
     assert new_id != "stale-client"
     assert new_id in server.provider.clients
     assert server.provider.registrations == 1
-    info = _client_info("authdemo")
+    info = _client_info("authdemo", server.url)
     assert info.client_id == new_id
     assert [str(u) for u in info.redirect_uris] == [mcp_oauth.MCP_REDIRECT_URI]
-    assert _tokens("authdemo").access_token in server.provider.access
+    assert _tokens("authdemo", server.url).access_token in server.provider.access
 
 
 def test_preregistered_client_wins_over_stale_check(
@@ -696,14 +697,14 @@ def test_preregistered_client_wins_over_stale_check(
         }
     )
     monkeypatch.setenv("KISS_MCP_AUTHDEMO_CLIENT_ID", "kiss-prereg")
-    _store_registration("authdemo", "stale-client", "http://localhost:0/callback")
+    _store_registration("authdemo", "stale-client", "http://localhost:0/callback", server.url)
     session = _login(server)
     # The environment's client replaced the stored one; the stale check
     # never ran, so nothing was registered dynamically.
     assert parse_qs(urlsplit(session.auth_url).query)["client_id"] == ["kiss-prereg"]
     assert server.provider.registrations == 0
-    assert _client_info("authdemo").client_id == "kiss-prereg"
-    assert _tokens("authdemo").access_token in server.provider.access
+    assert _client_info("authdemo", server.url).client_id == "kiss-prereg"
+    assert _tokens("authdemo", server.url).access_token in server.provider.access
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +724,7 @@ def test_build_provider_seeds_stored_oauth_metadata(server: _AuthMCPServer, home
     cfg = _cfg(server)
     assert build_provider(cfg, _no_redirect, _no_callback).context.oauth_metadata is None
     _login(server)
-    stored = FileTokenStorage("authdemo").get_oauth_metadata()
+    stored = FileTokenStorage("authdemo", server.url).get_oauth_metadata()
     assert stored is not None
     auth = build_provider(cfg, _no_redirect, _no_callback)
     assert auth.context.oauth_metadata is not None

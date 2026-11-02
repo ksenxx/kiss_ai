@@ -40,6 +40,19 @@ from kiss.tests.server.pause import Pause
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
 
+def _lock_is_free(lock: threading.RLock) -> bool:
+    """Whether no thread holds *lock* right now.
+
+    ``RLock.locked()`` exists only from Python 3.14 (the project runs on
+    3.13 too); a non-blocking acquire from this thread, which never holds
+    the lock, answers the same question portably.
+    """
+    if not lock.acquire(blocking=False):
+        return False
+    lock.release()
+    return True
+
+
 @unittest.skipIf(
     sys.platform == "win32" or is_root(),
     "needs POSIX permission bits that deny the owner (not root, not Windows)",
@@ -130,8 +143,9 @@ class SettingsWriteFailureTest(TwoClientHarness):
         before = len(a.of_type("configData"))
         with Pause(threading.Thread.__init__.__code__, starve_the_bridge_thread):
             a.send({"type": "saveConfig", "config": {"chrome_bridge": True}, "apiKeys": {}})
+            instance_lock = chrome_bridge.ChromeBridge._instance_lock
             self.wait_for(
-                lambda: lowered.is_set() and not chrome_bridge.ChromeBridge._instance_lock.locked(),
+                lambda: lowered.is_set() and _lock_is_free(instance_lock),
                 timeout=20, what="the bridge's start to fail",
             )
         starved.close()

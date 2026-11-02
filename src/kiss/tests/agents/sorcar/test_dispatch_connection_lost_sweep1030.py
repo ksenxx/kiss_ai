@@ -94,7 +94,7 @@ class _HoldTheRunUntilTheSocketIsClosed:
             return None
         if event == "line" and frame.f_locals.get("cmd") is not None and not self.fired:
             self.fired = True
-            _wait_until_closed(frame.f_locals["ws"])
+            _wait_until_closed(frame.f_locals["inbox"].ws)
         return self
 
 
@@ -155,7 +155,7 @@ class _CancelOnceTheSocketIsClosed:
             return None
         if event == "line" and frame.f_locals.get("started") and not self.fired:
             self.fired = True
-            _wait_until_closed(frame.f_locals["ws"])
+            _wait_until_closed(frame.f_locals["inbox"].ws)
             self.cancel.set()
         return self
 

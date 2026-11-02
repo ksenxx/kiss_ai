@@ -1,0 +1,564 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""The shell-rewrite conversions are exact or do not happen; compound commands (2026-10-31).
+
+Real ``sed``, ``python3`` and ``bash`` are the oracles: each test runs
+the command as written in one directory and compares it with what the
+conversion (:func:`heredoc_copy` / :func:`mechanical_edit`, applied
+through a real :class:`UsefulTools`) does in another.
+
+* ``sed`` without ``-z`` works line by line: a pattern holding a newline
+  is not converted (it never matches); a substitution without ``g``
+  replaces the first match of every line, which
+  :meth:`MechanicalEdit.edits_for` turns into the exact ``Edit`` for the
+  file's text, or into none.
+* A ``sed`` script the shell expands (``$A``, a backtick, a glob, ANSI-C
+  quoting) is not converted; quoting the shell removes is read as bash
+  reads it.
+* A python ``.replace()`` after the write, or an I/O keyword that changes
+  the bytes (``encoding``, ``errors``, ``newline``), is not converted.
+* A here-document followed by another input redirection on its command
+  is not converted (bash honours the last one).
+* ``[cd DIR &&] <rewrite> [&& | ; | newline] <rest>`` comes back with the
+  ``cd`` directory and the rest, and applying the call then running the
+  rest leaves the same files as bash; every other shape is not converted.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from kiss.agents.sorcar.edit_guards import (
+    HEREDOC_VERDICT,
+    heredoc_copy,
+    heredoc_text,
+    mechanical_edit,
+    python_edit,
+    rewrite_guard,
+    sed_edit,
+)
+from kiss.agents.sorcar.shell_scan import simple_commands
+from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.tests.conftest import host_sed_is_gnu, posix_only
+
+pytestmark = posix_only("sed, python3 and bash are the oracles")
+needs_gnu_sed = pytest.mark.skipif(not host_sed_is_gnu(), reason="needs GNU sed as the oracle")
+
+
+@pytest.fixture
+def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> UsefulTools:
+    """A tool set on ``tmp_path`` with no detach grace."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 0)
+    return UsefulTools(work_dir=str(tmp_path))
+
+
+def _bash(command: str, cwd: Path, **env: str) -> None:
+    """Run *command* with bash in *cwd*."""
+    subprocess.run(["bash", "-c", command], cwd=cwd, check=True, env={**os.environ, **env})
+
+
+def _sed(work: Path, content: str, *args: str) -> str:
+    """Return the text of ``f.txt`` holding *content* after ``sed -i *args f.txt``."""
+    target = work / "f.txt"
+    target.write_text(content)
+    subprocess.run(["sed", "-i", *args, "f.txt"], cwd=work, check=True)
+    return target.read_text()
+
+
+def _edited(tools: UsefulTools, work: Path, content: str, command: str) -> str | None:
+    """Return the text of ``f.txt`` holding *content* after the ``Edit`` *command* stands for.
+
+    The pairs are the ones :meth:`MechanicalEdit.edits_for` settles
+    for *content*; ``None`` when there are none, or the ``Edit``
+    refuses (the file is then checked to be untouched).
+    """
+    target = work / "f.txt"
+    target.write_text(content)
+    edit = mechanical_edit(command, str(work))
+    assert edit is not None and edit.path == str(target), command
+    pairs = edit.edits_for(content)
+    if pairs is None:
+        return None
+    tools.Read(str(target))
+    result = tools.Edit(str(target), edits=json.dumps(
+        [{"old_string": old, "new_string": new, "replace_all": every} for old, new, every in pairs]
+    ))
+    if result.startswith("Error"):
+        assert target.read_text() == content
+        return None
+    return target.read_text()
+
+
+# --- 1. sed record semantics --------------------------------------------------
+
+
+@needs_gnu_sed
+def test_sed_without_z_converts_only_what_sed_does(tools: UsefulTools, tmp_path: Path) -> None:
+    # A pattern holding a newline never matches without -z: sed leaves the file; no conversion.
+    assert _sed(tmp_path, "a\nb\n", "s/a\\nb/c/") == "a\nb\n"
+    command = "sed -i 's/a\\nb/c/' f.txt"
+    assert mechanical_edit(command, str(tmp_path)) is None
+    guard = rewrite_guard(command)
+    assert guard is not None and 'Edit(file_path="f.txt", old_string=<the exact' in guard
+    # With -z the file is one record: the pair is exact.
+    assert _sed(tmp_path, "a\nb\n", "-z", "s/a\\nb/c/") == "c\n"
+    assert _edited(tools, tmp_path, "a\nb\n", "sed -z -i 's/a\\nb/c/' f.txt") == "c\n"
+    # Without g, sed replaces the first match of every line; the Edit follows the text.
+    per_line = "sed -i 's/a/b\\n/' f.txt"
+    edit = mechanical_edit(per_line, str(tmp_path))
+    assert edit is not None and edit.per_line and edit.edits == [("a", "b\n", False)]
+    for content in ("a\na\n", "x\na\n", "x\n", "a\naa\n"):
+        expected = _sed(tmp_path, content, "s/a/b\\n/")
+        converted = _edited(tools, tmp_path, content, per_line)
+        assert converted in (expected, None), content
+    assert edit.edits_for("a\na\n") == [("a", "b\n", True)]  # two lines, one match each
+    assert edit.edits_for("x\na\n") == [("a", "b\n", False)]  # one match
+    assert edit.edits_for("x\n") == [("a", "b\n", False)]  # none: the Edit reports it
+    assert edit.edits_for("a\naa\n") is None  # a line with two matches: no Edit is exact
+    assert _edited(tools, tmp_path, "a\na\n", per_line) == "b\n\nb\n\n"
+    assert _edited(tools, tmp_path, "x\n", per_line) is None
+    # With g every match goes, as the Edit's replace_all does; -z without g is the first match.
+    assert _sed(tmp_path, "a\naa\n", "s/a/b\\n/g") == "b\n\nb\nb\n\n"
+    assert _edited(tools, tmp_path, "a\naa\n", "sed -i 's/a/b\\n/g' f.txt") == "b\n\nb\nb\n\n"
+    assert _sed(tmp_path, "a\na\n", "-z", "s/a/b/") == "b\na\n"
+    assert _edited(tools, tmp_path, "a\na\n", "sed -z -i 's/a/b/' f.txt") is None
+    # Through the Bash tool: the pairs edits_for settles from the file's text, so two
+    # lines with one match each are replaced as sed replaces them; a line holding the
+    # pattern twice has no exact Edit and the multi-line sed is refused as before.
+    target = tmp_path / "f.txt"
+    target.write_text("a\n")
+    tools.Read(str(target))
+    out = tools.Bash(per_line, "one match")
+    assert out.startswith("Applied as Edit(") and target.read_text() == "b\n\n"
+    target.write_text("a\na\n")
+    out = tools.Bash(per_line, "two matches")
+    assert out.startswith("Applied as Edit(") and "replace_all=True" in out, out
+    assert target.read_text() == "b\n\nb\n\n"
+    target.write_text("a\naa\n")
+    out = tools.Bash(per_line, "two matches on one line")
+    assert out == rewrite_guard(per_line), out
+    assert target.read_text() == "a\naa\n"
+
+
+# --- 2. shell expansion in the sed script ------------------------------------
+
+
+@needs_gnu_sed
+def test_sed_script_the_shell_expands_is_not_converted(tools: UsefulTools, tmp_path: Path) -> None:
+    target = tmp_path / "f.txt"
+    for command in (
+        'sed -i "s/a/$A\\n/" f.txt',
+        'sed -i -e "s/a/$A\\n/" f.txt',
+        'sed -i --expression="s/a/$A\\n/" f.txt',
+        'sed -i -e"s/a/$A\\n/" f.txt',
+        'sed -i "s/a/`echo x`\\n/" f.txt',
+        "sed -i s/a/b*\\\\n/ f.txt",  # an unquoted glob
+        "sed -i $'s/a/b\\\\n/' f.txt",  # ANSI-C quoting
+    ):
+        target.write_text("a\n")
+        _bash(command, tmp_path, A="x")
+        assert target.read_text() != "a\n", command  # bash and sed did rewrite the file
+        assert mechanical_edit(command, str(tmp_path)) is None, command
+        operand, edits = sed_edit(simple_commands(command, None)[0])
+        assert operand is not None and operand.text == "f.txt" and edits == [], command
+    # Quoting the shell removes is read as bash reads it: "\\n" is sed's \n, unquoted \n is n.
+    for command, expected in (
+        ('sed -i "s/a/b\\\\n/" f.txt', "b\n\n"),
+        ("sed -i s/a/b\\\\n/ f.txt", "b\n\n"),
+        ("sed -i s/a/b\\n/ f.txt", "bn\n"),
+    ):
+        target.write_text("a\n")
+        _bash(command, tmp_path)
+        assert target.read_text() == expected, command
+        assert _edited(tools, tmp_path, "a\n", command) == expected, command
+
+
+# --- 3. python replacements after the write ----------------------------------
+
+_READ = "s = open('a.py').read()\n"
+_WRITE = "open('a.py', 'w').write(s)\n"
+
+
+def _python(work: Path, program: str) -> str:
+    """Return the text of ``a.py`` (bytes decoded, no newline translation) after bash runs
+    *program* as a ``python3 -`` here-document."""
+    _bash(f"python3 - <<'EOF'\n{program}EOF", work)
+    return (work / "a.py").read_bytes().decode()
+
+
+def test_python_replacement_after_the_write_is_not_converted(tmp_path: Path) -> None:
+    source = tmp_path / "a.py"
+    source.write_text("x = 1\nq = 2\n")
+    program = _READ + "s = s.replace('x', 'y')\n" + _WRITE + "s = s.replace('q', 'r')\n"
+    assert _python(tmp_path, program) == "y = 1\nq = 2\n"  # the second never reaches the file
+    assert python_edit(program) == ("a.py", [], False)
+    assert mechanical_edit(f"python3 - <<'EOF'\n{program}EOF", str(tmp_path)) is None
+    source.write_text("x = 1\nq = 2\n")
+    program = _READ + _WRITE + "s = s.replace('x', 'y')\n"
+    assert _python(tmp_path, program) == "x = 1\nq = 2\n"
+    assert python_edit(program) == ("a.py", [], False)
+    # The same replacements before the write are the pattern.
+    program = _READ + "s = s.replace('x', 'y')\ns = s.replace('q', 'r')\n" + _WRITE
+    assert python_edit(program) == ("a.py", [("x", "y", True), ("q", "r", True)], True)
+    assert _python(tmp_path, program) == "y = 1\nr = 2\n"
+
+
+# --- 4. python I/O keywords ---------------------------------------------------
+
+
+def test_python_io_keywords_convert_only_when_edit_matches_them(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    source = tmp_path / "a.py"
+    pair = [("x", "y", True)]
+    # The last value says whether the read translates line endings (a newline keyword
+    # left out or None): the pairs are then exact only for a file holding no "\r".
+    for read, write, universal in (
+        ("open('a.py', newline='').read()", "open('a.py', 'w', newline='').write(s)", False),
+        ("open('a.py', newline='\\n').read()", "open('a.py', 'w', newline='\\n').write(s)",
+         False),
+        ("open('a.py', encoding='utf-8').read()", "open('a.py', 'w', encoding='UTF8').write(s)",
+         True),
+        ("open('a.py', errors='strict').read()", "open('a.py', 'w', encoding=None).write(s)",
+         True),
+        ("open('a.py', newline=None).read()", "open('a.py', 'w', newline='').write(s)", True),
+        ("Path('a.py').read_text(encoding='utf-8')", "Path('a.py').write_text(s)", True),
+    ):
+        program = f"from pathlib import Path\ns = {read}\ns = s.replace('x', 'y')\n{write}\n"
+        assert python_edit(program) == ("a.py", pair, universal), program
+        source.write_text("x = 1\n")
+        assert _python(tmp_path, program) == "y = 1\n"
+        # ...and the Edit writes the same bytes.
+        source.write_text("x = 1\n")
+        tools.Read(str(source))
+        assert tools.Edit(str(source), "x", "y", True).startswith("Successfully")
+        assert source.read_bytes() == b"y = 1\n"
+    # Keywords that change the bytes read or written: no conversion, the path still named.
+    for program, content, expected in (
+        (_READ + "s = s.replace('x', 'y')\nopen('a.py', 'w', newline='\\r\\n').write(s)\n",
+         b"x\n", b"y\r\n"),
+        ("s = open('a.py', errors='ignore').read()\ns = s.replace('x', 'y')\n" + _WRITE,
+         b"x\xff\n", b"y\n"),
+        ("s = open('a.py', encoding='latin-1').read()\ns = s.replace('\\xe9', 'e')\n"
+         "open('a.py', 'w', encoding='latin-1').write(s)\n", b"\xe9\n", b"e\n"),
+        ("with open('a.py') as f:\n    s = f.read()\ns = s.replace('x', 'y')\n"
+         "with open('a.py', 'w', newline='\\r') as f:\n    f.write(s)\n", b"x\n", b"y\r"),
+        ("s = Path('a.py').read_text(errors='replace')\ns = s.replace('x', 'y')\n"
+         "Path('a.py').write_text(s)\n", b"x\xff\n", "y\ufffd\n".encode()),
+    ):
+        source.write_bytes(content)
+        assert _python(tmp_path, "from pathlib import Path\n" + program).encode() == expected
+        assert python_edit(program) == ("a.py", [], False), program
+    for program in (
+        _READ.replace("'a.py'", "'a.py', encoding=enc") + "s = s.replace('x', 'y')\n" + _WRITE,
+        _READ.replace("'a.py'", "'a.py', encoding='nosuch'") + "s = s.replace('x', 'y')\n" + _WRITE,
+        _READ + "s = s.replace('x', 'y')\nopen('a.py', 'w', errors='ignore').write(s)\n",
+        _READ + "s = s.replace('x', 'y')\nwith open('a.py', 'a') as f:\n    f.write(s)\n",
+        # ``newline`` on Path.read_text (3.13+) / write_text (3.10+): an older python of
+        # the environment rejects the program, so it is not read as the Edit.
+        "s = Path('a.py').read_text(newline='')\ns = s.replace('x', 'y')\n"
+        "Path('a.py').write_text(s)\n",
+        "s = Path('a.py').read_text()\ns = s.replace('x', 'y')\n"
+        "Path('a.py').write_text(s, newline='')\n",
+    ):
+        assert python_edit(program) == ("a.py", [], False), program
+
+
+def test_python_universal_newlines_convert_only_for_a_file_without_cr(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """A read with the default ``newline`` turns ``\\r\\n`` and ``\\r`` into ``\\n``; Edit does not.
+
+    Over a file holding a ``\\r`` the program and the Edit write different
+    bytes, so the rewrite is not converted (the python heredoc is refused
+    as before, naming the Edit); over a file without one they agree and
+    the Edit is applied.  A read with ``newline=''`` keeps the bytes and
+    converts over any file.  The oracle is python3 run by bash (review of
+    2026-10-31, finding 1).
+    """
+    source = tmp_path / "a.py"
+    universal = _READ + "s = s.replace('old', 'new')\n" + _WRITE
+    exact = (
+        "s = open('a.py', encoding='utf-8', newline='').read()\ns = s.replace('old', 'new')\n"
+        "open('a.py', 'w', encoding='utf-8', newline='').write(s)\n"
+    )
+    command = f"python3 - <<'EOF'\n{universal}EOF"
+    exact_command = f"python3 - <<'EOF'\n{exact}EOF"
+    source.write_bytes(b"old\n")
+    tools.Read(str(source))  # shown once: every rewrite below may be applied as its Edit
+    for content in (b"old\r\nkept\r\n", b"old\rkept\r", b"old\r\r\nkept\n"):
+        source.write_bytes(content)
+        translated = _python(tmp_path, universal).encode()
+        assert b"\r" not in translated and translated.startswith(b"new\n"), (content, translated)
+        edit = mechanical_edit(command, str(tmp_path))
+        assert edit is not None and edit.universal_newlines and edit.text_dependent
+        assert edit.edits_for(content.decode()) is None
+        source.write_bytes(content)
+        out = tools.Bash(command, "rewrite")
+        assert out == rewrite_guard(command), out
+        assert 'Edit(file_path="a.py", old_string="old", new_string="new"' in out
+        assert source.read_bytes() == content, "the refused rewrite left the file alone"
+        # A read with newline='' keeps the bytes: the Edit writes what the program writes.
+        assert _python(tmp_path, exact).encode() == content.replace(b"old", b"new")
+        source.write_bytes(content)
+        out = tools.Bash(exact_command, "rewrite")
+        assert out.startswith("Applied as Edit(") and "Successfully replaced 1" in out, out
+        assert source.read_bytes() == content.replace(b"old", b"new")
+    # Without a "\r" the universal read is the Edit.
+    source.write_bytes(b"old\nkept\n")
+    assert _python(tmp_path, universal) == "new\nkept\n"
+    source.write_bytes(b"old\nkept\n")
+    out = tools.Bash(command, "rewrite")
+    assert out.startswith("Applied as Edit(") and source.read_bytes() == b"new\nkept\n", out
+
+
+def test_a_pair_with_a_bare_newline_is_not_converted_over_a_crlf_file(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """An ``old`` holding a ``\\n`` that a CRLF file lacks: ``Edit`` would retry it with ``\\r\\n``.
+
+    ``s.replace('old\\n', 'new\\n')`` over ``old\\r\\nkept\\r\\n`` matches
+    nothing and python leaves the file alone, while the Edit it was
+    converted to changed the file through that retry (review of
+    2026-10-31, finding 1, second round).  The pair is exact for a file
+    holding it, or holding no ``\\r\\n``.
+    """
+    source = tmp_path / "a.py"
+    program = (
+        "s = open('a.py', newline='').read()\ns = s.replace('old\\n', 'new\\n')\n"
+        "open('a.py', 'w', newline='').write(s)\n"
+    )
+    command = f"python3 - <<'EOF'\n{program}EOF"
+    edit = mechanical_edit(command, str(tmp_path))
+    assert edit is not None and edit.text_dependent and not edit.universal_newlines
+    assert edit.edits == [("old\n", "new\n", True)]
+    source.write_bytes(b"old\n")
+    tools.Read(str(source))
+    for content, expected in (
+        (b"old\r\nkept\r\n", None),  # the retry would match: no Edit is exact
+        (b"old\r\nold\nkept\r\n", [("old\n", "new\n", True)]),  # found as written
+        (b"old\nkept\n", [("old\n", "new\n", True)]),
+    ):
+        assert edit.edits_for(content.decode()) == expected, content
+        source.write_bytes(content)
+        written = _python(tmp_path, program).encode()
+        assert written == content.replace(b"old\n", b"new\n"), content
+        source.write_bytes(content)
+        out = tools.Bash(command, "rewrite")
+        if expected is None:
+            assert out == rewrite_guard(command) and source.read_bytes() == content, out
+        else:
+            assert out.startswith("Applied as Edit(") and source.read_bytes() == written, out
+    # Pairs are judged in order, each against the text the earlier ones left, as Edit
+    # applies them: the first pair below eats the only bare "a\n", so the second would be
+    # retried with "\r\n" and match where python matches nothing.
+    chain = (
+        "s = open('a.py', newline='').read()\ns = s.replace('a\\n', 'a\\r\\n')\n"
+        "s = s.replace('a\\nb', 'X')\nopen('a.py', 'w', newline='').write(s)\n"
+    )
+    command = f"python3 - <<'EOF'\n{chain}EOF"
+    edit = mechanical_edit(command, str(tmp_path))
+    assert edit is not None and edit.edits_for("a\nb\r\n") is None
+    assert edit.edits_for("a\nb\n") == edit.edits  # no CRLF: Edit never retries
+    source.write_bytes(b"a\nb\r\n")
+    assert _python(tmp_path, chain).encode() == b"a\r\nb\r\n"
+    source.write_bytes(b"a\nb\r\n")
+    out = tools.Bash(command, "rewrite")
+    assert out == rewrite_guard(command) and source.read_bytes() == b"a\nb\r\n", out
+
+
+# --- 5. a here-document followed by another input redirection -----------------
+
+
+def test_heredoc_with_a_later_input_redirection_is_not_converted(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    target = tmp_path / "f.txt"
+    for command, written in (
+        ("cat > f.txt <<'EOF' < /dev/null\nnew\nEOF", ""),
+        ("cat <<'EOF' < /dev/null > f.txt\nnew\nEOF", ""),
+        ("cat <<'EOF' > f.txt 0</dev/null\nnew\nEOF", ""),
+        ("cat <<'EOF' > f.txt <> /dev/null\nnew\nEOF", ""),
+        ("cat <<'EOF' > f.txt <<< x\nnew\nEOF", "x\n"),
+        ("tee f.txt <<'EOF' < /dev/null\nnew\nEOF", ""),
+        ("cat <<'EOF' > f.txt <<'EOF2'\nnew\nEOF\nnewer\nEOF2", "newer\n"),
+    ):
+        target.write_text("old\n")
+        _bash(command, tmp_path)
+        assert target.read_text() == written, command
+        assert heredoc_copy(command, str(tmp_path)) is None, command
+        assert heredoc_text(command) is None, command
+    # The here-document after an input redirection is the one that counts.
+    command = "cat < /dev/null <<'EOF' > f.txt\nnew\nEOF"
+    target.write_text("old\n")
+    _bash(command, tmp_path)
+    copy = heredoc_copy(command, str(tmp_path))
+    assert copy is not None and copy.body == target.read_text() == "new\n"
+    # A python program fed an empty standard input does nothing: no Edit either.
+    source = tmp_path / "a.py"
+    source.write_text("x = 1\n")
+    program = f"python3 - <<'EOF' < /dev/null\n{_READ}s = s.replace('x', 'y')\n{_WRITE}EOF"
+    _bash(program, tmp_path)
+    assert source.read_text() == "x = 1\n" and mechanical_edit(program, str(tmp_path)) is None
+    assert heredoc_text("# cat <<EOF\nx\nEOF") is None  # a comment opens nothing
+    # Through the Bash tool, the shown file keeps the here-document refusal and its text.
+    target.write_text("old\n")
+    tools.Read(str(target))
+    out = tools.Bash("cat > f.txt <<'EOF' < /dev/null\nnew\nEOF", "empty")
+    assert out == HEREDOC_VERDICT.format(path=target) and target.read_text() == "old\n"
+
+
+# --- compound commands --------------------------------------------------------
+
+_PROGRAM = _READ + "s = s.replace('x = 1', 'x = 10')\n" + _WRITE
+_SED = "sed -i 's/x = 1/x = 1\\ny = 2/'"
+ACCEPTED = (
+    "cd app && cat > f.txt <<'EOF' && cp f.txt g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF'\nbody\nEOF\ncp f.txt g.txt",
+    "cat > f.txt <<'EOF'; cp f.txt g.txt\nbody\nEOF\ncp g.txt h.txt",
+    "cat > f.txt <<'EOF' &&\nbody\nEOF\ncp f.txt g.txt",
+    "cat >> f.txt <<'EOF' && echo more >> g.txt\nbody\nEOF",
+    "tee f.txt <<'EOF' > /dev/null && cp f.txt g.txt\nbody\nEOF",
+    "cd app && cat > f.txt <<'EOF' 2>&1 && cp f.txt g.txt &> /dev/null\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo \"a && b\" > g.txt && echo 'c\\ || d' > h.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo a\\&b \"\\\"q\\\"\" > g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo a#b > g.txt # a comment && cp f.txt h.txt\nbody\nEOF",
+    "cd app && cat > f.txt <<'EOF' # note\nbody\nEOF\ncp f.txt g.txt",
+    "cd app && cat > f.txt <<'EOF'\nbody\nEOF",
+    f"cd app && python3 - <<'EOF' && cp a.py b.py\n{_PROGRAM}EOF",
+    f"python3 - <<'EOF'\n{_PROGRAM}EOF\ncp a.py b.py",
+    f"cd app && {_SED} a.py; cp a.py b.py",
+    f"{_SED} app/a.py\ncp app/a.py app/b.py",
+    f"cd app && {_SED} a.py",
+)
+"""Shapes of ``[cd DIR &&] <rewrite> [&& | ; | newline] <rest>`` that are converted."""
+REFUSED = (
+    "cp g.txt f.txt && cat > f.txt <<'EOF'\nbody\nEOF",  # a command before the copy
+    "cat > f.txt <<'EOF' || cp f.txt g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' | cat\nbody\nEOF",
+    "cat > f.txt <<'EOF' &\nbody\nEOF",
+    "cd \"$D\" && cat > f.txt <<'EOF'\nbody\nEOF",  # only the shell knows the directory
+    "cd && cat > f.txt <<'EOF'\nbody\nEOF",
+    "cd app; cat > f.txt <<'EOF'\nbody\nEOF",
+    "cd app && cd sub && cat > f.txt <<'EOF'\nbody\nEOF",
+    "cd app <<'EOF' && cat > f.txt\nbody\nEOF",
+    "cd app && # nothing\ncat > f.txt <<'EOF'\nbody\nEOF",
+    "cat > f.txt <<'EOF' && sed -i 's/a/b/' g.txt\nbody\nEOF",  # a rewrite in the rest
+    "cat > f.txt <<'EOF' && cat > g.txt <<'EOF2'\nbody\nEOF\nmore\nEOF2",
+    "cat > f.txt <<'EOF'\nbody\nEOF\npython3 - <<'EOF'\nprint(1)\nEOF",
+    "(cat > f.txt <<'EOF')\nbody\nEOF",
+    "{ cat > f.txt <<'EOF'; }\nbody\nEOF",
+    "if true; then cat > f.txt <<'EOF'; fi\nbody\nEOF",
+    "! cat > f.txt <<'EOF' && cp f.txt g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo $(date) > g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo \"$(date)\" > g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo \"`date`\" > g.txt\nbody\nEOF",
+    "cat > f.txt <<'EOF' && echo \"a > g.txt\nbody\nEOF",  # an unterminated quote
+    "cat > f.txt <<'EOF' && cp f.txt g.txt \\\n\nbody\nEOF",  # a continued line
+    "X=1 cat > f.txt <<'EOF' && cp f.txt g.txt\nbody\nEOF",
+    "> f.txt <<'EOF'\nbody\nEOF",  # no program
+    "cat > 'f>>x' <<'EOF'\nbody\nEOF",
+    "# nothing",
+    f"{_SED} app/a.py && cat <<'EOF' > app/b.py\nbody\nEOF",
+)
+"""Shapes outside the grammar: neither recogniser converts them."""
+
+
+def _populate(root: Path) -> None:
+    """Create ``f.txt``, ``app/f.txt`` and ``app/a.py`` under *root*."""
+    (root / "app").mkdir()
+    for directory in (root, root / "app"):
+        (directory / "f.txt").write_text("old\n")
+        (directory / "a.py").write_text("x = 1\nz = 3\n")
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Return every file under *root* with its text, by relative path."""
+    return {
+        str(p.relative_to(root)): p.read_bytes().decode() for p in root.rglob("*") if p.is_file()
+    }
+
+
+def _apply(tools: UsefulTools, work: Path, command: str) -> None:
+    """Apply the call *command* stands for through *tools*, then run its remainder with bash."""
+    copy = heredoc_copy(command, str(work))
+    if copy is not None:
+        assert copy.path is not None, command
+        content = copy.body
+        if copy.append:
+            content = Path(copy.path).read_text() + content
+        tools.Read(copy.path)
+        result = tools.Write(copy.path, content)
+        directory, remainder = copy.cwd, copy.remainder
+    else:
+        edit = mechanical_edit(command, str(work))
+        assert edit is not None and edit.path is not None, command
+        pairs = edit.edits_for(Path(edit.path).read_text())
+        assert pairs is not None, command
+        tools.Read(edit.path)
+        result = tools.Edit(edit.path, edits=json.dumps(
+            [{"old_string": o, "new_string": n, "replace_all": e} for o, n, e in pairs]
+        ))
+        directory, remainder = edit.cwd, edit.remainder
+    assert not result.startswith("Error"), result
+    if remainder:
+        _bash(f"cd {shlex.quote(directory)} && {remainder}" if directory else remainder, work)
+
+
+@pytest.mark.parametrize("command", ACCEPTED, ids=[str(index) for index in range(len(ACCEPTED))])
+def test_compound_rewrites_leave_the_files_bash_leaves(
+    tools: UsefulTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str,
+) -> None:
+    if _SED in command and not host_sed_is_gnu():
+        pytest.skip("needs GNU sed as the oracle")
+    base, shell, tool = tmp_path / "base", tmp_path / "shell", tmp_path / "tool"
+    for root in (base, shell, tool):
+        root.mkdir()
+        _populate(root)
+    _bash(command, shell)
+    assert _tree(shell) != _tree(base)  # bash did change something
+    monkeypatch.setattr(tools, "work_dir", str(tool))
+    _apply(tools, tool, command)
+    assert _tree(tool) == _tree(shell)
+
+
+def test_compound_rewrites_name_the_cd_directory_and_the_rest() -> None:
+    # The fields: the cd directory (absolute), the rest (first line's part, then the lines after).
+    copy = heredoc_copy(ACCEPTED[0], "/w")
+    assert copy is not None and (copy.cwd, copy.remainder) == ("/w/app", "cp f.txt g.txt")
+    assert copy.path == "/w/app/f.txt" and not copy.append
+    copy = heredoc_copy(ACCEPTED[2], "/w")
+    assert copy is not None and (copy.cwd, copy.remainder) == ("", "cp f.txt g.txt\ncp g.txt h.txt")
+    copy = heredoc_copy(ACCEPTED[4], "/w")
+    assert copy is not None and copy.append and copy.remainder == "echo more >> g.txt"
+    copy = heredoc_copy(ACCEPTED[11], "/w")
+    assert copy is not None and (copy.cwd, copy.remainder) == ("/w/app", "")
+    edit = mechanical_edit(ACCEPTED[12], "/w")
+    assert edit is not None and (edit.cwd, edit.remainder) == ("/w/app", "cp a.py b.py")
+    assert edit.path == "/w/app/a.py" and edit.edits == [("x = 1", "x = 10", True)]
+    # An absolute cd resolves without a start directory.
+    edit = mechanical_edit(f"cd /app && python3 - <<'EOF' && cp a.py b.py\n{_PROGRAM}EOF", None)
+    assert edit is not None and (edit.cwd, edit.path) == ("/app", "/app/a.py")
+    edit = mechanical_edit(ACCEPTED[15], "/w")
+    assert edit is not None and (edit.cwd, edit.remainder) == ("", "cp app/a.py app/b.py")
+    assert edit.path == "/w/app/a.py" and edit.per_line
+
+
+def test_compound_shapes_outside_the_grammar_are_not_converted(tmp_path: Path) -> None:
+    for command in REFUSED:
+        assert heredoc_copy(command, str(tmp_path)) is None, command
+        assert mechanical_edit(command, str(tmp_path)) is None, command
+    # A relative cd needs a known start directory.
+    command = "cd app && cat > f.txt <<'EOF' && cp f.txt g.txt\nbody\nEOF"
+    assert heredoc_copy(command, None) is None
+    copy = heredoc_copy(command, "/w")
+    assert copy is not None and copy.cwd == "/w/app"

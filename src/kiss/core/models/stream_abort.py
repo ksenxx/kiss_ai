@@ -354,6 +354,79 @@ def shutdown_pool_sockets(http_client: Any) -> bool:
     return shut_down
 
 
+class RequestAbortWatchdog:
+    """Aborts a non-streamed request on a user stop or at an absolute deadline.
+
+    The counterpart of :class:`StreamAbortWatchdog` for a request whose
+    reply the SDK hands back whole (``messages.create`` without
+    streaming): until the reply has arrived there is no response whose
+    socket could be shut down, and the SDK's ``timeout`` only bounds the
+    silence between two reads, so a peer that sends a byte before each
+    read timeout holds the calling thread for good.  Used as a context
+    manager around the SDK call, this shuts the client's pool sockets
+    down (:func:`shutdown_pool_sockets`, which wakes the parked read and
+    fails the request at once) when the calling thread's stop event is
+    set or *deadline* seconds have passed, and again at every poll until
+    the block is left: a request whose connection is still being set up
+    has no socket in the pool yet, and is cut the moment it has one.
+    The idle connections that go down with the request's are discarded
+    by httpx's pool as expired, so the client stays usable.  Nothing
+    else may be sending through the client meanwhile: the abort reaches
+    every connection of its pool.
+
+    Leaving the block disarms the watchdog under the same lock the
+    abort decision is taken under, so once it returns no abort can
+    happen and the pool may carry the next request.
+    """
+
+    _POLL_SECONDS = 0.1
+    _JOIN_SECONDS = 5.0
+
+    def __init__(
+        self, http_client: Any, deadline: float, name: str = "model-request-abort-watchdog"
+    ) -> None:
+        """Prepare to watch a request on *http_client*; entering the block starts the thread.
+
+        Args:
+            http_client: The ``httpx.Client`` the SDK sends through.
+            deadline: Seconds from entering the block after which the
+                request is aborted whatever arrives.
+            name: Thread name, so a stuck watchdog is identifiable in a
+                stack dump.
+        """
+        self._http_client = http_client
+        self._deadline = time.monotonic() + deadline
+        self._stop_event = stop_signal.get_thread_stop_event()
+        self._lock = threading.RLock()
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name=name, daemon=True)
+
+    def __enter__(self) -> "RequestAbortWatchdog":
+        try:
+            self._thread.start()
+        except BaseException:
+            # ``__exit__`` never runs for an ``__enter__`` that raised,
+            # and a Stop injected inside ``start()`` may land after the
+            # thread was spawned: disarm it on the way out.
+            self._done.set()
+            raise
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        locked_call(self._lock, self._done.set)
+        self._thread.join(self._JOIN_SECONDS)
+
+    def _watch(self) -> None:
+        """Poll until disarmed; abort at every poll once the stop or the deadline is due."""
+        while not self._done.wait(self._POLL_SECONDS):
+            with self._lock:
+                if self._done.is_set():
+                    return
+                stopped = self._stop_event is not None and self._stop_event.is_set()
+                if stopped or time.monotonic() >= self._deadline:
+                    shutdown_pool_sockets(self._http_client)
+
+
 def _client_pools(http_client: Any) -> list[Any]:
     """Return the httpcore connection pools an httpx client may send through.
 

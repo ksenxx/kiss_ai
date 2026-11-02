@@ -635,8 +635,7 @@ class FlushScopeTest(_PersistenceTestCase):
         """Pending events are drained even if the writer already exited."""
         task_id, _chat = th._add_task("dead writer")
         th._stop_event_writer()
-        th._reserve_pending(task_id)
-        th._event_queue.put((
+        th._event_deque.append((
             task_id,
             json.dumps({"type": "result", "content": "late"}),
             time.time(),

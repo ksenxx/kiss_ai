@@ -138,6 +138,23 @@
     ta.style.top = '0';
     ta.style.left = '0';
     ta.style.opacity = '0';
+    // Selecting the textarea focuses it and takes the document
+    // selection: both go back to what they are now (the control close()
+    // handed focus back to, with a text field's own selection) once the
+    // command has run, else a copy from a preview's contenteditable
+    // drops its highlighted text and leaves focus on the body.
+    let focused = doc.activeElement;
+    while (focused && focused.shadowRoot && focused.shadowRoot.activeElement) {
+      focused = focused.shadowRoot.activeElement;
+    }
+    const tag = String((focused && focused.tagName) || '').toLowerCase();
+    const field = tag === 'input' || tag === 'textarea';
+    const win = doc.defaultView;
+    const sel = !field && win && win.getSelection ? win.getSelection() : null;
+    const ranges = [];
+    for (let i = 0; sel && i < sel.rangeCount; i++) {
+      ranges.push(sel.getRangeAt(i).cloneRange());
+    }
     (doc.body || doc.documentElement).appendChild(ta);
     ta.select();
     ta.setSelectionRange(0, ta.value.length);
@@ -148,6 +165,23 @@
       ok = false;
     }
     ta.parentNode.removeChild(ta);
+    if (focused && focused !== doc.body && focused.isConnected) {
+      const start = focused.selectionStart;
+      const end = focused.selectionEnd;
+      const direction = focused.selectionDirection;
+      focused.focus({preventScroll: true});
+      if (field) {
+        try {
+          focused.setSelectionRange(start, end, direction);
+        } catch (_e) {
+          // number / email inputs have no selection API; theirs is kept
+        }
+      }
+    }
+    if (sel && ranges.length) {
+      sel.removeAllRanges();
+      ranges.forEach(r => sel.addRange(r));
+    }
     return ok;
   }
 
@@ -156,9 +190,12 @@
    *
    * The asynchronous Clipboard API is unavailable inside an opaque-origin
    * sandboxed iframe, so a hidden-textarea `execCommand('copy')` is always
-   * used as the fallback and as the sole path when the API rejects.
+   * used as the fallback and as the sole path when the API rejects — unless
+   * *current* (when given) says a newer copy was asked for meanwhile: then
+   * the rejected copy resolves false instead of falling back over the
+   * newer clipboard contents.
    */
-  function copyText(doc, text) {
+  function copyText(doc, text, current) {
     if (!text) return Promise.resolve(false);
     const win = doc.defaultView;
     const nav = win && win.navigator;
@@ -166,7 +203,7 @@
       try {
         return Promise.resolve(nav.clipboard.writeText(text)).then(
           () => true,
-          () => copyViaTextarea(doc, text),
+          () => (!current || current() ? copyViaTextarea(doc, text) : false),
         );
       } catch (_e) {
         return Promise.resolve(copyViaTextarea(doc, text));
@@ -176,7 +213,8 @@
   }
 
   /**
-   * Select every visible text node of *doc*'s body and return its text.
+   * Select every visible text node of *doc*'s body and return the live
+   * Ranges installed, one per stretch.
    *
    * `<script>`/`<style>` text and the menu's own markup live in that same
    * body — at any depth — so the document is walked text node by text node
@@ -185,23 +223,23 @@
    * moment they followed Select All with Copy.
    *
    * Chromium and WebKit keep at most one `Range` per `Selection`, so the
-   * returned text is assembled from the ranges as they are built; the
-   * caller must use it rather than re-reading the selection.
+   * caller keeps the returned Ranges and a later Copy reads them with
+   * `rangesText` rather than the selection.
    */
   function selectAll(doc, scope) {
     const win = doc.defaultView;
     const body = scope || doc.body || doc.documentElement;
-    if (!win || !body || typeof win.getSelection !== 'function') return '';
+    if (!win || !body || typeof win.getSelection !== 'function') return [];
     const sel = win.getSelection();
-    if (!sel) return '';
+    if (!sel) return [];
     sel.removeAllRanges();
     const walker = doc.createTreeWalker(body, 4 /* SHOW_TEXT */, null, false);
-    const parts = [];
+    const ranges = [];
     let range = null;
     let node = walker.nextNode();
     while (node) {
       if (inHiddenSource(node, body)) {
-        range = addRange(sel, range, parts);
+        range = addRange(sel, range, ranges);
       } else {
         if (!range) {
           range = doc.createRange();
@@ -211,17 +249,56 @@
       }
       node = walker.nextNode();
     }
-    addRange(sel, range, parts);
-    return parts.join('\n');
+    addRange(sel, range, ranges);
+    return ranges;
   }
 
-  /** Commit *range* to *sel*, recording its text, and reset it. */
-  function addRange(sel, range, parts) {
+  /** Commit *range* to *sel*, recording it in *ranges*, and reset it. */
+  function addRange(sel, range, ranges) {
     if (!range || range.collapsed) return null;
     sel.addRange(range);
-    const text = String(range.toString() || '').trim();
-    if (text) parts.push(text);
+    ranges.push(range);
     return null;
+  }
+
+  /**
+   * The text the live *ranges* (Select All's stretches) cover now, one
+   * entry per stretch: a Range follows the page's edits of the text it
+   * selected, as the selection's highlight does, so an insertion inside
+   * it is read and an addition past its end is not.
+   */
+  function rangesText(doc, ranges) {
+    const parts = [];
+    for (let i = 0; i < ranges.length; i++) {
+      const text = rangeText(doc, ranges[i]).trim();
+      if (text) parts.push(text);
+    }
+    return parts;
+  }
+
+  /**
+   * The text *range* covers now, read text node by text node so a
+   * hidden source inserted into it since Select All stays out, as it
+   * would have then.
+   */
+  function rangeText(doc, range) {
+    const root = range.commonAncestorContainer;
+    if (root.nodeType === 3 /* TEXT_NODE */) {
+      return root.data.slice(range.startOffset, range.endOffset);
+    }
+    const walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
+    let text = '';
+    let node = walker.nextNode();
+    while (node) {
+      if (range.intersectsNode(node) && !inHiddenSource(node, root)) {
+        text += node.data.slice(
+          node === range.startContainer ? range.startOffset : 0,
+          node === range.endContainer ? range.endOffset : node.length,
+        );
+      }
+      node = walker.nextNode();
+    }
+    return text;
   }
 
   function closestTag(node, tag) {
@@ -451,14 +528,23 @@
     // to it so a keyboard user does not lose their place.
     let opener = null;
     // Chromium keeps a single Range per Selection, so a multi-range Select
-    // All cannot be re-read from the DOM and its text has to be remembered.
-    // The Range the menu itself installed is remembered alongside it: the
-    // cache is only honoured while the live selection is still exactly that
-    // Range, so any selection the user makes afterwards — narrower, wider
-    // or elsewhere — discards it.  `selectionchange` is dispatched
+    // All cannot be re-read from the selection: the live Ranges it
+    // installed (every stretch) are remembered and their text read
+    // afresh at Copy time, since the page (a preview's script, typing
+    // into a contenteditable) may have changed it meanwhile, and a Range
+    // is live: it follows such edits as the highlight does, so a text
+    // cached at Select All time would be stale, and the scope re-read
+    // whole would take in text added past the selection's end.  The
+    // Range the selection itself kept is remembered alongside: the
+    // cache is only honoured while the live selection is still exactly
+    // that Range, so any selection the user makes afterwards — narrower,
+    // wider or elsewhere — discards it.  `selectionchange` is dispatched
     // asynchronously, so it cannot be relied on for this.
-    let selectAllText = '';
+    let selectAllRanges = [];
     let selectAllRange = null;
+    // The menu copy asked for most recently: an earlier one whose async
+    // write rejects after it must not fall back over it (see copyText).
+    let copySeq = 0;
 
     function cachedSelectAllText() {
       if (!selectAllRange) return '';
@@ -470,7 +556,7 @@
         (live.compareBoundaryPoints(live.START_TO_START, selectAllRange) ===
           0 &&
           live.compareBoundaryPoints(live.END_TO_END, selectAllRange) === 0);
-      return same ? selectAllText : '';
+      return same ? rangesText(doc, selectAllRanges).join('\n') : '';
     }
 
     // True while focus is still on the menu (or nowhere in particular):
@@ -519,14 +605,14 @@
         // setSelectionRange throws on `number` / `email` inputs.
         // Elsewhere it selects the visible text as one Range per stretch
         // between hidden sources.  Chromium keeps only the first Range, so
-        // the joined text is cached with the Range left in place, and the
-        // next Copy uses that text only while the live selection is still
+        // the live Ranges are kept with that one left in place, and the
+        // next Copy reads them only while the live selection is still
         // exactly that Range (cachedSelectAllText).
         if (item.editable && isTextField(item.editable)) {
           item.editable.focus();
           item.editable.select();
         } else {
-          selectAllText = selectAll(doc, item.editable);
+          selectAllRanges = selectAll(doc, item.editable);
           const sel = win && win.getSelection && win.getSelection();
           selectAllRange = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
         }
@@ -536,7 +622,17 @@
         pasteInto(doc, item.editable);
         return;
       }
-      copyText(doc, item.text || '');
+      // The parent document's copy controls all go through PanelCopy,
+      // which retires an older pending copy of any of them when a newer
+      // one is asked for: a menu copy there is one of them.  The
+      // sandboxed preview iframe has no PanelCopy and keeps its own.
+      const panelCopy = win && win.PanelCopy;
+      if (panelCopy && typeof panelCopy.copyText === 'function') {
+        panelCopy.copyText(item.text || '', doc);
+        return;
+      }
+      const seq = ++copySeq;
+      copyText(doc, item.text || '', () => seq === copySeq);
     }
 
     function ensureStyle() {
@@ -667,6 +763,8 @@
     inHiddenSource.toString() +
     addRange.toString() +
     selectAll.toString() +
+    rangesText.toString() +
+    rangeText.toString() +
     closestTag.toString() +
     editableTarget.toString() +
     isMac.toString() +

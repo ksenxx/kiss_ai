@@ -26,11 +26,12 @@ and applies the result in place on the command dict
   (``{task_id}`` in it -> the calling task's id);
 * the channel preamble, appended to ``appendToSystemPrompt`` of a
   channel run (a SEA deriving from ``ChannelSea``);
-* the ``system_prompt``, ``tools``, ``llm_call_hook`` and
-  ``tool_call_hook`` methods — callables no wire field can carry —
-  staged on the daemon-side fields ``systemPromptHook``, ``toolsHook``,
-  ``llmCallHook`` and ``toolCallHook``, which the run applies where it
-  assembles its system prompt, builds its toolset and makes its calls;
+* the ``system_prompt``, ``tools``, ``llm_call_hook``,
+  ``tool_call_hook`` and ``llm_response_hook`` methods — callables no
+  wire field can carry — staged on the daemon-side fields
+  ``systemPromptHook``, ``toolsHook``, ``llmCallHook``, ``toolCallHook``
+  and ``llmResponseHook``, which the run applies where it assembles its
+  system prompt, builds its toolset and makes its calls;
 * for a channel, the workspace the run holds for its lifetime
   (:func:`channel_workspace`), which the task runner enters BEFORE the
   tools are built — a channel's ``tools()`` binds the credentials of
@@ -223,8 +224,8 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
     ``prompt`` method rewrote it, or a ``{task_id}`` of the task text
     was filled in); ``appendToSystemPrompt`` extended with
     :data:`CHANNEL_PREAMBLE` for a channel; the daemon-side hook fields
-    ``systemPromptHook``, ``toolsHook``, ``llmCallHook`` and
-    ``toolCallHook``, always (every chain starts at :class:`BaseSea`,
+    ``systemPromptHook``, ``toolsHook``, ``llmCallHook``, ``toolCallHook``
+    and ``llmResponseHook``, always (every chain starts at :class:`BaseSea`,
     whose methods are identities unless ``base_sea.py`` is customized),
     so a client-sent value there is dropped.  The writes are atomic:
     they happen only after everything has succeeded, so a broken SEA
@@ -297,6 +298,7 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
     staged["toolsHook"] = run.tools_hook
     staged["llmCallHook"] = run.llm_call_hook
     staged["toolCallHook"] = run.tool_call_hook
+    staged["llmResponseHook"] = run.llm_response_hook
     # The provenance record the task runner folds into the run's
     # ``task_settings`` event (see :mod:`kiss.agents.sorcar.run_config`):
     # computed from the command BEFORE the writes, so it names the

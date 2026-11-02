@@ -23,7 +23,8 @@ This module is also the launcher: :func:`load_sea` executes a SEA file
 :func:`kiss.agents.sorcar.sea_settings.execute_python_file`) and
 instantiates its class; the ``base_*`` functions (:func:`base_settings`,
 :func:`base_prompt`, :func:`base_system_prompt`, :func:`base_tools`,
-:func:`base_tool_call_hook`, :func:`base_llm_call_hook`) apply the
+:func:`base_tool_call_hook`, :func:`base_llm_call_hook`,
+:func:`base_llm_response_hook`) apply the
 method of every class of the SEA's inheritance chain, base class first
 — so a SEA extends another by deriving from its class, and never calls
 ``super()``; :func:`evaluate_sea` bundles them into a run's
@@ -104,6 +105,7 @@ from kiss.agents.sorcar.sea_settings import (
     script_name,
 )
 from kiss.core.config import kiss_home
+from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_verdict import ALLOW, Verdict
 
 logger = logging.getLogger("kiss.sea_commands")
@@ -161,7 +163,10 @@ _subscribers: list[Callable[[list[str]], None]] = []
 
 # Last snapshot broadcast to subscribers.  Deduplicates identical
 # rescans so the daemon does not spam clients with unchanged lists.
-_last_broadcast: tuple[str, ...] = ()
+# ``None`` once a Stop interrupted a broadcast before every subscriber
+# had it (:func:`_publish`): the next rescan broadcasts whatever it
+# finds, an empty registry included.
+_last_broadcast: tuple[str, ...] | None = ()
 
 # Numbers the rescans in the order they start (``next`` of the C counter
 # is atomic), and the number of the last rescan published (guarded by
@@ -171,9 +176,17 @@ _scan_numbers = itertools.count(1)
 _published_scan = 0
 
 # ``register_as_model()`` verdict per SEA script, keyed by path and
-# stamped with the file's (mtime_ns, size, inode) so an edited or
-# replaced script is re-read.  Guarded by ``_lock``.
-_model_sea_cache: dict[Path, tuple[tuple[int, int, int], bool]] = {}
+# stamped with the (mtime_ns, size, inode) of the script and of every
+# file its class derives from (:func:`_base_stamps`), so an edit or a
+# replacement of any of them is re-read.  Guarded by ``_lock``.
+_model_sea_cache: dict[Path, tuple[dict[Path, tuple[int, int, int] | None], bool]] = {}
+
+# ``bases``: while :func:`_registers_as_model` loads a SEA on this
+# thread, the set every :func:`sea_class` call of that load adds the
+# file it was asked for to, loaded or not (``None`` outside such a
+# load).  A load that fails in a base is stamped with that base too,
+# so its repair (the child untouched) is re-read.
+_picker_load = threading.local()
 
 # Watcher-thread coordination.
 _watcher_thread: threading.Thread | None = None
@@ -421,15 +434,30 @@ def _publish(scan: int, merged: dict[str, Path]) -> list[str]:
     :func:`list_commands` — cannot deadlock.  Both locks are taken
     through :func:`locked` because a task thread rescans too
     (:func:`get_command` on a miss) and the runner's Stop injection
-    must not leak them.
+    must not leak them.  That Stop can also land after
+    ``_last_broadcast`` was advanced for a snapshot nobody delivered:
+    inside a callback, or still in the swap, between the advance and
+    its return.  The broadcast is then forgotten
+    (:func:`_forget_broadcast`) before the Stop propagates, so the
+    next rescan repeats it instead of deduplicating it away for good.
     """
-    snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged)
-    for cb in callbacks:
-        try:
-            cb(list(snapshot))
-        except Exception:  # pragma: no cover - subscribers own errors
-            logger.debug("SEA registry subscriber failed", exc_info=True)
+    try:
+        snapshot, callbacks = locked_call(_lock, _swap_registry, scan, merged)
+        for cb in callbacks:
+            try:
+                cb(list(snapshot))
+            except Exception:  # pragma: no cover - subscribers own errors
+                logger.debug("SEA registry subscriber failed", exc_info=True)
+    except BaseException:
+        locked_call(_lock, _forget_broadcast)
+        raise
     return snapshot
+
+
+def _forget_broadcast() -> None:
+    """Mark the last broadcast undelivered so the next rescan notifies whatever it finds."""
+    global _last_broadcast
+    _last_broadcast = None
 
 
 def _swap_registry(
@@ -627,6 +655,7 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
         path = Path(spec).expanduser()
         if not path.is_absolute() and relative_to:
             path = Path(relative_to) / path
+        _note_picker_base(path)
         if path.suffix != ".py" or not path.is_file():
             raise SeaError(f"sea_class({spec!r}): not an existing Python (.py) file")
     else:
@@ -637,7 +666,15 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
                 f"known commands: {', '.join(list_commands()) or 'none'}"
             )
         path = found
+        _note_picker_base(path)
     return type(load_sea(path.resolve()))
+
+
+def _note_picker_base(path: Path) -> None:
+    """Record *path* as a base of the SEA the model picker is loading on this thread, if any."""
+    bases = getattr(_picker_load, "bases", None)
+    if bases is not None:
+        bases.add(path.resolve())
 
 
 def sea_layers(
@@ -720,9 +757,15 @@ def _file_of(obj: Any) -> Path | None:
 
 
 def _bound(sea: BaseSea, cls: type, name: str) -> Callable[..., Any]:
-    """Return the method *name* of *cls* bound to *sea*; a non-function attribute is an error."""
+    """Return the method *name* of *cls* bound to *sea*; a non-function attribute is an error.
+
+    A plain Python function only: a class, a ``staticmethod``, a
+    builtin (``tools = len``) or a ``functools.partial`` is callable
+    but binds no instance or carries no ``__name__``, which the
+    diagnostics (:func:`_label`) need.
+    """
     attr = vars(cls)[name]
-    if not callable(attr) or isinstance(attr, (type, staticmethod)):
+    if not inspect.isfunction(attr):
         raise SeaError(
             f"{name} of SEA {str(sea.path)!r} must be a method, "
             f"got {type(attr).__name__}"
@@ -754,20 +797,23 @@ def _label(method: Callable[..., Any]) -> str:
     return f"{method.__name__}() of SEA {str(sea.path)!r}"
 
 
-def _call(method: Callable[..., Any], *args: Any) -> Any:
+def _call(method: Callable[..., Any], *args: Any, log: bool = True) -> Any:
     """Call a bound SEA method; whatever it raises becomes a :exc:`SeaError`.
 
     Except a Stop (:func:`~kiss.agents.sorcar.sea_settings.is_stop`),
     re-raised unchanged: the method did not fail, the task was stopped,
     so nothing (the model picker's verdict cache included) records it
-    as broken.
+    as broken.  The failure is logged with its traceback unless *log* is
+    ``False`` (a probe whose failure is an ordinary outcome,
+    :func:`own_settings`).
     """
     try:
         return method(*args)
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         if is_stop(exc):
             raise
-        logger.warning("%s raised", _label(method), exc_info=True)
+        if log:
+            logger.warning("%s raised", _label(method), exc_info=True)
         raise SeaError(f"{_label(method)} raised: {safe_message(exc)}") from exc
 
 
@@ -796,11 +842,18 @@ def declared_settings(seas: list[BaseSea]) -> dict[str, Any]:
 
 
 def own_settings(sea: BaseSea) -> dict[str, Any]:
-    """Return what the SEA's own class (not its bases) writes in ``settings``, over ``{}``."""
+    """Return what the SEA's own class (not its bases) writes in ``settings``, over ``{}``.
+
+    A tooling probe (the linter's ``redundant-key`` comparison, the
+    docs).  A ``settings`` that reads what its bases lay
+    (``settings["x"]``) cannot run over ``{}``: it raises
+    :exc:`SeaError` like any failing method, but nothing is logged,
+    since a run folds the bases first and the script is not broken.
+    """
     if "settings" not in vars(type(sea)):
         return {}
     method = _bound(sea, type(sea), "settings")
-    return _check_dict(_label(method), _call(method, {}))
+    return _check_dict(_label(method), _call(method, {}, log=False))
 
 
 def inherited_settings(sea: BaseSea) -> dict[str, Any]:
@@ -904,6 +957,26 @@ def _first_refusal(
     return ALLOW
 
 
+def _first_run_end(methods: list[Callable[..., Any]], reply: LLMReply) -> Verdict:
+    """Return the first ``end_run`` verdict of the ``llm_response_hook`` *methods*, else ``ALLOW``.
+
+    Raises:
+        SeaError: When a method returns a verdict that neither allows
+            nor ends the run (a ``refuse(text)``: a reply cannot be
+            refused, only acted on or made the run's end).
+    """
+    for method in methods:
+        verdict = _check_verdict(_label(method), _call(method, reply))
+        if not verdict.allowed:
+            if not verdict.ends_run:
+                raise SeaError(
+                    f"{_label(method)} must return ALLOW or end_run(result), "
+                    f"got refuse({verdict.text!r})"
+                )
+            return verdict
+    return ALLOW
+
+
 def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
     """Return *system_prompt* after every ``system_prompt`` method of *seas*, base first.
 
@@ -939,6 +1012,11 @@ def base_llm_call_hook(seas: list[BaseSea], new_messages: list[Any]) -> list[Any
     return _fold_llm_call_hook(_chain(seas, "llm_call_hook"), new_messages)
 
 
+def base_llm_response_hook(seas: list[BaseSea], reply: LLMReply) -> Verdict:
+    """Return the first ``end_run`` an ``llm_response_hook`` of *seas* returns, else ``ALLOW``."""
+    return _first_run_end(_chain(seas, "llm_response_hook"), reply)
+
+
 @dataclass
 class SeaRun:
     """What a run takes from its SEAs (:func:`evaluate_sea`).
@@ -955,6 +1033,8 @@ class SeaRun:
             (:func:`base_llm_call_hook`).
         tool_call_hook: ``(name, args) -> verdict``
             (:func:`base_tool_call_hook`).
+        llm_response_hook: ``reply -> verdict``
+            (:func:`base_llm_response_hook`).
     """
 
     task: str
@@ -964,13 +1044,14 @@ class SeaRun:
     tools_hook: Callable[[list[Any]], list[Any]]
     llm_call_hook: Callable[[list[Any]], list[Any]]
     tool_call_hook: Callable[[str, dict[str, Any]], Verdict]
+    llm_response_hook: Callable[[LLMReply], Verdict]
 
 
 def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
     """Return the configuration of a run of *seas* on *task*.
 
     The settings and the prompt are computed now; the system prompt,
-    tools and the two hooks are returned as callables for the run to
+    tools and the three hooks are returned as callables for the run to
     apply where it assembles its system prompt, builds its toolset, and
     makes its LLM and tool calls.  Every chain starts at
     :class:`BaseSea`, so the callables are always present (identities
@@ -992,7 +1073,9 @@ def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
     # the hook's first call, and the hooks run over the bound methods.
     chains = {
         name: _chain(seas, name)
-        for name in ("system_prompt", "tools", "llm_call_hook", "tool_call_hook")
+        for name in (
+            "system_prompt", "tools", "llm_call_hook", "tool_call_hook", "llm_response_hook",
+        )
     }
     return SeaRun(
         task,
@@ -1002,6 +1085,7 @@ def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
         functools.partial(_fold_tools, chains["tools"]),
         functools.partial(_fold_llm_call_hook, chains["llm_call_hook"]),
         functools.partial(_first_refusal, chains["tool_call_hook"]),
+        functools.partial(_first_run_end, chains["llm_response_hook"]),
     )
 
 
@@ -1156,7 +1240,10 @@ def _registers_as_model(sea_path: Path) -> bool:
 
     The verdict is cached per file stamp (the revision
     :func:`~kiss.agents.sorcar.sea_settings.parsed_sea` read, so both
-    an edit and an atomic replacement are re-read).  Only a script
+    an edit and an atomic replacement are re-read) of the script and
+    of every file its class derives from, since the method may be
+    inherited from a custom base (``class X(sea_class(...))``) and an
+    edit of that base alone changes the verdict.  Only a script
     whose source mentions ``register_as_model`` or derives its class
     from something other than the plain bases (so it may inherit the
     registration) is imported: importing every registered SEA (channel
@@ -1170,16 +1257,38 @@ def _registers_as_model(sea_path: Path) -> bool:
         logger.warning("SEA %s: cannot be read", sea_path)
         return False
     cached = locked_call(_lock, _model_sea_cache.get, sea_path)
-    if cached is not None and cached[0] == parsed.stamp:
+    if cached is not None and all(
+        parsed_sea(path).stamp == stamp for path, stamp in cached[0].items()
+    ):
         return cached[1]
     verdict = False
+    stamps: dict[Path, tuple[int, int, int] | None] = {sea_path: parsed.stamp}
     if parsed.mentions_register_as_model or parsed.bases.difference(SEA_BASES):
+        outer = getattr(_picker_load, "bases", None)
+        asked: set[Path] = set()
+        _picker_load.bases = asked
         try:
-            verdict = _call(_method(load_sea(sea_path), "register_as_model")) is True
+            sea = load_sea(sea_path)
+            stamps.update(_base_stamps(sea))
+            verdict = _call(_method(sea, "register_as_model")) is True
         except SeaError:
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
-    locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (parsed.stamp, verdict))
+            # A base may be what broke (a parent mid-edit, or not yet
+            # written): keep watching every file this load asked for
+            # and every one the last verdict depended on, so its repair
+            # is re-read.
+            for path in asked.union(cached[0] if cached is not None else ()):
+                stamps.setdefault(path, parsed_sea(path).stamp)
+        finally:
+            _picker_load.bases = outer
+    locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (stamps, verdict))
     return verdict
+
+
+def _base_stamps(sea: BaseSea) -> dict[Path, tuple[int, int, int] | None]:
+    """Return the revision stamp of every SEA file the class of *sea* derives from."""
+    files = {_file_of(cls) for cls in type(sea).__mro__[1:] if issubclass(cls, BaseSea)}
+    return {file: parsed_sea(file).stamp for file in files if file is not None}
 
 
 def model_seas() -> dict[str, Path]:
@@ -1309,6 +1418,7 @@ def check_sea(sea_path: Path, require_description: bool = True) -> SeaCheck:
     tools = run.tools_hook([])
     run.tool_call_hook("finish", {})
     run.llm_call_hook([])
+    run.llm_response_hook(LLMReply("<the model's reply>"))
     description = ""
     if require_description or defines(seas, "description"):
         description = sea_description(seas[-1])
@@ -1360,7 +1470,7 @@ def sea_check(name: str, sea_path: Path) -> str:
     defined = [
         method for method in (
             "system_prompt", "prompt", "tools", "llm_call_hook", "tool_call_hook",
-            "register_as_model", "on_picked_as_model",
+            "llm_response_hook", "register_as_model", "on_picked_as_model",
         ) if defines(seas, method)
     ]
     lines = [

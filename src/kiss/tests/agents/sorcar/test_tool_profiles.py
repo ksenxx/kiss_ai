@@ -363,6 +363,9 @@ def _parent(env: IsolatedKissHome, model: _FinishingModel, max_budget: float) ->
     agent.model_config = model.server.model_config
     agent._chat_id = ""
     agent._last_task_id = uuid.uuid4().hex
+    # Asks for sub-agents: children on its own model family are not refused
+    # (``fanout_guard.same_family_conflict``).
+    agent.task_description = "fan out to sub-agents"
     return agent
 
 
@@ -444,7 +447,11 @@ class TestFanoutPropagation:
         child is neither clipped nor charged against a separate allowance."""
         agent = _parent(env, model, max_budget=6.0)
         run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel('["Review module A for bugs", "Summarize module B"]')
+        # The model is pinned to the parent's: a review left to inherit it
+        # would be moved to another model family (and a real endpoint).
+        out = run_parallel(
+            '["Review module A for bugs", "Summarize module B"]', model=STANDIN_MODEL,
+        )
         assert len(_child_results(out)) == 2 and len(model.requests) == 2
         rows = {task: budget for _model, budget, task in _child_rows(agent)}
         # Plain share is 6.0 / (2 + 1) = 2.0 for both children.
@@ -488,8 +495,9 @@ class TestImplementationTasksKeepFullToolset:
     ) -> None:
         agent = _parent(env, model, max_budget=1.0)
         run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel(
+        out = run_parallel(  # pinned: a review left to inherit the model goes to another family
             '["Implement a regression test for the parser", "Review the parser for bugs"]',
+            model=STANDIN_MODEL,
         )
         assert all(r["success"] for r in _child_results(out))
         assert len(model.requests) == 2
@@ -587,7 +595,8 @@ def test_review_share_in_prompt_leaves_reviewers_uncapped(
     assert not hasattr(agent, "_review_quota")
     spent_before_fanout = float(agent.budget_used)
     run_parallel = _tool(agent, "run_parallel")
-    out = run_parallel('["Review module A for bugs"]')
+    # Pinned: a review left to inherit the model goes to another family (a real endpoint).
+    out = run_parallel('["Review module A for bugs"]', model=STANDIN_MODEL)
     assert _child_results(out)[0]["success"] is True
     assert len(model.requests) == 2
     rows = _child_rows(agent)

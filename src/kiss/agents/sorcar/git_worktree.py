@@ -777,6 +777,34 @@ def _same_path(left: Path, right: Path) -> bool:
         return left == right
 
 
+def _same_bytes(left: Path, right: Path) -> bool:
+    """Return True when the two regular files hold identical bytes.
+
+    Read now, chunk by chunk, with no cache: ``filecmp.cmp`` (even with
+    ``shallow=False``) remembers its verdict per path, size and mtime,
+    so a file rewritten with different bytes of the same length and a
+    preserved timestamp (an archive extraction, ``copy2``) kept
+    comparing equal to what it replaced.
+
+    Args:
+        left: First file.
+        right: Second file.
+
+    Raises:
+        OSError: When either file cannot be read.
+    """
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with open(left, "rb") as a, open(right, "rb") as b:
+        while True:
+            chunk_a = a.read(1 << 20)
+            chunk_b = b.read(1 << 20)
+            if chunk_a != chunk_b:
+                return False
+            if not chunk_a:
+                return True
+
+
 def strip_worktree_suffix(path: str) -> str:
     """Return *path* with the ``.kiss-worktrees/kiss_wt-<slug>[/...]``
     suffix removed, leaving the parent repository path.
@@ -884,7 +912,9 @@ class GitWorktreeOps:
         result = _git("rev-parse", "--show-toplevel", cwd=path)
         if result.returncode != 0:
             return None
-        return Path(result.stdout.strip())
+        # Only git's record terminator goes: ``strip()`` would turn a
+        # root named ``project `` into its neighbour ``project``.
+        return Path(result.stdout.removesuffix("\n"))
 
     @staticmethod
     def current_branch(repo: Path) -> str | None:
@@ -2612,8 +2642,6 @@ class GitWorktreeOps:
                 caller marks the rescue failed and the worktree is
                 preserved).
         """
-        import filecmp
-
         if src.is_symlink():
             if dst.is_symlink() or dst.exists():
                 if (
@@ -2629,9 +2657,7 @@ class GitWorktreeOps:
         if not src.is_file():
             return None
         if dst.is_symlink() or dst.exists():
-            if dst.is_file() and not dst.is_symlink() and filecmp.cmp(
-                str(src), str(dst), shallow=False,
-            ):
+            if dst.is_file() and not dst.is_symlink() and _same_bytes(src, dst):
                 return None
             dst = GitWorktreeOps._rescued_sibling(dst)
         else:
@@ -3431,7 +3457,7 @@ class GitWorktreeOps:
     def registered_worktrees(repo: Path) -> list[tuple[Path, str]]:
         """Return ``(wt_dir, branch)`` for every registered worktree.
 
-        Parses ``git worktree list --porcelain``.  The main repo entry
+        Parses ``git worktree list --porcelain -z``.  The main repo entry
         (whose branch name is any user branch, e.g. ``main``) is
         included alongside ``kiss/wt-*`` entries; callers filter by
         the branch-name prefix themselves.
@@ -3439,14 +3465,15 @@ class GitWorktreeOps:
         Detached-HEAD worktrees are skipped because they have no
         branch name to reclaim by.
 
-        Worktree paths are emitted verbatim by git, so the output is
-        split on ``"\\n"`` only (``_git`` runs in text mode, which
-        already turns a ``\\r\\n`` line ending into ``\\n``) and the
-        path tail is never stripped: ``splitlines()`` would also break
-        on ``\\v``/``\\f``/``\\x85``/``\\u2028``, and ``strip()`` would
-        silently rewrite a directory whose name ends in a space into a
-        DIFFERENT existing path — which :meth:`remove`'s ``rmtree``
-        fallback would then delete.
+        Worktree paths are emitted verbatim by git and every attribute
+        is NUL-terminated (``-z``; ``_git_text`` keeps the bytes of a
+        ``-z`` command as they are), so a path holding a newline or a
+        carriage return survives: split on ``"\\n"``, the path of
+        ``kiss_wt-a\\rb`` was read as ``kiss_wt-a``, and the reclaim
+        handed that OTHER directory to :meth:`remove`, whose ``rmtree``
+        fallback deleted it.  The path tail is never stripped either:
+        ``strip()`` would silently rewrite a directory whose name ends
+        in a space into a different existing path.
 
         Args:
             repo: Git repo root path.
@@ -3455,13 +3482,13 @@ class GitWorktreeOps:
             List of ``(wt_dir, branch)`` pairs in the order git
             reports them, empty on git failure.
         """
-        result = _git("worktree", "list", "--porcelain", cwd=repo)
+        result = _git("worktree", "list", "--porcelain", "-z", cwd=repo)
         if result.returncode != 0:  # pragma: no cover — git failure
             return []
         pairs: list[tuple[Path, str]] = []
         cur_dir: Path | None = None
         cur_branch: str | None = None
-        for line in result.stdout.split("\n"):
+        for line in result.stdout.split("\0"):
             if line.startswith("worktree "):
                 if cur_dir is not None and cur_branch is not None:
                     pairs.append((cur_dir, cur_branch))

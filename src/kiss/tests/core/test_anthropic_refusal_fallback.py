@@ -52,6 +52,7 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError, ModelRefusalError
+from kiss.core.models import model_families
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import MODEL_INFO, ModelInfo
 
@@ -198,6 +199,17 @@ def refusal_server() -> Generator[str]:
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
     server.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _no_other_family(monkeypatch: Any) -> None:
+    """Leave the declared same-family fallback as the only choice.
+
+    A refusal fails over to a model of another family when the machine
+    has one configured; these tests pin the fallback to the synthetic
+    pair served locally.
+    """
+    monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
 
 
 class TestAdapterRaisesOnRefusal:

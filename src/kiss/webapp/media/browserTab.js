@@ -216,6 +216,22 @@
 
     let moveFrame = null;
     let pendingMove = null;
+    /**
+     * Send the move waiting for its animation frame now (and drop the
+     * frame): a press, release or wheel must reach the daemon after the
+     * move that came before it, in the user's order, else the remote
+     * page sees the release before the drag and a buttons-down move
+     * after it.
+     */
+    function flushMove() {
+      if (moveFrame !== null) {
+        cancelAnimationFrame(moveFrame);
+        moveFrame = null;
+      }
+      const move = pendingMove;
+      pendingMove = null;
+      if (move && !view.disposed) mouse('mouseMoved', move);
+    }
     let lastPress = {t: 0, x: 0, y: 0, button: -1, count: 0};
     function clickCountFor(e) {
       const now = Date.now();
@@ -241,11 +257,13 @@
           screen.setPointerCapture(e.pointerId);
         } catch (_e) {}
       }
+      flushMove();
       mouse('mousePressed', e, {clickCount: clickCountFor(e)});
       e.preventDefault();
     });
     screen.addEventListener('pointerup', e => {
       if (e.pointerType === 'touch') return;
+      flushMove();
       mouse('mouseReleased', e, {clickCount: lastPress.count || 1});
       e.preventDefault();
     });
@@ -253,17 +271,12 @@
       if (e.pointerType === 'touch') return;
       // Coalesce to one move per animation frame.
       pendingMove = e;
-      if (moveFrame === null) {
-        moveFrame = requestAnimationFrame(() => {
-          moveFrame = null;
-          if (pendingMove && !view.disposed) mouse('mouseMoved', pendingMove);
-          pendingMove = null;
-        });
-      }
+      if (moveFrame === null) moveFrame = requestAnimationFrame(flushMove);
     });
     screen.addEventListener(
       'wheel',
       e => {
+        flushMove();
         mouse('mouseWheel', e, {
           deltaX: e.deltaMode === 0 ? e.deltaX : e.deltaX * 40,
           deltaY: e.deltaMode === 0 ? e.deltaY : e.deltaY * 40,

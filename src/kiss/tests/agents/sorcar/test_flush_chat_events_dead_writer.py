@@ -82,10 +82,10 @@ class TestFlushChatEventsDeadWriter:
         th._event_writer_stop.clear()
         th._event_writer_thread = dead
         event = {"type": "result", "content": "hello"}
-        th._event_queue.put((
+        th._event_deque.append((
             task_id, json.dumps(event), time.time(), th._current_db_path(),
         ))
-        assert th._event_queue.unfinished_tasks == 1
+        assert th._pending_count(None) == 1
 
         done = threading.Event()
 

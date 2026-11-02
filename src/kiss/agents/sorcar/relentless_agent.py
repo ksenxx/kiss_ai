@@ -32,7 +32,8 @@ from kiss.core.kiss_error import (
     ContextWindowExceededError,
     KISSError,
 )
-from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
+from kiss.core.llm_reply import LLMReply
+from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment, plain_io
 from kiss.core.printer import Printer
 from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
@@ -288,6 +289,19 @@ def _session_key(agent: Base) -> str:
     if key is None:
         key = agent.__dict__.setdefault("_usage_session_key", uuid4().hex)
     return str(key)
+
+
+def _fold_helper_spend(agent: Base) -> None:
+    """Fold *agent*'s helper spend (``KISSAgent._bill_helper_usage``) before banking it.
+
+    ``KISSAgent.run`` folds it on every exit, but a stop can interrupt
+    that fold; it bills each helper dollar exactly once however often
+    it runs, so the session bank and its stop retry both fold first.
+    Called on the agent's own thread only (the fold is not concurrent).
+    """
+    fold = getattr(agent, "_bill_helper_usage", None)
+    if callable(fold):
+        fold()
 
 
 def _session_usage(agent: Base) -> tuple[float, int, int]:
@@ -826,9 +840,11 @@ class RelentlessAgent(Base):
         # :class:`~kiss.core.kiss_agent.KISSAgent`).
         self.pre_step_hook: Callable[..., None] | None = None
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.tool_result_hook: Callable[[str, dict[str, Any], str, bool], None] | None = None
         self.context_reset_hook: Callable[[], None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
+        self.llm_response_hook: Callable[[LLMReply], Verdict] | None = None
         # Whether the run has the built-in toolset (``SorcarAgent.run``'s
         # *append_basic_tools*).
         self._append_basic_tools: bool = True
@@ -867,9 +883,11 @@ class RelentlessAgent(Base):
         self.model_config = None
         self.pre_step_hook = None
         self.tool_call_guard = None
+        self.tool_result_hook = None
         self.context_reset_hook = None
         self.llm_call_hook = None
         self.tool_call_hook = None
+        self.llm_response_hook = None
         # The thread's own binding first (the daemon binds one per
         # task thread), then the JSON printer's thread-local, a view
         # over the same storage.  Resolved once here so every user —
@@ -1307,6 +1325,37 @@ class RelentlessAgent(Base):
         """
         return ""
 
+    def _framework_instructions(self) -> str:
+        """The framework's additions to the caller's system prompt.
+
+        :data:`IMPORTANT_INSTRUCTIONS` (the continuation contract, the
+        work dir and this process's PID), the ``# Task Settings`` section
+        and the user's ``AGENTS.md`` when it exists, in that order.  A
+        ``plain_io`` run gets none of it.
+
+        Returns:
+            The text to append after the caller's system prompt.
+        """
+        work_dir_visible = (
+            self.docker_manager is None or self.work_dir in self.docker_manager.volumes
+        )
+        instructions = IMPORTANT_INSTRUCTIONS.format(
+            work_dir_line=(
+                WORK_DIR_LINE.format(work_dir=self.work_dir) if work_dir_visible else ""
+            ),
+            current_pid=str(os.getpid()),
+        )
+        instructions += self._task_settings_section()
+        agents_md = config_module.agents_md_path()
+        if agents_md.is_file():
+            # User-authored: a cp1252 byte from a Windows editor must
+            # not abort every task before its first model call (the
+            # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
+            # A ``/remember`` replacing the file at this instant must not
+            # abort the task either (Windows denies the open mid-rename).
+            instructions += "\n" + read_text_waiting_for_writer(agents_md, errors="replace")
+        return instructions
+
     def _task_settings_section(self) -> str:
         """The "# Task Settings" system-prompt section for this run.
 
@@ -1384,29 +1433,13 @@ class RelentlessAgent(Base):
         summaries: list[str] = []
         previous_summary: str | None = None  # the last continuation's, even if empty
         zero_progress_streak = 0
-        current_pid = str(os.getpid())
-        work_dir_visible = (
-            self.docker_manager is None or self.work_dir in self.docker_manager.volumes
-        )
-        important_instructions = IMPORTANT_INSTRUCTIONS.format(
-            work_dir_line=(
-                WORK_DIR_LINE.format(work_dir=self.work_dir) if work_dir_visible else ""
-            ),
-            current_pid=current_pid,
-        )
-        important_instructions += self._task_settings_section()
-        agents_md = config_module.agents_md_path()
-        if agents_md.is_file():
-            # User-authored: a cp1252 byte from a Windows editor must
-            # not abort every task before its first model call (the
-            # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
-            # A ``/remember`` replacing the file at this instant must not
-            # abort the task either (Windows denies the open mid-rename).
-            important_instructions += "\n" + read_text_waiting_for_writer(
-                agents_md,
-                errors="replace",
-            )
-        system_prompt = self.system_prompt + important_instructions
+        system_prompt = self.system_prompt
+        # Under ``plain_io`` the model reads the caller's system prompt
+        # alone: the operational instructions, the Task Settings and the
+        # user's AGENTS.md are the framework's own additions (see
+        # :func:`kiss.core.models.model.plain_io`).
+        if not plain_io(self.model_config):
+            system_prompt += self._framework_instructions()
         for session in range(self.max_sub_sessions):
             # One coherent snapshot for the whole session prologue: a
             # server-thread reclaim can publish between two separate
@@ -1434,6 +1467,7 @@ class RelentlessAgent(Base):
             executor = KISSAgent(f"{self.name} Session-{session}")
             executor.pre_step_hook = self.pre_step_hook
             executor.tool_call_guard = self.tool_call_guard
+            executor.tool_result_hook = self.tool_result_hook
             executor.context_reset_hook = self.context_reset_hook
             if session > 0 and self.context_reset_hook is not None:
                 # A new session starts from an empty context: nothing
@@ -1474,8 +1508,10 @@ class RelentlessAgent(Base):
                         attachments=attachments if session == 0 else None,
                         llm_call_hook=self.llm_call_hook,
                         tool_call_hook=self.tool_call_hook,
+                        llm_response_hook=self.llm_response_hook,
                     )
                 finally:
+                    _fold_helper_spend(executor)
                     self._accumulate_usage(executor)
                     self._current_executor = None
             except BudgetExceededError as exc:
@@ -1516,6 +1552,9 @@ class RelentlessAgent(Base):
                 # The stop can land inside the ``finally``'s own bank,
                 # before its atomic append: bank the session again
                 # (exact-once by session key) before the stop propagates.
+                # Likewise the executor's helper fold (idempotent), which
+                # a stop can interrupt in ``run``'s own ``finally``.
+                _fold_helper_spend(executor)
                 self._accumulate_usage(executor)
                 self._current_executor = None
                 raise
@@ -1709,24 +1748,40 @@ class RelentlessAgent(Base):
             # session's spend until the next session re-bases them.
             self._set_printer_offsets()
             summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+            # The task's live session while it runs, like a session
+            # executor: the task-wide budget check sees spend a
+            # sub-agent attributes to the task meanwhile (not just the
+            # allowance computed above) plus the summarizer's own, and
+            # the live usage readers see the summarizer's spend.  Banked
+            # exactly once (by its session key) on every exit, a stop
+            # landing inside the ``finally``'s own bank included.
+            summarizer_agent.budget_check_hook = self._check_total_budget
+            summarizer_agent.budget_status_hook = self._budget_status
+            self._current_executor = summarizer_agent
             try:
-                summarizer_result = summarizer_agent.run(
-                    model_name=self.model_name,
-                    prompt_template=SUMMARIZER_PROMPT,
-                    tools=[SummarizerFinish.finish],
-                    arguments={
-                        "digest": digest,
-                        "reason": f"session {session + 1}: {exc}",
-                    },
-                    max_steps=SUMMARIZER_MAX_STEPS,
-                    max_budget=summarizer_budget,
-                    model_config=self._executor_model_config(),
-                    printer=self.printer,
-                    verbose=self.verbose,
-                    print_prompts=False,
-                )
-            finally:
+                try:
+                    summarizer_result = summarizer_agent.run(
+                        model_name=self.model_name,
+                        prompt_template=SUMMARIZER_PROMPT,
+                        tools=[SummarizerFinish.finish],
+                        arguments={
+                            "digest": digest,
+                            "reason": f"session {session + 1}: {exc}",
+                        },
+                        max_steps=SUMMARIZER_MAX_STEPS,
+                        max_budget=summarizer_budget,
+                        model_config=self._executor_model_config(),
+                        printer=self.printer,
+                        verbose=self.verbose,
+                        print_prompts=False,
+                    )
+                finally:
+                    self._accumulate_usage(summarizer_agent)
+                    self._current_executor = None
+            except BaseException:
                 self._accumulate_usage(summarizer_agent)
+                self._current_executor = None
+                raise
             try:
                 parsed = yaml.safe_load(summarizer_result)
                 summary_text = (
@@ -1897,6 +1952,7 @@ class RelentlessAgent(Base):
         attachments: list[Attachment] | None = None,
         llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
+        llm_response_hook: Callable[[LLMReply], Verdict] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -1928,8 +1984,15 @@ class RelentlessAgent(Base):
                 every tool call with the tool's name and arguments and
                 returns a :class:`~kiss.core.tool_verdict.Verdict`:
                 ``refuse(text)`` suppresses the call and the model reads
-                *text* as the tool's result, ``ALLOW`` lets it run.
+                *text* as the tool's result, ``ALLOW`` lets it run,
+                ``end_run(result)`` ends the run with *result*.
                 Defaults to None (no hook).
+            llm_response_hook: Optional hook installed on every per-session
+                executor :class:`KISSAgent` (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): called after
+                every model reply with an :class:`~kiss.core.llm_reply.LLMReply`
+                (text, tool calls, token usage); ``ALLOW`` goes on,
+                ``end_run(result)`` ends the run.  Defaults to None (no hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1948,6 +2011,7 @@ class RelentlessAgent(Base):
         self.model_config = model_config
         self.llm_call_hook = llm_call_hook
         self.tool_call_hook = tool_call_hook
+        self.llm_response_hook = llm_response_hook
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
 

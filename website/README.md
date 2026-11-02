@@ -33,11 +33,19 @@ LLM/coding-assistant indexing") and verified live:
   the same window, is identical in both),
   the `/discover`, `/devtools` and
   `/sync_history_and_memory` rows are missing (the `/write_patent` and
-  `/review_patent` rows are there), and the channel table's "scratch
+  `/review_patent` rows are there), the `/rsi7d` row still says the SEA
+  "applies and evaluates improvements to each SEA" where the page now
+  says it "hands each SEA (its own included) to the /discover SEA" and the
+  `/revise_and_review_paper` row says "AI discovery" where the page says
+  "/discover runs", the two `model_config` rows (the settings table and
+  the `run_agent` options table) still read "(temperature, base URL,
+  ...)" where the page describes `base_url` and `plain_io: true`, and the channel table's "scratch
   directory" and "no inheritance" rows lack the page's cron-job sentence and
   its "or exec bridge" clause; in `cli.md` the `settings(self, settings)`
   paragraph still has `/write` declaring `{"timeout": 3600}` where the page
-  now says `{"timeout": 3600, "model": "bestrouter"}`; and the
+  now says `{"timeout": 3600, "model": "bestrouter"}` and its **Hooks**
+  bullet lacks the page's `end_run(result)` verdict and
+  `llm_response_hook(reply)` sentence; and the
   `overview.md`, `sample-tasks.md` and `tips.md` copies predate the
   `/discover` command (the pages now put `/discover` in front of the AI
   discovery and optimization prompts and name it in the overview's feature

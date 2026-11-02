@@ -952,7 +952,7 @@ class TestOpenBinaryFiles:
             page.write_text(head + filler * 5, encoding="utf-8", newline="")
             reply = harness.run(_open_file_unbounded(harness, "reports/chat-big-chat-1.html"))
             assert "error" not in reply, reply
-            assert reply["version"] == web_server._file_version(page.stat())
+            assert reply["version"] == web_server._file_version(page.read_bytes())
             assert reply["frames"] == 1
 
             # Past the editor cap, within one frame: read-only, whole.

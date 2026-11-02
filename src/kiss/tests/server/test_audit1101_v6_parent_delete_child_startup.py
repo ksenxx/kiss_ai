@@ -1,0 +1,156 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end: deleting a parent is refused while a just-admitted child is still starting.
+
+``deleteTask`` / ``deleteChat`` refuse to delete a task whose sub-task
+still runs (``_any_running``): a running child that has no
+``task_history`` row yet is known only through its state's
+``parent_task_id``.  ``_cmd_run`` knew the ``parentTaskId`` of a
+dispatched child at admission but did not stamp it onto the child's
+``AgentState``; the worker set it later, so in the startup window the
+child had a temporary registry key, no parent id and no row, and the
+deletion of its finished parent went through unchallenged while the
+child was live (it could then persist a row under the deleted parent).
+
+The state now carries the parent id from its construction, under the
+admission lock.  Real pieces throughout: the production ``_cmd_run``
+admission (a nonexistent agent script makes the worker fail at setup
+without a model call), the real registry, ``_cmd_delete_task`` /
+``_cmd_delete_chat`` and the real sqlite history.  A profile hook holds
+the worker thread at ``_run_task``'s entry so the window stays open;
+it replaces no code.
+"""
+
+from __future__ import annotations
+
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+from kiss.agents.sorcar.persistence import _add_task, _load_history
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
+from kiss.server.server import AgentServer
+
+DEADLINE_S = 15.0
+
+
+class _EntryGate:
+    """A profile hook that parks the thread entering *code* until released."""
+
+    def __init__(self, code: Any) -> None:
+        self.code = code
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if event == "call" and frame.f_code is self.code:
+            self.entered.set()
+            assert self.release.wait(DEADLINE_S), "gate timed out"
+            sys.setprofile(None)
+
+
+def _admit_gated(server: AgentServer, cmd: dict[str, Any]) -> tuple[_EntryGate, AgentState]:
+    """Admit *cmd* through ``_cmd_run`` with its worker parked at ``_run_task``'s entry."""
+    gate = _EntryGate(server._run_task.__func__.__code__)  # type: ignore[attr-defined]
+    threading.setprofile(gate)
+    try:
+        server._cmd_run(cmd)
+        assert gate.entered.wait(DEADLINE_S), "the worker never reached _run_task"
+    finally:
+        threading.setprofile(None)
+    state = agent_state.agent_states[cmd["_state_key"]]
+    assert state.task_thread is not None and state.task_thread.is_alive()
+    return gate, state
+
+
+def _finish_gated(gate: _EntryGate, state: AgentState) -> None:
+    """Stop the parked run and let its worker finish."""
+    if state.stop_event is not None:
+        state.stop_event.set()
+    thread = state.task_thread
+    gate.release.set()
+    if thread is not None:
+        thread.join(DEADLINE_S)
+        assert not thread.is_alive(), "the worker did not finish"
+
+
+def _row(task_id: str) -> dict[str, Any] | None:
+    return next((r for r in _load_history() if r["id"] == task_id), None)
+
+
+def _child_cmd(tmp_path: Path, parent_id: str, chat_id: str, tab_id: str) -> dict[str, Any]:
+    return {
+        "type": "run", "tabId": tab_id, "prompt": "child task", "chatId": chat_id,
+        "parentTaskId": parent_id, "parentTabId": "parent-tab", "workDir": str(tmp_path),
+        "seaPath": str(tmp_path / "does-not-exist.py"),
+    }
+
+
+def _server() -> tuple[AgentServer, list[dict[str, Any]], threading.Lock]:
+    server = AgentServer()
+    events: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def capture(event: dict[str, Any]) -> None:
+        with lock:
+            events.append(event)
+
+    server.printer.broadcast = capture  # type: ignore[assignment]
+    return server, events, lock
+
+
+def _notices(events: list[dict[str, Any]], lock: threading.Lock) -> list[str]:
+    with lock:
+        return [e["text"] for e in events if e.get("type") == "notice"]
+
+
+def test_delete_task_is_refused_while_its_child_is_still_starting(tmp_path: Path) -> None:
+    """The child's state names its parent from admission on; the parent row survives."""
+    parent_id, chat_id = _add_task("finished parent", chat_id="")
+    server, events, lock = _server()
+    gate, state = _admit_gated(server, _child_cmd(tmp_path, parent_id, chat_id, "child-tab"))
+    try:
+        assert state.running()
+
+        server._cmd_delete_task({"taskId": parent_id, "tabId": "chats", "connId": "c1"})
+
+        assert _row(parent_id) is not None, "the parent was deleted under its running child"
+        assert _notices(events, lock) == [
+            "Cannot delete the task: its task is still running. Stop it first.",
+        ]
+        assert state.parent_task_id == parent_id, "the child's state does not name its parent"
+        assert state.is_subagent
+    finally:
+        _finish_gated(gate, state)
+        for s in agent_state.snapshot():
+            agent_state.unregister(s.task_id, s)
+
+
+def test_delete_chat_is_refused_while_a_child_of_its_task_is_still_starting(
+    tmp_path: Path,
+) -> None:
+    """The same guard for ``deleteChat`` of the parent's chat."""
+    parent_id, chat_id = _add_task("finished parent", chat_id="")
+    server, events, lock = _server()
+    # The child is admitted into a chat of its own: only its parent id
+    # ties it to the chat being deleted.
+    gate, state = _admit_gated(
+        server, _child_cmd(tmp_path, parent_id, "child-own-chat", "child-tab-2"),
+    )
+    try:
+        assert state.chat_id != chat_id
+
+        server._cmd_delete_chat({"chatId": chat_id, "tabId": "chats", "connId": "c2"})
+
+        assert _row(parent_id) is not None, "the chat was deleted under a running child"
+        assert _notices(events, lock) == [
+            "Cannot delete the chat: its task is still running. Stop it first.",
+        ]
+    finally:
+        _finish_gated(gate, state)
+        for s in agent_state.snapshot():
+            agent_state.unregister(s.task_id, s)

@@ -42,6 +42,17 @@ logger = logging.getLogger(__name__)
 # authoritative set of ``model_config`` keys that can be forwarded.
 _GEMINI_CONFIG_FIELDS = frozenset(types.GenerateContentConfig.model_fields)
 
+# The documented dummy thought signature for a function call Gemini never
+# signed.  Gemini 3 and 4 models reject a request that continues a turn
+# whose function calls carry no signature (400 INVALID_ARGUMENT), which
+# is the first request after a conversation is handed off from another
+# provider's model (Sorcar's set_model, the fallback swap) and the replay
+# of a parallel batch, of which Gemini signs only the first call.  The
+# dummy skips that validation: Gemini API docs, "Thought signatures"
+# (generateContent), FAQ "How do I transfer history from a different
+# model".
+FOREIGN_CALL_SIGNATURE = b"skip_thought_signature_validator"
+
 
 class _ResponseTrackingHttpxClient(httpx.Client):
     """The transport ``GeminiModel`` gives ``genai.Client``.
@@ -387,7 +398,11 @@ class GeminiModel(Model):
         return mapping
 
     def _function_call_part(self, name: str, args: dict[str, Any], call_id: Any) -> types.Part:
-        """Build a Gemini ``function_call`` part, re-attaching any thought signature.
+        """Build a Gemini ``function_call`` part, re-attaching its thought signature.
+
+        A call without a stored signature (produced by another provider's
+        model, or an unsigned later call of a parallel batch) carries
+        :data:`FOREIGN_CALL_SIGNATURE`, or Gemini 3 and 4 would reject it.
 
         Args:
             name: The function name.
@@ -399,7 +414,7 @@ class GeminiModel(Model):
         """
         return types.Part(
             function_call=types.FunctionCall(name=name, args=args),
-            thought_signature=self._thought_signatures.get(call_id) if call_id else None,
+            thought_signature=self._thought_signatures.get(call_id) or FOREIGN_CALL_SIGNATURE,
         )
 
     def _function_response_part(self, name: str, content: Any, call_id: Any) -> types.Part:

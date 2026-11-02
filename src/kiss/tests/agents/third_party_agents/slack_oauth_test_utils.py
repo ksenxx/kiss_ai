@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -45,6 +46,9 @@ class SlackOAuthState:
         self.invalid_next = False
         # When True the code exchange answers without a user token.
         self.omit_user_token = False
+        # ``SlackApiServer`` answers each request on its own thread; one
+        # grant at a time keeps a refresh token one-use under concurrency.
+        self._lock = threading.Lock()
 
     def _issue(self) -> tuple[str, str]:
         self.issued += 1
@@ -62,6 +66,11 @@ class SlackOAuthState:
         Returns:
             Slack's JSON answer (``ok: false`` on any protocol error).
         """
+        with self._lock:
+            return self._answer(body)
+
+    def _answer(self, body: str) -> dict[str, Any]:
+        """Validate and answer one grant; runs under :attr:`_lock`."""
         form = {k: v[0] for k, v in parse_qs(body).items()}
         self.forms.append(form)
         if "client_secret" in form or form.get("client_id") != CLIENT_ID:

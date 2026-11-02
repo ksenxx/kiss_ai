@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from kiss.server.file_index import (
     FileView,
 )
 from kiss.server.server import AgentServer
-from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
 from kiss.tests.server.conftest import touch
 
 
@@ -67,6 +68,18 @@ def _build(reg: FileIndexRegistry, work_dir: str) -> FileView:
     view = reg.view_for(work_dir)
     assert view is not None
     return view
+
+
+def _persist(tmp_path: Path, root: Path) -> list[str]:
+    """Index *root* with a registry that is then stopped, leaving its persisted listings.
+
+    Returns the paths the scan produced.
+    """
+    reg = _registry(tmp_path, tmp_path / "home")
+    try:
+        return _build(reg, str(root)).paths
+    finally:
+        reg.stop()
 
 
 class TestScan:
@@ -234,6 +247,113 @@ class TestScan:
         assert view.paths == ["README.md", "src/", "src/a.py"]
         assert index.view("kiss/") is view, "views are cached per index"
         assert index.view("").paths is index.paths
+
+    @posix_only("directory permissions (Windows ACLs are not set with chmod)")
+    @pytest.mark.skipif(is_root(), reason="root lists a mode-000 directory")
+    def test_refused_directory_is_a_bare_entry_and_is_never_persisted(
+        self, tmp_path: Path,
+    ) -> None:
+        """A directory the OS will not let the daemon list stays refused for the process.
+
+        macOS answers a daemon without the "Files and Folders" permission
+        with a five-second wait per ``scandir`` of ``~/Desktop``,
+        ``~/Downloads`` and dozens of ``~/Library`` directories; paying it
+        on every rescan kept the index worker busy for minutes.  The
+        refusal (here ``EACCES`` from a mode-000 directory) is remembered,
+        the directory is indexed as its bare ``dir/`` entry, and no
+        listing of it is kept: an empty listing persisted with the
+        directory's mtime would stand for its contents for ever, even
+        after the permission is granted.
+        """
+        touch(tmp_path, "a.py", "locked/secret.py", "locked/sub/deep.py")
+        locked = tmp_path / "locked"
+        locked.chmod(0o000)
+        try:
+            first = FileIndex.scan(str(tmp_path))
+            assert first.paths == ["a.py", "locked/"]
+            assert str(locked) in file_index._refused
+            assert "locked" not in first.listings
+            assert first.relisted, "the root itself was read"
+            # Still refused, answered without a system call, and nothing
+            # new to persist.
+            second = FileIndex.scan(str(tmp_path), first.listings)
+            assert second.paths == ["a.py", "locked/"]
+            assert "locked" not in second.listings and not second.relisted
+            locked.chmod(0o755)
+            same = FileIndex.scan(str(tmp_path), second.listings)
+            assert same.paths == ["a.py", "locked/"], "refused until the daemon restarts"
+            # Nor does a listing another scan cached while the directory
+            # was readable bring it back: the refusal is checked first.
+            stale_cache = dict(first.listings)
+            stale_cache["locked"] = (os.stat(locked).st_mtime_ns, ["secret.py"], ["sub"])
+            from_cache = FileIndex.scan(str(tmp_path), stale_cache)
+            assert from_cache.paths == ["a.py", "locked/"]
+            assert "locked" not in from_cache.listings
+            assert from_cache.relisted, "the dropped listing makes the persisted copy stale"
+            trusted = FileIndex.scan(str(tmp_path), stale_cache, trusted=True)
+            assert trusted.paths == ["a.py", "locked/"]
+            file_index._refused.discard(str(locked))  # what a restart does
+            granted = FileIndex.scan(str(tmp_path), same.listings)
+            assert granted.paths == [
+                "a.py", "locked/", "locked/secret.py", "locked/sub/", "locked/sub/deep.py",
+            ]
+            assert granted.listings["locked"][1] == ["secret.py"]
+        finally:
+            locked.chmod(0o755)
+            file_index._refused.discard(str(locked))
+
+    @posix_only("named pipes")
+    def test_gitignore_read_that_never_returns_refuses_the_directory(
+        self, tmp_path: Path,
+    ) -> None:
+        """A ``.gitignore`` read the OS holds for ever turns into a refusal.
+
+        The daemon's home index is reloaded from persisted listings, so a
+        directory inside a protected tree is reached without being
+        listed in this process, and the first thing read below it is
+        its ``.gitignore``.  macOS holds that ``open`` as long as the
+        permission prompt the daemon cannot show stays unanswered: the
+        index worker never returned and the picker never opened again.
+        A FIFO nobody writes blocks the same way.  The read runs on a
+        helper thread with a deadline; when it passes the directory is
+        refused: a bare ``dir/`` entry, nothing below it, no listing kept,
+        and no further wait on the next scan.
+        """
+        touch(tmp_path, "a.py", "proj/main.py", "proj/sub/x.py")
+        fifo = tmp_path / "proj" / ".gitignore"
+        os.mkfifo(fifo)
+        proj = str(tmp_path / "proj")
+        # The listing the daemon reloaded, which lists ``.gitignore`` as a
+        # plain file: the scan must read it to learn the rules below.
+        listings: file_index.Listings = {
+            "": (os.stat(tmp_path).st_mtime_ns, ["a.py"], ["proj"]),
+            "proj": (os.stat(proj).st_mtime_ns, [".gitignore", "main.py"], ["sub"]),
+            "proj/sub": (os.stat(tmp_path / "proj" / "sub").st_mtime_ns, ["x.py"], []),
+        }
+        try:
+            started = time.monotonic()
+            index = FileIndex.scan(str(tmp_path), listings)
+            elapsed = time.monotonic() - started
+            assert file_index._READ_DEADLINE <= elapsed < file_index._READ_DEADLINE + 3.0
+            assert index.paths == ["a.py", "proj/"]
+            assert proj in file_index._refused
+            assert "proj" not in index.listings
+            assert "" in index.listings
+            assert index.relisted, "the cached listing was dropped: persist that"
+            started = time.monotonic()
+            again = FileIndex.scan(str(tmp_path), index.listings)
+            assert time.monotonic() - started < 1.0, "a refused directory is not read again"
+            assert again.paths == ["a.py", "proj/"]
+            assert not again.relisted
+        finally:
+            file_index._refused.discard(proj)
+            # Release the helper thread still blocked in ``open``: a
+            # writer end lets its open return and read to EOF (ENXIO if
+            # no reader is waiting, which only an earlier failure leaves).
+            try:
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
 
 
 class TestSearch:
@@ -521,6 +641,170 @@ class TestRegistry:
 
         reg = FileIndexRegistry(home=str(tmp_path))
         assert reg._cache_path("/x").parent == kiss_home() / "file-index"
+
+    def test_first_build_serves_persisted_listings_then_rescans(self, tmp_path: Path) -> None:
+        """After a restart the picker answers from the persisted listings at once.
+
+        The rescan that follows may wait on the OS (five seconds per
+        protected directory on macOS, minutes on a network share); the
+        first ``@`` of the session must not.  The index built from the
+        listings alone is published first and the callback runs; the
+        rescan is queued behind it and publishes the fresh index, with
+        the ``.gitignore`` rules the trusted build could not read.
+        """
+        root = tmp_path / "root"
+        touch(root, "old.py", "proj/.gitignore", "proj/out/gen.py", "proj/src/a.py")
+        (root / "proj" / ".gitignore").write_text("out\n")
+        assert "proj/out/" not in _persist(tmp_path, root)
+        time.sleep(0.02)
+        touch(root, "new.py")
+        (root / "old.py").unlink()
+
+        second = _registry(tmp_path, tmp_path / "home")
+        served: list[FileIndex] = []
+
+        def on_ready() -> None:
+            # On the worker thread, before it takes the next job: what the
+            # callback of the first request is answered from.
+            served.append(second._indexes[str(root)])
+
+        try:
+            second.ensure(str(root), on_ready)
+            _wait(lambda: bool(served))
+            trusted = served[0]
+            assert not trusted.relisted, "nothing was read for the first index"
+            assert trusted.built_at == float("-inf"), "stale from birth"
+            assert "old.py" in trusted.paths and "new.py" not in trusted.paths
+            assert "proj/src/a.py" in trusted.paths
+            _wait(lambda: second._indexes[str(root)] is not trusted)
+            fresh = second._indexes[str(root)]
+            assert fresh.relisted
+            assert "new.py" in fresh.paths and "old.py" not in fresh.paths
+            assert "proj/out/" not in fresh.paths, "the rescan read the .gitignore"
+            assert "proj/src/a.py" in fresh.paths
+            assert fresh.built_at > 0
+        finally:
+            second.stop()
+
+    def test_request_queued_while_listings_load_still_rescans(self, tmp_path: Path) -> None:
+        """A request that arrives while the persisted listings load gets a real scan.
+
+        The worker has taken the first request off ``_pending`` when the
+        second one arrives, so the second is queued with the root pending
+        again, and the rescan the trusted publish asks for folds into it.
+        That second job was queued before the trusted index existed; the
+        worker skips a job older than the index it finds, so the trusted
+        index must count as older than any request (``built_at`` -inf)
+        or the second request would be answered from the listings and no
+        real scan would run until the index went stale.
+        """
+        root = tmp_path / "root"
+        touch(root, "old.py")
+        _persist(tmp_path, root)
+        time.sleep(0.02)
+        touch(root, "new.py")
+        (root / "old.py").unlink()
+
+        second = _registry(tmp_path, tmp_path / "home")
+        gate = threading.Event()
+        answered: list[FileIndex] = []
+
+        def on_ready() -> None:
+            answered.append(second._indexes[str(root)])
+
+        try:
+            # Hold the worker so the two requests below queue up behind
+            # this job: the second stands in for a request that arrived
+            # while the listings loaded, stamped before the trusted index.
+            second.ensure(str(tmp_path / "other"), gate.wait)
+            second.ensure(str(root), on_ready)
+            second._jobs.put((str(root), time.monotonic(), on_ready))
+            gate.set()
+            _wait(lambda: len(answered) == 2)
+            assert "old.py" in answered[0].paths, "the first request is answered from the listings"
+            assert "new.py" in answered[1].paths and "old.py" not in answered[1].paths, (
+                "the second request waited for the real scan"
+            )
+            idle = threading.Event()
+            second.ensure(str(tmp_path / "idle"), idle.set)
+            assert idle.wait(10.0)
+            assert second._indexes[str(root)] is answered[1], "no further rescan was needed"
+        finally:
+            gate.set()
+            second.stop()
+
+    def test_persisted_listing_of_a_refused_directory_is_dropped_from_the_cache(
+        self, tmp_path: Path,
+    ) -> None:
+        """A refusal recorded before the listings load is written back to the cache.
+
+        The trusted build drops the refused directory's listing; the rescan
+        starts from that filtered index and finds nothing else to persist,
+        so the trusted build itself has to save, or the persisted cache
+        would keep (and every later start would briefly publish) the
+        refused directory's contents.
+        """
+        root = tmp_path / "root"
+        touch(root, "a.py", "locked/secret.py")
+        # Spelled as the scanner spells a sub-directory (root + "/" + rel): on
+        # Windows ``str(root / "locked")`` would differ by its separator.
+        locked = f"{root}/locked"
+        assert "locked/secret.py" in _persist(tmp_path, root)
+        file_index._refused.add(locked)  # what a scan of another root left behind
+        reg = _registry(tmp_path, tmp_path / "home")
+        served: list[FileIndex] = []
+
+        def on_ready() -> None:
+            served.append(reg._indexes[str(root)])
+
+        try:
+            reg.ensure(str(root), on_ready)
+            _wait(lambda: bool(served))
+            assert served[0].paths == ["a.py", "locked/"]
+            _wait(lambda: reg._indexes[str(root)] is not served[0])
+            assert reg._indexes[str(root)].paths == ["a.py", "locked/"]
+            cache = json.loads(reg._cache_path(str(root)).read_text())
+            assert set(cache["listings"]) == {""}, "the refused listing is gone from disk"
+        finally:
+            file_index._refused.discard(locked)
+            reg.stop()
+
+    def test_home_index_skips_the_macos_library_tree(self, tmp_path: Path) -> None:
+        """On macOS ``~/Library`` is left out of the home index, like Windows' ``AppData``.
+
+        It is the application state tree (a third of a home directory's
+        entries here, dozens of them behind the privacy protection that
+        stalls a daemon's ``scandir`` for five seconds each).  A
+        ``Library`` directory anywhere else is an ordinary directory, and
+        a work dir inside the skipped tree (iCloud Drive) is indexed as a
+        root of its own, the way a dot-directory is.
+        """
+        home = tmp_path / "home"
+        touch(
+            home, "work/a.py", "work/Library/keep.py",
+            "Library/Application Support/app/state.plist",
+            "Library/Mobile Documents/com~apple~CloudDocs/notes.md",
+        )
+        skipped = sys.platform == "darwin"
+        reg = _registry(tmp_path, home)
+        paths = _build(reg, str(home)).paths
+        assert ("Library/" in paths) is not skipped
+        assert ("Library/Application Support/app/state.plist" in paths) is not skipped
+        assert "work/Library/" in paths and "work/Library/keep.py" in paths
+        assert reg.root_for(str(home / "work")) == (str(home), "work/")
+        icloud = str(home / "Library" / "Mobile Documents")
+        if skipped:
+            assert reg.root_for(icloud) == (icloud, "")
+            assert _build(reg, icloud).paths == [
+                "com~apple~CloudDocs/", "com~apple~CloudDocs/notes.md",
+            ]
+        else:
+            assert reg.root_for(icloud) == (str(home), "Library/Mobile Documents/")
+        reg.stop()
+        # Outside the home root the name means nothing (a Unity or Xcode
+        # project keeps its own ``Library``).
+        touch(tmp_path, "proj/Library/x.py", "proj/main.py")
+        assert "Library/x.py" in FileIndex.scan(str(tmp_path / "proj")).paths
 
 
 class _Server:

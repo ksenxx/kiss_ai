@@ -56,6 +56,9 @@ MAX_TASKS = 100
 MAX_TASK_CHARS = 300
 MAX_RESULT_CHARS = 200
 
+MAX_SENTENCE_CHARS = 160
+"""Longest suggestion ``save_recommendations`` accepts; it names the longer ones instead."""
+
 OWN_SEA_PREFIXES = ("recommendations", "cron_prompt")
 """``task_history.sea`` prefixes of automations, not of the user's own tasks."""
 
@@ -93,7 +96,17 @@ SYSTEM_PROMPT = (
     f"If the task list is empty, save {RECOMMENDATION_COUNT} first tasks for a new "
     "software project (summarise the README, run the test suite, list the open TODOs, "
     "...), still with the app-combining ones when apps are connected. Never ask the "
-    "user anything."
+    "user anything." """\
+
+
+## Lessons from recent runs (rsi7d)
+- Draft the ten sentences in one pass right after the memory_pull calls; do not re-rank or
+  re-weigh picks (the runs that did ran out of budget before saving).
+- Never count characters yourself: keep each sentence to about 15 words;
+  `save_recommendations` names any sentence over 160 characters with its length, so call it
+  and fix only what it names.
+- Call `save_recommendations` by your fourth step at the latest.
+"""
 )
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -247,16 +260,29 @@ def save_recommendations(tasks: list[str]) -> str:
     """Store the suggested tasks for the sidebar's RECOMMENDATIONS subpanel.
 
     Args:
-        tasks: Exactly ten non-empty one-sentence task prompts.
+        tasks: Exactly ten non-empty one-sentence task prompts of at most
+            :data:`MAX_SENTENCE_CHARS` characters each.
 
     Returns:
-        ``"Saved 10 recommendations."`` or an error describing what to fix.
+        ``"Saved 10 recommendations."`` or an error describing what to fix
+        (the over-long sentences are named with their lengths, so the
+        model never has to count characters itself).
     """
     if not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks):
         return f"Error: pass a list of {RECOMMENDATION_COUNT} strings."
     cleaned = [_WS_RE.sub(" ", task).strip() for task in tasks]
     if len(cleaned) != RECOMMENDATION_COUNT or any(not task for task in cleaned):
         return f"Error: pass exactly {RECOMMENDATION_COUNT} non-empty tasks (got {len(cleaned)})."
+    too_long = [
+        f"#{index + 1} ({len(task)} chars)"
+        for index, task in enumerate(cleaned)
+        if len(task) > MAX_SENTENCE_CHARS
+    ]
+    if too_long:
+        return (
+            f"Error: shorten these to at most {MAX_SENTENCE_CHARS} characters and call "
+            f"again with all {RECOMMENDATION_COUNT}: {', '.join(too_long)}."
+        )
     # Staged in a per-writer temp file: a scheduled run and a manual one
     # may overlap, and the sidebar must never read a half-written file.
     atomic_write_text(

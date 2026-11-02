@@ -2932,3 +2932,20 @@ def get_max_context_length(model_name: str) -> int:
     if info is None:
         raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length
+
+
+def get_cache_discount(model_name: str) -> float | None:
+    """Return the model's cache-read price as a share of its input price, or ``None``.
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        ``cache_read_price_per_1M / input_price_per_1M`` (0.05 for an
+        Anthropic model, 0.1 for an OpenAI one), or ``None`` for an
+        unknown model or one without both prices.
+    """
+    info = _lookup_model_info(model_name)
+    if info is None or not info.input_price_per_1M or info.cache_read_price_per_1M is None:
+        return None
+    return info.cache_read_price_per_1M / info.input_price_per_1M

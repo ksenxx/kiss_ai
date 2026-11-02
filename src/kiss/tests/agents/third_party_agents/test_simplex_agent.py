@@ -13,6 +13,7 @@ doubles anywhere.
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import threading
@@ -140,6 +141,11 @@ def simplex_server() -> Iterator[str]:
         server.shutdown()
         thread.join(timeout=5.0)
         assert not thread.is_alive(), "websocket server thread did not exit"
+        if sys.platform != "win32":
+            # websockets 15 ``Server.shutdown`` writes to its POSIX shutdown
+            # pipe but never closes it: two fds leaked per fixture use.
+            os.close(server.shutdown_watcher)
+            os.close(server.shutdown_notifier)
 
 
 def _authenticate(agent: SimpleXAgent, ws_url: str) -> dict[str, Callable[..., str]]:

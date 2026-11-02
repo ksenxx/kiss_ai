@@ -91,7 +91,9 @@
         location.replace(url);
       }
 
-      fetch('/api/app-window', {cache: 'no-store'})
+      // The deadline covers the body too: a daemon that answers and then
+      // stalls is taken for one without a popup, like one that is silent.
+      fetch('/api/app-window', {cache: 'no-store', signal: AbortSignal.timeout(2000)})
         .then(function (response) { return response.ok ? response.json() : null; })
         .catch(function () { return null; })
         .then(function (state) {

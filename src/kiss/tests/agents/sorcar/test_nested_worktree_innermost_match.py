@@ -79,7 +79,7 @@ def test_bash_guard_refuses_innermost_parent_repo_path(nested: tuple[Path, Path]
     assert (proj / "src" / "app.py").read_text() == "main\n"
     # Paths inside the inner worktree itself are still allowed.
     out = tools.Bash(f"cat {inner_wt.as_posix()}/src/app.py", "read")
-    assert out.strip() == "worktree", out
+    assert out.startswith("worktree\n"), out  # (then the batching hint of a first short call)
 
 
 def test_stale_innermost_worktree_falls_back_to_its_own_parent(

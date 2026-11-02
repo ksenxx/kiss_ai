@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +159,26 @@ def _site(port: int = 0) -> tuple[_Site, str]:
     httpd = _Site(port)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_port}/"
+
+
+@pytest.fixture
+def display_on() -> Iterator[None]:
+    """Turn the display on and keep it on while the test places windows.
+
+    With the display asleep (the user away for ten minutes) the window
+    server has no display, and Chrome puts a popup at default bounds,
+    ignores the page's ``moveTo`` / ``resizeTo`` and leaves the opener
+    window open: both macOS browser tests failed so on an unattended
+    Mac (2026-11-01) and passed as soon as the display was on.
+    ``caffeinate -u`` turns the display on, ``-d`` holds it until the
+    test is over.
+    """
+    keeper = subprocess.Popen(["caffeinate", "-d", "-u"])
+    try:
+        yield
+    finally:
+        keeper.terminate()
+        keeper.wait(timeout=10)
 
 
 def _page_requests() -> list[str]:
@@ -707,7 +727,7 @@ def test_real_browser_opens_the_page_in_app_mode(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="checks the macOS brand bundle")
 def test_macos_real_browser_runs_from_the_brand_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, display_on: None
 ) -> None:
     """On macOS the real browser starts from the brand bundle's clone and loads the page.
 
@@ -888,7 +908,7 @@ def test_macos_real_browser_runs_from_the_brand_bundle(
 
 @pytest.mark.skipif(not _MACOS, reason="the brand bundle is macOS-only")
 def test_macos_real_browser_started_before_the_daemon_shows_the_start_page(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, display_on: None
 ) -> None:
     """After a reboot the app is relaunched before the daemon: a window at once, the app later.
 

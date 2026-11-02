@@ -42,7 +42,7 @@ _TOOL_NAMES = {
 
 
 def test_sea_methods_follow_the_contract_and_share_the_autorouter_protocol() -> None:
-    """Same settings and protocol as the autorouter, headed and introduced for OpenRouter."""
+    """The autorouter's settings and protocol, headed, introduced and routed for OpenRouter."""
     sea = OrautorouterSea()
     prompt = orautorouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + prompt
@@ -52,10 +52,13 @@ def test_sea_methods_follow_the_contract_and_share_the_autorouter_protocol() -> 
     shared = autorouter_sea.SYSTEM_PROMPT.removeprefix(autorouter_sea.INTRO)
     assert shared.startswith(" Finish the task") and prompt.endswith(shared)
     assert sea.register_as_model() is True
+    # The autorouter's settings, except that the router itself is an OpenRouter catalog model
+    # (the autorouter's router needs a direct vendor key): one OpenRouter key runs the session.
     assert sea.settings({"tool_profile": "shell"}) == AutorouterSea().settings(
         {"tool_profile": "shell"}
-    )
-    assert sea.settings({})["model"].startswith(orautorouter_sea.VENDOR_PREFIX)
+    ) | {"model": orautorouter_sea.ROUTER_MODEL}
+    assert orautorouter_sea.ROUTER_MODEL.startswith(orautorouter_sea.VENDOR_PREFIX)
+    assert orautorouter_sea.ROUTER_MODEL in MODEL_INFO
     # The menu and the pick are this module's; the rest is the autorouter's very functions.
     tools = {t.__name__: t for t in sea.tools([])}
     assert set(tools) == _TOOL_NAMES
@@ -71,7 +74,7 @@ def test_agent_file_loader_stages_the_openrouter_router() -> None:
     """The daemon-side loader applies the settings and stages the prompt and tools hooks."""
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "toolProfile": "full", "model": "x"}
     assert apply_sea(cmd) == {"model", "classifyTasks", "useWebTools", "useMemory"}
-    assert cmd["model"] == autorouter_sea.ROUTER_MODEL
+    assert cmd["model"] == orautorouter_sea.ROUTER_MODEL
     assert cmd["model"].startswith(orautorouter_sea.VENDOR_PREFIX)
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + orautorouter_sea.SYSTEM_PROMPT
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is True
@@ -98,7 +101,11 @@ def test_every_tier_candidate_is_a_distinct_openrouter_catalog_model() -> None:
             if model.startswith(orautorouter_sea.VENDOR_PREFIX):
                 assert model in ours, (tier, model)
     frontier = {model for model, _ in orautorouter_sea.TIERS["frontier"]}
-    assert frontier == {"openrouter/openai/gpt-6-astra", "openrouter/anthropic/claude-fable-5.1"}
+    assert frontier == {
+        "openrouter/openai/gpt-6-astra",
+        "openrouter/anthropic/claude-fable-5.1-max",
+        "openrouter/anthropic/claude-opus-5.5-max",
+    }
 
 
 def test_menu_and_pick_only_ever_name_openrouter_models() -> None:

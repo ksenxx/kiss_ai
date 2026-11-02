@@ -204,6 +204,8 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "sea_source",
         "patch_sea_code",
         "improve_sea_code",
+        "improve_sea_with_discover",
+        "replay_findings",
         "revert_sea_code",
         "tune_sea_settings",
         "patch_sea_settings",

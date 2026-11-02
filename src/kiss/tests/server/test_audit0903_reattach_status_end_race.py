@@ -87,7 +87,7 @@ class _ParkingPrinter(MemoryPrinter):
         self.release_events = threading.Event()
 
     def subscribe_tab(
-        self, task_id: Any, tab_id: str,
+        self, task_id: Any, tab_id: str, headless: bool = False,
     ) -> list[dict[str, Any]] | None:
         """Park the designated tab's FIRST subscription, then delegate.
 
@@ -99,7 +99,7 @@ class _ParkingPrinter(MemoryPrinter):
             self.parked.set()
             if not self.release.wait(timeout=30):
                 raise TimeoutError("parked too long in subscribe_tab")
-        return super().subscribe_tab(task_id, tab_id)
+        return super().subscribe_tab(task_id, tab_id, headless)
 
 
 def _replay_parked_before_finalize(

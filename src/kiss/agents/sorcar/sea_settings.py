@@ -123,7 +123,18 @@ SETTING_DOCS: dict[str, str] = {
                "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
     "max_budget": "USD budget of the run, a finite number; default: the caller's share or the "
                   "daemon's default.",
-    "model_config": "Model configuration dict passed to the LLM (temperature, base URL, ...).",
+    "model_config": "Model configuration dict passed to the LLM (temperature, ...). "
+                    "`base_url` (with `api_key`) routes every model call of the run, in a "
+                    "tab and headless alike, to that OpenAI-compatible endpoint (a proxy "
+                    "the SEA starts, say); `model` must still name a catalogued model so "
+                    "the calls are priced. `plain_io: true` leaves the framework's own "
+                    "additions out of what the model reads: the system prompt is the SEA's "
+                    "`system_prompt` return alone (no `# Restricted tool profile` or "
+                    "`# Web tools are off` note, no `# MOST IMPORTANT INSTRUCTIONS`, "
+                    "`# Task Settings` or `AGENTS.md` trailer; the memory protocol stays "
+                    "while the run has the memory tools, and a CLI-backed model's text tool "
+                    "catalog stays) and tool results carry no usage line (`Steps: ..., "
+                    "Context: ...`). Replaces the caller's `model_config` whole.",
     "use_web_tools": "Give the run the browser tools (daemon default: on).",
     "auto_classify": "Let the pre-run classifier decide whether the task is simple (lite "
                      "prompt) (daemon default: the persisted setting).",

@@ -141,7 +141,7 @@ def test_run_parallel_children_run_as_the_named_agent_script(
     model = StandInModelServer(responder)
     try:
         result = sorcar.run(
-            "PARENT-TASK fan out",
+            "PARENT-TASK fan out to sub-agents",
             work_dir=str(repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
@@ -234,7 +234,7 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
     )
     try:
         result = sorcar.run(
-            "PARENT-TASK fan out",
+            "PARENT-TASK fan out to sub-agents",
             work_dir=str(repo),
             model=STANDIN_MODEL,
             model_config=parent_model.model_config,

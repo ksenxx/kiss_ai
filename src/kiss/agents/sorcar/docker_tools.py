@@ -5,12 +5,15 @@
 """File tools (Read, Write, Edit) that execute inside a Docker container via bash."""
 
 import base64
+import mimetypes
 import secrets
 import shlex
 from collections.abc import Callable
+from typing import Any
 
-from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE
+from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, PendingAppend
 from kiss.agents.sorcar.useful_tools import _edit_pairs
+from kiss.core.models.model import READ_TOOL_BINARY_MIME_TYPES, encode_binary_attachment
 
 #: Marker the Write script echoes only after the bytes really landed.
 #: Success must be proven positively: the bash function's *other* failure
@@ -27,25 +30,34 @@ _NO_PYTHON = "Error: Python required for Edit"
 _CHUNK_BYTES = 72_000
 
 
+def _pieces(data: bytes) -> list[bytes]:
+    """Split *data* into the base64 pieces one shell command each carries.
+
+    Each piece holds at most :data:`_CHUNK_BYTES` bytes, so its command
+    fits a single argv string whatever the payload size; empty data is
+    one empty piece.
+    """
+    return [data[i:i + _CHUNK_BYTES] for i in range(0, len(data), _CHUNK_BYTES)] or [b""]
+
+
 def _store_commands(staging: str, target: str, data: bytes) -> list[str]:
     """Return the shell commands that together store *data* at *target*.
 
-    Each command carries one base64 piece of at most :data:`_CHUNK_BYTES`
-    bytes, so it fits a single argv string whatever the payload size.
-    The pieces accumulate in *staging*, a file beside the target that
-    nobody else names, and the last command publishes it with one
-    ``mv`` (keeping the mode of the file it replaces), so a reader of
-    the target sees the previous file or the whole new one and a second
-    writer of the same target cannot splice its bytes into this one.
-    Each command echoes :data:`_WRITE_OK` once its piece landed and
-    nothing (non-zero status) when it did not.
+    Each command carries one base64 piece (:func:`_pieces`).  The pieces
+    accumulate in *staging*, a file beside the target that nobody else
+    names, and the last command publishes it with one ``mv`` (keeping
+    the mode of the file it replaces), so a reader of the target sees
+    the previous file or the whole new one and a second writer of the
+    same target cannot splice its bytes into this one.  Each command
+    echoes :data:`_WRITE_OK` once its piece landed and nothing
+    (non-zero status) when it did not.
 
     Args:
         staging: The staging path, already shell-quoted.
         target: The target path, already shell-quoted.
         data: The bytes to store; empty data makes an empty file.
     """
-    pieces = [data[i:i + _CHUNK_BYTES] for i in range(0, len(data), _CHUNK_BYTES)] or [b""]
+    pieces = _pieces(data)
     publish = (
         f'{{ [ ! -f {target} ] || chmod "$(stat -c %a {target})" {staging}; }} && '
         f"mv -fT {staging} {target} && "
@@ -61,6 +73,27 @@ def _store_commands(staging: str, target: str, data: bytes) -> list[str]:
             f"{encoded}\nKISS_B64_EOF"
         )
     return commands
+
+
+def _append_commands(target: str, data: bytes) -> list[str]:
+    """Return the shell commands that together append *data* to *target*.
+
+    Each command appends one base64 piece (:func:`_pieces`) through the
+    shell's ``>>``: the target is opened for appending, so what another
+    writer appends before the first piece or between two stays in front
+    of them, as after the ``cat >> target`` a redirected copy stands
+    for (:meth:`DockerTools.Write`).  Each command echoes
+    :data:`_WRITE_OK` once its piece landed.
+
+    Args:
+        target: The target path, already shell-quoted.
+        data: The bytes to append; empty data creates a missing target.
+    """
+    return [
+        f"base64 -d >> {target} << 'KISS_B64_EOF' && echo {_WRITE_OK}\n"
+        f"{base64.b64encode(piece).decode()}\nKISS_B64_EOF"
+        for piece in _pieces(data)
+    ]
 
 
 def _python_edit_command(file_path: str, payload: str, old_len: int, replace_all: bool) -> str:
@@ -158,14 +191,41 @@ class DockerTools:
     bash function (typically DockerManager.Bash or SorcarAgent._docker_bash).
     """
 
-    def __init__(self, bash_fn: Callable[[str, str], str]) -> None:
+    def __init__(
+        self,
+        bash_fn: Callable[[str, str], str],
+        read_bytes: Callable[[str], bytes] | None = None,
+    ) -> None:
         """Initialize with a bash execution function.
 
         Args:
             bash_fn: Callable(command, description) -> output string.
                      Executes a bash command inside the Docker container.
+            read_bytes: Fetches a file's bytes from the container
+                (``DockerManager.read_bytes``), raising ``OSError`` when
+                it cannot: what ``Read`` attaches an image or PDF with.
+                Without it ``Read`` reports such a file as not readable.
         """
         self.bash = bash_fn
+        self.read_bytes = read_bytes
+        # The manager whose ``read_bytes`` this is (``DockerManager`` or
+        # ``ExecBridge``): its ``Bash`` redirects a ``>>`` copy to a Write
+        # and keeps the append as ``pending_append`` for that Write.
+        self.manager: Any = getattr(read_bytes, "__self__", None)
+
+    def _take_pending_append(self) -> PendingAppend | None:
+        """Return the manager's pending append and forget it: it belongs to this call alone.
+
+        ``Bash`` redirected a ``>>`` copy to a Write and kept the append
+        (:class:`~kiss.agents.sorcar.docker_manager.PendingAppend`) for
+        that Write.  Whichever call comes next takes it (as a Bash of
+        the manager drops it), so a redirect the agent's hook refused
+        never turns a later Write into an append.
+        """
+        pending: PendingAppend | None = getattr(self.manager, "pending_append", None)
+        if pending is not None:
+            self.manager.pending_append = None
+        return pending
 
     def Read(  # noqa: N802
         self,
@@ -186,6 +246,7 @@ class DockerTools:
                 less than 1 are rejected; values beyond EOF return an
                 explicit sentinel rather than empty content.
         """
+        self._take_pending_append()
         if start_line < 1:
             return (
                 f"Error: start_line must be >= 1 (got {start_line}); the "
@@ -193,6 +254,9 @@ class DockerTools:
             )
         if max_lines < 1:
             return f"Error: max_lines must be >= 1 (got {max_lines})."
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if mime_type in READ_TOOL_BINARY_MIME_TYPES:
+            return self._read_binary(file_path, mime_type or "")
         path = shlex.quote(file_path)
         cmd = (
             f'FILE={path}\n'
@@ -213,8 +277,32 @@ class DockerTools:
         )
         return self.bash(cmd, f"Read {file_path}")
 
-    def _store(self, file_path: str, data: bytes, description: str) -> str | None:
-        """Store *data* at *file_path* in one piece, whatever happens on the way.
+    def _read_binary(self, file_path: str, mime_type: str) -> str:
+        """Attach the image, PDF, audio or video *file_path* as the host ``Read`` does.
+
+        The bytes come through :attr:`read_bytes` (one exec, no text
+        decoding, no output cap) and go out as the attachment encoding
+        a vision model sees as the image and a text-only model gets
+        described (:func:`encode_binary_attachment`).
+        """
+        if self.read_bytes is None:
+            return (
+                f"Error: Cannot read binary file {file_path} (mime={mime_type}): this "
+                "environment fetches no file bytes; use Bash tools to inspect it."
+            )
+        try:
+            data = self.read_bytes(file_path)
+        except OSError as e:
+            return f"Error: Cannot read binary file {file_path} (mime={mime_type}): {e}"
+        return (
+            f"Read binary file {file_path} as {mime_type} ({len(data)} bytes); "
+            "content attached below.\n" + encode_binary_attachment(mime_type, data)
+        )
+
+    def _store(
+        self, file_path: str, data: bytes, description: str, append: bool = False,
+    ) -> str | None:
+        """Store *data* at *file_path* in one piece, whatever happens on the way, or append it.
 
         The pieces land in a staging file beside the target that is
         published with the last one (:func:`_store_commands`).  A piece
@@ -223,19 +311,27 @@ class DockerTools:
         call raised (the container or the task is going away), the
         discard would end the same way and is skipped: the target is
         still untouched and only the uniquely named staging file stays.
+        With *append* the pieces go after the target's current bytes
+        through the shell's ``>>`` instead (:func:`_append_commands`),
+        as the ``cat >> target`` the Write stands for would put them;
+        a piece that did not land leaves the ones before it, as that
+        command would.
 
         Returns:
             None once the data is published, else the output of the
             command that failed, for the caller to return as is.
         """
+        target = shlex.quote(file_path)
         staging = shlex.quote(f"{file_path}.kiss-partial-{secrets.token_hex(8)}")
-        commands = _store_commands(staging, shlex.quote(file_path), data)
+        commands = (
+            _append_commands(target, data) if append else _store_commands(staging, target, data)
+        )
         for index, command in enumerate(commands):
             part = f" (part {index + 1}/{len(commands)})" if len(commands) > 1 else ""
             result = self.bash(command, f"{description}{part}")
             if _WRITE_OK in result:
                 continue
-            if STOPPED_MESSAGE not in result:
+            if not append and STOPPED_MESSAGE not in result:
                 self.bash(f"rm -f {staging}", f"{description} (discard)")
             return result
         return None
@@ -251,7 +347,19 @@ class DockerTools:
             file_path: Path to the file to write.
             content: The full content to write to the file.
         """
-        failure = self._store(file_path, content.encode(), f"Write {file_path}")
+        pending = self._take_pending_append()
+        if pending is not None and (file_path, content) == (
+            pending.path, pending.snapshot.decode("utf-8") + pending.body
+        ):
+            # ``Bash`` redirected a ``>>`` copy to this very Write: the body
+            # goes after whatever the file holds when it lands, through the
+            # shell's ``>>``, as the command would have put it.  The agent's
+            # hook ran in between, and what another writer appended there,
+            # or appends before the store, must not be overwritten by the
+            # stale snapshot.
+            failure = self._store(file_path, pending.body.encode(), f"Write {file_path}", True)
+        else:
+            failure = self._store(file_path, content.encode(), f"Write {file_path}")
         if failure is not None:
             return failure
         return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -279,6 +387,7 @@ class DockerTools:
                 batch and the result names the edits already applied.
                 ``old_string`` / ``new_string`` are then ignored.
         """
+        self._take_pending_append()
         if edits:
             pairs = _edit_pairs(edits)
             if isinstance(pairs, str):

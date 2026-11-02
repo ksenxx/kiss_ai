@@ -56,7 +56,12 @@ from typing import Any
 
 from kiss.core.config import kiss_home
 from kiss.core.locked import locked_call
-from kiss.core.processes import kill_process_group, popen_process_group, terminate_process_group
+from kiss.core.processes import (
+    kill_process_group,
+    popen_process_group,
+    run_process_group,
+    terminate_process_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,16 +164,13 @@ def _send_cached_status(hook: Path, reply: StatusReply) -> None:
 
 
 def _query_status(hook: Path) -> dict[str, Any] | None:
-    """Run ``signin status`` of *hook*; the ``signin`` event it calls for, else ``None``."""
+    """Run ``signin status`` of *hook*; the ``signin`` event it calls for, else ``None``.
+
+    In a process group of its own, ended whole at :data:`STATUS_TIMEOUT`:
+    a child the hook started must not outlive it.
+    """
     try:
-        run = subprocess.run(
-            [str(hook), "status"],
-            capture_output=True,
-            text=True,
-            timeout=STATUS_TIMEOUT,
-            env=_hook_env(),
-            check=False,
-        )
+        run = run_process_group([str(hook), "status"], STATUS_TIMEOUT, env=_hook_env())
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("sign-in hook %s failed: %s", hook, exc)
         return None
@@ -243,6 +245,8 @@ class SigninLogin:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",  # output that is not UTF-8 is not JSON, not a crash
                     env=_hook_env(),
                 )
             except OSError as exc:
@@ -347,7 +351,11 @@ class SigninLogin:
         the time a line is read sends nothing: its URL (a dead loopback
         port) must not reach the window after the replacement's, so the
         "still current" check and the send happen under the lock (the
-        reply only queues the frame).
+        reply only queues the frame).  Its failure at the end is sent
+        the same way: a retry that started between the check and the
+        send would otherwise see the old failure reported after its own
+        URL.  A sign-in that succeeded is announced through the status
+        lock (:func:`_signed_in`), outside this one.
         """
         assert proc.stdout is not None
         first = _parse(proc.stdout.readline())
@@ -365,19 +373,19 @@ class SigninLogin:
             if self._proc is not proc:  # ended by cancel() or a newer start()
                 return  # _end_locked() closed its stdin
             self._proc = None
-        # Closed here, not left to the Popen's finaliser (a ResourceWarning
-        # and a pipe held open until the collector gets to it).  No paste()
-        # reaches the stream any more (it is not the current hook's), and
-        # the stream buffers nothing (paste() writes the descriptor), so
-        # the close cannot block or fail.
-        assert proc.stdin is not None
-        proc.stdin.close()
-        if proc.returncode == 0 and last.get("logged_in"):
-            locked_call(_status_lock, _signed_in, reply, str(last.get("email") or ""))
-            return
-        error = last.get("error") or (
-            f"the sign-in hook exited with status {proc.returncode}"
-            if url
-            else "the sign-in hook printed no sign-in page"
-        )
-        reply({"type": "signinError", "provider": provider, "error": str(error)}, False)
+            # Closed here, not left to the Popen's finaliser (a ResourceWarning
+            # and a pipe held open until the collector gets to it).  No paste()
+            # reaches the stream any more (it is not the current hook's), and
+            # the stream buffers nothing (paste() writes the descriptor), so
+            # the close cannot block or fail.
+            assert proc.stdin is not None
+            proc.stdin.close()
+            if proc.returncode != 0 or not last.get("logged_in"):
+                error = last.get("error") or (
+                    f"the sign-in hook exited with status {proc.returncode}"
+                    if url
+                    else "the sign-in hook printed no sign-in page"
+                )
+                reply({"type": "signinError", "provider": provider, "error": str(error)}, False)
+                return
+        locked_call(_status_lock, _signed_in, reply, str(last.get("email") or ""))

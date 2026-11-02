@@ -36,6 +36,7 @@ from kiss.agents.sorcar.sea_settings import (
     base_class_defaults,
 )
 from kiss.core.config import kiss_home
+from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_verdict import ALLOW
 
 
@@ -339,7 +340,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     }
     assert apply_sea(cmd) == set()
     # The only writes are the provenance record of a script that
-    # replaced nothing and the four hook callables every run gets,
+    # replaced nothing and the five hook callables every run gets,
     # all of them ``BaseSea``'s identities here.
     record = cmd.pop("_runConfig")
     # The command carries a model, a memory flag and a classifier flag; the
@@ -352,6 +353,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     assert cmd.pop("toolsHook")([_hello]) == [_hello]
     assert cmd.pop("llmCallHook")([1, 2]) == [1, 2]
     assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) == ALLOW
+    assert cmd.pop("llmResponseHook")(LLMReply("hi")) == ALLOW
     assert cmd == {
         "seaPath": str(script),
         "model": "kept-model",

@@ -51,6 +51,11 @@ FAN_OUT_TOOLS = frozenset({"run_parallel", "run_commands_parallel", "run_agent"}
 """Tools that block on other agents or command batches for an unbounded time."""
 WAITING_TOOLS = frozenset({"ask_user_question"})
 """Tools that wait on a person, however short their timeout."""
+STOP_WAIT_SECONDS = 60.0
+"""How long :meth:`PromptCacheKeepAlive.stop` waits for a ping in flight
+before abandoning its thread.  A model's ping bounds itself well under
+this (30 s for Anthropic, see ``KEEP_ALIVE_TIMEOUT_SECONDS`` there), so
+the limit is only reached when its abort could not reach the socket."""
 
 
 def keep_alive_max_pings(model_name: str) -> int:
@@ -126,10 +131,11 @@ class PromptCacheKeepAlive:
     the model reports that it needs no keep-alive (``None``), or after
     *max_pings*.  ``__exit__`` joins the thread, so the body's caller may
     wait for a ping already in flight (bounded by the model's ping
-    timeout, 30 s for Anthropic with retries off; typically 1-3 s), which
-    keeps the model object single-threaded again once the body is left.
-    Responses are only appended by the thread and read by the caller
-    after :meth:`stop` has joined it, so no lock is needed.
+    deadline, 30 s for Anthropic with retries off; typically 1-3 s),
+    which keeps the model object single-threaded again once the body is
+    left and gets the ping billed.  Responses are only appended by the
+    thread and read by the caller after :meth:`stop` has joined it, so
+    no lock is needed.
 
     A task Stop is a ``KeyboardInterrupt`` injected into the task thread
     (``PyThreadState_SetAsyncExc``), delivered at the next check point:
@@ -138,7 +144,11 @@ class PromptCacheKeepAlive:
     then ping (and bill) for up to *max_pings* intervals after the task
     ended.  :meth:`stop` is therefore idempotent and the caller repeats
     it from a ``finally`` of its own, and the thread gives up by itself
-    once the stop event of the thread that created it is set.
+    once the stop event of the thread that created it is set.  The
+    thread also publishes that event as its own
+    (:func:`~kiss.core.stop_signal.set_thread_stop_event`), so the
+    model's request watchdog aborts a ping in flight the moment the task
+    is stopped instead of letting it run to its deadline.
     """
 
     def __init__(
@@ -182,13 +192,23 @@ class PromptCacheKeepAlive:
 
         Idempotent and safe before the thread started: ``__exit__``
         calls it, and the body's caller calls it again from a
-        ``finally`` in case a Stop landed on ``__exit__``'s entry.
+        ``finally`` in case a Stop landed on ``__exit__``'s entry.  The
+        wait is bounded by :data:`STOP_WAIT_SECONDS`; a thread that
+        outlives it is abandoned with a warning.
         """
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join()
+            self._thread.join(STOP_WAIT_SECONDS)
+            if self._thread.is_alive():
+                logger.warning(
+                    "Prompt-cache keep-alive ping still in flight after %.0fs; abandoned",
+                    STOP_WAIT_SECONDS,
+                )
 
     def _run(self) -> None:
+        # The model's request watchdog reads this thread's stop event:
+        # the task's, so a Stop aborts a ping in flight at once.
+        stop_signal.set_thread_stop_event(self._owner_stop)
         next_ping_at = self._cache_touched_at + self._interval
         for _ in range(self._max_pings):
             if self._stop.wait(max(0.0, next_ping_at - time.time())):
@@ -201,7 +221,10 @@ class PromptCacheKeepAlive:
                     self._function_map, self._tools_schema
                 )
             except Exception as e:
-                logger.warning("Prompt-cache keep-alive ping failed; giving up: %s", e)
+                if self._owner_stop is not None and self._owner_stop.is_set():
+                    logger.debug("Prompt-cache keep-alive ping aborted by the task's stop")
+                else:
+                    logger.warning("Prompt-cache keep-alive ping failed; giving up: %s", e)
                 return
             if response is None:
                 return
