@@ -479,6 +479,81 @@ def test_content_filter_with_no_fallback_at_all_ends_the_run(
     assert [c["stop_reason"] for c in printer.llm_calls()] == ["content_filter"] * 2
 
 
+# --- A content policy refusal reported as an HTTP error -----------------------
+
+_CYBER_FLAG = (
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try "
+    "rephrasing your request. To get authorized for security work, join the Trusted Access "
+    "for Cyber program: https://chatgpt.com/cyber"
+)
+
+
+def _content_policy_400() -> Reply:
+    """OpenAI's answer when its classifier refuses the request before any model runs."""
+    return Reply(
+        status=400,
+        json_body={
+            "error": {
+                "message": _CYBER_FLAG,
+                "type": "invalid_request_error",
+                "param": None,
+                "code": None,
+            }
+        },
+    )
+
+
+def test_content_policy_http_error_switches_to_another_family_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request the provider refused on its content policy (an HTTP 400, not a
+    typed stop) is not retried three times on the same model: the second
+    request already goes to the other-family fallback and the notice says why.
+    Three sub-agents of the 2026-11-01 audit died of "3 consecutive errors" on
+    exactly this reply."""
+    _register(monkeypatch, _OPENAI_PRIMARY, _ANTHROPIC_OTHER, thinking="high")
+    _register(monkeypatch, _ANTHROPIC_OTHER, None)
+
+    def respond(request: Request) -> Reply:
+        model = str(request.body.get("model"))
+        if model == _OPENAI_PRIMARY:
+            return _content_policy_400()
+        return _responses_finish(model)
+
+    printer = CapturePrinter()
+    with ScriptedOpenAIServer(respond) as server:
+        result = _run_openai(server, printer, _OPENAI_PRIMARY, responses_api=True)
+        seen = _models_seen(server)
+
+    assert result == "done"
+    assert seen == [_OPENAI_PRIMARY, _ANTHROPIC_OTHER]
+    assert printer.notices() == [
+        f"Switched model from {_OPENAI_PRIMARY} to {_ANTHROPIC_OTHER} after a content "
+        "policy refusal of the request"
+    ]
+    assert [c["model"] for c in printer.llm_calls()] == [_ANTHROPIC_OTHER]
+
+
+def test_content_policy_http_error_with_no_fallback_ends_the_run(
+    monkeypatch: pytest.MonkeyPatch, no_other_family: None
+) -> None:
+    """Nothing to switch to: like a filtered response, the refused request gets
+    the one context-stating retry and then ends the run as a typed
+    ``ContentFilterError`` naming the provider's text, not after three
+    "Please try again" rounds."""
+    _register(monkeypatch, _OPENAI_PRIMARY, None, thinking="high")
+
+    printer = CapturePrinter()
+    with ScriptedOpenAIServer(lambda request: _content_policy_400()) as server:
+        with pytest.raises(ContentFilterError, match="flagged for possible cybersecurity") as info:
+            _run_openai(server, printer, _OPENAI_PRIMARY, responses_api=True)
+        seen = _models_seen(server)
+
+    assert info.value.stop_reason == "content_policy"
+    assert seen == [_OPENAI_PRIMARY, _OPENAI_PRIMARY]
+    assert printer.notices() == []
+
+
 @pytest.mark.parametrize(
     ("reason", "error_type"),
     [

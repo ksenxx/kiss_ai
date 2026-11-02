@@ -108,7 +108,14 @@ class ConnPrinter:
             e["data"] for e in self.of_type("terminalData") if e["tab_id"] == tab_id
         )
 
-    def wait_for(self, predicate: Any, timeout: float = 10.0) -> None:
+    def wait_for(self, predicate: Any, timeout: float = 30.0) -> None:
+        """Poll *predicate* until it holds; fail with every event seen so far.
+
+        The default bound covers a shell that is only starting: under a
+        full-suite load the hermetic bash has taken more than 10 s from
+        spawn to its first prompt (the pty echo of typed input arrives
+        long before).
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if predicate():

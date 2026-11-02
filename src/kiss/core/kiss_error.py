@@ -80,10 +80,22 @@ class ContentFilterError(ModelRefusalError):
     ``finish_reason == "content_filter"``.  Like a safety refusal it is
     deterministic for the same request and shared by every model of the
     family, so the agentic loop fails over to another family instead of
-    retrying the same one.
+    retrying the same one.  A request the provider's classifier refused
+    outright, as an HTTP error naming its content policy, is typed the
+    same way with ``stop_reason="content_policy"``.
     """
 
-    stop_reason = "content_filter"
+    def __init__(self, message: str, stop_reason: str = "content_filter") -> None:
+        """Create the error.
+
+        Args:
+            message: What the provider reported.
+            stop_reason: ``content_filter`` for a filtered response,
+                ``content_policy`` for a refused request; named by the
+                fail-over warning.
+        """
+        super().__init__(message)
+        self.stop_reason = stop_reason
 
 
 class OutputCapError(KISSError):

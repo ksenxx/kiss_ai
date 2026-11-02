@@ -19,6 +19,10 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 """Repository root (``src/kiss/scripts/check.py`` is four levels deep)."""
+#: The directory under a repository that holds the tasks' git worktrees
+#: (:data:`kiss.agents.sorcar.git_worktree._WORKTREE_SUBDIR`; spelled here so
+#: the check script imports nothing of the agent).
+WORKTREES_DIR = ".kiss-worktrees"
 
 
 _ERROR_LINE = re.compile(r"error|-->|^\S+:\d+(:\d+)?: |^\s*[A-Z]{1,3}\d{3,4}\b", re.IGNORECASE)
@@ -88,7 +92,8 @@ def run_command(cmd: list[str], description: str, quiet: bool = False) -> list[s
         print(f"{'=' * 60}\n", flush=True)
 
     with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        env=stage_env(),
     ) as proc:
         assert proc.stdout is not None
         digest = error_lines(_echo_lines(proc.stdout, quiet))
@@ -100,8 +105,84 @@ def run_command(cmd: list[str], description: str, quiet: bool = False) -> list[s
     return None
 
 
+def in_worktree(root: Path = PROJECT_ROOT) -> bool:
+    """Whether the tree at *root* is a task's git worktree (a checkout under ``.kiss-worktrees``).
+
+    Args:
+        root: The project root the check runs on.
+    """
+    return WORKTREES_DIR in root.resolve().parts
+
+
+def main_checkout(root: Path = PROJECT_ROOT) -> Path:
+    """The repository a worktree at *root* was made from; *root* itself outside a worktree.
+
+    Args:
+        root: The project root the check runs on.
+    """
+    parts = root.resolve().parts
+    return Path(*parts[:parts.index(WORKTREES_DIR)]) if WORKTREES_DIR in parts else root
+
+
+def uv_run(*command: str, root: Path = PROJECT_ROOT) -> list[str]:
+    """The ``uv run`` that runs *command* in the environment of the tree at *root*.
+
+    ``uv run`` syncs the project environment before the command, which
+    inside a worktree would install the worktree as the environment's
+    editable ``kiss`` package (see :func:`sync_command`): there the
+    command runs with ``--no-sync`` on the environment as it is.
+
+    Args:
+        command: The command and its arguments.
+        root: The project root the check runs on.
+    """
+    return ["uv", "run", *(["--no-sync"] if in_worktree(root) else []), *command]
+
+
+def project_script(script: str, module: str, *args: str, root: Path = PROJECT_ROOT) -> list[str]:
+    """The command running the project's console *script*, or its *module* in a worktree.
+
+    A worktree's environment has no install of the worktree's project
+    (:func:`sync_command`), so there the script runs as ``python -m
+    <module>`` and imports the worktree's ``src/`` (:func:`stage_env`).
+
+    Args:
+        script: The console script's name (``sea``).
+        module: The module its entry point lives in
+            (``kiss.agents.sorcar.sea_cli``).
+        args: The script's arguments.
+        root: The project root the check runs on.
+    """
+    if in_worktree(root):
+        return uv_run("python", "-m", module, *args, root=root)
+    return uv_run(script, *args, root=root)
+
+
+def stage_env(root: Path = PROJECT_ROOT) -> dict[str, str] | None:
+    """The environment the stages run with inside a worktree; ``None`` (the inherited one) outside.
+
+    A worktree has no environment of its own, and uv would build it one
+    (every dependency again, on whatever Python it finds newest, 3.14
+    next to a 3.13 daemon) rather than use the main checkout's: the
+    stages run in that checkout's ``.venv`` (``UV_PROJECT_ENVIRONMENT``,
+    unless the caller set one) and import the worktree's sources, its
+    ``src/`` and ``projects/`` first on ``PYTHONPATH``, ahead of the
+    editable install the environment holds of the main checkout.
+
+    Args:
+        root: The project root the check runs on.
+    """
+    if not in_worktree(root):
+        return None
+    inherited = os.environ.get("PYTHONPATH", "")
+    sources = [str(root / "src"), str(root / "projects")] + ([inherited] if inherited else [])
+    environment = os.environ.get("UV_PROJECT_ENVIRONMENT") or str(main_checkout(root) / ".venv")
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(sources),
+            "UV_PROJECT_ENVIRONMENT": environment}
+
+
 FIXERS: list[tuple[list[str], str]] = [
-    (["uv", "run", "ruff", "check", "--fix", "src/"], "Auto-fix lint (ruff check --fix)"),
+    (uv_run("ruff", "check", "--fix", "src/"), "Auto-fix lint (ruff check --fix)"),
 ]
 """The auto-fixers ``--fix`` runs before the checks: what they fix never
 reaches the digest, so the digest holds only what a hand must fix.
@@ -361,17 +442,19 @@ def main() -> int:
             return int(cached["exit_code"])
 
     checks = [
-        (["uv", "sync"], "Install dependencies (uv sync)"),
-        (["uv", "run", "generate-api-docs"], "Generate API docs"),
-        (["uv", "run", "sea", "lint"], "Lint SEAs (sea lint)"),
-        (["uv", "run", "sea", "docs"], "Generate SEA vocabulary tables (sea docs)"),
-        (["uv", "run", "python", "-m", "compileall", "-q", "src/"], "Syntax check (compileall)"),
-        (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
-        (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
+        (sync_command(), "Install dependencies (uv sync)"),
+        (project_script("generate-api-docs", "kiss.scripts.generate_api_docs"),
+         "Generate API docs"),
+        (project_script("sea", "kiss.agents.sorcar.sea_cli", "lint"), "Lint SEAs (sea lint)"),
+        (project_script("sea", "kiss.agents.sorcar.sea_cli", "docs"),
+         "Generate SEA vocabulary tables (sea docs)"),
+        (uv_run("python", "-m", "compileall", "-q", "src/"), "Syntax check (compileall)"),
+        (uv_run("ruff", "check", "src/"), "Lint code (ruff)"),
+        (uv_run("mypy", "src/"), "Type check (mypy)"),
     ]
 
     if args.full:
-        checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
+        checks.append((uv_run("pyright", "src/"), "Type check (pyright)"))
         webapp_dir = PROJECT_ROOT / "src" / "kiss" / "webapp"
         if (webapp_dir / "node_modules").is_dir() and shutil.which("npm"):
             checks.append(
@@ -386,6 +469,29 @@ def main() -> int:
     if args.fix:
         save_verdict(fingerprint, args.full, 1 if failed else 0, verdict)
     return 1 if failed else 0
+
+
+def sync_command(root: Path = PROJECT_ROOT) -> list[str]:
+    """The ``uv sync`` that installs the dependencies of the tree at *root*.
+
+    Inside a task's git worktree (a checkout under ``.kiss-worktrees``)
+    the project itself is not installed: the environment is the main
+    checkout's (:func:`stage_env`), and an editable install of the
+    worktree would re-point its ``kiss`` package at a directory that is
+    removed when the worktree is merged (the 2026-11-01 audit counted 19
+    such runs).  The dependencies alone are synced, ``--inexact`` so
+    that the main checkout's install, extraneous to a sync that skips
+    the project, is not removed either (``uv sync --no-install-project
+    --dry-run`` on the shared environment says "Would uninstall
+    kiss-agent-framework" without it); the later stages read the
+    worktree's files by path.
+
+    Args:
+        root: The project root the check runs on.
+    """
+    if in_worktree(root):
+        return ["uv", "sync", "--inexact", "--no-install-project"]
+    return ["uv", "sync"]
 
 
 def verdict_text(failed: list[tuple[str, list[str]]]) -> str:

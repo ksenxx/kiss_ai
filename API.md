@@ -74,6 +74,10 @@
 - `tool`: The tool callable, for its ``unknown_arguments_hint``.
 - **Returns:** The hint (starting with a newline), or ``""`` when every argument is a parameter or the tool takes no ``options``.
 
+**`is_content_policy_error`** — Return whether *e* is a provider error refusing the request on its content policy. Such a refusal (:data:`_CONTENT_POLICY_PHRASES`) arrives as a plain HTTP error of the SDK, not as a typed stop, yet retrying it on the same family is as pointless as retrying a ``content_filter`` stop: the 2026-11-01 audit lost three sub-agents to "3 consecutive errors" on OpenAI's cybersecurity flag before failing over by hand.<br/>`def is_content_policy_error(e: Exception) -> bool`
+
+- `e`: The exception the model call raised.
+
 **`stop_reason_of`** — Why the provider ended *response*: Anthropic's ``stop_reason``, OpenAI's finish reason. Chat completions carry ``choices[0].finish_reason``; the Responses API ``status`` (``completed``) or ``incomplete_details.reason`` (``max_output_tokens``).  ``None`` when the response says nothing.<br/>`def stop_reason_of(response: Any) -> str | None`
 
 ---

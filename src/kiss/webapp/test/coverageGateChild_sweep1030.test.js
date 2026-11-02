@@ -38,7 +38,10 @@ const WAIT_MS = 20000;
  * and stderr until it has exited and its pipes have closed (`close`: a
  * process it left behind may still write), `until` matches the output,
  * or WAIT_MS pass; then kill the whole group.  Resolves with `{out,
- * code, timedOut}`, `code` null unless it ended on `close`.
+ * code, timedOut, closed}`, `code` null unless it ended on `close`;
+ * `closed` resolves when the pipes have closed, which a process outside
+ * the group that inherited them (the gate's guard leads its own group)
+ * may delay past the kill.
  */
 function runGroup(args, env, until) {
   return new Promise(resolve => {
@@ -49,6 +52,7 @@ function runGroup(args, env, until) {
     });
     let out = '';
     let done = false;
+    const closed = new Promise(settle => child.on('close', () => settle()));
     const timer = setTimeout(() => finish(null, true), WAIT_MS);
     function finish(code, timedOut) {
       if (done) return;
@@ -59,7 +63,7 @@ function runGroup(args, env, until) {
       } catch {
         // The group has exited already.
       }
-      resolve({out, code, timedOut});
+      resolve({out, code, timedOut, closed});
     }
     function collect(chunk) {
       out += chunk;
@@ -121,6 +125,16 @@ async function testHungSuiteOutputStreams() {
       "the hung suite's output did not reach the gate's stdout while it ran",
     );
     assert.strictEqual(res.code, null, 'the suite was still running');
+    // The kill reached the gate only: its guard leads its own group and
+    // kills the suite and itself when the gate dies, and node writes the
+    // guard's V8 coverage into the scratch TMPDIR just before that
+    // (`process.kill` of one's own group runs the exit hooks first).
+    // Removing the directory before then left that file behind, one
+    // directory per run; the pipes the guard inherited close with it.
+    await Promise.race([
+      res.closed,
+      new Promise(settle => setTimeout(settle, 5000).unref()),
+    ]);
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }

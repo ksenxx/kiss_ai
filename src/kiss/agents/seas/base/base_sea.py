@@ -80,7 +80,7 @@ from typing import Any
 from kiss.core.config import kiss_home
 from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_schema import tool_schema
-from kiss.core.tool_verdict import ALLOW, Verdict, end_run, refuse
+from kiss.core.tool_verdict import ALLOW, Verdict, allow_with_note, end_run, refuse
 
 __all__ = [
     "ALLOW",
@@ -89,6 +89,7 @@ __all__ = [
     "LLMReply",
     "Verdict",
     "WorkerSea",
+    "allow_with_note",
     "end_run",
     "refuse",
     "tool_schema",
@@ -107,16 +108,15 @@ WORKTREE_TOOL_NAMES: frozenset[str] = frozenset({"create_worktree", "commit_and_
 SUMMARY_EVERY_STEPS = 10
 """A run with the ``summary`` tool must call it at every step that is a multiple of this."""
 
-SUMMARY_DUE_REFUSAL = (
-    "Step {step} is a multiple of {every}, so a summary is owed before any other tool runs: "
-    "call summary(description=...) now, recapping your steps since the last summary, "
-    "then re-issue this exact {name} call."
+SUMMARY_DUE_NOTE = (
+    "\n\nA summary is due (one is owed at every step that is a multiple of {every}): make your "
+    "next tool call summary(description=...), recapping your steps since the last summary."
 )
-"""The refusal a tool call other than ``summary`` or ``finish`` gets while a summary is due.
+"""Appended to the result of every tool call but ``summary`` and ``finish`` while a summary is due.
 
-The agent prefixes it with :data:`~kiss.core.tool_verdict.REFUSED_PREFIX`
-(the call did not run) and appends the re-issue reminder to the
-``summary`` call's own result, so the refused call is re-issued.
+The call runs as asked (a refusal cost a whole model step to re-issue
+it, and the 2026-11-01 audit counted 246 of them in one task): the note
+is what the model reads at the very step it chooses what to do next.
 """
 
 
@@ -135,16 +135,22 @@ class BaseSea:
     run whose toolset holds the ``summary`` tool must call it at every
     :data:`SUMMARY_EVERY_STEPS`-th step (the system prompt's "Periodic
     Activity Summaries" rule).  ``tools`` notes whether the tool is
-    there, ``llm_call_hook`` counts the steps (one LLM call each), and
-    ``tool_call_hook`` refuses every other tool call (``finish``
-    excepted) from the 10th, 20th, ... step on until ``summary`` runs.
+    there, ``llm_response_hook`` reads the step of every reply (the
+    ``Steps:`` count of the tool-result footer, which the rule is
+    stated in), and ``tool_call_hook`` lets every other tool call run
+    but ends its result with :data:`SUMMARY_DUE_NOTE` from the 10th,
+    20th, ... step on until ``summary`` runs (``finish`` excepted).
     """
 
     path: Path | None = None
     """The file the SEA was loaded from (the launcher sets it; else the class's module file)."""
 
     step = 0
-    """The run's step so far: the number of LLM calls made (``llm_call_hook``)."""
+    """The run's step so far: the ``Steps:`` count of the footer, read from each reply.
+
+    A continuation session restarts the footer's count at 1, as it
+    restarts the model's context, so the cadence restarts with it.
+    """
 
     has_summary_tool = False
     """Whether the run's toolset holds the ``summary`` tool (set by ``tools``)."""
@@ -243,29 +249,24 @@ class BaseSea:
         model that only talks.
 
         The root layer's own rule: while a ``summary`` is due (see
-        :class:`BaseSea`), every call but ``summary`` and ``finish`` is
-        refused with :data:`SUMMARY_DUE_REFUSAL`; the ``summary`` call
-        clears the debt.  ``finish`` is exempt because its own summary
-        ends the run (and the agent probes it for an implicit finish).
+        :class:`BaseSea`), every call but ``summary`` and ``finish`` runs
+        with :data:`SUMMARY_DUE_NOTE` appended to its result
+        (:func:`~kiss.core.tool_verdict.allow_with_note`); the
+        ``summary`` call clears the debt.  ``finish`` is exempt because
+        its own summary ends the run (and the agent probes it for an
+        implicit finish).
         """
         if name == "summary":
             self.summary_due = False
         elif self.summary_due and name != "finish":
-            return refuse(
-                SUMMARY_DUE_REFUSAL.format(step=self.step, every=SUMMARY_EVERY_STEPS, name=name)
-            )
+            return allow_with_note(SUMMARY_DUE_NOTE.format(every=SUMMARY_EVERY_STEPS))
         return ALLOW
 
     def llm_call_hook(self, new_messages: list[Any]) -> list[Any]:
         """Return the messages to send given the *new_messages* of the next LLM call.
 
-        The root layer counts the run's steps here (one per LLM call)
-        and marks a ``summary`` due at every
-        :data:`SUMMARY_EVERY_STEPS`-th step of a run that has the tool.
+        The root layer passes them on unchanged.
         """
-        self.step += 1
-        if self.has_summary_tool and self.step % SUMMARY_EVERY_STEPS == 0:
-            self.summary_due = True
         return new_messages
 
     def llm_response_hook(self, reply: LLMReply) -> Verdict:
@@ -282,8 +283,20 @@ class BaseSea:
         every exchange with the model: what a domain rule needs to cap
         the tokens of an episode or to end it on a reply that settles
         the task.  A tool Codex ran natively during the turn has run
-        already.  The root layer allows every reply.
+        already.
+
+        The root layer allows every reply and reads its ``step`` (the
+        footer's count after the call): at every
+        :data:`SUMMARY_EVERY_STEPS`-th step of a run that has the
+        ``summary`` tool a summary comes due.  A step that does not grow
+        is a continuation session restarting the count: a debt of the
+        previous session, whose context is gone, is dropped with it.
         """
+        if reply.step <= self.step:
+            self.summary_due = False
+        self.step = reply.step
+        if self.has_summary_tool and self.step % SUMMARY_EVERY_STEPS == 0:
+            self.summary_due = True
         return ALLOW
 
     def register_as_model(self) -> bool:

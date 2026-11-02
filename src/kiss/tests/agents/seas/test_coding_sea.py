@@ -26,7 +26,7 @@ from typing import Any
 import docker
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import BaseSea, LLMReply
 from kiss.agents.seas.coding import coding_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
@@ -520,7 +520,7 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert run.settings == resolved
     # ``tools`` adds the harness's checkpoint tools to the built-ins and drops
     # ``summary`` and ``decide``; with no ``summary`` tool the root layer's
-    # ten-step summary cadence never refuses a call.
+    # ten-step summary cadence never marks a summary due.
     def summary(description: str) -> str:
         return description
 
@@ -531,8 +531,8 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
         "print", "checkpoint", "rollback",
     ]
     assert loaded.has_summary_tool is False
-    for _ in range(10):
-        BaseSea.llm_call_hook(loaded, [])
+    for step in range(1, 11):
+        BaseSea.llm_response_hook(loaded, LLMReply("", [], step=step))
     assert loaded.step == 10 and loaded.summary_due is False
     assert BaseSea.tool_call_hook(loaded, "Bash", {"command": "ls"}) == ALLOW
     assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()

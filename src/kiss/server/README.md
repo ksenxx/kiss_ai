@@ -463,7 +463,9 @@ run when the subclass's receives the dict.  Per method:
   folded the same way, base first; each class receives the previous
   result and returns the next.
 - `tool_call_hook(name, args)`: the classes are asked in order and the
-  first refusal (`refuse(text)`) wins; `ALLOW` allows.  The model never
+  first refusal (`refuse(text)`) wins; `ALLOW` allows, and the notes
+  of the allowing verdicts (`allow_with_note(text)`) are joined in
+  chain order onto the result.  The model never
   reads a refusal bare: the agent returns `REFUSED: the <tool> call did
   NOT run and had no effect. <text>` (`tool_verdict.refusal_result`),
   and the next allowed call of another tool gets a reminder appended
@@ -477,14 +479,15 @@ run when the subclass's receives the dict.  Per method:
 They pass their input through, with one rule of the root layer's own,
 the `summary` cadence (`base_sea.SUMMARY_EVERY_STEPS`, 10): `tools()`
 resets the run's step count and records whether the toolset holds the
-`summary` tool (`self.has_summary_tool`), `llm_call_hook` counts one
-step per LLM call and marks a summary due at every 10th step of a run
-that has the tool, and `tool_call_hook` then refuses every call but
-`summary` and `finish` with `base_sea.SUMMARY_DUE_REFUSAL` ("Step 10
-is a multiple of 10, so a summary is owed before any other tool runs:
-call summary(description=...) now, ..., then re-issue this exact Bash
-call.") until `summary` runs; the `summary` call's own result then
-carries the re-issue reminder.  A SEA whose own `tools()` drops `summary` should set
+`summary` tool (`self.has_summary_tool`), `llm_response_hook` reads
+each reply's `step` (the `Steps:` count of the tool-result footer, which
+restarts with every continuation session) and marks a summary due at
+every 10th step of a run that has the tool, and `tool_call_hook` then
+lets every call but `summary` and `finish` run with
+`base_sea.SUMMARY_DUE_NOTE` appended to its result ("A summary is due (one
+is owed at every step that is a multiple of 10): make your next tool call
+summary(description=...), ...") until `summary` runs (an allowing
+verdict with a note: `allow_with_note`).  A SEA whose own `tools()` drops `summary` should set
 `self.has_summary_tool = False` there (every bundled SEA only appends
 tools).  `system_prompt` is folded exactly
 like `prompt`: each class receives the text so far and what it returns
@@ -527,8 +530,8 @@ class BaseSea:
         return ALLOW
 ```
 
-(The file's real `tools` and `llm_call_hook` bodies reset and count
-the run's steps, `BaseSea.step`, one per LLM call, and its
+(The file's real `tools` and `llm_response_hook` bodies reset and
+read the run's step, `BaseSea.step`, from each reply's `step`, and its
 `tool_call_hook` enforces one rule only, the ten-step `summary`
 cadence described below; that is all the logic in them, so keep
 those lines when you edit the bodies and add yours around them.)
@@ -667,8 +670,12 @@ family>".`) unless (i) the call is a fan-out of two or more tasks
 over disjoint named pieces of work (`undivided_work` /
 `named_pieces`: every task names a slash path, a directory ending in
 `/`, a dotted module or file name, a URL or a backticked command, and
-no piece is named by two tasks; the shortfall names the task that
-names nothing or the piece two tasks share), (ii) the caller's own
+no piece is named by two tasks; pieces under `tmp/` and, in a fan-out
+of three or more, pieces every task names (shared instructions) do
+not count, and a directory two tasks share is no overlap when each
+names a more specific piece under it; the shortfall names the task
+that names nothing of its own, or every pair of tasks sharing a piece
+and up to three of the pieces each, in one clause), (ii) the caller's own
 task asks for sub-agents in so many words (`asks_for_sub_agents`:
 "sub-agent", "sub-task", `run_parallel`, `run_agent`, "parallel
 agents", "adversarial testing" / "training", "second opinion" or
@@ -1091,7 +1098,20 @@ from the caller, their budget included (each then gets the explicit
 `timeout` (argument > the SEA's setting > 3600) and returns a YAML
 list with one entry per task: the child's result text or, for a child
 still running at that point, its `agent_job` notice; no child is
-stopped by the timeout.
+stopped by the timeout.  A list longer than the daemon's
+`tool_output_max_chars` is written to `tmp/tool-out/<tag>-agents.txt`
+under the caller's work dir and the call returns its digest instead
+(`agent_dispatch.digest_agent_results`: one `[i/N] ok|FAILED: <first
+200 characters of the summary>` line per child, `running (job <id>)`
+for one not finished).  The `summary` of every sub-task result
+(`run_agent`, `agent_job` and each `run_parallel` entry alike,
+`agent_dispatch.format_dispatch_result`) of a child that ran several
+sessions (a hand-off, see [Refusals and session
+hand-off](#refusals-and-session-hand-off)) is the final session's
+summary alone, opened with `(the last of N sessions; the earlier
+sessions' handoff notes are in the task's stored result)`
+(`agent_dispatch.result_summary`): the `<h3>Previous Session N</h3>`
+notes stay in the stored result for the user.
 
 ### `system_prompt()`, `register_as_model()` and `on_picked_as_model()` — model routing SEAs
 
@@ -1113,7 +1133,13 @@ picker's tab, or a `run_agent` call that names the picker as its
 gets the real model the picker resolved to.
 `register_as_model()` is a registry flag,
 not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
-lists every registered SEA whose `register_as_model()` returns `True`,
+lists every registered SEA whose `register_as_model()` returns `True`
+(the verdict is cached per script, stamped with the mtime, size and
+inode of the script and of every SEA file its class derives from, so
+an edit of a custom base alone, `class X(sea_class(...))`, is re-read;
+only a script whose source mentions `register_as_model` or derives
+from something other than the plain bases is imported for it,
+`_registers_as_model`),
 the daemon offers them in the model picker (vendor `Router`, once at
 least one catalog model is runnable), and a task run with such a pick
 becomes a run of the SEA on the model its
@@ -1470,11 +1496,35 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   decoded into `tmp/chrome-shot-<ns>.png` under the work dir and its
   path returned), `snapshot` (an interactive-element listing whose
   numbers feed `click` and `type_text`), each waiting `timeout`
-  seconds for the extension's answer (`ChromeBridge.call`; a command
-  the extension has not answered by then drops the connection so the
-  extension reconnects, while the extension's own 30 s execution
-  deadline, `COMMAND_DEADLINE_MS`, answers with an ordinary error and
-  keeps the connection).  The bridge is a loopback
+  seconds for the extension's answer (`ChromeBridge.call`; the frame
+  carries a `timeout_ms` a tenth short of that, at most
+  `_REPLY_MARGIN_SECS` (1 s) short, so the extension's own deadline
+  normally answers first with an ordinary error, `command exceeded its
+  Ns deadline`, and keeps the connection — `COMMAND_DEADLINE_MS`, 30 s,
+  applies only to a frame without `timeout_ms`; a command the
+  extension has still not answered by the tool's timeout drops the
+  connection, shutting the socket down before the close so the close
+  returns at once instead of waiting on a stuck sender, and the
+  extension reconnects.  The write itself is bounded too: a watchdog
+  bound to that connection's socket shuts it down when the deadline
+  passes mid-`send` (a peer that stopped draining its socket would
+  otherwise block `sendall` for good), the call fails with `the
+  extension stopped reading; '<cmd>' could not be sent within the Ns
+  left of its timeout`, and the watchdog is cancelled once the write
+  returned so it never cuts a later, healthy connection.  The
+  bridge's locks are reentrant and taken through
+  `kiss.core.locked.locked_call`, so a Stop landing right after an
+  acquire cannot leave a lock held by a dead thread.  On the
+  extension's side the deadline travels into every stage of an
+  `evaluate`/`snapshot`/`click`/`type_text`: a command whose deadline
+  passed while it waited in a queue (`command waited out its Ns
+  deadline in the queue`), on a busy renderer (`command exceeded its
+  deadline before the page ran it`, checked by the injected script
+  itself against the page's clock) or before the CSP fallback's
+  debugger attach refuses to run, since KISS was already told it
+  failed, and the deadline detaches only the debugger attachment the
+  timed-out command itself made, never the next command's on the same
+  tab).  The bridge is a loopback
   WebSocket server on an ephemeral `127.0.0.1` port with a mutual
   challenge–response handshake (`challenge` nonce → `hello` with
   `sha256(token:nonce)` → `hello_ok` with `sha256(nonce:token)`; the
@@ -1596,9 +1646,11 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   during a first-time index build lands at once; the abandoned worker
   starts no further embedding batch once the cancel event is set
   (`VectorIndex.sync(cancel=)`, checked between batches), finishing
-  the scan and the batch under way, the stale-row cleanup and the
-  query it was asked for in the background, which is all process exit
-  then waits for.  `True`
+  the scan, the batch under way, a query embedding already in flight
+  and the stale-row cleanup in the
+  background, which is all process exit then waits for, and skips the
+  search itself once the cancel is set (`MemoryTools._search_one`:
+  nobody reads an abandoned worker's hits).  `True`
   enables, `False` disables,
   `None` falls back to the daemon's configured default (the settings
   panel's "Use persistent memory" checkbox, persisted as
@@ -1631,7 +1683,11 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   the shared `_porcelain_entries` parser),
   and `commit_and_merge` when done, which commits the branch and
   squash-merges it into the original branch; a conflicting merge is
-  resolved by the bundled `/merge` SEA run as a sub-agent.  The commit
+  resolved by the bundled `/merge` SEA run as a sub-agent.  A
+  repository nested inside the worktree (a clone with a `.git` of
+  its own) is a checkout of its own that the enclosing worktree does
+  not isolate (`sorcar_agent._in_checkout_of`): a tracked, non-ignored
+  edit there needs its own `create_worktree(path)` first.  The commit
   message is generated from the diff and stamped with the user's
   prompt and the task's result (`kiss.agents.sorcar.commit_message`);
   the model call that writes it is billed to the task it commits for
@@ -1647,7 +1703,15 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   Both tools belong to the `edit` tool group; `WorkerSea.tools()`
   strips them, so a worker edits the caller's tree in place.  A
   worktree the agent created but never merged is presented to the
-  user with the Merge / Discard bar.  `use_worktree` and `auto_commit`
+  user with the Merge / Discard bar; one with no tracked changes
+  against its base is discarded instead (announced after the task,
+  its git-ignored output rescued into the checkout; silently for a
+  stale resumed session), but only when git could list its
+  changes (`merge_flow._changed_files_of` answers `None`, not an empty
+  list, when the comparison fails: a missing object, an unreadable
+  index, a base that no longer resolves), since the branch may hold
+  the only copy of the task's work — such a worktree is kept and
+  presented, with a warning in the log.  `use_worktree` and `auto_commit`
   are removed settings: `sea_settings.REMOVED_SETTINGS` refuses them
   and `uv run sea lint` flags a docstring that still mentions their
   getters (`sea_lint.REMOVED_GETTERS`).
@@ -1683,17 +1747,29 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   is created, then started, under a `kiss-<12 hex>` name chosen
   beforehand, so a Stop landing inside the create call leaves nothing
   unreachable: cleanup force-removes whatever was made by handle or by
-  name, and a removal that fails keeps the name on the manager so a
-  later `close()` retries),
+  name, a stop that fails at `close()` falls back to the same force
+  removal, and a removal that still fails keeps the name on the
+  manager so a later `close()` retries by name instead of forgetting
+  a running container and deleting the shared directory it mounts),
   `container:<name-or-id>` attaches to a container the caller already
   runs (commands run in its own working directory, nothing extra is
-  mounted, it is left running afterwards), `exec:http://127.0.0.1:<port>`
+  mounted, it is left running afterwards; a timed-out command whose
+  exec the daemon delayed is still killed when it eventually starts,
+  since the reaper of each exec (`docker_manager._ExecRun.reap`)
+  watches the exec's own container, which outlives the `close()` that
+  drops the attached manager's handle), `exec:http://127.0.0.1:<port>`
   runs them on a remote environment that has no local container at
   all through a local HTTP exec bridge (`exec_bridge.ExecBridge`
   stands in for the Docker manager: `Bash` and
   `run_commands_parallel` POST `{command, timeout, token}` to
   `/exec` and get `{exit_code, output}` back, whole, not streamed; a
-  Stop POSTs `/kill` for the token; the run fails at its start when
+  Stop POSTs `/kill` for the token from a helper thread waited on
+  for at most `docker_manager._KILL_WAIT_S` (2 s), also when it
+  reaches the waiting thread
+  as an injected `KeyboardInterrupt`, so the kill is on its way
+  before the call returns (a bridge that stalls on it keeps the
+  helper thread waiting, not the task; a `/kill` the bridge
+  refuses is swallowed); the run fails at its start when
   `/ping` does not answer; the file tools are the same `Bash`-backed
   `DockerTools` a container run uses), `""` runs the tools on the
   host.
@@ -1734,16 +1810,22 @@ Per `KISSAgent.run()`'s contract:
   with the list of new messages (those added to the conversation
   since the previous LLM call) about to be sent; its return value
   replaces those messages.  The `BaseSea` method returns them
-  unchanged after counting the step (`self.step`).
+  unchanged.
 - **`tool_call_hook(name, args)`** — called before every tool call
   with the tool's name and arguments dict and returns a typed verdict
   (`kiss.core.tool_verdict.Verdict`, re-exported by `base_sea`):
   `ALLOW` lets the tool execute; `refuse(text)` suppresses the call
-  and *text* is given to the model as the tool's result.  The
-  `BaseSea` method returns `ALLOW` for every call except, at every
-  tenth step of a run that has the `summary` tool, a call other than
-  `summary` or `finish` while the summary is owed (see [Customizing
-  every run](#customizing-every-run)).
+  and *text* is given to the model as the tool's result;
+  `allow_with_note(text)` (also re-exported) lets the call run as
+  asked and appends *text* to its result, after the agent's result
+  hook has read the plain result — for a rule the model should act on
+  at its next step without losing this one (a blank *text* is a
+  `ValueError`; `finish` carries no note).  The `BaseSea` method
+  returns `ALLOW` for every call except, at every tenth step of a run
+  that has the `summary` tool, a call other than `summary` or `finish`
+  while the summary is owed, which gets
+  `allow_with_note(SUMMARY_DUE_NOTE)` (see [Customizing every
+  run](#customizing-every-run)).
   The model never reads a refusal bare: the executor hands it
   `kiss.core.tool_verdict.refusal_result(name, text)` — `REFUSED: the
   <name> call did NOT run and had no effect. <text>` — and the next
@@ -1771,7 +1853,13 @@ Per `KISSAgent.run()`'s contract:
   `cache_write`, `cost`, `stop_reason`), the `step`, and the run's
   `budget_used` / `total_tokens_used` so far.  Returns `ALLOW` to act
   on the reply or `end_run(result)` to end the run (none of the
-  reply's tool calls run); a `refuse(...)` here is a broken SEA.
+  reply's tool calls run); a `refuse(...)` here is a broken SEA.  The
+  `BaseSea` method allows every reply and reads its `step` into
+  `self.step` (the `Steps:` count of the tool-result footer), marking
+  a summary due at every `SUMMARY_EVERY_STEPS`-th step of a run that
+  has the `summary` tool; a step that does not grow is a continuation
+  session restarting the count, and the previous session's debt is
+  dropped with it.
   With `llm_call_hook` (rewrite the next request) this is every
   exchange with the model — what used to need a proxy between the
   agent and the model to count an episode's tokens or end it.  A tool
@@ -1783,8 +1871,10 @@ Per `KISSAgent.run()`'s contract:
 A hook that returns the wrong type (a non-list, a non-`Verdict`)
 fails the task with a diagnostic error, like every wrong-typed value.
 In an inheritance chain the `llm_call_hook` results are threaded base
-first, the first `tool_call_hook` refusal wins, and the first
-`llm_response_hook` `end_run` wins.
+first, the first `tool_call_hook` refusal wins (an allowance carries
+the notes of the allowing verdicts joined in chain order, and is
+`ALLOW` itself when none has one; `sea_commands._first_refusal`), and
+the first `llm_response_hook` `end_run` wins.
 
 ```python
 # guarded_agent.py
@@ -1813,7 +1903,12 @@ tool call.  A method named differently from the contract
 ordinary method the daemon never calls; `uv run sea lint` does not
 flag such a definition, only a docstring that still describes the
 earlier contract's getters (`stale-docstring`), so check the method
-names yourself.
+names yourself.  A `settings()` that reads a key its bases lay
+(`not settings["use_web_tools"]`) is fine in a run, where the bases
+are folded first; `sea lint`, which also runs the script's own
+`settings()` over `{}` for its `redundant-key` comparison
+(`sea_commands.own_settings`), takes the failure there as "no own
+dict to compare", not as a `broken` finding, and logs nothing for it.
 
 
 ## Tools: `tools(tools)`
@@ -2014,7 +2109,24 @@ SEA's own `tool_call_hook` need not restate:
   other's spills; the path is shown in POSIX form on every OS,
   `useful_tools.SPILL_DIR`, since the model pastes it into `Bash`,
   which is bash on Windows too, and the file holds the output
-  verbatim, written with `newline=""`).  `memory_list(max_output_chars=...)` has the same
+  verbatim, written with `newline=""`).  A host `run_commands_parallel`
+  report longer than the ceiling (`tool_output_max_chars`) is written
+  whole to `tmp/tool-out/<tag>-parallel.txt` (`useful_tools.spill_report`,
+  the tag six random hex digits) and the result is its digest
+  (`digest_parallel_report`): the tally line, one `[i/N] exit 0 in
+  1.2s: <command>` line per command (the command cut to 160
+  characters), then for each command that did not succeed the last
+  `DIGEST_TAIL_CHARS` (1,200) characters of its output under a `###
+  [i/N] ...` header naming the section of the file that has all of it;
+  the container and bridged `run_commands_parallel` pass no `spill`
+  and return the whole report.  A `run_parallel` result over the same
+  ceiling goes to `tmp/tool-out/<tag>-agents.txt` the same way
+  (`agent_dispatch.digest_agent_results`: `N sub-tasks; the whole
+  result is in <path>, this is its digest:` and one `[i/N] ok|FAILED:
+  <first 200 characters of the summary as text>` line per child, or
+  `[i/N] running (job <id>)` for one still running).  The coding gate
+  reads exit codes and sub-task outcomes from the digests as it does
+  from the full reports.  `memory_list(max_output_chars=...)` has the same
   default and ceiling, and a `Read` with no range keeps the default
   budget too, ending in a note that names the `start_line` to
   continue from.  A host `Bash` result of a command that only read
@@ -2042,7 +2154,12 @@ SEA's own `tool_call_hook` need not restate:
   container and bridged `Read` do the same, fetching the bytes with
   one exec that prints the file's size and its base64
   (`DockerManager.read_bytes`, `ExecBridge.read_bytes`,
-  `docker_manager._FETCH_SCRIPT`), so neither the text decoding nor
+  `docker_manager._FETCH_SCRIPT`: `base64 < path | tr -d '\n'`, POSIX
+  tools only, so a BSD `base64` without GNU's `-w0` works too; a
+  fetch whose base64 does not decode to the announced size is an
+  `OSError`, `cannot read <path>: fetched N of its M bytes`, since the
+  pipeline's exit code is `tr`'s and would hide an encoder that died
+  mid-file), so neither the text decoding nor
   the output cap of the container `Bash` touches them.
 - **Read before modify.**  `Edit` and `Write` of an existing file the
   model has not been shown in this session are refused — except a
@@ -2096,21 +2213,40 @@ SEA's own `tool_call_hook` need not restate:
   line, is converted only while no line holds the pattern twice —
   with several matching lines the `Edit` gets `replace_all`,
   `MechanicalEdit.edits_for`; a file holding `\r` the python read would
-  translate is not converted either).  The rewrite may be the whole
+  translate is not converted either, nor is a `sed -i` on a symlink or
+  a hard-linked file, which GNU sed would replace with a new regular
+  file where `Edit` writes through the link,
+  `useful_tools._sed_replaces_link`).  The rewrite may be the whole
   command or the first step of `[cd DIR &&] <rewrite> [&& | ; |
   newline] <rest>` on one line with no subshell, substitution or
-  backtick (`edit_guards._rewrite_segment`): the rest then runs as a
+  backtick, at the top level (not in a subshell, group, pipe or
+  background list) and with only the redirections a `Write`/`Edit`
+  reproduces (`edit_guards._exact_redirections`: the here-document on
+  standard input, standard output to a file through `>`, `>>`, `>|`,
+  `>&` with a file operand, `&>` or `&>>`, `2>&1`, `2> /dev/null` and
+  `< /dev/null`; an input file, `1>&2`, a standard-error file or a
+  descriptor of the command's own leaves the command to run as
+  written or to the guards below) (`edit_guards._rewrite_segment`): the rest then runs as a
   second `Bash` call, `cd DIR && <rest>`, with the original call's
   `description`, `timeout_seconds`, `max_output_chars`, `background`
   and `on_timeout` (`useful_tools.followup_call`), only once the
   `Write`/`Edit` went through, and a `cd` to a missing directory is
   refused up front (`CD_VERDICT`), as bash would run nothing after it.
-  Under an agent the tool raises the call as a
+  Under an agent whose run has both `Write` and `Edit` to make
+  (`UsefulTools.redirect`, set from the run's final toolset in
+  `SorcarAgent`) the tool raises the call as a
   `tool_verdict.ToolRedirect` and the agent makes it through its own
   tool path (`KISSAgent._execute_redirected`), so the
   `tool_call_hook`, the guard, the `tool_call`/`tool_result` events and
   the coding gate see the `Write`/`Edit` exactly as if the model had
-  issued it (only the original call counts in `tool_calls_made`); the
+  issued it (only the original call counts in `tool_calls_made`; the
+  redirected call is registered under the original call's interrupt
+  token, `tool_interrupt.register_tool_call`, so a Stop on the `Bash`
+  panel reaches whichever redirected call is running, and a nested
+  call that starts under an already stopped one is not run); a
+  profile without one of the two tools (`bash`, `shell`, `review`) or
+  a SEA `tools()` that dropped it has the tool apply the `Write`/`Edit`
+  itself, follow-up `Bash` included; the
   `Bash` result opens with `Applied as Write(file_path=..., content=...),
   whose result follows:` (`Appended through ...` for a `>>` copy;
   strings cut to 80 characters), then the call's result or its
@@ -2123,7 +2259,8 @@ SEA's own `tool_call_hook` need not restate:
   mechanical edit of a file not shown is refused with the exact `Edit`
   call and the region around its first `old_string`, after which the
   file counts as read, so the same command or that `Edit` goes through
-  next; a copy into a file that does not exist yet, or into `/dev/*`,
+  next (a scratch file counts as shown: the edit is applied at once);
+  a copy into a file that does not exist yet, or into `/dev/*`,
   runs as the shell command it is; a command that is no such rewrite,
   or whose conversion is not exact, falls to the rewrite and
   here-document guards below.  A foreground container or bridged
@@ -2133,7 +2270,21 @@ SEA's own `tool_call_hook` need not restate:
   checked with `test -d`), with no shown-file rule — the container
   tracks no reads — and a copy creating a new file redirected to
   `Write` too (the bundled coding SEA's trials run on that container
-  `Bash`, so its ledger gate sees the edit).  `run_commands_parallel`
+  `Bash`, so its ledger gate sees the edit).  A redirected `>>` copy
+  is remembered on the manager as a `docker_manager.PendingAppend`
+  (the path, the file's bytes when the redirect was raised, the
+  appended body) for the one `Write` it stands for: when that `Write`
+  lands with exactly the snapshot plus the body, `DockerTools.Write`
+  appends the body through the shell's `>>`
+  (`docker_tools._append_commands`) instead of storing the snapshot,
+  so what another writer appended meanwhile is kept, as `cat >>`
+  would have kept it; the next `DockerTools` `Read`, `Edit` or
+  `Write`, or the next `Bash` of the manager (the ones that start
+  and control a container background job included), takes or
+  drops the pending append (only `run_commands_parallel` leaves it
+  alone), so a redirect the
+  agent's hook refused never turns a later `Write` into an append.
+  `run_commands_parallel`
   (host, container or bridge) and a `Bash(..., machine=)` job apply no
   conversion: there the rewrite is refused as below.  A container or
   bridged `Bash` started as a job bypasses the foreground path:
@@ -2152,9 +2303,21 @@ SEA's own `tool_call_hook` need not restate:
   verdicts, so no re-issue reminder follows): a command that would
   delete the work dir or `/` or kill every process
   (`shell_guards.destructive_command_guard`, `REFUSED: the Bash call did NOT run: ...`); inside
-  a worktree, a command naming the main checkout's path (`Error:
-  command references the parent-repo path ...`, with the command
-  rewritten against the worktree to copy as is); a shell rewrite of a
+  a worktree, a command naming the main checkout's path outside its
+  `.venv` (`Error: command references the parent-repo path ...`, with
+  the command rewritten against the worktree to copy as is) and a
+  `uv sync`/`uv run`/`uv add`/`uv remove`, with or without global options
+  before the subcommand (`uv --directory . run`, `uv -q sync`;
+  `useful_tools._uv_in_worktree_guard`,
+  ``REFUSED: `uv run` did NOT run: the worktree '<path>' has no
+  environment of its own and shares the main checkout's
+  (<checkout>/.venv); ...``: a worktree has no environment
+  of its own, so uv would build it one or, through `UV_PROJECT_ENVIRONMENT`
+  or a `.venv` link, install the worktree as the main checkout's editable
+  project; the refusal names the main checkout's environment binary to
+  run with the worktree's `src/` and `projects/` first on `PYTHONPATH`,
+  `uv run <program> ...` rewritten to copy as is unless a global option
+  with a value, `--directory x`, would be dropped); a shell rewrite of a
   file that the bullet above did not apply as a `Write`/`Edit`: a
   `sed` editing in place (`-i`, `-i.bak`, `-Ei`, `--in-place`) with
   `\n` in one of its words and a `python -` or `python3 -` heredoc that reads a
@@ -2175,15 +2338,51 @@ SEA's own `tool_call_hook` need not restate:
   resolve — since it may be an existing file (`HEREDOC_UNRESOLVED_VERDICT`);
   a here-document that creates a new file at a literal path, one aimed
   at `/dev/*`, and one fed to an interpreter (`python3 - <<EOF >
-  out.json` writes the program's output, not the text) run.  The
+  out.json` writes the program's output, not the text) run.  On the
+  host the three guards exempt scratch
+  files (`useful_tools._is_scratch_path`: under a `tmp` directory
+  inside the work dir, or anywhere under `$KISS_HOME/cron/work`; a
+  checkout that itself sits under `/tmp` is not scratch), as `Write`
+  overwrites one unread: a multi-line `sed -i` whose file operands all
+  resolve to scratch or missing files, a python heredoc every written
+  path of which (`edit_guards.python_written_paths`: `open(p, "w")`,
+  `p.write_text(...)`, a literal or a name bound exactly once in the
+  program; a path built at run time keeps the refusal) resolves so,
+  and a here-document into a scratch file run as written; the
+  `guarded(path)` predicate the guards take
+  (`useful_tools._host_guarded`) says which absolute paths are still
+  refused.  A container or bridged `Bash` passes its plain `exists`
+  (`docker_manager._refuse_or_lift`: no scratch exemption there, and
+  the rewrite guard reads the command alone), as does the host
+  `rewrite_guard` of a `Bash(..., machine=)` job, whose files this
+  host cannot see.  The
   command is read by `shell_scan.simple_commands`, a quote-aware
   scanner that follows `cd`s, pipes, `&&`/`||`/`;` chains, groups
   and arithmetic commands (`((...))`, whose only commands are its
-  command substitutions) the way bash does, drops wrapper prefixes
+  command substitutions) the way bash does (where bash versions
+  disagree on a `${...}` operand, as bash 3.2, the macOS system
+  bash, reads it, so a substitution only that bash would run is
+  still scanned), drops wrapper prefixes
   with their option values (`sudo -u root`, `env`, `nice`, `timeout
   -s KILL 5`, `stdbuf`) and reads a Windows drive path (`C:/x`) as
   the absolute path Git Bash spells `/c/x`, so a redirect inside a
-  quoted string or a heredoc body is not a write; and a foreground
+  quoted string or a heredoc body is not a write.  The scanner also
+  follows a variable the command itself assigns a literal value
+  (`T=tmp/x; cat > $T/f`, `export T=...`, `${T}`; `_Scanner.variables`)
+  into the words after it, in the same scope — not after `||` or `&&`,
+  not in a compound command that may not run, not `T+=`; a subshell's,
+  a pipeline stage's and a backgrounded list's assignments end with
+  them (a brace group's included); after a brace group that may not
+  have run, after `read` (`read T`, `read -aT`), `unset`, `declare`,
+  `readonly`, `let`, `printf -v`, a loop over the variable, an
+  arithmetic command assigning it or an array assignment (`T[0]=x`,
+  `T=(x y)`, `T+=(z)`) the variable is unknown (as are `REPLY` after any
+  `read` or `select` and `MAPFILE` after any `mapfile`, the variables
+  those fill when no operand names one), and after `eval`, `source` or a
+  name reference (`declare -n`) every variable is —
+  so such a target resolves to a literal path instead of being refused
+  as one only the shell knows;
+  and a foreground
   `sleep N` with N over 30 (`FOREGROUND_SLEEP_MAX_SECONDS`; N is the
   sum of the literal operands with GNU sleep's `s`/`m`/`h`/`d`
   suffixes, `inf`/`infinity` is forever, and an operand only the
@@ -2213,8 +2412,10 @@ SEA's own `tool_call_hook` need not restate:
   container whether the target exists with `test -e`,
   `DockerManager._path_test`) and on an exec bridge
   (`ExecBridge._path_test` runs the same `test -e` through the bridge;
-  a probe that times out or is stopped counts as existing, so the copy
-  is refused rather than run on a target nobody checked); the
+  a probe that times out or is stopped fails closed either way: it
+  counts as existing, so the copy is refused rather than run on a
+  target nobody checked, and as no directory, so a `cd` nobody checked
+  authorizes no rewrite after it); the
   host tool checks with `os.path.lexists` against the directory the
   command runs in (`UsefulTools._resolve_cwd`: the work dir, or the
   main checkout when the task's worktree vanished mid-task; resolved
@@ -2410,7 +2611,7 @@ prefixes the message below with `Task failed: SeaError: `):
 | `locked` naming something other than a run setting (`locked`, `hidden`, an unknown name) | `SEA '...': settings()['locked'] may only name settings keys (work_dir, model, chat_id, ...); got ['hidden']` |
 | `description()` of a `/<name>` command returns an empty or blank string (a non-string is the `must return a string` row above) | `SEA '...': description() must return a non-empty string` (raised by `/<name> help`, `sea_commands.sea_description`; `/<name> check` reports it as its text) |
 | `prompt()` returns an empty string | `prompt() of SEA '...' must return a non-empty string` |
-| a contract method is not a plain method: declared `@staticmethod`, or the name bound to a class or a non-callable (`description = "..."`) | `description of SEA '...' must be a method, got staticmethod` (`sea_commands._bound`, raised before the attribute is called, for `description`, `settings` and the hooks alike) |
+| a contract method is not a plain Python function: declared `@staticmethod`, or the name bound to a class, a builtin (`tools = len`), a `functools.partial` or a non-callable (`description = "..."`) | `description of SEA '...' must be a method, got staticmethod` (`got builtin_function_or_method`, `got partial`, `got str`, ...; `sea_commands._bound` checks `inspect.isfunction` before the attribute is called, for `description`, `settings` and the hooks alike) |
 | a method `X` raises | `X() of SEA '...' raised: ...` |
 | a method returns the wrong type | `system_prompt() of SEA '...' must return a string, got ...`, `tools() of SEA '...' must return a list of tool callables (not a file path), got ...`, `llm_call_hook() of SEA '...' must return a list, got ...`, `tool_call_hook() of SEA '...' must return a Verdict (ALLOW, or refuse(text), from kiss.agents.seas.base.base_sea), got ...` |
 | a value whose own methods raise (e.g. a `str` subclass with a raising `__str__`) | `prompt() of SEA '...' returned a broken value: ...`, `SEA '...': settings()['max_budget'] returned a broken value: ...` |
@@ -2456,7 +2657,14 @@ carries one) raises `KISSError: Chat Completions response was
 truncated (finish_reason=...)`, as the Responses transport refuses
 a `status` of `incomplete` or `failed`, since a tool call cut
 mid-JSON would otherwise run with no arguments; the cut-short reply
-was still billed.  A
+was still billed.  So is a stream the gateway closed cleanly (EOF or
+`[DONE]`) before any choice carried a `finish_reason`, which raises
+`KISSError: Chat Completions stream ended without a finish_reason,
+so its text and any tool-call arguments may be incomplete.` as a
+Responses stream without its `response.completed` event does,
+rather than letting the partial text become the turn; the usage
+already seen is kept for the agent's partial-usage drain
+(`take_partial_usage_response`).  A
 non-streamed (callback-less) OpenAI-compatible request has no stall
 clock, since a reasoning turn may legitimately send nothing for
 minutes, but it is still stoppable: the SDK call runs on a worker
@@ -2488,7 +2696,13 @@ which case the shutdown reaches the connections already open and
 nothing more.  A safety refusal
 (`stop_reason="refusal"`, `ModelRefusalError`), a provider content
 filter (`ContentFilterError`, a subclass: OpenAI's `incomplete_details.reason
-== "content_filter"` or `finish_reason == "content_filter"`), an
+== "content_filter"` or `finish_reason == "content_filter"`; also a
+request the provider's classifier refused as a plain HTTP error naming
+its content policy, OpenAI's 400 "This content was flagged for
+possible cybersecurity risk" or Azure's "content management policy"
+(`kiss_agent.is_content_policy_error`), which the loop types as a
+`ContentFilterError(stop_reason="content_policy")` instead of counting
+it toward the three consecutive-error retries), an
 output-token cap hit before a usable answer (`OutputCapError`:
 Anthropic `stop_reason="max_tokens"` with no complete tool call on a
 tool-bearing turn, Responses `max_output_tokens`, Chat Completions
@@ -2502,9 +2716,13 @@ the strongest configured model of another family among
 as the last resort — an explicit catalog `fallback` or, with none,
 the configured OpenRouter twin, same family or not — since a
 refusal, a filter or a cap stops a model's OpenRouter twin too), once
-per run: the conversation is carried over
-(`model.hand_off_conversation`, helper spend record included), the
-tool schema rebuilt for the new provider, and a `system_prompt`
+per run, through `KISSAgent.switch_model`, the path the `set_model`
+tool takes as well: the conversation is carried over
+(`model.hand_off_conversation`, helper spend record and limit check
+included, and the `llm_call_hook` boundary moved to where it lands,
+so the switching step's tool results stay new to the hook), a
+Gemini-to-Gemini switch keeps its thought signatures, the tool
+schema is rebuilt for the new provider, and a `system_prompt`
 warning names the old and the new model, the stop reason, and says
 so when the same family was the only choice.  An output cap is first
 retried once at reasoning effort `low` (`kiss_agent.RETRY_EFFORT`,
@@ -2523,17 +2741,26 @@ so a session lost to a filter or a cap is visible in the event log.
 A model that cannot see (`model_families.model_supports_images`: a
 family outside `VISION_FAMILIES`, anthropic / openai / google / xai,
 with no `vl`,
-`vision`, `omni` or `image` segment in its name) does not get the
+`vision`, `omni` or `image` segment in its name, or a model of such a
+family whose name carries a `TEXT_ONLY_NAME_MARKS` fragment —
+`gpt-oss`, `gemma-2-`, `gpt-audio`) does not get the
 images and PDFs a tool returns as raw base64: `vision_bridge.describe_attachments`
 has the first configured model of `VISION_MODELS` (`claude-sonnet-5-5`,
 `gpt-6-luna`, `gemini-3.5-flash-lite`, then their OpenRouter twins)
-describe each attachment in one non-agentic call, the description
+describe each image or PDF (`vision_bridge.describable`; an audio or
+video clip stays an attachment, since a model that cannot see may
+still hear) in one non-agentic call, the description
 replaces the attachment in the tool message (a missing vision model
 or a failed call becomes a line saying why there is no picture), and
 the spend is credited to the run's model as *helper usage*
-(`Model.helper_usage`, keyed per call so an interrupted call is
-never billed twice) and billed by the agent before every limit
-check (`KISSAgent._bill_helper_usage`), so the budget cap covers it.
+(`Model.helper_usage`, a running total credited once per call key,
+of which the agent bills only the part above its mark, so an
+interrupted call is neither billed twice nor lost) and billed by the
+agent before every limit
+check (`KISSAgent._bill_helper_usage`), so the budget cap covers it;
+the agent's limit check also runs before each description call
+(`Model.limit_check`, handed to the bridge), so a batch of pictures
+stops at the cap instead of paying for every one.
 
 How the task runner labels a run that did not finish on its own
 (`task_runner`): the `KeyboardInterrupt` injected into the task
@@ -2596,8 +2823,19 @@ SEA's hooks, so a hook author knows what the model reads:
   gate observes every tool call and reads every tool result: the exit
   codes of every shell command (`Bash`, `run_commands_parallel`, a
   `bash_job` wait, host or container) go into a ledger keyed by the
-  command as written, the commands of a refused call are `refused`,
-  and a call the user's Stop interrupted is no evidence.  On any run
+  command as written (`result_exit_codes`: a `bash_job` report counts
+  only its `status: exited N` / `Job <id>: exited with code N` line,
+  not the command echo or the log lines; a `run_commands_parallel`
+  report gives each command the exit of its `### [i/N]` section, and
+  a digest of one the `[i/N] exit N in 1.2s:` lines of its preamble,
+  `PARALLEL_DIGEST_STATUS`; a `run_parallel` digest is read for its
+  `[i/N] ok` / `FAILED` lines, `dispatch_successes`), the commands of a
+  refused call are `refused`,
+  and a call the user's Stop interrupted is no evidence.  An `Edit` /
+  `Write` under a `tmp` directory inside the work dir
+  (`CodingGate.is_scratch`: the progress log, a probe, the verifier)
+  is not observed at all: it changes no work, arms nothing and leaves
+  no unchecked change.  On any run
   a `finish(success=True)` is refused when a command named in its
   `evidence` argument (a JSON list of commands, or one string) never
   ran or last exited non-zero (`EVIDENCE_FIELD_VERDICT`), and, once
@@ -2624,12 +2862,17 @@ SEA's hooks, so a hook author knows what the model reads:
   the agent's own verifier `verify.sh` in the task's scratch
   directory (`tmp/<task-id>/verify.sh`, the path the system prompt's
   How to Work rule 3 names; run with the run's own shell, a subprocess
-  in the work dir or the task's container, `VERIFIER_TIMEOUT` 900 s;
+  under `bash -c` found through `processes.find_bash` — Git for
+  Windows keeps `bash.exe` off `PATH` — in the work dir, or in the
+  task's container, `VERIFIER_TIMEOUT` 900 s;
   no verifier means no verdict) and, when a reviewer is set, a review
   of the diff; then the evidence named, the hedge check (which on a
-  coding run also refuses a file change — an edit, or a shell command
-  that writes or deletes files — with no shell command after it,
-  `UNCHECKED_REASON`), a once-per-run check that the summary does not
+  coding run also refuses a file change — an edit outside `tmp/`, or a
+  shell command that writes or deletes files — with no shell command
+  after it, `UNCHECKED_REASON`; a `bash_job(action="wait")` clears
+  the change like a foreground command, since it is where a
+  background test run's outcome is read, `evidence_gate.JOB_WAIT`), a
+  once-per-run check that the summary does not
   admit a case of the task unhandled (`leaves_a_case_open`, by the
   decisions model, threshold `OPEN_READING_THRESHOLD`; no decisions
   model, no verdict) and the review's findings are judged, and every
@@ -2678,15 +2921,41 @@ SEA's hooks, so a hook author knows what the model reads:
   once with a request for an explicit `finish`.  A `commit_and_merge`
   on a coding run runs the verifier, the unchecked-change check and
   the review first (the reviewer is told the summary is not written
-  yet), a refusal there counting as a gate round, and a merge asked
+  yet, `MERGE_SUMMARY_PLACEHOLDER`, and that the evidence is not named
+  yet either, `MERGE_EVIDENCE_PLACEHOLDER`, so it judges the diff and
+  the verifier and reports neither as a gap), a refusal there counting
+  as a gate round, and a merge asked
   for again with findings open and nothing changed is refused with
   them (`MERGE_UNANSWERED_VERDICT`); the gate follows the agent into
   its worktree (`CodingGate.move`) and back to the checkout at the
-  merge, and the finish after a merge reviews again only when a file
-  changed.  A sub-agent gets the same gate without a reviewer: its
+  merge.  A merge that went through resets the round count and drops
+  the open findings (`CodingGate.merged`, called by the agent once the
+  repository has no worktree left): the rounds the merge spent and the
+  findings its review raised stay with the merge, the finish after it
+  is refused on rounds of its own and reviewed again only when a file
+  changed, so no finding older than the merge ends as its caveat.  A
+  sub-agent gets the same gate without a reviewer: its
   caller's gate reviews the whole diff.  A review's model spend is
-  charged to the run (`_charge_gate_usage`, keyed per attempt so a
-  retry or a stop never bills it twice).  A verifier or review stage
+  charged to the run that asked for it (`_charge_gate_usage`, bound
+  to the run's ledger epoch and persisted row when the gate is built,
+  `_new_coding_gate`, since the review runs on its own thread and a
+  Stop lets the run end without waiting for it): a run with a row and
+  a server printer is charged through the printer's late-charge
+  bridge (`charge_task_usage`, `task_update.charge_side_channel_usage`)
+  — banked on the live ledger while the row is unfinished, and once
+  the row is finished (a review a Stop left running) added to the row
+  and its finished ancestors with a persisted `usage_info`, rather
+  than landing on the agent's next task — and a run without either
+  goes to the ledger epoch directly; keyed per attempt
+  (`_gate_charges_taken`) so a retry or a stop never bills it twice,
+  and a charge the bridge could not make is not retried.  The
+  classifier fold and the row's final usage save are each retried
+  once when an exception, a Stop's injected interrupt above all,
+  cuts them short (`_retried_cleanup_step`), the
+  retry of a save that already committed writing nothing
+  (`_save_final_usage(unless_finished=True)`, `persistence.task_end_ms`)
+  so it does not overwrite a late charge on the finished row.  A
+  verifier or review stage
   that raises refuses the finish like a failed stage (`run_stage`
   logs the error and records the stage as `error`; its verdict reads
   `Not finished: a check of the gate could not run (...)`), counting
@@ -2768,7 +3037,10 @@ SEA's hooks, so a hook author knows what the model reads:
   is_continue=True)` continues from the summary the model wrote; on
   the exception path the summary is written by
   a tool-less helper (`finish` only, at most `SUMMARIZER_MAX_STEPS`
-  = 3 steps, its spend billed to the task) from a scripted digest of
+  = 3 steps; it is the task's live session while it runs,
+  `_current_executor`, so the task-wide budget check and the live
+  usage readers see its spend, which is banked once on every exit,
+  a Stop landing inside the bank included) from a scripted digest of
   the trajectory, `kiss.agents.sorcar.handoff_digest.handoff_digest`:
   the task text (3,000 characters), the last three `summary` texts
   the model wrote, the files written with
@@ -2924,8 +3196,14 @@ direct model, fail over to another family instead
 when it is of another family, else the strongest configured model of
 another family, else the declared fallback or the twin as the last
 resort, same family or not; see "Error handling").  The switch (the
-fallback's or `set_model`'s) hands the live conversation over
-(`model.hand_off_conversation`): kept verbatim when both models talk
+fallback's or `set_model`'s; both go through `KISSAgent.switch_model`,
+and `set_model` switches the live executor, `_current_executor`,
+the session running at the time, and with no live executor only
+records the name for the next session, `Model deferred-changed to
+...`) hands the live
+conversation over (`model.hand_off_conversation`, which also moves
+the `llm_call_hook` boundary, the helper spend record and the
+agent's limit check): kept verbatim when both models talk
 to the same endpoint (`base_url`), so an OpenAI model keeps another
 OpenAI model's reasoning items, and converted to plain chat messages
 (`responses_items_to_chat_messages`, which every adapter reads) across
@@ -2938,7 +3216,14 @@ and any other such item loses its `id` — as the vendor's
 `responses_item_id_prefixes` in `model_info` declare (`rs`, `fc`,
 `msg` for OpenAI, which otherwise answers `Missing required
 parameter: 'input[8].summary'`; the vendor is found by its host in
-the base URL, compared without regard to case).  The usage line
+the base URL, compared without regard to case).  A hop into a Gemini
+model sends each earlier function call the new model never signed —
+another provider's, or an unsigned later call of a parallel batch —
+with the documented dummy thought signature
+(`gemini_model.FOREIGN_CALL_SIGNATURE`,
+`skip_thought_signature_validator`), which Gemini 3 and 4 would
+otherwise reject with a 400, while a Gemini-to-Gemini switch carries
+the real signatures over.  The usage line
 appended to the messages carries over.  A `codex/*` turn reports one
 usage sum for every request the turn made, so the context it leaves
 is estimated between the per-request average and that sum from the
@@ -3305,19 +3590,40 @@ task runs (after its `status running=true`, no stop pending) is
 re-established with backoff — at once, then 1 s, 2 s, 4 s, ... up to
 30 s between attempts (`_RECONNECT_FIRST_BACKOFF_SECONDS`,
 `_RECONNECT_MAX_BACKOFF_SECONDS`) — for the `reconnect_seconds`
-window (300 s by default): the client re-attaches to its tab, the
-daemon replays the tab's events, so a `result` or terminal status
-published meanwhile is still delivered and the wait goes on
-(`TaskResult.reconnects` counts the reconnects; the replayed
-transcript restarts the spend totals, so nothing is counted twice).
-The window opens at the first drop and closes once the run is
-replayed; it is not bounded by `timeout`, which applies again once
-reconnected; a run the daemon has not named yet (no chat or task id
-announced) is not resumed, and `reconnect_seconds=0` raises
-`ConnectionLostError` at the first close as before; `TimeoutError` when the task outlives
+window (300 s by default): the client re-attaches to its tab with a
+`resumeSession` flagged `recovery: true` — a transport recovery, not
+a user asking for the tab, so the daemon restores this connection's
+subscription and transcript but a tab the user closed while the run
+went on stays closed on every surface — naming the run by its task
+id or, before the first stamped event gave it one, by the
+client-minted run token the `run` carried as `taskId`
+(`client_run_token`), so the daemon replays this run and not the
+chat's latest row; the daemon replays the tab's events, so a
+`result` or terminal status published meanwhile is still delivered
+and the wait goes on (`TaskResult.reconnects` counts the reconnects;
+the replayed transcript restarts the spend totals, so nothing is
+counted twice).  A web app closing the run's `api-…` tab while the
+task runs hides it (the tab leaves every surface) but does not end
+it: the daemon keeps the task's subscription of the tab for the local
+client that addressed it (`AgentServer._headless_client_task`,
+`WebPrinter.local_client_addressed`), marked headless so its
+copies reach no web app and the tab counts as no viewer, and the
+client still receives the `result`; a recovery re-attach leaves that
+tab closed as the user left it.  The window opens at the first drop and closes once
+the run is replayed; `timeout` keeps running through it: a timeout
+that expires while the client is still trying ends the wait on time,
+as it would on a live connection (the attempts stop; with
+`stop_on_timeout` the stop is still sent after one reconnect of its
+own, within the same window); a run the daemon has not named yet (no
+chat or task id announced) is not resumed, and `reconnect_seconds=0`
+raises `ConnectionLostError` at the first close as before;
+`TimeoutError` when the task outlives
 `timeout` (the client disconnects and the task keeps running; its
 tab is closed, `closeTab`, only once the task is known to be over —
-it returned, its `result` arrived, its stop was confirmed or the run
+it returned, its terminal `result` arrived (a session handoff's
+`finish(success=False, is_continue=True)` result is not one: the
+executor answers it with the next session and the task goes on, so
+the client keeps waiting), its stop was confirmed or the run
 was refused — so a task that may still run keeps its tab on every
 surface until a user closes it, while a sub-agent run's tab is
 closed on every exit since no surface shows it), or, with
@@ -3344,8 +3650,11 @@ spend reported so far, so the caller can still charge it.
 `cost` is the exact
 figure the daemon's final `result` event carries as `cost_usd` next
 to its four-decimal `cost` display string (`kiss.core.printer.event_cost`;
-a later `usage_info` event, say a side channel's spend that lands
-after the row was saved, updates the totals, and a delta the daemon
+a later `usage_info` event, say a side channel's spend or a finish
+gate review's that lands after the row was saved — a review a Stop
+left running is charged to the finished row of the run that asked
+for it, `SorcarAgent._charge_gate_usage` —
+updates the totals, and a delta the daemon
 has already banked on a waiting ancestor, `ancestor_charged`, is not
 folded in twice); the daemon persists the task's final cost unrounded
 as well, so a parent row sums its children's exact spend.  The same
@@ -3422,7 +3731,10 @@ task count merge with the bare name the `llm_call` events carry.
   on a slow folder delays no other, and every rescan is numbered when
   it starts and published only if no later-started one was published
   first, so an older scan never replaces a newer registry
-  (`_publish`).  Of the 28 bundled SEA folders (the
+  (`_publish`; an unchanged list is not re-broadcast to the clients,
+  except after a Stop interrupted a broadcast before every subscriber
+  had it, when the next rescan broadcasts whatever it finds,
+  `_forget_broadcast`).  Of the 28 bundled SEA folders (the
   `base/` folder of the base classes is never a command), 26 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
@@ -3447,9 +3759,13 @@ task count merge with the bare name the `llm_call` events carry.
   the panel — the first run once the task is `FIRST_UPDATE_DELAY_S`
   (60 s) old, then whenever a poll finds the last answer older than
   `UPDATE_INTERVAL_S` (10 min), or at once on the panel's refresh
-  button — and never twice at once; the child is bound to the task's
-  stop event, so Stop ends the update together with the task, the
-  panel reporting "The task was stopped before this update finished."),
+  button — and never twice at once; the child runs under a stop event
+  of its own that observes the task's (`task_update._ChildStopEvent`,
+  re-checking the parent's every 0.1 s while blocked), so Stop on the
+  task's tab ends the update together with the task, the panel
+  reporting "The task was stopped before this update finished.",
+  while a Stop on the update's own nested tab ends only the update
+  and the task and its other children keep running),
   `/autorouter` (runs a task on the cheapest model tier
   that will finish it; its `settings()` fixes the routing session's model to
   `autorouter_sea.ROUTER_MODEL`, `claude-opus-5-5-max`, with
@@ -3512,9 +3828,14 @@ task count merge with the bare name the `llm_call` events carry.
   container, 40 steps and a tenth of the trial's budget, told to keep
   the script within a quarter of `verifier_timeout`; an author whose
   run ends without a script by its own doing, answering in text or
-  spending its steps or budget, is retried once on a model of another
-  family (`blind_retried`), while an author run that fails with an
-  error, no such model, no credential, a provider down, is not; the
+  spending its steps or budget, is retried once (`blind_retried`;
+  the `blind_verifier_written` event of the second run says `retry:
+  true`) on a model of another family, or on the configured author
+  model again when this daemon pins every task to its model
+  (`agent_dispatch.task_model_pinned`: the retry then switches to no
+  model the configuration did not name), while an author run that
+  fails with an error, no such model, no credential, a provider down,
+  is not retried; the
   script is kept on the host and the container's copy at
   `/tmp/kiss-blind-verify.sh`, the agent's to read and run, is
   rewritten before each run, so an edit or deletion there changes
@@ -3543,8 +3864,8 @@ task count merge with the bare name the `llm_call` events carry.
   ran and exited 0; the reviewer is shown what was named with each
   exit code).  This replaced the string comparison of
   the summary's quotes against tool output (`coding/quoted_evidence.py`,
-  no longer wired in), which refused 536-594 finishes per benchmark
-  run without changing an outcome.  Then the SEA's own `EvidenceGate(track_changes=True)` — the
+  no longer wired in), which refused many finishes without changing
+  an outcome.  Then the SEA's own `EvidenceGate(track_changes=True)` — the
   hedge check of the executor's guard (see "Refusals" above) plus a
   second reason: a file was changed (`Edit`, `Write`, or a shell
   command that writes, `evidence_gate.writes_files`: redirections,
@@ -3728,6 +4049,9 @@ task count merge with the bare name the `llm_call` events carry.
   one, up to `FORWARD_ATTEMPTS` (3) ports within `SSH_TIMEOUT`, and an
   opening cut short never vouches for a port someone else may hold), so
   the daemon port need not be reachable from here, only the ssh port;
+  ssh runs in a process group of its own, killed whole, so a
+  `ProxyCommand` of the user's ssh configuration goes down with it
+  instead of keeping ssh's output pipe open;
   through it this daemon presents its client certificate,
   `$KISS_HOME/tls/client.pem`, and the machine's daemon, which sniffs
   the first byte of every connection, serves the forwarded TLS like a
@@ -3745,7 +4069,15 @@ task count merge with the bare name the `llm_call` events carry.
   (`BatchMode`), allow TCP forwarding and land in a POSIX shell, and an
   unknown host key is accepted on first use), or `https://host:port` with the
   machine's remote password, which pins the remote `kiss-web`'s TLS
-  certificate and checks the password with one handshake before saving;
+  certificate and checks the password with one handshake before saving
+  (for either form the pin is staged in a sibling file, written as the
+  PEM's bytes so Windows gives it no CRLF line ends, verified by the
+  first handshake and only then published together with the registry
+  entry, so a wrong address or password changes nothing; a Stop or a
+  registry-write error between the two puts the previous pin back, or
+  removes the new one for a new name, so the entry the registry still
+  holds keeps the certificate it was registered with, and the staging
+  file is removed however the call ends);
   the name defaults to the host; `/machine remove <name>` forgets it,
   `/machine list` shows each machine's address and reachability; once a
   machine is registered the Chats panel lists its tasks next to the
@@ -3754,7 +4086,23 @@ task count merge with the bare name the `llm_call` events carry.
   machine name (the link to each machine keeps its sockets alive with
   WebSocket pings, so an idle hour does not drop it, and a request
   whose previously kept socket has closed is sent once more over a
-  fresh one; its sockets ask for permessage-deflate and for `parts`
+  fresh one; a kept socket whose ssh forward is no longer the login's
+  live one (`MachineLink._forward_gone`: its ssh process exited, or
+  another lane reopened the forward on a fresh local port) is dropped
+  before the request is sent, so the request dials afresh, which
+  reopens the forward, instead of reporting the machine down; every
+  request is stamped with a fresh `generation` and a reply that
+  echoes one must echo this one, so a frame still on its way for an
+  earlier request is skipped rather than taken as the answer, and the
+  daemon announces `echoesGeneration` in its `auth_ok` (its replies
+  echo the stamp through `commands.request_generation`; a page's
+  command carries none and its reply stays as it was), after which a
+  `models`, `history`, `myModelsData` or `machines` reply without a
+  `generation` (`machines.CORRELATED_REPLIES`: a list the daemon
+  pushed to every connection unasked, for another client's edit or a
+  registry change) is not read as the answer either — a daemon
+  without the flag is read as before, the first frame of the type
+  being the answer; its sockets ask for permessage-deflate and for `parts`
   in their `auth` frame, so a transcript or a picture above
   `local_endpoint.PART_CHARS` (64 KiB) comes from the machine as
   `part` frames (`seq`-numbered, every one but the last flagged
@@ -3799,12 +4147,28 @@ task count merge with the bare name the `llm_call` events carry.
   longer fanned out to it and opening that chat in another tab displaces
   nothing, and an unbind from another connection, a `closeTab`,
   `newChat` or local-chat resume, lands wholly before or wholly after
-  the publication, never half-way)
+  the publication, never half-way; a machine's chat shows in one tab,
+  as a local chat does: a `resumeSession` of it into a second tab, or
+  a bound tab's run whose first frame tells which chat the machine
+  ran it in, displaces the tab that showed that chat
+  (`RemoteTabs._displace_locked`, decided in the critical section that
+  claims the chat, so two resumes racing each other leave exactly one
+  tab), which ends its stream as an unbound one does and leaves the
+  registry as a `closeTab` would, every surface closing it — unless
+  something republished the tab meanwhile, in which case the close
+  stands down; a stream carrying a sub-agent run of a local task has
+  no chat tab and neither displaces nor is displaced)
   (its own web UI is never opened; a sub-agent tab that joins the
   task's stream, through `resumeSession` or a replayed
   `openSubagentTab`, has the binding announced to the surfaces
   (`tabMachine`) before its transcript, as the bound tab's is, so the
-  drop-down shows the machine for the sub-agent tab as for its parent,
+  drop-down shows the machine for the sub-agent tab as for its parent
+  (the announcement is delivered under the stream's lock that made the
+  tab one of its own, to every client, so no frame of the tab can
+  overtake it; a sub-agent tab that leaves the stream for a chat, a
+  `resumeSession` with a `chatId`, has the binding announced gone the
+  same way, while a resume of a task the stream never saw keeps it on
+  the stream and is answered here with nothing running),
   and a surface's `ready` replays every binding, the bound tab's and
   then its sub-agent tabs', before any transcript; the chat header then shows the
   machine and that machine's working directory, with the directories
@@ -3942,7 +4306,12 @@ task count merge with the bare name the `llm_call` events carry.
   concrete follow-ups, at least three of them combining the signed-in
   apps, or ten starter tasks for a new project when there are none,
   and stores them in `$KISS_HOME/recommendations.json`, which the
-  sidebar's RECOMMENDATIONS subpanel shows; `/recommendations now` runs it
+  sidebar's RECOMMENDATIONS subpanel shows (`save_recommendations`
+  takes exactly ten non-empty one-sentence prompts of at most
+  `MAX_SENTENCE_CHARS`, 160, characters each; the longer ones are
+  named with their lengths, `Error: shorten these to at most 160
+  characters and call again with all 10: #3 (171 chars).`, so the
+  model never counts characters itself); `/recommendations now` runs it
   once, and the 6-hourly default cron job keeps the file fresh; both
   default jobs come from `cron_agent.DEFAULT_JOBS`, seeded once per home
   by `seed_default_jobs` at daemon start so your edits and removals

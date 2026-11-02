@@ -370,7 +370,9 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
       worktree, and
     * the command literally contains the *parent-repo* absolute path
       prefix (not the worktree's prefix — that's a legitimate write
-      inside the worktree).
+      inside the worktree), outside its ``.venv``: the shared
+      environment's binaries (``<repo>/.venv/bin/pytest``) are how a
+      worktree runs the project's tools (:func:`_uv_in_worktree_guard`).
 
     Args:
         command: The Bash command line the model wants to run.
@@ -388,7 +390,8 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
             while end < len(command) and not re.match(_PATH_END, command[end]):
                 end += 1
             hit = command[m.start() : end]
-            if Path(hit).is_relative_to(wt_root):
+            if Path(hit).is_relative_to(wt_root) or Path(hit).is_relative_to(
+                    Path(main_repo) / ".venv"):
                 continue
             if _worktree_index(Path(hit).parts[len(Path(main_repo).parts) :]) is not None:
                 # The worktree of a repository nested under the parent
@@ -433,6 +436,100 @@ def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
             if pair not in roots:
                 roots.append(pair)
     return roots
+
+
+#: The ``uv`` subcommands that sync the project environment first.
+_UV_SYNCING = frozenset({"sync", "run", "add", "remove"})
+#: ``uv`` options whose value is the next word, global ones before the
+#: subcommand (``uv --directory . run``) and ``uv run``'s own.
+_UV_VALUED = frozenset({
+    "--project", "--directory", "--config-file", "--cache-dir", "--color",
+    "--allow-insecure-host", "--python-preference", "--with", "--with-editable",
+    "--with-requirements", "--python", "-p", "--env-file", "--extra", "--group",
+    "--only-group", "--package", "--index", "--find-links", "-w", "--python-platform",
+})
+#: Where ``uv [global options] sync|run|add|remove`` starts in a command's text.
+_UV_COMMAND = re.compile(
+    r"(?<![\w./-])uv(?:[ \t]+[^ \t;&|\n]+)*?[ \t]+(sync|run|add|remove)(?=[ \t;&|\n]|$)")
+
+
+def _after_uv_options(argv: list[str], index: int) -> int:
+    """Return the index of the first word of ``argv`` from ``index`` on that is no option.
+
+    An option in :data:`_UV_VALUED` takes the next word with it, so
+    ``uv --directory . run`` finds ``run`` and ``uv run -p 3.12 pytest``
+    finds ``pytest``.
+    """
+    while index < len(argv) and argv[index].startswith("-"):
+        index += 2 if argv[index] in _UV_VALUED else 1
+    return index
+
+
+def _uv_in_worktree_guard(command: str, work_dir: str | None) -> str | None:
+    """Refuse a ``uv sync``, ``uv run``, ``uv add`` or ``uv remove`` run inside a worktree.
+
+    A worktree has no environment of its own, so ``uv`` either builds it
+    one (every dependency again, on whatever Python it finds newest) or,
+    when ``UV_PROJECT_ENVIRONMENT`` or a ``.venv`` link names the main
+    checkout's environment, installs the worktree as that environment's
+    editable project, a path that is removed when the work is merged
+    (the 2026-11-01 audit counted 19 ``check --full`` runs doing so).
+    The refusal names the command to run instead: the main checkout's
+    environment binary with the worktree's sources first on
+    ``PYTHONPATH``, so a project script (``check``, ``pytest``, ``python``)
+    runs on the worktree's code in the daemon's own environment.
+
+    Args:
+        command: The Bash command line the model wants to run.
+        work_dir: The agent's working directory.
+
+    Returns:
+        The refusal, or ``None`` when the command may run (it is not in a
+        worktree, or runs no such ``uv`` command; one quoted or in a
+        here-document body is text, not a command).
+    """
+    roots = _worktree_roots(work_dir)
+    if not roots:
+        return None
+    main_repo, wt_root = roots[0]
+    for simple in simple_commands(command, None):
+        argv = [word.text for word in simple.argv()]
+        at = _after_uv_options(argv, 1) if argv and argv[0] == "uv" else len(argv)
+        if at >= len(argv) or argv[at] not in _UV_SYNCING:
+            continue
+        environment = Path(main_repo) / ".venv"
+        sources = f"PYTHONPATH={wt_root}/src:{wt_root}/projects"
+        refusal = (
+            f"REFUSED: `uv {argv[at]}` did NOT run: the worktree {wt_root!r} has no environment "
+            f"of its own and shares the main checkout's ({environment}); a sync from here "
+            f"would build the worktree one or re-point that environment's editable install "
+            f"at the worktree, which is removed when the work is merged.  Run the "
+            f"environment's binaries directly, with the worktree's sources first: "
+            f"{sources} {environment}/bin/<program> ...  (the project check: "
+            f"{sources} {environment}/bin/check --full --fix)."
+        )
+        # A global option with a value (``--directory x``) changes what runs
+        # where, so the rewritten command, which drops the options, is not
+        # offered; flags such as ``-q`` are dropped without harm.
+        if argv[at] != "run" or any(o in _UV_VALUED or "=" in o for o in argv[1:at]):
+            return refusal
+        index = _after_uv_options(argv, at + 1)
+        program = argv[index] if index < len(argv) else ""
+        binary = environment / "bin" / ("python" if program in ("python", "python3") else program)
+        match = _UV_COMMAND.search(command)
+        if not program or not binary.is_file() or match is None:
+            return refusal
+        # The program's word in the text: the (index - at)-th after ``run``.
+        words = list(re.finditer(r"\S+", command[match.end():]))
+        if len(words) <= index - at - 1:
+            return refusal
+        word = words[index - at - 1]
+        if word.group().strip("'\"") != program:
+            return refusal
+        suggested = (command[:match.start()] + f"{sources} {binary}"
+                     + command[match.end() + word.end():])
+        return refusal + f"  Copy this rewritten command as is: {suggested[:20000]}"
+    return None
 
 
 # Windows paths are case-insensitive, so the parent-repo guard must not be
@@ -1312,15 +1409,35 @@ def _refuse_or_lift(
         when the command may run) and the possibly lifted deadline.
     """
     guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
-    refusal = _bash_parent_repo_guard(command, work_dir) or guard or rewrite_guard(command)
-    if refusal is None and cwd is not None:
-        refusal = heredoc_guard(command, bash_path(os.path.abspath(cwd)), _host_lexists)
+    refusal = (_bash_parent_repo_guard(command, work_dir)
+               or _uv_in_worktree_guard(command, work_dir) or guard)
+    if refusal is None and cwd is None:
+        refusal = rewrite_guard(command)  # another machine's files: no scratch exemption
+    elif refusal is None and cwd is not None:
+        guarded = functools.partial(_host_guarded, work_dir)
+        bash_cwd = bash_path(os.path.abspath(cwd))
+        refusal = rewrite_guard(command, bash_cwd, guarded) or heredoc_guard(
+            command, bash_cwd, guarded)
     return refusal, timeout_seconds
 
 
 def _host_lexists(path: str) -> bool:
     """Return whether the absolute bash *path* (see :func:`bash_path`) exists on this host."""
     return os.path.lexists(host_path(path))
+
+
+def _host_guarded(work_dir: str | None, path: str) -> bool:
+    """Return whether a shell rewrite of the absolute bash *path* is refused on this host.
+
+    It is when the file exists and is not a scratch file of *work_dir*
+    (:func:`_is_scratch_path`): a scratch file is rewritten from scratch
+    by every session and never reviewed, so a here-document, a
+    ``sed -i`` or a python rewrite of one may run as written, as
+    ``Write`` overwrites one unread.  Bound to *work_dir* with
+    :func:`functools.partial` for the guards (:func:`rewrite_guard`,
+    :func:`heredoc_guard`).
+    """
+    return _host_lexists(path) and not _is_scratch_path(Path(host_path(path)).resolve(), work_dir)
 
 
 def _host_isdir(path: str) -> bool:
@@ -1430,6 +1547,7 @@ def run_commands_pool(
     max_workers: int,
     stop_event: threading.Event | None,
     max_output_chars: int,
+    spill: Callable[[str], str | None] | None = None,
 ) -> str:
     """Validate the ``run_commands_parallel`` arguments, run them via *run_one*, render the report.
 
@@ -1451,14 +1569,20 @@ def run_commands_pool(
         max_workers: Concurrency bound; ``0`` runs all commands at once.
         stop_event: The task's stop event, or ``None``.
         max_output_chars: Per-command output cap in the report.
+        spill: Writes a report longer than the conversation's ceiling
+            (``DEFAULT_CONFIG.tool_output_max_chars``) to a file and
+            returns the path to show, or ``None`` when it cannot; the
+            result is then the digest (:func:`digest_parallel_report`).
+            ``None`` returns the whole report, however long.
 
     Returns:
         A report starting with a tally line
         (``N commands: K succeeded, F failed, T timed out``) followed by
         one section per command, in input order, giving its exit code,
         wall time and (truncated) output (see
-        :func:`_format_parallel_report`).  A string starting with
-        ``Error:`` when the arguments were invalid.
+        :func:`_format_parallel_report`), or its digest when it is over
+        the ceiling and *spill* kept the whole of it.  A string starting
+        with ``Error:`` when the arguments were invalid.
 
     Raises:
         ToolCallInterrupted: When the tool panel's Stop was pressed.
@@ -1488,7 +1612,89 @@ def run_commands_pool(
     pool.shutdown(wait=True)
     tool_interrupt.raise_if_interrupted()
     results = [(-1, NOT_STARTED, 0.0) if f.cancelled() else f.result() for f in futures]
-    return _format_parallel_report(command_list, results, max_output_chars)
+    report = _format_parallel_report(command_list, results, max_output_chars)
+    if spill is not None and len(report) > DEFAULT_CONFIG.tool_output_max_chars:
+        shown = spill(report)
+        if shown is not None:
+            return digest_parallel_report(command_list, results, shown)
+    return report
+
+
+#: Characters of a failed command's output a digest keeps (its tail: the
+#: test runner's summary, the compiler's last errors).
+DIGEST_TAIL_CHARS = 1200
+
+
+def _command_status(code: int | None, seconds: float) -> str:
+    """One command's outcome for the report: its exit code or timeout and wall time."""
+    if code is None:
+        return f"TIMED OUT after {seconds:.1f}s"
+    if code < -1:
+        return f"killed by signal {-code} in {seconds:.1f}s"
+    return f"exit {code} in {seconds:.1f}s"
+
+
+def digest_parallel_report(
+    commands: list[str], results: list[tuple[int | None, str, float]], shown: str,
+) -> str:
+    """Render the short form of a ``run_commands_parallel`` report whose whole text is in a file.
+
+    The tally, one line per command with its status, the tail of each
+    command that did not succeed (:data:`DIGEST_TAIL_CHARS`), and the
+    file to ``grep`` for the rest: a 60-split test run then costs the
+    conversation a page, not the whole of every split's output (the
+    2026-11-01 audit saw 22 such runs fill 365 k tokens).
+
+    Args:
+        commands: The commands, in input order.
+        results: Their ``(exit code, output, seconds)``.
+        shown: The path of the file holding the whole report, as the
+            model should name it.
+    """
+    codes = [code for code, _, _ in results]
+    succeeded = sum(1 for code in codes if code == 0)
+    timed_out = sum(1 for code in codes if code is None)
+    failed = len(codes) - succeeded - timed_out
+    lines = [
+        f"{len(commands)} commands: {succeeded} succeeded, {failed} failed, {timed_out} timed out."
+        f" The whole report ({len(commands)} sections) is in {shown}; this is its digest."
+    ]
+    pairs = list(zip(commands, results, strict=True))
+    for index, (command, (code, _, seconds)) in enumerate(pairs, 1):
+        one_line = " ".join(command.split())
+        lines.append(f"[{index}/{len(commands)}] {_command_status(code, seconds)}: "
+                     f"{one_line[:160]}{'...' if len(one_line) > 160 else ''}")
+    for index, (command, (code, output, seconds)) in enumerate(pairs, 1):
+        if code == 0:
+            continue
+        tail = output.rstrip("\n")[-DIGEST_TAIL_CHARS:] or "(no output)"
+        lines.append(f"\n### [{index}/{len(commands)}] {_command_status(code, seconds)}, "
+                     f"last {min(len(tail), DIGEST_TAIL_CHARS)} chars (section {index} of {shown} "
+                     f"has all of it)\n{tail}")
+    return "\n".join(lines)
+
+
+def spill_report(root: str | None, kind: str, text: str) -> str | None:
+    """Write *text* under ``tmp/tool-out/`` of *root* and return the path to show, or ``None``.
+
+    The file is ``tmp/tool-out/<tag>-<kind>.txt``, *tag* six random hex
+    digits, the shown path relative to *root* (where the model's shell
+    commands run); ``None`` when *root* is unknown or the directory
+    cannot be made or written.
+
+    Args:
+        root: The directory the tool's commands run in.
+        kind: What the file holds, for its name (``parallel``, ``agents``).
+        text: The whole report.
+    """
+    if root is None:
+        return None
+    name = f"{uuid.uuid4().hex[:6]}-{kind}.txt"
+    try:
+        (_make_dirs_under(root, SPILL_DIR) / name).write_text(text, encoding="utf-8")
+    except OSError:
+        return None
+    return f"{SPILL_DIR}/{name}"
 
 
 def _format_parallel_report(
@@ -1507,12 +1713,7 @@ def _format_parallel_report(
     for index, (command, (code, output, seconds)) in enumerate(
         zip(commands, results, strict=True), start=1
     ):
-        if code is None:
-            status = f"TIMED OUT after {seconds:.1f}s"
-        elif code < -1:
-            status = f"killed by signal {-code} in {seconds:.1f}s"
-        else:
-            status = f"exit {code} in {seconds:.1f}s"
+        status = _command_status(code, seconds)
         lines.append(f"\n### [{index}/{len(commands)}] {status}\n$ {command}")
         lines.append(_truncate_output(output.rstrip("\n"), max_output_chars) or "(no output)")
     return "\n".join(lines)
@@ -2320,7 +2521,9 @@ class UsefulTools:
             applied = self._edit_instead(edit, host_path(edit.path), followup)
             if applied is not None:
                 return applied
-        return rewrite_guard(command) or heredoc_guard(command, bash_cwd, _host_lexists)
+        guarded = functools.partial(_host_guarded, self.work_dir)
+        return rewrite_guard(command, bash_cwd, guarded) or heredoc_guard(
+            command, bash_cwd, guarded)
 
     def _write_instead(
         self, copy: HeredocCopy, path: str, followup: tuple[str, dict[str, Any]] | None,
@@ -2411,14 +2614,16 @@ class UsefulTools:
             return None
         call = edit_call(path, edits)
         if content is not None and not self._is_read(resolved):
+            # A scratch file counts as shown, as Write overwrites one unread.
             self._mark_read(resolved)
-            return (
-                f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was not shown "
-                f"in this session, with no reviewable change. Make the same change with {call} "
-                "— the region around its first old_string follows and the file now counts as "
-                "read, so that call (or the same command, applied as that Edit) goes through.\n"
-                + region_around_string(content, edits[0][0])
-            )
+            if not _is_scratch_path(resolved, self.work_dir):
+                return (
+                    f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was not "
+                    f"shown in this session, with no reviewable change. Make the same change with "
+                    f"{call} — the region around its first old_string follows and the file now "
+                    "counts as read, so that call (or the same command, applied as that Edit) "
+                    "goes through.\n" + region_around_string(content, edits[0][0])
+                )
         return self._apply(call, "Edit", edit_args(path, edits), followup=followup)
 
     def _apply(
@@ -2575,7 +2780,9 @@ class UsefulTools:
 
         cwd = self._resolve_cwd()
         guard, timeout_seconds = refuse_or_lift(command, self.work_dir, timeout_seconds)
-        guard = _bash_parent_repo_guard(command, self.work_dir) or guard
+        guard = (_bash_parent_repo_guard(command, self.work_dir)
+                 or (None if machine else _uv_in_worktree_guard(command, self.work_dir))
+                 or guard)
         if guard is None:
             # A shell rewrite of a file is applied as the Write/Edit it stands
             # for, or refused naming it; a machine's files this host cannot see.
@@ -2943,8 +3150,12 @@ class UsefulTools:
             A report starting with a tally line
             (``N commands: K succeeded, F failed, T timed out``) followed by
             one section per command, in input order, giving its exit code,
-            wall time and (truncated) output.  A string starting with
-            ``Error:`` when the arguments were invalid.
+            wall time and (truncated) output.  A report too long for the
+            conversation is written whole to ``tmp/tool-out/`` and its
+            digest returned instead: the tally, one status line per
+            command, the tail of each command that did not succeed, and
+            the file's path.  A string starting with ``Error:`` when the
+            arguments were invalid.
         """
         del description
         run_one = functools.partial(
@@ -2953,7 +3164,10 @@ class UsefulTools:
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
         )
-        return run_commands_pool(commands, run_one, max_workers, self.stop_event, max_output_chars)
+        spill = functools.partial(spill_report, self._resolve_cwd(), "parallel")
+        return run_commands_pool(
+            commands, run_one, max_workers, self.stop_event, max_output_chars, spill,
+        )
 
     def _consume_stream(
         self,

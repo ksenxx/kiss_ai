@@ -949,12 +949,19 @@ def _fold_llm_call_hook(methods: list[Callable[..., Any]], new_messages: list[An
 def _first_refusal(
     methods: list[Callable[..., Any]], name: str, args: dict[str, Any]
 ) -> Verdict:
-    """Return the first refusing verdict of the ``tool_call_hook`` *methods*, else ``ALLOW``."""
+    """Return the first refusing verdict of the ``tool_call_hook`` *methods*, else the allowance.
+
+    The allowance carries the notes of the allowing verdicts
+    (:func:`~kiss.core.tool_verdict.allow_with_note`), in chain order;
+    it is ``ALLOW`` itself when none carries one.
+    """
+    notes = ""
     for method in methods:
         verdict = _check_verdict(_label(method), _call(method, name, args))
         if not verdict.allowed:
             return verdict
-    return ALLOW
+        notes += verdict.text
+    return Verdict(True, notes) if notes else ALLOW
 
 
 def _first_run_end(methods: list[Callable[..., Any]], reply: LLMReply) -> Verdict:
