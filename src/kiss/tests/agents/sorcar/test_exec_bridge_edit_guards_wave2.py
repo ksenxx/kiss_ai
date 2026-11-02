@@ -99,9 +99,13 @@ def test_bash_refuses_the_rewrites_a_docker_task_refuses(
     # Other rewrites stay refused: a sed the Edit cannot spell, a target only the shell knows.
     refused = bridge.Bash("sed -i 's/v1/&\\n/' data.txt", "multi-line sed")
     assert refused.startswith("REFUSED: the `sed -i` call did NOT run"), refused
-    refused = bridge.Bash('F=data.txt; cat > "$F" <<\'EOF\'\nv2\nEOF', "variable target")
+    refused = bridge.Bash('cat > "$F" <<\'EOF\'\nv2\nEOF', "variable target")
     assert refused.startswith("REFUSED: the command did not run: it writes ")
     assert "only the shell knows which file that is" in refused
+    # A variable the command itself assigned names the file: the refusal says which.
+    refused = bridge.Bash('F=data.txt; cat > "$F" <<\'EOF\'\nv2\nEOF', "assigned target")
+    assert refused.startswith(
+        f"REFUSED: the command did not run: it writes the existing file {data}")
     assert data.read_text() == "v1\n"
     # The bytes the append read come through the bridge's fetch.
     assert bridge.read_bytes(str(data)) == b"v1\n"

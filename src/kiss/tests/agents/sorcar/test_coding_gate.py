@@ -28,8 +28,10 @@ import yaml
 
 from kiss.agents.sorcar import coding_gate as cg
 from kiss.agents.sorcar import sorcar_agent as sorcar_agent_module
+from kiss.agents.sorcar.agent_dispatch import digest_agent_results
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
 from kiss.core import user_config
 from kiss.core.event_sink import bind_printer
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
@@ -77,7 +79,7 @@ def _turn(gate: CodingGate, name: str, args: dict, result: str, refused: bool = 
     gate.result(name, args, result, refused)
 
 
-def test_readers_pair_commands_with_exit_codes_in_both_tool_formats() -> None:
+def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Path) -> None:
     jobs: dict[str, str] = {}
     bash = {"command": "pytest -q"}
     # the host tool: a prefix on failure, nothing on success, its own timeout wording
@@ -121,6 +123,20 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats() -> None:
               "ok\n\n### [2/2] TIMED OUT after 9.0s\n$ b\n")
     assert cg.result_exit_codes("run_commands_parallel", {"commands": '["a", "b"]'}, report,
                                 jobs) == [("a", "0"), ("b", "timeout")]
+    # the digest of a report too long for the conversation: every command's
+    # exit is on its status line (the sections are only the failed ones')
+    digest = digest_parallel_report(["a", "b", "c"], [(0, "ok", 0.1), (None, "", 9.0),
+                                                      (2, "E", 0.2)], "tmp/tool-out/x.txt")
+    assert cg.result_exit_codes("run_commands_parallel", {"commands": '["a", "b", "c"]'},
+                                digest, jobs) == [("a", "0"), ("b", "timeout"), ("c", "2")]
+    # a status line in a command's own output (a nested parallel run) does
+    # not override the command's exit, in the digest or in the full report
+    outer = "echo '[1/1] exit 0 in 0.1s: inner'; exit 1"
+    report = UsefulTools(work_dir=str(tmp_path)).run_commands_parallel(f'[{outer!r}]')
+    inner_status: list[tuple[int | None, str, float]] = [(1, "[1/1] exit 0 in 0.1s: inner\n", 0.2)]
+    for text in (report, digest_parallel_report([outer], inner_status, "tmp/tool-out/y.txt")):
+        assert cg.result_exit_codes("run_commands_parallel", {"commands": f'[{outer!r}]'}, text,
+                                    jobs) == [(outer, "1")]
     # the three message shapes carry tool results
     assert cg.tool_result_texts({"type": "function_call_output", "output": "x"}) == ["x"]
     assert cg.tool_result_texts({"role": "tool", "content": "y"}) == ["y"]
@@ -171,6 +187,10 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats() -> None:
     assert cg.dispatch_successes("Error: unknown agent job 'agent-9'") == []
     assert cg.dispatch_successes("Job agent-1a2b (sorcar agent task) is still running.") == []
     assert cg.dispatch_successes("[unterminated: {") == []
+    # the digest of a run_parallel result too long for the conversation
+    notice = "Started the sub-task as job agent-0123abcd; agent_job(job_id) collects its result."
+    digest = digest_agent_results([done, failed, notice], "tmp/tool-out/x-agents.txt")
+    assert cg.dispatch_successes(digest) == [True, False]
     # code files arm the gate, prose does not
     assert cg.is_code_file("src/a.py") and cg.is_code_file("Makefile")
     assert cg.is_code_file("tmp/x/verify.sh") and cg.is_code_file("pyproject.toml")
@@ -749,6 +769,9 @@ def test_sorcar_agent_gates_the_merge_of_its_worktree_and_keeps_the_verifier(
     reviews = [r for r in requests if "You are reviewing, read-only" in str(r["messages"][-1])]
     assert len(reviews) == 2
     assert cg.MERGE_SUMMARY_PLACEHOLDER in reviews[0]["messages"][-1]["content"]
+    # at the merge no finish names evidence: the reviewer is told so, not "(none named)"
+    assert cg.MERGE_EVIDENCE_PLACEHOLDER in reviews[0]["messages"][-1]["content"]
+    assert "(none named)" not in reviews[0]["messages"][-1]["content"]
     assert f"### {shown} (new file)\nprint('bye')" in reviews[0]["messages"][-1]["content"]
     assert f"### {shown} (new file)\nprint('hello')" in reviews[1]["messages"][-1]["content"]
     assert "since your previous review" in reviews[1]["messages"][-1]["content"]
@@ -760,7 +783,8 @@ def test_sorcar_agent_gates_the_merge_of_its_worktree_and_keeps_the_verifier(
     assert not (repo / ".kiss-worktrees" / "tmp").exists()
     gate = agent._coding_gate
     assert gate.work_dir == str(work) and gate.base_commit == seed
-    assert gate.gate_rounds == 1 and gate.reviews == 2 and gate.open_findings == []
+    # the merge that went through left its round behind: the finish was gated afresh
+    assert gate.gate_rounds == 0 and gate.reviews == 2 and gate.open_findings == []
     assert gate.last_verifier_run[0] == 0 and gate.exit_codes == {"bash tmp/verify.sh": "0"}
 
 
@@ -789,6 +813,77 @@ def test_a_merge_with_the_reviews_findings_open_and_no_change_is_refused(tmp_pat
         _turn(gate, "Bash", {"command": "python hello.py"}, "hello\n")
         assert gate.merge_verdict(TASK) is None
         assert len(requests) == 2 and gate.reviews == 2 and gate.open_findings == []
+
+
+def test_a_merge_that_went_through_leaves_its_rounds_and_findings_behind(tmp_path: Path) -> None:
+    """Audit 2026-11-01 (task 4aa14638): three refused merges spent the round cap, the
+    merge then went through, and the finish delivered the merge's stale findings as
+    caveats. ``merged()`` resets the rounds and findings; so does a review the agent
+    dispatched itself after a later change."""
+    script = [text_body("VERDICT: NOT DONE\n1. hello.py prints bye, not hello.")]
+    hello = tmp_path / "hello.py"
+    with serve(script) as (url, requests):
+        gate = _gate(tmp_path, reviewer=MODEL, model_config={"base_url": url, "api_key": "local"})
+        hello.write_text("print('bye')\n")
+        _turn(gate, "Write", {"file_path": str(hello), "content": "print('bye')\n"}, "ok")
+        _turn(gate, "Bash", {"command": "python hello.py"}, "bye\n")
+        for round_number in (1, 2, 3):
+            verdict = gate.merge_verdict(TASK)
+            assert verdict is not None and f"round {round_number} of 3" in verdict
+        assert gate.merge_verdict(TASK) is None  # past the cap the merge goes through
+        assert gate.gate_rounds == 3
+        assert gate.open_findings == ["1. hello.py prints bye, not hello."]
+        gate.merged()
+        assert gate.gate_rounds == 0 and gate.open_findings == []
+        # the finish after the merge: no file changed, nothing to re-review, no caveat
+        args: dict[str, Any] = {"success": True, "summary_in_html": DONE}
+        assert gate.finish_verdict(args, TASK) is None
+        assert args["summary_in_html"] == DONE and gate.delivered_findings == []
+        assert len(requests) == 1
+    # a review the agent dispatched after a later change supersedes the gate's findings
+    gate = _gate(tmp_path)
+    gate.gate_rounds, gate.open_findings = 2, ["1. stale"]
+    _turn(gate, "Edit", {"file_path": str(hello), "old_string": "bye", "new_string": "hello"}, "ok")
+    _turn(gate, "run_agent", {"task": "Verify the listed changes: hello.py. Report only "
+                              "demonstrated issues.", "tool_profile": "review"},
+          "ran: sorcar\nsuccess: true\nsummary: no issues\n")
+    assert gate.reviewed_by_agent and gate.gate_rounds == 0 and gate.open_findings == []
+    # one dispatched before the change reviewed an older diff: nothing is reset
+    gate.gate_rounds, gate.open_findings = 2, ["1. stale"]
+    _turn(gate, "run_agent", {"task": "Review hello.py", "tool_profile": "review"},
+          "Started as job agent-abc; agent_job(job_id) collects it.")
+    _turn(gate, "Edit", {"file_path": str(hello), "old_string": "hello", "new_string": "hi"}, "ok")
+    _turn(gate, "agent_job", {"job_id": "agent-abc", "action": "wait"},
+          "ran: sorcar\nsuccess: true\nsummary: fine\n")
+    assert not gate.reviewed_by_agent and gate.gate_rounds == 2
+    assert gate.open_findings == ["1. stale"]
+
+
+def test_scratch_files_are_notes_not_changes_of_the_work(tmp_path: Path) -> None:
+    """An ``Edit``/``Write`` under ``tmp/`` (the progress log, a probe, the verifier) and a
+    redirect into ``tmp/`` leave no unchecked change, arm nothing and need no re-review."""
+    gate = _gate(tmp_path, verifier="exit 0\n")
+    _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"}, "ok")
+    _turn(gate, "Bash", {"command": "python a.py > tmp/out.txt 2>&1"}, "")
+    assert gate.armed and not gate.evidence.unchecked_change and gate.changes == 1
+    for path in ("tmp/PROGRESS.md", "./tmp/c16c/probe.py", str(tmp_path / "tmp" / "verify.sh"),
+                 "sub/tmp/notes.md"):
+        _turn(gate, "Edit", {"file_path": path, "old_string": "a", "new_string": "b"}, "ok")
+        _turn(gate, "Write", {"file_path": path, "content": "x"}, "ok")
+    assert not gate.evidence.unchecked_change and gate.changes == 1
+    assert gate.written_files == [str(tmp_path / "a.py")]
+    done = {"success": True, "summary_in_html": DONE}
+    assert gate.finish_verdict(dict(done), TASK) is None
+    # a code file that merely sits next to a tmp name, or outside the work dir, is work
+    for path in ("tmpl/a.py", "a.tmp", "tmp", str(tmp_path.parent / "tmp" / "x.py")):
+        assert not gate.is_scratch(path), path
+    _turn(gate, "Write", {"file_path": "tmpl/a.py", "content": "x"}, "ok")
+    assert gate.evidence.unchecked_change and gate.changes == 2
+    # a probe-only run (scratch python, no product code) is not a coding run
+    (tmp_path / "other").mkdir()
+    probe = _gate(tmp_path / "other")
+    probe.observe("Write", {"file_path": "tmp/probe.py", "content": "print(1)\n"})
+    assert not probe.armed and not probe.coding_run()
 
 
 def test_a_delegated_change_is_judged_by_the_diff(tmp_path: Path) -> None:

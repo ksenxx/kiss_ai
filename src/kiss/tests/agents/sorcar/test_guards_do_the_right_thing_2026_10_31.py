@@ -50,6 +50,7 @@ from kiss.agents.sorcar.useful_tools import (
     BATCHING_HINT,
     UsefulTools,
     _is_read_only,
+    _uv_in_worktree_guard,
     sleep_guard,
 )
 from kiss.core.config import DEFAULT_CONFIG
@@ -176,9 +177,12 @@ def test_home_target_resolves_and_new_files_still_run(
 
 
 def test_variable_target_stays_refused(tools: UsefulTools, tmp_path: Path) -> None:
-    out = tools.Bash('OUT=notes.md; cat > "$OUT" <<EOF\nx\nEOF', "dynamic")
+    out = tools.Bash('cat > "$OUT" <<EOF\nx\nEOF', "dynamic")
     assert out == HEREDOC_UNRESOLVED_VERDICT.format(path="$OUT")
     assert "Write(file_path=<the literal path $OUT names>, content=" in out
+    # One the command assigns names the file; the refusal does too.
+    out = tools.Bash('OUT=notes.md; cat > "$OUT" <<EOF\nx\nEOF', "assigned")
+    assert out == HEREDOC_VERDICT.format(path=tmp_path / "notes.md")
     assert (tmp_path / "notes.md").read_text() == "old\n"
 
 
@@ -672,3 +676,48 @@ def test_read_only_commands() -> None:
         "find . -fprint out", "ls | python3 x.py", "rm -rf build",
     ):
         assert not _is_read_only(command), command
+
+
+def test_uv_in_a_worktree_is_refused_naming_the_shared_environments_binary(tmp_path: Path) -> None:
+    """A worktree shares the main checkout's environment: ``uv sync``/``uv run`` there
+    would build it one of its own or re-point the shared editable install (the
+    2026-11-01 audit's 19 ``check --full`` runs); the refusal names what to run."""
+    repo = tmp_path / "repo"
+    worktree = repo / ".kiss-worktrees" / "kiss_wt-1-abc"
+    worktree.mkdir(parents=True)
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    for binary in ("python", "check", "pytest"):
+        (repo / ".venv" / "bin" / binary).write_text("#!/bin/sh\necho ran $0 \"$@\"\n")
+        (repo / ".venv" / "bin" / binary).chmod(0o755)
+    sources = f"PYTHONPATH={worktree}/src:{worktree}/projects"
+    tools = UsefulTools(work_dir=str(worktree))
+    # uv run: refused, with the command to copy
+    out = tools.Bash("uv run check --full --fix", "lint")
+    assert out.startswith("REFUSED: `uv run` did NOT run")
+    suggested = out.split("Copy this rewritten command as is: ")[1]
+    assert suggested == f"{sources} {repo}/.venv/bin/check --full --fix"
+    assert tools.Bash(suggested, "the suggestion runs").strip() == (
+        f"ran {repo}/.venv/bin/check --full --fix")
+    for command, rewritten in (
+        ("cd src && uv run --no-sync pytest -q a.py | tail -3",
+         f"cd src && {sources} {repo}/.venv/bin/pytest -q a.py | tail -3"),
+        ("UV_PROJECT_ENVIRONMENT=../../.venv uv run --project . python3 -c 'print(1)'",
+         f"UV_PROJECT_ENVIRONMENT=../../.venv {sources} {repo}/.venv/bin/python -c 'print(1)'"),
+    ):
+        refusal = _uv_in_worktree_guard(command, str(worktree))
+        assert refusal is not None and refusal.endswith(rewritten)
+    # global flags before the subcommand are dropped from the rewrite
+    refusal = _uv_in_worktree_guard("uv -q --offline run pytest -q a.py", str(worktree))
+    assert refusal is not None and refusal.endswith(f"{sources} {repo}/.venv/bin/pytest -q a.py")
+    # a program the environment lacks, the sync itself, and a global option whose
+    # value (``--directory .``) a rewrite would drop: refused without a rewrite
+    for command in ("uv run nosuchtool --x", "uv sync", "echo x && uv add requests",
+                    "uv --directory . run check --full --fix", "uv --project=. sync",
+                    "uv --color never -q run pytest"):
+        verdict = _uv_in_worktree_guard(command, str(worktree))
+        assert verdict is not None and "Copy this" not in verdict and "bin/check --full" in verdict
+    # ``uv`` as text (a heredoc body, a quoted word) or outside a worktree runs
+    for command in ("cat > s.sh <<'EOF'\nuv run pytest\nEOF\n", "echo 'uv sync'", "uv lock",
+                    "uv --version", "uv -q pip list", "uv tool run ruff check ."):
+        assert _uv_in_worktree_guard(command, str(worktree)) is None, command
+    assert _uv_in_worktree_guard("uv run pytest", str(repo)) is None

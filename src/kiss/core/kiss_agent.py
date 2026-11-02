@@ -77,6 +77,7 @@ from kiss.core.tool_interrupt import (
     unregister_tool_call,
 )
 from kiss.core.tool_verdict import (
+    ALLOW,
     REISSUE_REMINDER,
     ToolRedirect,
     Verdict,
@@ -152,6 +153,25 @@ _CONTEXT_OVERFLOW_PHRASES = (
     "context_length_exceeded",
     "maximum context length",
     "exceeds the maximum number of tokens",
+)
+# A request the provider's own classifier refused before any model ran,
+# reported as an HTTP error rather than a typed stop: OpenAI's "This content
+# was flagged for possible cybersecurity risk" (400), Azure's "content
+# management policy" / ``ResponsibleAIPolicyViolation``, OpenRouter's
+# moderation 403, a ``content_policy_violation`` code.  Deterministic for
+# the request and shared by the family, like a ``content_filter`` stop.
+CONTENT_POLICY_STOP = "content_policy"
+_CONTENT_POLICY_PHRASES = (
+    "content was flagged",
+    "flagged for possible",
+    "content_policy",
+    "content policy",
+    "content management policy",
+    "content_filter",
+    "content filter",
+    "usage policy",
+    "usage policies",
+    "responsibleaipolicyviolation",
 )
 
 
@@ -249,6 +269,8 @@ def _failure_reason(error: KISSError) -> str:
         A phrase naming the provider's stop reason, e.g. ``a content
         filter stop (stop_reason="content_filter")``.
     """
+    if isinstance(error, ContentFilterError) and error.stop_reason == CONTENT_POLICY_STOP:
+        return "a content policy refusal of the request"
     if isinstance(error, ContentFilterError):
         return f'a content filter stop (stop_reason="{error.stop_reason}")'
     if isinstance(error, ModelRefusalError):
@@ -381,6 +403,22 @@ def _is_context_overflow_error(e: Exception) -> bool:
     """Return True when the provider rejected a request for exceeding the context window."""
     error_msg = str(e).lower()
     return any(phrase in error_msg for phrase in _CONTEXT_OVERFLOW_PHRASES)
+
+
+def is_content_policy_error(e: Exception) -> bool:
+    """Return whether *e* is a provider error refusing the request on its content policy.
+
+    Such a refusal (:data:`_CONTENT_POLICY_PHRASES`) arrives as a plain
+    HTTP error of the SDK, not as a typed stop, yet retrying it on the
+    same family is as pointless as retrying a ``content_filter`` stop:
+    the 2026-11-01 audit lost three sub-agents to "3 consecutive
+    errors" on OpenAI's cybersecurity flag before failing over by hand.
+
+    Args:
+        e: The exception the model call raised.
+    """
+    error_msg = str(e).lower()
+    return any(phrase in error_msg for phrase in _CONTENT_POLICY_PHRASES)
 
 
 def _with_usage_footer(text: str, usage_info: str) -> str:
@@ -1024,6 +1062,37 @@ class KISSAgent(Base):
             )
         return True
 
+    def _recover_from_family_failure(
+        self, error: _EmptyModelResponseError | ModelRefusalError | OutputCapError
+    ) -> bool:
+        """Arrange the next step after a failure the whole model family shares.
+
+        A refusal, a content filter, an output cap or repeated empty
+        turns are deterministic for the request, so the step is retried
+        on a model of another family when one is configured
+        (:meth:`_try_switch_to_fallback`); failing that, a refusal gets
+        one retry with the task's context stated (:data:`REFUSAL_RETRY_MSG`),
+        and a second refusal is final.
+
+        Args:
+            error: The typed failure of the step.
+
+        Returns:
+            Whether the loop continues (a model was switched or the
+            retry message was added); ``False`` means *error* ends the run.
+        """
+        new_name = self._try_switch_to_fallback(reason=_failure_reason(error), other_family=True)
+        if new_name is not None:
+            self._low_effort_retried = False
+            self._reset_progress_trackers()
+            return True
+        if isinstance(error, ModelRefusalError) and not self._refusal_retried:
+            self._refusal_retried = True
+            self.model.add_message_to_conversation("user", REFUSAL_RETRY_MSG)
+            self._add_message("user", REFUSAL_RETRY_MSG)
+            return True
+        return False
+
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
         consecutive_stalls = 0
@@ -1046,28 +1115,26 @@ class KISSAgent(Base):
                 logger.debug("Exception caught", exc_info=True)
                 if isinstance(e, OutputCapError) and self._retry_at_low_effort(e):
                     continue
-                if isinstance(e, _EmptyModelResponseError | ModelRefusalError | OutputCapError):
-                    # The whole family shares a refusal, a filter or a
-                    # cap, so the fallback is another family when one is
-                    # configured.
-                    new_name = self._try_switch_to_fallback(
-                        reason=_failure_reason(e), other_family=True
-                    )
-                    if new_name is not None:
-                        consecutive_errors = 0
-                        self._low_effort_retried = False
-                        self._reset_progress_trackers()
-                        continue
-                    if isinstance(e, ModelRefusalError) and not self._refusal_retried:
-                        # One retry with the task's context stated; a second
-                        # refusal is final.
-                        self._refusal_retried = True
-                        self.model.add_message_to_conversation("user", REFUSAL_RETRY_MSG)
-                        self._add_message("user", REFUSAL_RETRY_MSG)
-                        continue
+                if isinstance(
+                    e, _EmptyModelResponseError | ModelRefusalError | OutputCapError
+                ) and self._recover_from_family_failure(e):
+                    consecutive_errors = 0
+                    continue
                 raise
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
+                if is_content_policy_error(e):
+                    # The provider refused the request itself (HTTP 400
+                    # "content was flagged ..."): the same request gets the
+                    # same answer from the whole family, so it is a
+                    # content filter, not an outage to retry three times.
+                    refused = ContentFilterError(
+                        f"Content policy refusal from model: {e}", stop_reason=CONTENT_POLICY_STOP
+                    )
+                    if self._recover_from_family_failure(refused):
+                        consecutive_errors = 0
+                        continue
+                    raise refused from e
                 if not _is_retryable_error(e):
                     new_name = self._try_switch_to_fallback(reason="a non-retryable error")
                     if new_name is None:
@@ -1389,7 +1456,9 @@ class KISSAgent(Base):
         framework's :attr:`tool_call_guard` may still block the call.  A
         long-running call keeps the prompt cache warm meanwhile.  The
         :attr:`tool_result_hook` reads the result (a refusal included)
-        before a pending re-issue reminder is appended to it.
+        before the note of an allowing verdict
+        (:func:`~kiss.core.tool_verdict.allow_with_note`) and a pending
+        re-issue reminder are appended to it.
 
         Args:
             function_call: The tool call dict with ``name`` and
@@ -1405,7 +1474,8 @@ class KISSAgent(Base):
         args = _call_args(function_call)
         if name != "finish":
             self.tool_calls_made += 1
-        blocked = self._tool_call_refusal(name, args)
+        verdict = self._tool_call_verdict(name, args)
+        blocked = None if verdict.allowed else verdict
         if blocked is not None:
             # A refused finish is owed no re-issue: the gate's verdict says
             # what to do next, and a reminder to "re-issue it now" sent
@@ -1431,6 +1501,8 @@ class KISSAgent(Base):
             blocked = self._redirect_ended
         if self.tool_result_hook is not None:
             self.tool_result_hook(name, args, response, blocked is not None)
+        if verdict.allowed and verdict.text and name != "finish":
+            response += verdict.text
         if not settled:
             response = self._with_reissue_reminder(name, response)
         return name, response, blocked
@@ -1712,8 +1784,8 @@ class KISSAgent(Base):
         if self.context_reset_hook is not None:
             self.context_reset_hook()
 
-    def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> Verdict | None:
-        """Return the refusing verdict of the vetoes on calling *name* with *args*, or ``None``.
+    def _tool_call_verdict(self, name: str, args: dict[str, Any]) -> Verdict:
+        """Return the verdict of the vetoes on calling *name* with *args*.
 
         The caller's :attr:`tool_call_hook` is consulted first (it sees
         every call); only when it allows does the framework's
@@ -1725,19 +1797,30 @@ class KISSAgent(Base):
             args: The call's arguments.
 
         Returns:
-            Verdict | None: The hook's refusing verdict (a
+            Verdict: The hook's refusing verdict (a
             :func:`~kiss.core.tool_verdict.end_run` one ends the run),
-            the guard's refusal text as a refusing verdict, or ``None``
-            when neither objects.
+            the guard's refusal text as a refusing verdict, or the hook's
+            allowing verdict when neither objects (its ``text``, if any,
+            is the note the call's result ends with).
         """
+        verdict = ALLOW
         if self.tool_call_hook is not None:
             verdict = self.tool_call_hook(name, args)
             if not verdict.allowed:
                 return verdict
         if self.tool_call_guard is None:
-            return None
+            return verdict
         text = self.tool_call_guard(name, args)
-        return None if text is None else Verdict(False, text)
+        return verdict if text is None else Verdict(False, text)
+
+    def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> Verdict | None:
+        """Return the refusing verdict on calling *name* with *args*, or ``None`` when allowed.
+
+        :meth:`_tool_call_verdict` without the allowing verdict's note,
+        for the implicit-finish probe.
+        """
+        verdict = self._tool_call_verdict(name, args)
+        return None if verdict.allowed else verdict
 
     def _ended_run_result(self, verdict: Verdict) -> str:
         """Return the run's result for a hook's run-ending *verdict*.

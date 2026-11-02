@@ -243,32 +243,71 @@ def named_pieces(task: str) -> set[str]:
     return pieces
 
 
+def is_scratch_piece(piece: str) -> bool:
+    """Whether *piece* is a path under a ``tmp`` directory (``tmp/x``, ``./tmp/x``, ``/w/tmp/x``).
+
+    Scratch files are shared by design (a progress log, instructions
+    copied for every child, probe output): naming one is no claim on
+    the work.
+    """
+    parts = piece.strip().lstrip("~").split("/")
+    return "tmp" in parts[:-1]
+
+
+def _under(piece: str, directory: str) -> bool:
+    """Whether *piece* lies under *directory* (a piece that is a path prefix of it)."""
+    return piece != directory and piece.startswith(directory.rstrip("/") + "/")
+
+
 def undivided_work(tasks: Sequence[str]) -> str:
     """Return why *tasks* are not a fan-out over disjoint named pieces of work, or ``""``.
+
+    Pieces under ``tmp/`` (:func:`is_scratch_piece`) do not count, nor
+    do pieces every task of a fan-out of three or more names (shared
+    instructions: a file to read, a command to run; with two tasks
+    "every" is "both", and the check would be void).  A piece two tasks
+    share is no overlap when it is a directory of which both name a
+    more specific piece (``src/x/`` with ``src/x/a.py`` and
+    ``src/x/b.py``); one task working on the whole directory while the
+    other works on a file in it is an overlap.  Every overlapping pair
+    is reported at once, so one refusal shows all there is to divide.
 
     Args:
         tasks: The task texts of one ``run_agent`` / ``run_parallel`` call.
 
     Returns:
         ``""`` when there are two or more tasks, each names a piece
-        (:func:`named_pieces`) and no piece is named by two of them;
-        else the first shortfall, as a clause for the refusal.
+        (:func:`named_pieces`) and no counted piece is named by two of
+        them; else the shortfall, as a clause for the refusal.
     """
     if len(tasks) < 2:
         return "one sub-task is no fan-out over disjoint work"
     pieces = [named_pieces(task) for task in tasks]
-    for i, found in enumerate(pieces):
+    common = set.intersection(*pieces) if len(pieces) >= 3 else set()
+    counted = [{p for p in found if p not in common and not is_scratch_piece(p)}
+               for found in pieces]
+    for i, found in enumerate(counted):
         if not found:
             return (
                 f"task {i + 1} of the fan-out names no file, directory, module, URL or "
                 "`command` of its own"
+                + (" (pieces every task names, and tmp/ paths, do not count)" if pieces[i]
+                   else "")
             )
-    for i, first in enumerate(pieces):
-        for j in range(i + 1, len(pieces)):
-            shared = first & pieces[j]
+    overlaps = []
+    for i, first in enumerate(counted):
+        for j in range(i + 1, len(counted)):
+            shared = sorted(
+                piece for piece in first & counted[j]
+                if not (any(_under(p, piece) for p in first)
+                        and any(_under(p, piece) for p in counted[j]))
+            )
             if shared:
-                return f"tasks {i + 1} and {j + 1} of the fan-out both name {sorted(shared)[0]}"
-    return ""
+                overlaps.append(
+                    f"tasks {i + 1} and {j + 1} of the fan-out both name {', '.join(shared[:3])}"
+                    + (f" (+{len(shared) - 3} more)" if len(shared) > 3 else "")
+                )
+    return "; ".join(overlaps)
 
 
 def same_family_conflict(

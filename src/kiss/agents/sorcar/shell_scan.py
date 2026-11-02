@@ -17,10 +17,13 @@ the commands in it.  Each simple command records its words, the files
 its standard output is redirected to, whether a here-document feeds it,
 whether a pipe does, what its output is piped to, its group, and the
 directory it runs in, followed through ``cd``.  A subshell, a
-substitution, a pipeline stage and a ``&`` list keep their ``cd`` to
-themselves; a ``cd`` that may not run (after ``||``, or in an ``if``,
-a loop or a ``case``) leaves the directory unknown.  Other commands are
-taken to succeed.
+substitution, a pipeline stage and a ``&`` list keep their ``cd`` and
+their assignments to themselves; a ``cd`` that may not run (after
+``||``, or in an ``if``, a loop or a ``case``) leaves the directory
+unknown, and a variable set any other way than by a literal
+assignment (``read``, ``unset``, ``declare``, ``let``, a loop variable,
+an arithmetic command, ``eval``, ``source``) is unknown afterwards.
+Other commands are taken to succeed.
 
 Nothing is expanded: a word holding a parameter, a command or
 arithmetic substitution, a leading ``~`` or a glob is marked as not
@@ -58,7 +61,29 @@ _OPENERS = frozenset({"{", "if", "while", "until", "for", "select", "case"})
 _CLOSERS = frozenset({"}", "fi", "done", "esac"})
 _RESERVED = _OPENERS | _CLOSERS | {"!", "then", "else", "elif", "do", "time"}
 _BARE_WORD = re.compile(r"(?:[{}!]|[a-z]+)(?=[ \t\n;&|<>()]|\Z)")
-_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
+#: ``T=x``, ``T+=x`` and an array element's ``T[0]=x``; ``T=(x y)`` starts the same way.
+_ASSIGNMENT = re.compile(r"(?P<name>[A-Za-z_]\w*)(?P<subscript>\[[^\]]*\])?(?P<append>\+)?=")
+_NAME = re.compile(r"[A-Za-z_]\w*")
+_BLANKS = re.compile(r"[ \t]*")
+#: Builtins that assign the variables their operands name (``read T``,
+#: ``unset T``, ``declare -x T=x``, ``mapfile T``, ``let T=1``): afterwards
+#: the variable's value is unknown.
+_ASSIGNING_BUILTINS = frozenset({"read", "readarray", "mapfile", "declare", "typeset", "local",
+                                 "readonly", "unset", "getopts", "let"})
+#: ``read``'s options that take a value, attached (``-aT``) or next (``-a T``);
+#: ``-a`` names the array read into.
+_READ_VALUED = "adinNptu"
+#: Builtins whose ``-n`` makes a name reference: assigning it assigns the
+#: variable it names, so afterwards no variable is known.
+_DECLARING_BUILTINS = frozenset({"declare", "typeset", "local"})
+#: The variable a builtin fills when no operand names one (``read <<<x``
+#: sets REPLY, ``mapfile <<<x`` MAPFILE), unknown after every such call.
+_DEFAULT_TARGETS = {"read": "REPLY", "readarray": "MAPFILE", "mapfile": "MAPFILE"}
+#: Builtins that run text as commands: afterwards no variable is known.
+_SOURCING_BUILTINS = frozenset({"eval", "source", "."})
+#: An assignment in an arithmetic expression: ``i=0``, ``i+=1``, ``i++``, ``--i``.
+_ARITHMETIC_ASSIGNMENT = re.compile(
+    r"(?:\+\+|--)\s*([A-Za-z_]\w*)|([A-Za-z_]\w*)\s*(?:\+\+|--|(?:[-+*/%&|^]|<<|>>)?=(?!=))")
 # What may start at a token boundary: a process substitution, a redirection
 # (with its file-descriptor number) or a control operator.
 _TOKEN = re.compile(
@@ -67,6 +92,10 @@ _TOKEN = re.compile(
     r"|(?P<operator>;;&|;;|;&|&&|\|\||\|&|[;&|\n])"
 )
 _PARAMETER = re.compile(r"\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
+#: An expansion that is one variable and nothing else: ``$T`` or ``${T}``.
+_VARIABLE = re.compile(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})\Z")
+#: What makes bash split an unquoted expansion into words or expand it as a pattern.
+_SPLIT_OR_GLOB = re.compile(r"[ \t\n*?\[]")
 # The parameter a ``${`` opens: a name, a positional number or a special
 # parameter (``?``, ``#``, ``-``, ...; the characters that are operators
 # after a parameter), after the ``!`` of ``${!x}``; or the ``#`` of
@@ -299,14 +328,22 @@ class _Scanner:
         self.pos = 0
         self.cwd = cwd
         self.group = group
+        # The variables the command assigned so far and their literal values:
+        # ``None`` for one whose value only the shell knows (an expansion in
+        # it, or an assignment that may not run).  Read back where a later
+        # word expands ``$NAME`` / ``${NAME}``, so ``T=tmp/x && cat > $T/f``
+        # names a literal path.
+        self.variables: dict[str, str | None] = {}
         self.commands: list[SimpleCommand] = []
         # The here-documents opened on the current line: (delimiter, strip
         # leading tabs, whether the substitutions of the body run).
         self.heredocs: list[tuple[str, bool, bool]] = []
         # What a ``|`` just piped, until the next command starts and reads it.
         self.pipe_from: SimpleCommand | Group | None = None
-        # Whether the command or group being scanned follows ``||``.
+        # Whether the command or group being scanned follows ``||``, and
+        # whether it follows ``&&`` (an assignment there may not run).
         self.after_or = False
+        self.after_and = False
         # Where in the text a ``((`` was found not to close as ``))``: shared
         # with the scanners of its arithmetic expressions, so no expression is
         # scanned twice (nested ones would double the work at each level).
@@ -316,9 +353,12 @@ class _Scanner:
         """Scan commands to the end of the text, or to the end of the group being scanned."""
         text = self.text
         current: SimpleCommand | Group | None = None
-        # Where the current and-or list and pipeline started, and whether the
-        # pipeline has several stages (each runs in a subshell of its own).
+        # Where the current and-or list and pipeline started, the variables
+        # known then, and whether the pipeline has several stages (each
+        # runs in a subshell of its own, as does a backgrounded list, so
+        # its assignments end with it: the variables are restored after it).
         list_cwd = pipeline_cwd = self.cwd
+        list_variables = pipeline_variables = dict(self.variables)
         piped = False
         while self.pos < len(text):
             char = text[self.pos]
@@ -336,6 +376,8 @@ class _Scanner:
                 self.end_command(current)  # a ``case`` pattern
                 current = None
             elif char == "(":
+                if isinstance(current, SimpleCommand) and self.array_value(current):
+                    continue
                 current = self.group_command("(")
             elif not isinstance(current, SimpleCommand) and (word := self.reserved_word()):
                 if word in _OPENERS:
@@ -351,18 +393,21 @@ class _Scanner:
                     self.end_command(current)
                     if operator in ("|", "|&"):
                         self.pipe_from, self.cwd, piped = current, pipeline_cwd, True
+                        self.variables = dict(pipeline_variables)
                         self.line_breaks()
                     else:
-                        if operator == "&":
-                            self.cwd = list_cwd  # the list ran in the background
+                        if operator == "&":  # the list ran in the background
+                            self.cwd, self.variables = list_cwd, dict(list_variables)
                         elif piped:
-                            self.cwd = pipeline_cwd
+                            self.cwd, self.variables = pipeline_cwd, dict(pipeline_variables)
                         pipeline_cwd, piped = self.cwd, False
+                        pipeline_variables = dict(self.variables)
                         if operator in ("&&", "||"):
                             self.line_breaks()
                         else:
-                            list_cwd = self.cwd
+                            list_cwd, list_variables = self.cwd, dict(self.variables)
                     self.after_or = operator == "||"
+                    self.after_and = operator == "&&"
                     current = None
                     if operator == "\n":
                         self.heredoc_bodies()
@@ -375,6 +420,30 @@ class _Scanner:
                         current = self.start_command()
                     current.words.append(self.substitution() if token else self.word())
         self.end_command(current)
+
+    def array_value(self, command: SimpleCommand) -> bool:
+        """Skip the ``(...)`` at the position when it is the value of the assignment before it.
+
+        ``T=(a b)`` and ``T+=(c)`` make ``T`` an array, whose words this
+        scan does not follow: the assignment's variable becomes unknown.
+        Returns whether the parenthesis was such a value.
+        """
+        if not command.words or not command.words[-1].text.endswith("="):
+            return False
+        if not _ASSIGNMENT.fullmatch(command.words[-1].text):
+            return False
+        text, depth = self.text, 0
+        while self.pos < len(text):
+            char = text[self.pos]
+            if char in "\"'":
+                self.pos = self.closing(self.pos + 1, char)
+            else:
+                depth += {"(": 1, ")": -1}.get(char, 0)
+                self.pos += 2 if char == "\\" else 1
+                if not depth:
+                    break
+        command.words[-1] = Word(command.words[-1].text, literal=False)
+        return True
 
     def start_command(self) -> SimpleCommand:
         """Start a simple command at the position; it reads the pipe a ``|`` left open."""
@@ -397,6 +466,9 @@ class _Scanner:
         arithmetic = opener == "(" and self.text.startswith("((", self.pos)
         end = self.arithmetic(self.pos + 2) if arithmetic else 0
         if end:
+            expression = self.text[self.pos + 2:end - 2]
+            for prefixed, assigned in _ARITHMETIC_ASSIGNMENT.findall(expression):
+                self.variables[prefixed or assigned] = None
             group = Group("((", self.cwd, self.group)
             self.pos = end
         elif opener == "(":
@@ -419,13 +491,30 @@ class _Scanner:
     def compound(self, word: str) -> Group:
         """Scan the group the reserved *word* opens to its closing word; return the group.
 
-        A ``cd`` in it holds after it, unless it may not have run.
+        A ``cd`` in it holds after it, unless it may not have run.  An
+        assignment in it holds for the commands after it in the group;
+        after a group that may not have run (a compound command, or a
+        brace group after ``&&`` or ``||``) the variable is unknown.
         """
         outer = self.group
         conditional = word != "{" or self.after_or or (outer is not None and outer.conditional)
+        may_not_run = conditional or self.after_and
+        if word in ("for", "select"):  # the loop variable takes the values it loops over
+            blanks = _BLANKS.match(self.text, self.pos)
+            loop_variable = _NAME.match(self.text, blanks.end() if blanks else self.pos)
+            if loop_variable:
+                self.variables[loop_variable[0]] = None
+            if word == "select":  # the line read at each prompt
+                self.variables["REPLY"] = None
+        before = dict(self.variables)
         group = self.group = Group(word, self.cwd, outer, conditional)
+        self.after_or = self.after_and = False
         self.command_list()
         self.group = outer
+        if may_not_run:
+            for name in before.keys() | self.variables.keys():
+                if self.variables.get(name) != before.get(name):
+                    self.variables[name] = None
         return group
 
     def subshell(self, kind: str) -> Group:
@@ -433,11 +522,12 @@ class _Scanner:
 
         A ``cd`` in it ends with it.
         """
-        saved = self.cwd, self.group, self.after_or
+        saved = self.cwd, self.group, self.after_or, self.after_and, self.variables
         group = self.group = Group(kind, self.cwd, self.group)
-        self.after_or = False
+        self.after_or = self.after_and = False
+        self.variables = dict(self.variables)  # its assignments end with it too
         self.command_list()
-        self.cwd, self.group, self.after_or = saved
+        self.cwd, self.group, self.after_or, self.after_and, self.variables = saved
         return group
 
     def substitution(self) -> Word:
@@ -448,17 +538,64 @@ class _Scanner:
         return Word(self.text[start:self.pos], literal=False)
 
     def end_command(self, command: SimpleCommand | Group | None) -> None:
-        """Follow a finished ``cd``; one that may not run leaves the directory unknown."""
+        """Follow a finished ``cd`` or assignment; one that may not run leaves its state unknown.
+
+        A bare assignment (``T=tmp/x``, several at once) or an ``export``
+        one records the variable's literal value for the words after it
+        (:attr:`variables`); a value the shell expands, or an assignment
+        after ``||`` or ``&&`` or in a compound command that may not run,
+        makes the variable unknown, as do the builtins that assign the
+        variables their operands name (``read T``, ``unset T``, ``declare
+        T=x``, ``printf -v T``...) or, named or not, their default
+        (``read`` fills REPLY, ``mapfile`` MAPFILE); after ``eval`` or
+        ``source`` no variable is known.  (An assignment in a pipeline segment or a
+        backgrounded list is recorded too and undone by
+        :meth:`command_list` when the segment or the list ends.)
+        """
         if not isinstance(command, SimpleCommand):
             return
         argv = command.argv()
         name = argv[0].text if argv else ""
+        group = command.group
+        conditional = self.after_or or (group is not None and group.conditional)
         if name in ("cd", "pushd"):
-            group = command.group
-            conditional = self.after_or or (group is not None and group.conditional)
             self.cwd = None if conditional else _cd(self.cwd, argv[1:])
         elif name == "popd":
             self.cwd = None
+        elif name in _SOURCING_BUILTINS:
+            self.variables = dict.fromkeys(self.variables)
+        elif name in _ASSIGNING_BUILTINS:
+            for word in argv[1:]:
+                if not word.text.startswith("-"):
+                    if named := _NAME.match(word.text):
+                        self.variables[named[0]] = None
+                elif name in _DECLARING_BUILTINS and "n" in word.text[1:]:
+                    self.variables = dict.fromkeys(self.variables)  # a name reference
+                elif name == "read":  # ``-aT``, ``-raT``: the array read into
+                    for at, letter in enumerate(word.text[1:], 2):
+                        if letter in _READ_VALUED:
+                            if letter == "a" and (named := _NAME.match(word.text, at)):
+                                self.variables[named[0]] = None
+                            break
+            if name in _DEFAULT_TARGETS:
+                self.variables[_DEFAULT_TARGETS[name]] = None
+        elif name == "printf":  # ``printf -v T ...`` assigns T
+            texts = [word.text for word in argv]
+            for index, text in enumerate(texts[1:], 1):
+                if text == "-v" and index + 1 < len(texts):
+                    self.variables[texts[index + 1]] = None
+                elif text.startswith("-v"):
+                    self.variables[text[2:]] = None
+        assigned = command.words if not argv else argv[1:] if name == "export" else []
+        for word in assigned:
+            match = _ASSIGNMENT.match(word.text)
+            if match is None:
+                continue
+            # ``T+=x`` appends to a value this scan may not know; ``T[0]=x``
+            # makes an array, whose ``$T`` is its first element.
+            known = (word.literal and not conditional and not self.after_and
+                     and not match["append"] and not match["subscript"])
+            self.variables[match["name"]] = word.text[match.end():] if known else None
 
     def line_breaks(self) -> None:
         """Skip the blanks and newlines after ``&&``, ``||`` or ``|``: the list goes on."""
@@ -537,8 +674,7 @@ class _Scanner:
             elif char == '"':
                 literal = self.double_quoted(parts) and literal
             elif char in "$`":
-                parts.append(self.expansion())
-                literal = False
+                literal = self.expanded(parts) and literal
             else:
                 glob = char in "*?[" or (char == "~" and self.pos == start)
                 literal = literal and not glob
@@ -562,13 +698,29 @@ class _Scanner:
                 parts.append(escaped.replace("\n", ""))
                 self.pos += 2
             elif char in "$`":
-                parts.append(self.expansion(True, True))
-                literal = False
+                literal = self.expanded(parts, True, True) and literal
             else:
                 parts.append(char)
                 self.pos += 1
         self.pos += 1
         return literal
+
+    def expanded(self, parts: list[str], quoted: bool = False, expands: bool = False) -> bool:
+        """Scan the expansion at the position into *parts*; return whether its value is known.
+
+        An expansion that is one variable the command assigned a literal
+        value (:attr:`variables`) contributes that value, and the word
+        stays literal; any other expansion is kept as written, as is an
+        unquoted one whose value bash would split into several words or
+        expand as a pattern (blanks, ``*``, ``?``, ``[`` in it).
+        """
+        expansion = self.expansion(quoted, expands)
+        variable = _VARIABLE.match(expansion)
+        value = self.variables.get(variable[1] or variable[2]) if variable else None
+        if value is not None and not quoted and _SPLIT_OR_GLOB.search(value):
+            value = None
+        parts.append(expansion if value is None else value)
+        return value is not None
 
     def expansion(self, quoted: bool = False, expands: bool = False) -> str:
         """Scan the expansion at the position and return its text.
@@ -713,6 +865,7 @@ class _Scanner:
         body = self.text[start + 1:self.pos].removesuffix("`")
         scanner = _Scanner(re.sub(r"\\([$`\\])", r"\1", body), self.cwd,
                            Group("`", self.cwd, self.group))
+        scanner.variables = dict(self.variables)
         scanner.command_list()
         self.commands.extend(scanner.commands)
 

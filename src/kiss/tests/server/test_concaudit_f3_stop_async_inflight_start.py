@@ -16,6 +16,10 @@ reached its post-await cleanup.
 The test runs a real fake ``cloudflared`` (a long-lived child that
 records its pid) and calls ``stop_async`` while the spawn is inside its
 fail-fast window, i.e. before the process is published.  No mocks.
+The window (``_SPAWN_FAILFAST_WINDOW``, 1 s in production) is widened
+for the test: the fake is a Python interpreter whose start-up alone
+takes seconds under load, and a stop that arrives after the window has
+elapsed meets a published tunnel instead of an in-flight spawn.
 """
 
 from __future__ import annotations
@@ -28,8 +32,12 @@ import unittest
 from pathlib import Path
 
 from kiss.core.processes import pid_alive
+from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import install_fake_cloudflared
+
+# Seconds the spawn keeps waiting for an early exit before it publishes.
+_FAILFAST_WINDOW = 10.0
 
 
 class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
@@ -59,6 +67,11 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
         )
         server._agent_server.use_private_tab_registry(tmp_dir / "tabs.json")
         server._loop = asyncio.get_running_loop()
+        production_window = web_server._SPAWN_FAILFAST_WINDOW
+        web_server._SPAWN_FAILFAST_WINDOW = _FAILFAST_WINDOW
+        self.addCleanup(
+            setattr, web_server, "_SPAWN_FAILFAST_WINDOW", production_window,
+        )
         # Stand in for the watchdog tick that (re)starts the tunnel;
         # stop_async cancels this task exactly like the real watchdog.
         server._watchdog_task = asyncio.create_task(
@@ -86,7 +99,7 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
 
         # Give the still-running executor start time to finish its
         # fail-fast window and reach the publish point.
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _FAILFAST_WINDOW + 5
         while pid_alive(child_pid) and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         self.assertIsNone(

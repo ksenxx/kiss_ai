@@ -505,3 +505,36 @@ def test_undivided_work_wants_two_tasks_each_with_a_piece_and_no_shared_piece() 
     assert undivided_work(["fix a.py", "nothing here"]) == (
         "task 2 of the fan-out names no file, directory, module, URL or `command` of its own"
     )
+
+
+def test_undivided_work_reports_every_overlap_and_ignores_shared_instructions() -> None:
+    """Audit 2026-11-01 (task 4aa14638): a 24-task fan-out was refused four times, one
+    overlap per refusal (a shared instructions file, then a shared module, then a shared
+    test directory), the 15 KB task list re-emitted each time."""
+    # every overlapping pair in one clause, a few shared pieces each
+    clause = undivided_work(["fix a.py and b.py", "fix a.py and c.py", "fix b.py, c.py and d.py"])
+    assert clause == ("tasks 1 and 2 of the fan-out both name a.py; "
+                      "tasks 1 and 3 of the fan-out both name b.py; "
+                      "tasks 2 and 3 of the fan-out both name c.py")
+    many = undivided_work(["fix a.py b.py c.py d.py e.py", "fix a.py b.py c.py d.py e.py f.py"])
+    assert many == "tasks 1 and 2 of the fan-out both name a.py, b.py, c.py (+2 more)"
+    # pieces every task of three or more names are shared instructions, not claims
+    shared = "Read tmp/INSTRUCTIONS.md and README.md first, run `uv run pytest -q` after; "
+    assert undivided_work([shared + "fix a.py", shared + "fix b.py", shared + "fix c.py"]) == ""
+    # ...but with two tasks a shared README.md is an overlap (every task is both tasks)
+    assert undivided_work(["Read README.md; fix a.py", "Read README.md; fix b.py"]) == (
+        "tasks 1 and 2 of the fan-out both name README.md")
+    # tmp/ paths never count, however many tasks name them
+    assert undivided_work(["fix a.py, notes in tmp/x/notes.md", "fix b.py; log to ./tmp/x/log"
+                           ", see /w/tmp/x/notes.md"]) == ""
+    assert undivided_work(["work in tmp/x/", "work in tmp/y/"]) == (
+        "task 1 of the fan-out names no file, directory, module, URL or `command` of its own "
+        "(pieces every task names, and tmp/ paths, do not count)")
+    # a directory both tasks name is no overlap when each names its own file under it
+    assert undivided_work(["tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/a.js",
+                           "tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/b.js"]) == ""
+    # one task on the whole directory, the other on a file in it: an overlap
+    assert undivided_work(["refactor src/x/", "fix src/x/b.py in src/x/"]) == (
+        "tasks 1 and 2 of the fan-out both name src/x/")
+    assert undivided_work(["refactor src/x/", "refactor src/x/"]) == (
+        "tasks 1 and 2 of the fan-out both name src/x/")

@@ -3894,6 +3894,25 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
     }
 
 
+def task_end_ms(task_id: str) -> int:
+    """Return when task *task_id*'s row was finished, in epoch milliseconds. Thread-safe.
+
+    The row's ``end_ts``: 0 while the task runs (or when the row is
+    missing).  A caller deciding whether a final save already committed
+    reads it under ``TASK_USAGE_LOCK``, which every finishing write and
+    late add to the row also takes.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT end_ts FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    return 0 if row is None else _safe_int(row["end_ts"], 0)
+
+
 def task_start_ms(task_id: str) -> int:
     """Return when task *task_id* started, in epoch milliseconds. Thread-safe.
 

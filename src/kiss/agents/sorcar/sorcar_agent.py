@@ -1238,6 +1238,10 @@ class SorcarAgent(RelentlessAgent):
         # A placeholder until ``_begin_task`` builds the run's own (a
         # subclass's scratch directory needs its own state, set after this).
         self._coding_gate = CodingGate(self._gate_shell, os.getcwd(), "tmp")
+        self._gate_charges_taken: set[str] = set()
+        """Keys of the gate review attempts charged through the printer's
+        late-charge bridge (:meth:`_charge_gate_usage`), which has no key
+        of its own to count a repeated charge once."""
         # Per-run settings taken from :meth:`run`'s arguments; the
         # defaults are what a run that never reached ``run`` reports.
         self._launch_model_name: str = ""
@@ -1897,7 +1901,7 @@ class SorcarAgent(RelentlessAgent):
         # event panels (see ``media/main.js``); outside a chat page the
         # call is a harmless no-op.  The every-10-steps cadence is
         # enforced by the SEA root layer (``BaseSea.tool_call_hook``,
-        # ``SUMMARY_DUE_REFUSAL``); a run without a SEA relies on the
+        # ``SUMMARY_DUE_NOTE``); a run without a SEA relies on the
         # SYSTEM.md rule alone.
         tools.append(summary)
         if self._is_parallel and (allowed is None or "run_parallel" in allowed):
@@ -3084,6 +3088,8 @@ class SorcarAgent(RelentlessAgent):
                 reattached = self._reattach_after_failed_merge(wt) if stranded else ""
             message += reattached
             merged = self._wt_for_repo(wt.repo_root) is None
+            if merged:
+                self._coding_gate.merged()
             self._broadcast_to_watchers({
                 "type": "worktree_result",
                 "action": "merge",
@@ -4422,8 +4428,17 @@ class SorcarAgent(RelentlessAgent):
         reviewer = None
         if with_reviewer and self._subagent_info is None:
             reviewer = gate_reviewer(self.model_name)
+        # The charge is bound to THIS run's ledger epoch and persisted row
+        # now, as a dispatch binds its fold (``dispatch_epoch``): the
+        # review runs on its own thread, and a Stop lets the run end
+        # without waiting for it (``CodingGate.run_stages``), so its
+        # charge can land after the row's final save, or after this
+        # reusable agent began its next task.
+        charge = functools.partial(
+            self._charge_gate_usage, epoch=self._usage_epoch(), task_id=_persisted_task_id(self),
+        )
         return CodingGate(self._gate_shell, self.work_dir or os.getcwd(), self._scratch_dir(),
-                          reviewer, self._charge_gate_usage, model_config=self.model_config)
+                          reviewer, charge, model_config=self.model_config)
 
     def _gate_shell(self, command: str, timeout: int) -> tuple[int | None, str]:
         """Run *command* for the gate where the run's tools run: ``(exit code, output)``.
@@ -4436,16 +4451,51 @@ class SorcarAgent(RelentlessAgent):
             return container_run(self._docker_bash(command, "finish gate", timeout))
         return run_on_host(command, self.work_dir or os.getcwd(), timeout)
 
-    def _charge_gate_usage(self, budget: float, tokens: int, steps: int, key: str) -> None:
-        """Attribute a gate review attempt's model spend to this run's accounting.
+    def _charge_gate_usage(self, budget: float, tokens: int, steps: int, key: str, *,
+                           epoch: Any = None, task_id: str = "") -> None:
+        """Attribute a gate review attempt's model spend to the run that asked for it.
+
+        A run with a persisted row and a server printer is charged
+        through the printer's ``charge_task_usage`` bridge
+        (:func:`~kiss.server.task_update.charge_side_channel_usage`),
+        as a dispatched sub-task's spend is: while the row is unfinished
+        the spend is banked on the live ledger epoch *epoch* and the
+        task's new totals go out as a ``usage_info``; once the row is
+        finished (a review a Stop left running, charged after the final
+        save) it is added to the row and its finished ancestors with a
+        persisted ``usage_info``, so the history and the Spend panel
+        show it.  Without a row or that printer the spend goes to the
+        ledger epoch directly.
+
+        The gate charges an attempt again, with the same *key*, when a
+        stop ends it (``CodingGate.review_verdict``: the attempt's
+        ``finally`` and then the ``except BaseException`` that lets the
+        stop propagate), so a key counts once: the ledger deduplicates
+        its own records by key, and the bridge, which has no key, is
+        given each key once (:attr:`_gate_charges_taken`, marked before
+        the charge, so no interleaving bills a key twice).  A charge the
+        bridge could not make (a database error, which it logs and never
+        raises) is not retried, as for every other late charge: the key
+        is consumed either way, so a stop's second charge never doubles a
+        first one that did land.
 
         Args:
             budget: The attempt's spend in USD.
             tokens: Its tokens.
             steps: Its model calls.
             key: The attempt's key: a retried charge counts once.
+            epoch: The run's ledger epoch, captured when the gate was
+                built (:meth:`_new_coding_gate`); ``None`` for the current one.
+            task_id: The run's persisted row id captured then, or ``""``.
         """
-        _attribute_sub_usage(self, budget, tokens, steps, key=key)
+        charge = getattr(self.printer, "charge_task_usage", None)
+        if task_id and callable(charge):
+            if key in self._gate_charges_taken:
+                return
+            self._gate_charges_taken.add(key)
+            charge(self, task_id, budget, tokens, steps, epoch=epoch)
+            return
+        _attribute_sub_usage(self, budget, tokens, steps, epoch=epoch, key=key)
 
     def _gate_tool_result(self, name: str, args: dict[str, Any], result: str,
                           refused: bool) -> None:

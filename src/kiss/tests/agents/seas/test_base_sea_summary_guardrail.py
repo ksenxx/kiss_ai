@@ -5,11 +5,14 @@
 """The root layer's ``summary`` cadence guardrail (``base_sea.py``).
 
 A run that has the ``summary`` tool must call it at every 10th step:
-from such a step on, ``BaseSea.tool_call_hook`` refuses every other
-tool (``finish`` excepted) until ``summary`` runs.  The tests drive a
-real :class:`ChatSorcarAgent` against the scripted local model with
-the hooks :func:`evaluate_sea` stages for the bare base, exactly as
-the daemon wires them.
+from such a step on, every other tool call (``finish`` excepted) still
+runs, but its result ends with ``SUMMARY_DUE_NOTE`` until ``summary``
+runs.  The step is the one the tool-result footer prints, so the rule
+the model reads and the one the gate applies are the same count, and a
+continuation session restarts both.  The tests drive a real
+:class:`ChatSorcarAgent` against the scripted local model with the
+hooks :func:`evaluate_sea` stages for the bare base, exactly as the
+daemon wires them.
 """
 
 from __future__ import annotations
@@ -18,13 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import (
+    SUMMARY_DUE_NOTE,
     SUMMARY_EVERY_STEPS,
     BaseSea,
 )
 from kiss.agents.sorcar.sea_commands import evaluate_sea
-from kiss.core.tool_verdict import REFUSED_PREFIX, REISSUE_REMINDER
+from kiss.core.llm_reply import LLMReply
 from kiss.tests.agents.seas.conftest import run_sea
-from kiss.tests.agents.seas.sea_contract import tool_result_text, tool_results
+from kiss.tests.agents.seas.sea_contract import tool_results
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 
 
@@ -40,31 +44,32 @@ def _run(tmp_path: Path, script: list[bytes], tool_profile: str) -> tuple[Any, l
     return run_sea(run, script, tmp_path, max_steps=20, tool_profile=tool_profile)
 
 
-def test_tenth_step_tool_call_is_refused_until_summary_runs(tmp_path: Path) -> None:
-    """Steps 1-9 run Bash; step 10's Bash is refused; summary at 11 clears it; 12's Bash runs."""
-    script = [_bash(step) for step in range(1, 11)]
+def test_tenth_step_tool_call_runs_and_asks_for_the_summary(tmp_path: Path) -> None:
+    """Steps 1-9 run Bash plain; step 10's Bash runs with the note; summary clears it.
+
+    The model that misses the summary at step 10 is not sent back a
+    step: the Bash ran (``step-10`` is in its result) and the note tells
+    it to summarise next.  Step 11 ignores the note too, so its result
+    carries the note again; the summary at step 12 clears the debt and
+    step 13's Bash is plain.
+    """
+    script = [_bash(step) for step in range(1, 12)]
     script.append(tool_call_body("summary", {"description": "- ten steps"}, prompt_tokens=700))
-    script.append(_bash(12))
+    script.append(_bash(13))
     script.append(finish_body("<p>done</p>", prompt_tokens=900))
     parsed, requests = _run(tmp_path, script, "shell+control")
     assert parsed["success"] is True
     results = tool_results(requests[-1])
-    assert len(results) == 12, results
+    assert len(results) == 13, results
+    note = SUMMARY_DUE_NOTE.format(every=SUMMARY_EVERY_STEPS).strip()
     for step in range(9):
         assert f"step-{step + 1}" in results[step], results[step]
-    # The refusal cannot be read as a success: it opens by saying the
-    # call did not run, and asks for the exact call back after the summary.
-    assert results[9].startswith(REFUSED_PREFIX.format(name="Bash")), results[9]
-    assert f"Step {SUMMARY_EVERY_STEPS} is a multiple of {SUMMARY_EVERY_STEPS}" in results[9]
-    assert "call summary(description=...) now" in results[9]
-    assert "re-issue this exact Bash call" in results[9]
-    assert "step-10" not in results[9]
-    # The summary's own result reminds the model of the refused call at
-    # the very step it chooses what to do next; the re-issued Bash is
-    # plain again.
-    assert tool_result_text(results[10]).strip() == REISSUE_REMINDER.format(name="Bash").strip()
-    assert "step-12" in results[11], results[11]
-    assert "Reminder" not in results[11], results[11]
+        assert "A summary is due" not in results[step], results[step]
+    assert "step-10" in results[9] and note in results[9], results[9]
+    assert "REFUSED" not in results[9], results[9]
+    assert "step-11" in results[10] and note in results[10], results[10]
+    assert "A summary is due" not in results[11], results[11]  # the summary's own result
+    assert "step-13" in results[12] and "A summary is due" not in results[12], results[12]
 
 
 def test_finish_is_allowed_on_a_tenth_step(tmp_path: Path) -> None:
@@ -114,21 +119,48 @@ def summary(description: str) -> str:
     return description
 
 
+def _reply(step: int) -> LLMReply:
+    return LLMReply("", [{"name": "Bash", "arguments": {}}], step=step)
+
+
 def test_the_summary_comes_due_again_at_step_twenty() -> None:
     """The debt recurs at every multiple of 10: after step 10's summary, step 20 owes one.
 
-    Driven through the hooks :func:`evaluate_sea` stages; the first ten
-    steps (no summary tool, steps 1-9, ``finish`` exempt) are pinned by
+    Driven through the hooks :func:`evaluate_sea` stages, with the
+    replies' steps as the agent reports them; the first ten steps (no
+    summary tool, steps 1-9, ``finish`` exempt) are pinned by
     ``tests/server/test_base_sea_root_layer.py``.
     """
     run = evaluate_sea([BaseSea()], "t")
     run.tools_hook([_bash, summary])
-    for _ in range(SUMMARY_EVERY_STEPS):
-        run.llm_call_hook([])
+    for step in range(1, SUMMARY_EVERY_STEPS + 1):
+        run.llm_response_hook(_reply(step))
     assert run.tool_call_hook("summary", {"description": "x"}).allowed
-    for _ in range(SUMMARY_EVERY_STEPS):
-        run.llm_call_hook([])
-    refused = run.tool_call_hook("Read", {"file_path": "/x"})
-    assert not refused.allowed and "re-issue this exact Read call" in refused.text
+    for step in range(SUMMARY_EVERY_STEPS + 1, 2 * SUMMARY_EVERY_STEPS + 1):
+        run.llm_response_hook(_reply(step))
+    noted = run.tool_call_hook("Read", {"file_path": "/x"})
+    assert noted.allowed and noted.text == SUMMARY_DUE_NOTE.format(every=SUMMARY_EVERY_STEPS)
     assert run.tool_call_hook("summary", {"description": "y"}).allowed
-    assert run.tool_call_hook("Read", {"file_path": "/x"}).allowed
+    assert run.tool_call_hook("Read", {"file_path": "/x"}).text == ""
+
+
+def test_a_continuation_session_restarts_the_count_and_drops_the_old_debt() -> None:
+    """A new session's footer starts at 1 again; a summary owed by the old session is not carried.
+
+    The 2026-11-01 audit found 158 of 159 cadence refusals of one task
+    fell on steps whose footer did not end in 9: the gate counted the
+    whole run while the footer restarted with each continuation.
+    """
+    run = evaluate_sea([BaseSea()], "t")
+    run.tools_hook([_bash, summary])
+    for step in range(1, 11):
+        run.llm_response_hook(_reply(step))
+    assert "A summary is due" in run.tool_call_hook("Bash", {"command": "ls"}).text
+    # The next session: its first reply is step 1 of a fresh footer.
+    run.llm_response_hook(_reply(1))
+    assert run.tool_call_hook("Bash", {"command": "ls"}).text == ""
+    for step in range(2, 10):
+        run.llm_response_hook(_reply(step))
+        assert run.tool_call_hook("Bash", {"command": "ls"}).text == ""
+    run.llm_response_hook(_reply(10))
+    assert "A summary is due" in run.tool_call_hook("Bash", {"command": "ls"}).text
