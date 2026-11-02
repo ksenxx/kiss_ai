@@ -135,8 +135,11 @@ def test_cd_moves_where_relative_targets_resolve(work: Path) -> None:
     # Relative to the work dir, log.txt does not exist: the shell creates it.
     out = tools.Bash("cat > log.txt <<'EOF'\nroot log\nEOF", "create")
     assert "REFUSED" not in out and (work / "log.txt").read_text() == "root log\n"
-    # After a cd only the shell can resolve, a relative target cannot be checked.
-    for command in ('D=sub; cd "$D" && cat >> log.txt <<\'EOF\'\ntwo\nEOF',
+    # A variable the command assigned a literal value is followed into its cd...
+    out = tools.Bash('D=sub; cd "$D" && cat >> log.txt <<\'EOF\'\ntwo\nEOF', "assigned")
+    assert out == _refusal(log)
+    # ...but after a cd only the shell can resolve, a relative target cannot be checked.
+    for command in ('cd "$D" && cat >> log.txt <<\'EOF\'\ntwo\nEOF',
                     "cd sub; cd -; cat >> log.txt <<'EOF'\ntwo\nEOF",
                     "pushd sub; popd; cat >> log.txt <<'EOF'\ntwo\nEOF",
                     # a cd that may not run: after ||, or in an if, a loop or a case
@@ -198,7 +201,7 @@ def test_a_target_only_the_shell_resolves_is_refused(work: Path) -> None:
     """A variable, a command substitution or a glob may name an existing file."""
     tools = UsefulTools(work_dir=str(work))
     for command, target in (
-        ('OUT=x; cat > "$OUT" <<EOF\nx\nEOF', "$OUT"),
+        ('cat > "$OUT" <<EOF\nx\nEOF', "$OUT"),  # the environment's, not the command's
         ('cat > "`pwd`/notes.md" <<EOF\nx\nEOF', "`pwd`/notes.md"),
         ('cat > "$(pwd)/notes.md" <<EOF\nx\nEOF', "$(pwd)/notes.md"),
         ("cat > ${OUT:-notes}.md <<EOF\nx\nEOF", "${OUT:-notes}.md"),
@@ -209,6 +212,12 @@ def test_a_target_only_the_shell_resolves_is_refused(work: Path) -> None:
     assert sorted(path.name for path in work.iterdir()) == [
         "my notes.md", "notes.md", "sub", "sub dir"]
     assert (work / "notes.md").read_text() == "old\n"
+    # A variable the command assigns names its file: an existing one is refused as
+    # such, a new one is created.
+    assert tools.Bash('OUT=notes.md; cat > "$OUT" <<EOF\nx\nEOF', "assigned") == (
+        _refusal(work / "notes.md"))
+    assert "REFUSED" not in tools.Bash('OUT=x; cat > "$OUT" <<EOF\nx\nEOF', "assigned")
+    assert (work / "x").read_text() == "x\n"
 
 
 def test_parallel_and_background_commands_are_guarded(work: Path) -> None:

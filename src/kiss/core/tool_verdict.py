@@ -34,7 +34,8 @@ class Verdict:
         allowed: Whether the call runs (the reply is acted on).
         text: The tool result the model reads instead when the call is
             refused, or the run's result when the verdict ends the run;
-            empty when allowed.
+            when the call is allowed, a note its result ends with
+            (:func:`allow_with_note`), empty for a plain ``ALLOW``.
         ends_run: Whether the run ends now, with *text* as its result
             (:func:`end_run`); the refused call does not run.
         success: Whether a run ended by this verdict counts as a success.
@@ -48,6 +49,25 @@ class Verdict:
 
 ALLOW = Verdict(True)
 """The verdict that lets the tool call run."""
+
+
+def allow_with_note(text: str) -> Verdict:
+    """Return the verdict that lets the tool call run and appends *text* to its result.
+
+    For a rule the model should act on at its next step without losing
+    this one: the call runs as asked, and the model reads *text* at the
+    end of the result (the agent appends it after its result hook has
+    read the plain result).
+
+    Args:
+        text: The note the result ends with; must not be blank.
+
+    Raises:
+        ValueError: When *text* is not a non-blank string.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("allow_with_note() needs the non-blank text appended to the result")
+    return Verdict(True, text)
 
 
 class ToolRedirect(Exception):  # noqa: N818 - a control-flow signal, not an error

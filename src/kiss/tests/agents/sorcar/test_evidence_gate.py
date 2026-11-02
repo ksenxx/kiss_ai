@@ -32,8 +32,16 @@ def test_hedges_and_writing_commands_are_recognised() -> None:
         assert eg.writes_files({"command": command}), command
     for command in ("pytest -q", "ls -la", "cmd 2>&1 | head", "cmd > /dev/null", "cmd &> /dev/null",
                     "grep -n x f", "git status", "git diff", "docker run --rm img pytest",
-                    "perform -x"):
+                    "perform -x",
+                    # a test or probe output saved under a scratch directory is a check
+                    "pytest -q > tmp/out.txt 2>&1", "pytest -q >> ./tmp/4aa/log.txt",
+                    "python3 probe.py > /home/u/repo/tmp/probe/result.json",
+                    'cmd > "tmp/x y.txt"', "cmd > /tmp/out.txt", "cmd >tmp/out"):
         assert not eg.writes_files({"command": command}), command
+    # ...but not one into a file whose name only starts with tmp, or one tmp file among others
+    for command in ("cmd > tmpfile", "cmd > mytmp/x", "cmd > tmp/a > out.txt",
+                    "cmd > tmp/a; cmd > b"):
+        assert eg.writes_files({"command": command}), command
     assert eg.writes_files({"commands": '["ls", "echo 1 > f"]'})
     assert not eg.writes_files({"commands": '["ls", "pwd"]'})
     assert eg.writes_files({"commands": "echo 1 > f"})  # not JSON: one command
@@ -70,6 +78,12 @@ def test_gate_refuses_once_with_the_reason_then_passes() -> None:
     gate.observe("Read", {"file_path": "a.py"})  # neither a change nor a check
     assert not gate.unchecked_change
     assert gate.verdict(done) is None
+    # waiting on a background check reads its outcome: it clears the change; a tail does not
+    gate.observe("Edit", {"file_path": "a.py"})
+    gate.observe("bash_job", {"job_id": "j1", "action": "tail"})
+    assert gate.unchecked_change
+    gate.observe("bash_job", {"job_id": "j1", "action": "wait", "timeout_seconds": 600})
+    assert not gate.unchecked_change
     # a hedged summary is refused even without a change; both reasons are listed together
     hedged = {"success": "true", "summary_in_html": "It should work but I could not test it."}
     verdict = gate.verdict(hedged)

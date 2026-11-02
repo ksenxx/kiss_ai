@@ -62,13 +62,15 @@ _ONLY_CHECKS = (
     rf"(?:\s+{_MAKE_WORD})+\s*(?:[;&|)#\n]|\d*[<>]|\Z)"
 )
 
-#: Shell commands that change files: redirections (not to ``/dev/null``), here
-#: documents, copy/move/delete/patch and in-place editors (``rm`` the command,
-#: not the ``--rm`` option), ``--fix`` runs and builds (Make, CMake, Ninja),
-#: unless every Make target is a check (``make test``).  Package tools are
-#: read word by word instead (:data:`WRITING_SUBCOMMANDS`).
+#: Shell commands that change files: redirections (not to ``/dev/null`` and
+#: not into a ``tmp/`` directory: a test or probe output saved under the
+#: scratch directory is a check, not a change of the work), here documents,
+#: copy/move/delete/patch and in-place editors (``rm`` the command, not the
+#: ``--rm`` option), ``--fix`` runs and builds (Make, CMake, Ninja), unless
+#: every Make target is a check (``make test``).  Package tools are read word
+#: by word instead (:data:`WRITING_SUBCOMMANDS`).
 WRITING_COMMAND = re.compile(
-    r"(?<![<>&\d])>{1,2}(?!&)\s*(?!/dev/null)\S"
+    r"(?<![<>&\d])>{1,2}(?![&>])\s*(?!/dev/null)(?![\"']?(?:\S*/)?tmp/)\S"
     r"|<<"
     r"|--fix\b"
     r"|\b(?:tee|cp|mv|rsync|install|patch|touch|mkdir|rmdir|unlink|shred|dd|truncate"
@@ -115,6 +117,8 @@ _BLANK = re.compile(r"\s")
 EDIT_TOOLS = frozenset({"Edit", "Write"})
 #: Tool names that run shell commands.
 SHELL_TOOLS = frozenset({"Bash", "run_commands_parallel"})
+#: The ``bash_job`` action that reads a background command's outcome.
+JOB_WAIT = "wait"
 
 #: The refusal; ``{reasons}`` is the numbered list of what is missing.
 EVIDENCE_VERDICT = (
@@ -248,6 +252,10 @@ class EvidenceGate:
             self.unchecked_change = True
         elif name in SHELL_TOOLS:
             self.unchecked_change = writes_files(args)
+        elif name == "bash_job" and str(args.get("action", "tail")).strip().lower() == JOB_WAIT:
+            # The outcome of a background check (a test suite, a build) is
+            # read here, as a foreground shell command's would be.
+            self.unchecked_change = False
 
     def reasons(self, args: dict[str, Any]) -> list[str]:
         """The reasons a ``finish`` with *args* is unsupported (empty when it is not).

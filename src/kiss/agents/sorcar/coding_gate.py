@@ -179,6 +179,12 @@ MERGE_SUMMARY_PLACEHOLDER = (
     "(not written yet: this review runs at the merge of the task's worktree, before the "
     "agent's finish)"
 )
+#: What the reviewer reads as the evidence at a merge-time review: the finish
+#: call, not yet made, is what names the commands.
+MERGE_EVIDENCE_PLACEHOLDER = (
+    "(not named yet: the finish call after this merge names them; judge the diff and the "
+    "verifier, and do not report the missing summary or evidence as a gap)"
+)
 
 #: The reviewer's brief: the task, the agent's summary, its verifier and
 #: evidence, and the diff; one ``VERDICT:`` line and the numbered gaps.
@@ -192,7 +198,10 @@ output shown, which is from its most recent run before this review. The evidence
 lists the commands the engineer names as backing the claim, each checked to have run in \
 this session and exited 0; a command is evidence of a requirement only when it tests that \
 requirement: `echo`, `cat`, a script the engineer wrote themselves, or the words of the \
-task prove nothing about the work on their own. Do not invent problems and never demand \
+task prove nothing about the work on their own. When the summary and evidence sections \
+say they are not written yet (a review at the merge of the worktree, before the finish), \
+judge the diff and the verifier against the task and do not report their absence as a \
+gap. Do not invent problems and never demand \
 something the task does not ask for: report only a requirement that is not met, not \
 checked, or checked wrongly, each with the evidence that shows it. Take the task \
 literally (exact names, formats, values, thresholds, edge cases, examples). A symptom, \
@@ -318,9 +327,24 @@ STARTED_JOB = re.compile(r"(?:^Started|left running as) background job (\w+)", r
 JOB_EXITED = re.compile(r"^(?:status|Job \w+): exited (?:with code )?(-?\d+)$", re.MULTILINE)
 #: The line that opens the log section of a ``bash_job`` report (both tools).
 JOB_LOG_SECTION = re.compile(r"^--- last \d+ log lines ---$", re.MULTILINE)
-#: The section header of one command of a ``run_commands_parallel`` report.
-PARALLEL_EXIT = re.compile(
-    r"^### \[(\d+)/\d+\] (?:exit (-?\d+)|(TIMED OUT)|killed by signal (\d+))", re.MULTILINE)
+#: The outcome of one command of a ``run_commands_parallel`` report:
+#: ``[i/N] exit 0 in 1.2s``, ``[i/N] TIMED OUT``, ``[i/N] killed by signal 9``.
+_PARALLEL_STATUS = r"\[(\d+)/\d+\] (?:exit (-?\d+)|(TIMED OUT)|killed by signal (\d+))"
+#: The section header of one command of the report (``### [i/N] exit 0 in 1.2s``).
+PARALLEL_EXIT = re.compile("^### " + _PARALLEL_STATUS, re.MULTILINE)
+#: The status line of one command in the preamble of the report's digest
+#: (``[i/N] exit 0 in 1.2s: <command>``; the full report was written to a
+#: file, ``useful_tools.digest_parallel_report``).  Only the preamble, before
+#: the first ``### `` section, is read for these: a command's own output may
+#: hold such a line (a nested parallel run) and must not override its exit.
+PARALLEL_DIGEST_STATUS = re.compile("^" + _PARALLEL_STATUS + r" in [\d.]+s: ", re.MULTILINE)
+#: Where the sections of a ``run_commands_parallel`` report or digest start.
+PARALLEL_SECTIONS = "\n### "
+#: The first line of a ``run_parallel`` digest (the children's YAML was
+#: written to a file, ``agent_dispatch.digest_agent_results``), and one
+#: sub-task's line of it with its outcome.
+AGENT_DIGEST_HEADER = re.compile(r"\A\d+ sub-tasks; the whole result is in ")
+AGENT_DIGEST_LINE = re.compile(r"^\[\d+/\d+\] (ok|FAILED|running)\b", re.MULTILINE)
 #: A timed-out ``Bash`` result: the host tool's and the container tool's wording.
 TIMED_OUT = re.compile(r"^Error: [Cc]ommand (?:execution timeout|timed out)")
 #: A ``Bash`` result of a command the tool did not run (a guard's refusal).
@@ -514,8 +538,15 @@ def dispatch_successes(text: str) -> list[bool]:
 
     Returns:
         One flag per sub-task result found; empty for a job notice (the
-        sub-task still runs), an error, or any other text.
+        sub-task still runs), an error, or any other text.  A
+        ``run_parallel`` digest (the YAML of the children was too long
+        for the conversation and went to a file) is read from its
+        ``[i/N] ok`` / ``[i/N] FAILED`` lines; a child still running has
+        no flag.
     """
+    if AGENT_DIGEST_HEADER.match(text):
+        return [outcome == "ok" for outcome in AGENT_DIGEST_LINE.findall(text)
+                if outcome != "running"]
     try:
         loaded = yaml.safe_load(text)
     except yaml.YAMLError:
@@ -567,8 +598,10 @@ def result_exit_codes(name: str, args: dict[str, Any], text: str,
     if name == "run_commands_parallel":
         if INTERRUPTED.match(text):
             return [(command, "interrupted") for command in shell_commands(args)]
+        preamble = text.split(PARALLEL_SECTIONS, 1)[0]
+        found = PARALLEL_EXIT.findall(text) + PARALLEL_DIGEST_STATUS.findall(preamble)
         sections = {int(index): code or ("timeout" if timed_out else f"killed by signal {signal}")
-                    for index, code, timed_out, signal in PARALLEL_EXIT.findall(text)}
+                    for index, code, timed_out, signal in found}
         return [(command, sections[index])
                 for index, command in enumerate(shell_commands(args), 1) if index in sections]
     return []
@@ -1052,6 +1085,8 @@ class CodingGate:
             name: The tool name.
             args: Its arguments.
         """
+        if name in EDIT_TOOLS and self.is_scratch(args.get("file_path")):
+            return  # a scratch note (tmp/PROGRESS.md, a probe): no change of the work
         self.evidence.observe(name, args)
         if name in EDIT_TOOLS or name in SHELL_TOOLS or name in DISPATCH_TOOLS:
             self.resolve_base()
@@ -1106,6 +1141,30 @@ class CodingGate:
         self.changed_since_review = True
         self.reviewed_by_agent = False
 
+    def merged(self) -> None:
+        """Note that the worktree's merge went through: the finish is gated afresh.
+
+        The rounds the merge spent and the findings of its review (met,
+        or time-barred by the round cap) stay with the merge: the finish
+        is refused on rounds of its own and reviewed again only when a
+        file changes, so findings older than the merge never end as its
+        caveats.
+        """
+        self.gate_rounds = 0
+        self.open_findings = []
+
+    def is_scratch(self, path: Any) -> bool:
+        """Whether *path* (as an ``Edit`` / ``Write`` names it) is a scratch file of the run.
+
+        One under a ``tmp`` directory inside the work dir: a progress log,
+        a probe, the verifier.  Writing one changes no work.
+        """
+        if not isinstance(path, str) or not path:
+            return False
+        relative = os.path.relpath(os.path.join(self.work_dir, path), self.work_dir)
+        parts = relative.replace("\\", "/").split("/")
+        return not relative.startswith("..") and "tmp" in parts[:-1]
+
     def result(self, name: str, args: dict[str, Any], text: str, refused: bool) -> None:
         """Record a tool call's result (the agent's ``tool_result_hook``).
 
@@ -1159,6 +1218,11 @@ class CodingGate:
         if review:
             if any(successes) and changes == self.changes:
                 self.reviewed_by_agent = True
+                if self.changed_since_review:
+                    # A review of a diff later than the gate's own: its
+                    # findings and the rounds spent on them are stale.
+                    self.gate_rounds = 0
+                    self.open_findings = []
         else:
             self.delegated = True
             self.changed()
@@ -1263,8 +1327,9 @@ class CodingGate:
         changed since is refused with them (:data:`MERGE_UNANSWERED_VERDICT`:
         a merge has no summary to answer them in).  The refusal counts as
         a gate round like a finish's; past the cap the merge goes through
-        and the finish delivers the open findings as caveats.  At the
-        finish nothing is reviewed again unless a file changed.
+        and its rounds and findings stay with it (:meth:`merged`): the
+        finish is gated afresh and reviewed again only when a file
+        changed.
 
         Args:
             task: The task statement.
@@ -1418,7 +1483,8 @@ class CodingGate:
         """
         commands = evidence_commands(args.get("evidence"))
         if not commands:
-            return "(none named)"
+            at_merge = args.get("summary_in_html") == MERGE_SUMMARY_PLACEHOLDER
+            return MERGE_EVIDENCE_PLACEHOLDER if at_merge else "(none named)"
         return "\n".join(f"- exit {self.exit_codes.get(c.strip(), 'not run')}: `{c[:300]}`"
                          for c in commands[:30])
 

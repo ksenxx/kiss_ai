@@ -760,9 +760,13 @@ What a prompt job's run is given, and what the scheduler does around it
   job (`Every morning run /slack ...`) gets the same block in front of its argument.
 - *Window start and the `covered_until` watermark.* Each job stores `covered_until`,
   the moment up to which its runs have covered: set to the job's creation time when it
-  is created and moved to the run's start time after every run that ended ok or
-  `[SILENT]`. The window start is that watermark, so a run after a failed or missed
-  one covers everything since the last successful one, not just one interval; a job
+  is created and moved to the run's start time after every run that ended silent
+  (`[SILENT]`, `NO_REPLY` or an empty result) or whose result every delivery target
+  received (a run that ended ok but
+  whose delivery to a target failed covers nothing, so the retry reports the same
+  news again rather than only what is newer). The window start is that watermark, so
+  a run after a failed, missed or undelivered one covers everything since the last
+  successful one, not just one interval; a job
   stored before the watermark existed falls back to one schedule interval back (the
   gap between its last and next run times; when that is unknown the block says "not
   set"). A plain prompt job runs the bundled `cron_prompt_sea.py`, whose

@@ -28,10 +28,12 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import (
     ALLOW,
-    SUMMARY_DUE_REFUSAL,
+    SUMMARY_DUE_NOTE,
     SUMMARY_EVERY_STEPS,
     BaseSea,
+    LLMReply,
     Verdict,
+    allow_with_note,
     refuse,
 )
 from kiss.agents.sorcar import sea_commands
@@ -42,6 +44,7 @@ from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT
 from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD, SETTING_FIELDS, apply_sea, load_layers
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
+    base_llm_response_hook,
     base_prompt,
     base_system_prompt,
     base_tool_call_hook,
@@ -221,25 +224,30 @@ def summary(description: str) -> str:
     return description
 
 
-def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
-    """At a 10th step every tool but ``summary`` and ``finish`` waits for a summary.
+def _reply(step: int) -> LLMReply:
+    return LLMReply("", [{"name": "Bash", "arguments": {"command": "ls"}}], step=step)
 
-    ``finish`` is exempt at every step: a one-step run (or the agent's
-    implicit-finish probe) must be able to end without a summary first.
+
+def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
+    """At a 10th step every tool but ``summary`` and ``finish`` runs with the summary note.
+
+    The step is the reply's (the footer's count).  ``finish`` is exempt
+    at every step: a one-step run (or the agent's implicit-finish probe)
+    must be able to end without a summary first.
     """
     sea = BaseSea()
     sea.tools([summary, house_tool])
     assert sea.has_summary_tool
-    due = SUMMARY_DUE_REFUSAL.format(step=10, every=SUMMARY_EVERY_STEPS, name="Bash")
+    due = allow_with_note(SUMMARY_DUE_NOTE.format(every=SUMMARY_EVERY_STEPS))
     # Nothing ran yet: both the probe and a real finish pass.
     assert base_tool_call_hook([sea], "finish", {}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
-    for _ in range(9):
-        sea.llm_call_hook([])
+    for step in range(1, 10):
+        assert base_llm_response_hook([sea], _reply(step)) == ALLOW
         assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
-    sea.llm_call_hook([])
+    assert base_llm_response_hook([sea], _reply(10)) == ALLOW
     assert sea.step == 10 and sea.summary_due
-    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == refuse(due)
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == due
     assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {}) == ALLOW
     assert base_tool_call_hook([sea], "summary", {"description": "- ran ls"}) == ALLOW
@@ -251,10 +259,34 @@ def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
     # drops it) is under no rule at all; ``tools`` restarts the count.
     sea.tools([house_tool])
     assert not sea.has_summary_tool and sea.step == 0
-    for _ in range(10):
-        sea.llm_call_hook([])
+    for step in range(1, 11):
+        base_llm_response_hook([sea], _reply(step))
     assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
+
+
+def test_tool_call_hook_fold_keeps_the_notes_of_allowing_verdicts() -> None:
+    """The chain's allowance carries every SEA's note, in order; a refusal still wins."""
+
+    class Notes(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return allow_with_note(" note-a") if name == "Bash" else ALLOW
+
+    class MoreNotes(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return allow_with_note(" note-b")
+
+    class Refuses(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return refuse("no") if name == "Read" else ALLOW
+
+    both = Verdict(True, " note-a note-b")
+    assert base_tool_call_hook([Notes(), MoreNotes()], "Bash", {}) == both
+    assert base_tool_call_hook([Notes(), MoreNotes()], "Edit", {}) == Verdict(True, " note-b")
+    assert base_tool_call_hook([Notes(), Refuses()], "Read", {}) == refuse("no")
+    assert base_tool_call_hook([Notes(), Refuses()], "Write", {}) == ALLOW
+    with pytest.raises(ValueError, match="non-blank"):
+        allow_with_note(" ")
 
 
 def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:

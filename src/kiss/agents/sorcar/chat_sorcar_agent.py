@@ -36,6 +36,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
     _task_has_transcript_events,
+    task_end_ms,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sea_commands import named_commands_help
@@ -135,6 +136,38 @@ def _safe_broadcast(broadcast: Any, event: dict[str, Any]) -> None:
         broadcast(event)
     except Exception:
         logger.warning("%s broadcast raised", event.get("type"), exc_info=True)
+
+
+def _retried_cleanup_step(
+    first: BaseException | None, step: str, action: Callable[[], None],
+) -> BaseException | None:
+    """Run the idempotent run-cleanup *step*; retry it once when an exception cut it short.
+
+    For a step whose completion the accounting depends on: the keyed
+    classifier fold (exactly once however often it runs) and the row's
+    final result and usage save (updates of the row by id, re-reading
+    the ledger).  The runner's Stop injects ``KeyboardInterrupt`` into
+    a live task thread at most twice (``_force_stop_thread``), so the
+    retry of a step the second injection landed in runs to its end
+    instead of leaving the row's cost at zero or the classifier's spend
+    unbanked (review of 2026-11-02, findings 2 and 3).  Each exception is
+    logged (:func:`~kiss.agents.sorcar.sorcar_agent._first_cleanup_error`).
+
+    Args:
+        first: The first exception an earlier step raised, or ``None``.
+        step: The step's name, for the log.
+        action: The step.
+
+    Returns:
+        The first exception any step raised so far, or ``None``.
+    """
+    for attempt in ("", " (retry)"):
+        try:
+            action()
+            return first
+        except BaseException as exc:  # noqa: BLE001 — held, see run()'s cleanup
+            first = _first_cleanup_error(first, step + attempt, exc)
+    return first
 
 
 def _retire_printer_task(agent: Any, run_printer: Any, task_key: str) -> None:
@@ -426,6 +459,8 @@ class ChatSorcarAgent(SorcarAgent):
         prompt: str = "",
         parsed: dict[str, Any] | None = None,
         result_summary: str = "",
+        *,
+        unless_finished: bool = False,
     ) -> None:
         """Stamp the ledger totals and the end time on the row (``TASK_USAGE_LOCK`` held).
 
@@ -443,7 +478,18 @@ class ChatSorcarAgent(SorcarAgent):
             parsed: The run's result mapping (:func:`_parse_result`), or
                 ``None``.
             result_summary: The extracted human-readable summary text.
+            unless_finished: Write nothing when the row already carries
+                an end time: the retry of a save a Stop interrupted
+                (``run``'s cleanup) must not replace the totals a
+                completed first attempt wrote, since a late charge may
+                have been added to the finished row meanwhile
+                (:func:`~kiss.server.task_update.charge_side_channel_usage`),
+                which the ledger snapshot does not contain.  Read under
+                the same lock, so no late add can fall between the check
+                and the write.
         """
+        if unless_finished and task_end_ms(task_id) > 0:
+            return
         # One coherent triple (see usage_snapshot): three property reads
         # could tear across a concurrent abandoned-subagent reclaim.
         final_cost, final_tokens, final_steps = self.usage_snapshot()
@@ -1077,10 +1123,11 @@ class ChatSorcarAgent(SorcarAgent):
                 # ``SorcarAgent.run``'s cleanup folds the pre-run classifier's
                 # spend, but a run stopped or failing before ``super().run``
                 # never gets there.  The fold is keyed and consumes the
-                # record, so after a normal run it is a no-op.
-                self._fold_classifier_usage()
-            except BaseException as exc:  # noqa: BLE001 — held, see above
-                first = _first_cleanup_error(first, "_fold_classifier_usage", exc)
+                # record, so after a normal run it is a no-op; a Stop
+                # landing in it gets it one retry (_retried_cleanup_step).
+                first = _retried_cleanup_step(
+                    first, "_fold_classifier_usage", self._fold_classifier_usage,
+                )
             finally:
                 self._last_result_summary = result_summary
                 try:
@@ -1102,7 +1149,18 @@ class ChatSorcarAgent(SorcarAgent):
                         # runner that would otherwise persist it, so it
                         # is finalised here even under ``_skip_persistence``.
                         if not _skip_persistence or self._last_task_id != task_id:
-                            try:
+                            # One step, retried once when a Stop lands in
+                            # it (_retried_cleanup_step): both writes are
+                            # updates of the row by id, so the retry
+                            # cannot double anything, and without it a
+                            # row left unfinished would keep cost 0.  The
+                            # retry leaves a row the first attempt did
+                            # finish alone (a Stop right after its write).
+                            attempts = 0
+
+                            def final_save() -> None:
+                                nonlocal attempts
+                                attempts += 1
                                 # The agent's own verdict (sub-agents and
                                 # CLI runs, which no server runner
                                 # persists) rides on the row with the
@@ -1154,8 +1212,9 @@ class ChatSorcarAgent(SorcarAgent):
                                 locked_call(
                                     TASK_USAGE_LOCK, self._save_final_usage, extra_payload,
                                     task_id, agent_prompt, parsed, result_summary,
+                                    unless_finished=attempts > 1,
                                 )
-                            except BaseException as exc:  # noqa: BLE001
-                                first = _first_cleanup_error(first, "final save", exc)
+
+                            first = _retried_cleanup_step(first, "final save", final_save)
             if first is not None and completed:
                 raise first

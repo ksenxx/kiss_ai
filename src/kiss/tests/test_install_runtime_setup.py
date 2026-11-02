@@ -183,16 +183,24 @@ class Sandbox:
         self,
         commands: str,
         env: dict[str, str] | None = None,
-        timeout: float = 60,
+        timeout: float = 120,
     ) -> subprocess.CompletedProcess[str]:
-        """Run *commands* after the block, under bash, in the sandbox."""
+        """Run *commands* after the block, under bash, in the sandbox.
+
+        The block waits ``KISS_WEB_START_TIMEOUT`` seconds for the
+        stand-in daemon to bind its port; 60 by default here because
+        that daemon is a bash script that starts a Python interpreter,
+        and on a machine running the whole suite it has missed a 20 s
+        wait (tests that expect the wait to expire set a shorter one).
+        The subprocess *timeout* stays above it.
+        """
         script = (
             "set -eo pipefail\n"
             f"export HOME={str(self.home)!r}\n"
             f"export PATH={str(self.stubs)!r}:{str(self.tools)!r}\n"
             f"PROJECT_DIR={str(REPO)!r}\n"
             f"export KISS_WEB_PORT={self.port}\n"
-            'export KISS_WEB_START_TIMEOUT="${KISS_WEB_START_TIMEOUT:-20}"\n'
+            'export KISS_WEB_START_TIMEOUT="${KISS_WEB_START_TIMEOUT:-60}"\n'
             + _runtime_block()
             + "\n"
             + textwrap.dedent(commands)

@@ -1586,12 +1586,27 @@ def test_bench_verdict_tells_expected_puzzles_from_other_blocks(tool, server):
     assert bench.verdict(tool, content, "Error navigating: boom").startswith("ERROR ")
 
 
-def test_live_cloudflare_protected_site_loads(tool):
+# What the live Cloudflare attempts give the challenge to clear.  The
+# product's 12 s (``web_stealth._CHALLENGE_WAIT_SECS``) is the agent's
+# budget for a page that keeps its interstitial; the test below checks
+# the rating, not the budget.  Traced under the full parallel run
+# (2026-11-02, 3 of 35 attempts; never alone, under CPU load alone or
+# under Docker container churn alone): the challenge page's first
+# request to Cloudflare stalls and the page shows no Turnstile frame at
+# all until Cloudflare's own retry reloads it (``?__cf_chl_rt_tk=``)
+# after 45 s; the checkbox then shows, is ticked, and the content came
+# at 53-56 s.  Every other attempt cleared in 6-8 s, as alone.  One such
+# retry plus the usual clear fits in 75 s.
+_LIVE_CHALLENGE_WAIT_SECS = 75.0
+
+
+def test_live_cloudflare_protected_site_loads(tool, monkeypatch):
     """A real Cloudflare-protected publisher that challenged this network loads.
 
-    journals.sagepub.com showed the Turnstile checkbox to every earlier
+    journals.sagepub.com shows the Turnstile checkbox to every
     configuration from this machine; with a fresh profile (no clearance
-    cookie) the page must come back as content.  Skipped offline.
+    cookie) the box must be ticked and the page come back as content.
+    Skipped offline.
     """
     try:
         import socket
@@ -1599,10 +1614,10 @@ def test_live_cloudflare_protected_site_loads(tool):
         socket.create_connection(("journals.sagepub.com", 443), timeout=5).close()
     except OSError:
         pytest.skip("no Internet access")
-    # Two fresh browsers at most: the live challenge runs its own
-    # JavaScript inside the 12 s wait, which a host busy with a parallel
-    # test run can starve; a profile that is always challenged still
-    # fails on the second try.
+    monkeypatch.setattr(web_stealth, "_CHALLENGE_WAIT_SECS", _LIVE_CHALLENGE_WAIT_SECS)
+    # Two fresh browsers at most: a profile that is always challenged
+    # (the browser rated a bot, its tick refused) still fails on the
+    # second try.
     tree = ""
     for _attempt in range(2):
         tool.close()
