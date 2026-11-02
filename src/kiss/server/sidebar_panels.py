@@ -830,6 +830,11 @@ def _machine_reply(
         reply = machines.link_for(machine, lane).request(
             payload, reply_type, timeout, errors=errors,
         )
+        # The link stamped the command with a generation of its own,
+        # which the machine echoes on some replies (``myModelsData``,
+        # ``machines``): the link's, not the page's (``getModels``'s
+        # forwarder puts the page's back).
+        reply.pop("generation", None)
         if cmd["type"] == "saveConfig":
             _adopt_machine_password(machine, reply)
     except machines.MachineError as exc:

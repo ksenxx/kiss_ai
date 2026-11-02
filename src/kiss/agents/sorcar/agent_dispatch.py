@@ -72,6 +72,7 @@ from kiss.agents.sorcar.fanout_guard import (
     is_review_task,
     parse_tasks_json,
     review_budget,
+    same_family_conflict,
 )
 from kiss.agents.sorcar.machines import find_machine, is_local_machine, load_machines
 from kiss.agents.sorcar.run_config import (
@@ -100,6 +101,7 @@ from kiss.agents.sorcar.useful_tools import (
 )
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.kiss_error import BudgetExceededError
+from kiss.core.models.model_families import other_family_model, same_family
 
 logger = logging.getLogger(__name__)
 
@@ -1027,6 +1029,7 @@ def result_summary(result: TaskResult) -> str:
 
 def format_dispatch_result(
     result: TaskResult | str, timeout: float, alias: str = "", machine: str = "",
+    model_note: str = "",
 ) -> str:
     """Format what :func:`dispatch_result` returned for the calling model.
 
@@ -1036,11 +1039,17 @@ def format_dispatch_result(
     name of a SEA reached by path, shown there too
     (:func:`~kiss.agents.sorcar.run_config.run_config_line`); *machine*
     is the remote machine the sub-task ran on, ending the line with
-    ``machine=<name>`` (empty: it ran here, nothing is shown).
+    ``machine=<name>`` (empty: it ran here, nothing is shown);
+    *model_note* follows the line's ``model=<name>`` field (a review
+    moved to another family, see :func:`second_opinion_model`; empty:
+    nothing is shown).
     """
     if isinstance(result, str):
         return result
     ran = run_config_line({**result.settings, "timeout": timeout}, alias)
+    model_field = re.search(r"\bmodel=\S+", ran)
+    if model_note and model_field is not None:
+        ran = f"{ran[:model_field.end()]} {model_note}{ran[model_field.end():]}"
     return str(yaml.safe_dump(
         {
             "ran": f"{ran} machine={machine}" if machine else ran,
@@ -1298,11 +1307,11 @@ def dispatch_command(
     explicit = list(explicit_values(model_name, budget, options))
     # A read-only review the caller gave no budget holds one sized by
     # the diff it reads (:func:`review_budget`) rather than half of the
-    # caller's remainder, which the 2026-10-24 audit found 10 to 40x
-    # what reviews spend; the cap never raises the inherited share.  A
-    # task that reads as a review but asks for changes ("review and fix
-    # ...") is an implementation task and keeps the full share, as it
-    # keeps the full toolset (:meth:`SorcarAgent._tool_profile`).
+    # caller's remainder, many times what a review spends; the cap
+    # never raises the inherited share.  A task that reads as a review
+    # but asks for changes ("review and fix ...") is an implementation
+    # task and keeps the full share, as it keeps the full toolset
+    # (:meth:`SorcarAgent._tool_profile`).
     review_task = is_review_task(prompt)
     is_review = options.tool_profile == "review" or (
         not options.tool_profile and review_task and not is_implementation_task(prompt)
@@ -1573,6 +1582,49 @@ def pinned_model_conflict(parent_agent: Any, run_options: RunOptions) -> str:
     return ""
 
 
+SECOND_OPINION_NOTE = "(another family than the caller's, for a second opinion)"
+"""What the ``ran:`` line says after ``model=`` for a review moved to another family."""
+NO_OTHER_FAMILY_NOTE = "(no other family configured)"
+"""What it says when the review had to stay on the caller's family."""
+
+
+def second_opinion_model(
+    parent_model: str, child_model: str, pinned: bool, review: bool,
+) -> tuple[str, str]:
+    """Return the model and ``ran:`` note of a review that would share the caller's family.
+
+    A reviewer on the caller's own model shares its blind spots and
+    misreads the same sentence the same way, so a review the call did
+    not pin to a model runs on the strongest configured model of another
+    family (:func:`~kiss.core.models.model_families.other_family_model`)
+    for a second opinion.  The review stays on the inherited model, and the
+    note says why, when no other family has a credential or when this
+    daemon pins every task to its model (:func:`task_model_pinned`).
+
+    Args:
+        parent_model: The calling agent's model; empty when the child
+            inherits nothing (a channel, ``inherit: false``).
+        child_model: The model the review would run.
+        pinned: Whether the call (``model=``, ``options['model']``) or
+            the SEA's ``model`` setting chose *child_model*; a pinned
+            same-family reviewer is honoured.
+        review: Whether the child is a review.
+
+    Returns:
+        ``(model, note)``: the model to run instead (empty keeps the
+        plan's) and the note shown after ``model=`` on the ``ran:``
+        line (empty: none).
+    """
+    if not review or pinned or not parent_model or not same_family(parent_model, child_model):
+        return "", ""
+    if task_model_pinned():
+        return "", f"{NO_OTHER_FAMILY_NOTE[:-1]}: this daemon pins every task to its model)"
+    other = other_family_model(parent_model)
+    if other:
+        return other, SECOND_OPINION_NOTE
+    return "", NO_OTHER_FAMILY_NOTE
+
+
 def plan_run_agent(
     parent_work_dir: str,
     task: str,
@@ -1585,6 +1637,7 @@ def plan_run_agent(
     parent_agent: Any = None,
     siblings: int = 1,
     machine: str = "",
+    sibling_tasks: Sequence[str] = (),
 ) -> dict[str, Any] | str:
     """Resolve and check a SEA sub-task call; return :func:`dispatch_result`'s arguments.
 
@@ -1644,12 +1697,17 @@ def plan_run_agent(
             its copy of the SEA sets); the SEA's ``work_dir`` setting
             read here is a path here and is not sent; the task's paths
             are not rewritten.
+        sibling_tasks: Every task of a ``run_parallel`` call (*task* is
+            its first); empty for a ``run_agent`` call.  A fan-out over
+            disjoint named pieces of work may run on the caller's own
+            model family (:func:`~kiss.agents.sorcar.fanout_guard.same_family_conflict`).
 
     Returns:
         The keyword arguments of :func:`dispatch_result` plus
-        ``name`` and ``alias``, or an error message (an empty task, bad
-        options, an unknown agent or machine, a broken SEA, or a
-        locked key the call contradicts).
+        ``name``, ``alias`` and ``model_note``, or an error message (an
+        empty task, bad options, an unknown agent or machine, a broken
+        SEA, a locked key the call contradicts, or a sub-task of the
+        caller's own model family that is no fan-out over disjoint work).
     """
     if not task.strip():
         return EMPTY_TASK_ERROR
@@ -1708,6 +1766,11 @@ def plan_run_agent(
             f"{name} is not a channel (its class does not derive from ChannelSea)"
         )
     inherit = not channel and run_options.inherit is not False
+    conflict, second_opinion, model_note = family_verdict(
+        parent_agent, run_options, settings, task, sibling_tasks or [task], inherit, machine_name,
+    )
+    if conflict:
+        return f"Error: {name}: {conflict}"
     base_dir = parent_work_dir or str(kiss_home() / "agent_work")
     sea_command = ""
     # The ``ran:`` line names the command a call that reached a
@@ -1730,20 +1793,109 @@ def plan_run_agent(
     kwargs: dict[str, Any] = {
         "name": name, "prompt": sub_task_prompt(task, parent_work_dir, inherit, machine_name),
         "sea_path": sea_path, "work_dir": work_dir,
-        "model_name": run_options.model, "budget": run_options.max_budget, "timeout": seconds,
+        "model_name": second_opinion or run_options.model, "budget": run_options.max_budget,
+        "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
         "workspace": run_options.workspace,
         "siblings": siblings, "machine": machine_name, "sea_command": sea_command,
-        "alias": alias,
+        "alias": alias, "model_note": model_note,
     }
     return kwargs
+
+
+def family_verdict(
+    parent_agent: Any,
+    run_options: RunOptions,
+    settings: dict[str, Any],
+    task: str,
+    sibling_tasks: Sequence[str],
+    inherit: bool,
+    machine_name: str,
+) -> tuple[str, str, str]:
+    """Judge a sub-task that would run on the caller's own model family.
+
+    Inside a task, such a sub-agent is the same model with less context:
+    refused unless the call is a fan-out over disjoint named pieces, the
+    caller's task asks for sub-agents, or another family is pinned
+    (:func:`~kiss.agents.sorcar.fanout_guard.same_family_conflict`).  A
+    review that would be one runs on another family instead
+    (:func:`second_opinion_model`).  A channel or an ``inherit: false``
+    call inherits no model, so neither applies to it; nor to a sub-task
+    on another machine, which is work the caller cannot do inline here.
+
+    Args:
+        parent_agent: The agent calling the tool.
+        run_options: The call's parsed options.
+        settings: The SEA's evaluated settings.
+        task: The sub-task's text.
+        sibling_tasks: Every task of the call (*task* among them).
+        inherit: Whether the child inherits from the caller.
+        machine_name: The registered machine the child runs on, or ``""``.
+
+    Returns:
+        ``(conflict, model, note)``: the refusal reason or ``""``; the
+        model the child runs instead (empty keeps the call's); the note
+        shown after ``model=`` on the ``ran:`` line (empty: none).
+    """
+    from kiss.agents.sorcar.cron_agent import _current_task_text
+
+    review = run_options.tool_profile == "review" or (
+        not run_options.tool_profile and is_review_task(task) and not is_implementation_task(task)
+    )
+    parent_model = (
+        str(getattr(parent_agent, "model_name", "") or "") if inherit and not machine_name else ""
+    )
+    child_model = run_options.model or str(settings.get("model") or "") or parent_model
+    conflict = same_family_conflict(
+        parent_model, child_model, sibling_tasks, _current_task_text(parent_agent), review,
+    )
+    if conflict:
+        return conflict, "", ""
+    model, note = second_opinion_model(
+        parent_model, child_model, bool(run_options.model) or "model" in settings, review,
+    )
+    return "", model, note
+
+
+def sibling_plan(
+    plan: dict[str, Any], task: str, parent_work_dir: str, parent_agent: Any, tasks: list[str],
+) -> dict[str, Any] | str:
+    """Return *plan*, made by :func:`plan_run_agent` for a sibling of *task*, re-made for it.
+
+    The agent and arguments of a ``run_parallel`` call are the same for
+    every task, so the SEA is resolved, loaded and checked once; what
+    depends on the task text is re-made here: the prompt and the
+    family verdict (:func:`family_verdict`).
+
+    Args:
+        plan: A sibling's plan (its keyword arguments for :func:`dispatch_result`).
+        task: This sibling's task text.
+        parent_work_dir: Work directory of the calling task.
+        parent_agent: The agent calling the tool.
+        tasks: Every task of the call.
+
+    Returns:
+        The plan for *task*, or the error message when it may not start.
+    """
+    conflict, model, note = family_verdict(
+        parent_agent, plan["options"], plan["settings"], task, tasks, plan["inherit"],
+        plan["machine"],
+    )
+    if conflict:
+        return f"Error: {plan['name']}: {conflict}"
+    return {
+        **plan,
+        "prompt": sub_task_prompt(task, parent_work_dir, plan["inherit"], plan["machine"]),
+        "model_name": model or plan["options"].model, "model_note": note,
+    }
 
 
 def sub_task_prompt(task: str, parent_work_dir: str, inherit: bool, machine: str) -> str:
     """Return the prompt a sub-task planned by :func:`plan_run_agent` gets for *task*.
 
-    The one part of a plan that depends on the task text: a sub-task
+    One of the two parts of a plan that depend on the task text (the
+    other is the family verdict, :func:`family_verdict`): a sub-task
     that inherits from the caller and runs on this daemon gets the
     caller's main-repository paths rewritten to its worktree
     (:func:`rewrite_parent_repo_paths`, when
@@ -1894,9 +2046,10 @@ def run_agents_parallel(
     The implementation behind the ``run_parallel`` tool
     (:func:`make_run_parallel_tool`): one :func:`plan_run_agent` for
     the call (the agent and arguments are the same for every task, so
-    the SEA is resolved, loaded and checked once) and one job per task
-    from that plan — so a child is exactly what ``run_agent`` would
-    start, with the caller's remaining budget shared among the N
+    the SEA is resolved, loaded and checked once), re-made for every
+    other task's text by :func:`sibling_plan` before any job starts,
+    and one job per plan — so a child is exactly what ``run_agent``
+    would start, with the caller's remaining budget shared among the N
     children plus the caller — then one wait of the call's ``timeout``
     for all of them.  A child still running when the wait ends is not
     stopped: its entry is the job notice, and ``agent_job`` collects
@@ -1920,32 +2073,32 @@ def run_agents_parallel(
     Returns:
         A YAML list with one entry per task, in order: the child's
         result text (``ran``, ``success``, ``summary``) or its job
-        notice; or the error message alone when the children cannot
-        start (the checks are the same for every task, so nothing is
-        started then).
+        notice; or the error message alone when a child cannot start
+        (every task is planned before any starts, so nothing is started
+        then).
     """
     started: list[AgentJob] = []
-    plan: dict[str, Any] | None = None
     call_id = uuid.uuid4().hex
-    for task in tasks:  # the one check that depends on the task text, for every task
+    for task in tasks:  # reported for any task before the first is planned
         conflict = slash_task_conflict(parent_agent, task)
         if conflict:
             return f"Error: {conflict}"
+    planned = plan_run_agent(
+        parent_work_dir, tasks[0], agent, model, tool_profile, max_budget, timeout,
+        options, parent_agent, siblings=len(tasks), sibling_tasks=tasks,
+    )
+    if isinstance(planned, str):
+        return planned
+    plans = [planned]
+    for task in tasks[1:]:
+        sibling = sibling_plan(planned, task, parent_work_dir, parent_agent, tasks)
+        if isinstance(sibling, str):
+            return sibling
+        plans.append(sibling)
     try:
-        for task in tasks:
-            if plan is None:
-                planned = plan_run_agent(
-                    parent_work_dir, task, agent, model, tool_profile, max_budget, timeout,
-                    options, parent_agent, siblings=len(tasks),
-                )
-                if isinstance(planned, str):
-                    return planned
-                plan = kwargs = planned  # the plan's prompt is this first task's
-            else:
-                prompt = sub_task_prompt(task, parent_work_dir, plan["inherit"], plan["machine"])
-                kwargs = {**plan, "prompt": prompt}
+        for kwargs in plans:
             # Held before it is launched, so a Stop inside the launch cancels it.
-            job = new_agent_job(plan["name"], kwargs, parent_agent, call_id)
+            job = new_agent_job(kwargs["name"], kwargs, parent_agent, call_id)
             started.append(job)
             launch_agent_job(job)
         deadline = time.monotonic() + started[0].timeout
@@ -2159,6 +2312,7 @@ def wait_until_started(job: AgentJob) -> None:
 def _finish_agent_job(job: AgentJob, kwargs: dict[str, Any]) -> None:
     """Thread body of a job: record the dispatch's outcome and text on *job*."""
     alias = kwargs.pop("alias", "")
+    model_note = kwargs.pop("model_note", "")
     try:
         if job.cancel.is_set():
             # Killed before this thread ran (its owner's run ended while
@@ -2168,7 +2322,7 @@ def _finish_agent_job(job: AgentJob, kwargs: dict[str, Any]) -> None:
             return
         job.outcome = dispatch_result(**kwargs)
         job.result = format_dispatch_result(
-            job.outcome, job.timeout, alias, kwargs.get("machine", ""),
+            job.outcome, job.timeout, alias, kwargs.get("machine", ""), model_note,
         )
     except BaseException as exc:  # noqa: BLE001 — the thread must record any failure
         logger.warning("agent job %s failed", job.job_id, exc_info=True)
@@ -2428,9 +2582,9 @@ _GENERIC_AGENT_NAMES = frozenset({
     "general", "agent", "sorcar", "kiss", "analysis", "analyst", "assistant",
     "default", "llm", "model",
 })
-"""Names models invent for "another copy of me" (16 dispatches in the
-7-day audit of 2026-09-19).  Each means what an empty ``agent`` means: a
-plain Sorcar sub-agent (:data:`DEFAULT_AGENT_PATH`) on the task.
+"""Names models invent for "another copy of me".  Each means what an
+empty ``agent`` means: a plain Sorcar sub-agent
+(:data:`DEFAULT_AGENT_PATH`) on the task.
 ``worker`` is not one of them: it names a base class (a tool-bound
 run), so ``agent="worker"`` gets the usual "no such command" error
 instead of silently running a session; nor are the

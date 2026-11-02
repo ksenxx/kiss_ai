@@ -235,6 +235,9 @@ class TestSorcarAgentDockerBranch:
             def run_commands_parallel(self, commands: str) -> str:
                 return "docker parallel output"
 
+            def read_bytes(self, path: str) -> bytes:
+                return b""
+
         agent.docker_manager = FakeDockerManager()
         tools = agent._get_tools()
         assert callable(tools[0])

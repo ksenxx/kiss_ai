@@ -1403,6 +1403,8 @@ class SorcarRunApiTest(unittest.TestCase):
             agent._base_system_prompt = base_system_prompt
             agent._use_web_tools = False
             agent._is_parallel = True
+            # Asks for sub-agents: children on its own model family are not refused.
+            agent.task_description = "fan out to sub-agents"
             return agent
 
         def fan_out(agent: ChatSorcarAgent, tasks: str) -> list[str]:

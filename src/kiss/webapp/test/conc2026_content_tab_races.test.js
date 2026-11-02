@@ -129,8 +129,9 @@ async function testForeignScopeErrorMustNotSwallowReload() {
   const reloadBtn = toastButton(toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
   click(win, reloadBtn);
+  const reloads = posted.filter(m => m && m.type === 'openFile');
   assert.strictEqual(
-    posted.filter(m => m && m.type === 'openFile').length,
+    reloads.length,
     1,
     'the reload must request the file from the daemon',
   );
@@ -146,14 +147,16 @@ async function testForeignScopeErrorMustNotSwallowReload() {
     error: 'Permission denied',
   });
 
-  // The tab's own reload reply arrives: it MUST replace the editor
-  // text with the disk content (a fresh editor holding 'v2 on disk').
+  // The tab's own reload reply arrives (the daemon echoes the
+  // request's token): it MUST replace the editor text with the disk
+  // content (a fresh editor holding 'v2 on disk').
   // Today the foreign error already cleared contentReloadRequested, so
   // this reply takes the dirty-guard branch and only reveals a line —
   // the explicit reload silently does nothing.
   send(win, {
     type: 'fileContent',
     tabId: 'a1',
+    token: reloads[0].token,
     path: FILE_PATH,
     name: 'notes.txt',
     content: 'v2 on disk',
@@ -177,19 +180,20 @@ async function testForeignScopeErrorMustNotSwallowReload() {
 // unsaved edits instead of overwriting them.
 async function testSameScopeErrorStillClearsReloadFlag() {
   const ctx = makePage();
-  const {win, created} = ctx;
+  const {win, posted, created} = ctx;
   const toast = await openDirtyConflictedTab(ctx);
 
   const reloadBtn = toastButton(toast, 'Reload from disk');
   assert.ok(reloadBtn, "the toast must offer 'Reload from disk'");
   click(win, reloadBtn);
+  const reload = posted.filter(m => m && m.type === 'openFile')[0];
 
-  // The tab's own reload FAILS (same scope: the reply is attributed to
-  // the very conversation that owns the tab). The edits survive, and
-  // the flag must be cleared...
+  // The tab's own reload FAILS (the reply echoes the request's token).
+  // The edits survive, and the flag must be cleared...
   send(win, {
     type: 'fileContent',
     tabId: 'a1',
+    token: reload.token,
     path: FILE_PATH,
     error: 'notes.txt was deleted',
   });

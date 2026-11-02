@@ -54,6 +54,7 @@ from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.sorcar.sea_settings import declares_channel
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
+from kiss.core.llm_reply import LLMReply
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.third_party_agents.recording_daemon import (
     RecordingDaemon,
@@ -622,6 +623,7 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
     assert cmd.pop("toolCallHook")("x", {}) == ALLOW
+    assert cmd.pop("llmResponseHook")(LLMReply("hi")) == ALLOW
     assert cmd == {"seaPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"

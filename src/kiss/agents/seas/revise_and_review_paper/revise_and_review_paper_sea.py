@@ -33,7 +33,8 @@ Three tools make the mechanical steps deterministic:
 
 * :func:`writer_task` returns the task text of a writing round, with
   the user's instructions, the review to answer, the rules on
-  experiments, ablations and AI discovery, and the report contract.
+  experiments and ablations, the ``/discover`` route to a stronger
+  method or result, and the report contract.
 * :func:`reviewer_task` returns the task text of a fresh review
   round: the staged PDF only, no earlier reviews, notes or memory,
   the venue's scores and a final ``Recommendation:`` line.
@@ -53,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
-from kiss.agents.seas.discover.discover_sea import DISCOVERY_INSTRUCTIONS
+from kiss.agents.seas.discover.discover_sea import DiscoverSea
 
 WRITE_PAPER_SEA = str(Path(__file__).resolve().parents[1] / "write_paper" / "write_paper_sea.py")
 """Absolute path of the bundled ``/write_paper`` SEA, the writer of every round."""
@@ -153,8 +154,8 @@ Reviews go to `<work dir>/reports/<stem>-round<N>-review.txt`.
    venue's scale, decide the verdict yourself, log it, and call `loop_status` again
    with `overrides="<round>=<verdict>"`.
 4. On CONTINUE, triage each weakness: a writing fix; an allowed experiment, ablation or
-   benchmark (the writer runs it, via the AI discovery loop its task carries when
-   a stronger method or result is wanted); or a ruled-out point, stated in the paper as a
+   benchmark (the writer runs it; a stronger method or result goes through the `/discover`
+   SEA its task names); or a ruled-out point, stated in the paper as a
    limitation. Put ruled-out points, allowed benchmarks and the remaining budget into
    `coordinator_notes` of `writer_task(instructions, N + 1, review_path, coordinator_notes)`.
 5. Stop early when every weakness is ruled out or was answered earlier with evidence the
@@ -204,9 +205,10 @@ Rules for this round:
 - Experiments: when the instructions or the review ask for evidence the paper lacks (a
   baseline, an ablation, a benchmark, a stronger result), run it on the benchmarks the
   instructions name; when they name none, use the area's standard public benchmarks and
-  say which in the paper. Follow the AI discovery loop below when asked
-  for a stronger method or result. Commit the scripts and the raw results next to the
-  paper; every new number enters the paper through its macros.
+  say which in the paper. When a stronger method or result is wanted, run that search
+  through `/discover` as the block below says and put its measured result in the paper.
+  Commit the scripts and the raw results next to the paper; every new number enters the
+  paper through its macros.
 - Never remove a negative result, inflate a claim, or mention a review, a round or an
   earlier version in the paper. State a point you cannot answer with evidence as a
   limitation in the paper.
@@ -221,6 +223,22 @@ Rules for this round:
   and report what is left undone.
 """
 
+_DISCOVER_RULES = f"""\
+Slash command for a stronger method or result:
+- `/discover`: {DiscoverSea().description()}
+
+Run it with `run_agent(agent="discover", task=<task>, max_budget=<share of your budget>,
+timeout=<seconds>)`. The task names the method's files next to the paper, the dev
+evaluation command or benchmark, the metric, the goal the review sets and the round limit
+the budget allows, and ends with "Do not change this repository": this directory holds
+uncommitted paper edits that the loop's commits and resets would swallow, so the loop runs
+in a lab copy under the child's scratch dir and reports `best.patch` with the dev and
+held-out metrics. Apply the patch to the method's files (`git apply <path>`), re-run the
+evaluation yourself, put the measured numbers in the paper, and call `/discover` again while
+the goal is unmet and the budget allows.
+"""
+"""The ``/discover`` block that ends every writer task: what the SEA does and how to run it."""
+
 
 class ReviseAndReviewPaperSea(BaseSea):
     """The ``/revise_and_review_paper`` SEA."""
@@ -230,10 +248,22 @@ class ReviseAndReviewPaperSea(BaseSea):
         return (
             "Writes a research paper with /write_paper from your writing instructions, has "
             "/review_paper review it as a fresh reviewer under your review instructions, and "
-            "repeats the revise-and-review loop (with experiments, ablations or AI discovery when "
-            "the review asks for evidence) until the review says strong accept or the paper cannot "
-            "improve further; use `/revise_and_review_paper Writing: <...> Review: <...>`."
+            "repeats the revise-and-review loop (with experiments, ablations or /discover runs "
+            "when the review asks for evidence) until the review says strong accept or the paper "
+            "cannot improve further; use `/revise_and_review_paper Writing: <...> Review: <...>`."
         )
+
+    def prompt(self, task: str) -> str:
+        """Return the run's task: the user's text, then the shape of the loop.
+
+        The sentence says in so many words that the rounds are sub-agents of
+        this task: the dispatcher refuses a child of the coordinator's own
+        model family as "the same model with less context" unless the task
+        text asks for sub-agents
+        (:func:`~kiss.agents.sorcar.fanout_guard.asks_for_sub_agents`).
+        """
+        return (f"{task.strip()}\n\nRun each writing round as a sub-agent on {WRITE_PAPER_SEA} "
+                f"and each review round as a reviewer sub-agent on {REVIEW_PAPER_SEA}.")
 
     def system_prompt(self, system_prompt: str) -> str:
         """Append the coordinator's rules to the default system prompt."""
@@ -296,7 +326,7 @@ def writer_task(
     parts = [head, "", "Writing instructions from the user:", instructions.strip(), ""]
     if coordinator_notes.strip():
         parts += ["Notes from the loop coordinator:", coordinator_notes.strip(), ""]
-    parts += [_WRITER_RULES.rstrip(), "", DISCOVERY_INSTRUCTIONS]
+    parts += [_WRITER_RULES.rstrip(), "", _DISCOVER_RULES.rstrip()]
     return "\n".join(parts)
 
 

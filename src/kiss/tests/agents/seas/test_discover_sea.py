@@ -345,7 +345,9 @@ class _LabScript:
     commits them (the baseline), step 1 isolates the lab with
     ``create_worktree``, step 2 writes an idea into the lab's worktree,
     step 3 commits it and writes ``best.patch``, and every later step is
-    ``finish`` (the first one is refused once: the lab's worktree is unmerged).
+    ``finish`` (the first one is refused once: the lab's worktree is unmerged;
+    the second once more, by the coding gate: the patch was written by a shell
+    redirect and no check followed it).
     """
 
     def __init__(self, caller_tree: Path) -> None:
@@ -463,13 +465,14 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
         })
 
         reqs = script.requests
-        assert len(reqs) == 6, [_last_message(r)[-300:] for r in reqs] or printer.captured
+        assert len(reqs) == 7, [_last_message(r)[-300:] for r in reqs] or printer.captured
         # The SEA ran, as a sub-agent, with the loop in its prompt.
         assert discover_sea.DISCOVERY_INSTRUCTIONS in request_text(reqs[0])
         assert "- Is subagent: yes\n" in request_text(reqs[0])
         assert "Created worktree" in _last_message(reqs[2])
         assert "Successfully wrote" in _last_message(reqs[3])
         assert "has not been merged" in _last_message(reqs[5])
+        assert "files were changed after the last shell command" in _last_message(reqs[6])
         lab, lab_tree = script.lab(), script.lab_tree()
         assert lab_tree.parent == lab / ".kiss-worktrees"
         assert (lab_tree / "model.py").read_text(encoding="utf-8") == "SCORE = 3\n"

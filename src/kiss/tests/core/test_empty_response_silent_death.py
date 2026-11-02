@@ -38,6 +38,7 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import model_families
 from kiss.core.models.model_info import MODEL_INFO
 
 # A routed name: it has no OpenRouter twin, so after the empty turns the
@@ -48,8 +49,14 @@ _MODEL = "openrouter/openai/gpt-4o-mini"
 
 @pytest.fixture(autouse=True)
 def _no_declared_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the model to no fallback even if ``~/.kiss/MY_MODELS.json`` declares one."""
+    """Pin the model to no fallback even if ``~/.kiss/MY_MODELS.json`` declares one.
+
+    Repeated empty turns also fail over to a model of another family when
+    one is configured on the machine; an empty preference list keeps that
+    from reaching a real provider here.
+    """
     monkeypatch.setattr(MODEL_INFO[_MODEL], "fallback", None)
+    monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
 
 
 def _empty_assistant_response() -> dict[str, Any]:

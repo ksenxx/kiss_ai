@@ -70,6 +70,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.core import tool_interrupt
+from kiss.core.llm_reply import LLMReply
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     custom_model_config,
@@ -530,7 +531,7 @@ def _staged_hook(cmd: dict[str, Any], key: str) -> Any:
     """Return the SEA hook ``apply_sea`` staged on a ``run`` command, or ``None``.
 
     The hook fields (``systemPromptHook``, ``toolsHook``, ``llmCallHook``,
-    ``toolCallHook``) hold the SEA's bound methods and never travel the
+    ``toolCallHook``, ``llmResponseHook``) hold the SEA's bound methods and never travel the
     wire as callables, so a (buggy or malicious) client that sends one as
     a JSON value must not crash the executor: anything non-callable means
     "no hook".  The caller declares the hook's precise signature.
@@ -1863,7 +1864,9 @@ class _TaskRunnerMixin:
                 ``parentTaskId`` (a ``run_agent`` child).
             previous_task_id: See :meth:`_subscribe_chat_viewers`.
         """
-        self.printer.subscribe_tab(task_id, source_tab_id)
+        locked_call(
+            self._state_lock, self._subscribe_launching_tab_locked, task_id, source_tab_id,
+        )
         if is_subagent:
             return
         self._subscribe_chat_viewers(
@@ -1873,6 +1876,29 @@ class _TaskRunnerMixin:
             start_ms=start_ms,
             client_task_id=client_task_id,
             previous_task_id=previous_task_id,
+        )
+
+    def _subscribe_launching_tab_locked(self, task_id: str, tab_id: str) -> None:
+        """Under ``_state_lock``: subscribe the launching *tab_id* to *task_id*'s stream.
+
+        Headless when the tab is closed on every surface already (its
+        state is ``frontend_closed``: a close in the run's setup
+        window, or during an earlier subtask of a sequential run),
+        so the close's decision stands and the tab stays no viewer —
+        its copies reach the local client that addressed it only
+        (:meth:`JsonPrinter.cleanup_tab`).  Decided under the lock the
+        close marks the tab closed under
+        (``_drop_tab_state_locked``) and a reopen commits its
+        publication under (``_commit_replay_publication``), so
+        neither interleaves with this subscription.
+
+        Args:
+            task_id: The task's allocated ``task_history`` row id.
+            tab_id: The UI tab the task was launched from.
+        """
+        state = agent_state.find_by_tab(tab_id)
+        self.printer.subscribe_tab(
+            task_id, tab_id, headless=state is not None and state.frontend_closed,
         )
 
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
@@ -2219,6 +2245,9 @@ class _TaskRunnerMixin:
             _tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = _staged_hook(
                 cmd, "toolCallHook"
             )
+            _llm_response_hook: Callable[[LLMReply], Verdict] | None = _staged_hook(
+                cmd, "llmResponseHook"
+            )
 
             on_task_id_allocated = partial(
                 self._on_run_task_id_allocated,
@@ -2313,6 +2342,7 @@ class _TaskRunnerMixin:
                         system_prompt_hook=_system_prompt_hook,
                         llm_call_hook=_llm_call_hook,
                         tool_call_hook=_tool_call_hook,
+                        llm_response_hook=_llm_response_hook,
                         tool_profile=_tool_profile,
                         docker_image=_docker_image or None,
                         _skip_persistence=True,
@@ -2940,8 +2970,15 @@ class _TaskRunnerMixin:
             start_ms=start_ms,
             end_ms=end_ms,
         )
-        task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
         agent = state.agent
+        # A dispatched child's parentage, persisted the way
+        # ``ChatSorcarAgent._build_extra_payload`` persists it: without
+        # it the row passes the chat readers' root filter and replays
+        # as a turn of the parent's chat.
+        sub_info = getattr(agent, "_subagent_info", None)
+        if sub_info:
+            extra["subagent"] = sub_info
+        task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
         if agent is not None:
             agent._chat_id = state.chat_id
         _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)

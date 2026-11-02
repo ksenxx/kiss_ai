@@ -43,6 +43,29 @@ def tool_call_body(
     Returns:
         The JSON body.
     """
+    return tool_calls_body([(name, arguments)], prompt_tokens, completion_tokens, cached_tokens,
+                           text or f"Calling {name}.")
+
+
+def tool_calls_body(
+    calls: list[tuple[str, dict[str, Any]]],
+    prompt_tokens: int,
+    completion_tokens: int = 100,
+    cached_tokens: int = 0,
+    text: str = "",
+) -> bytes:
+    """Build one chat-completion response that calls several tools in one turn.
+
+    Args:
+        calls: The ``(tool, arguments)`` of each call, in order.
+        prompt_tokens: Reported prompt (context) size.
+        completion_tokens: Reported completion size.
+        cached_tokens: Reported prompt-cache read tokens.
+        text: Assistant text sent along with the calls.
+
+    Returns:
+        The JSON body.
+    """
     usage: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -59,12 +82,12 @@ def tool_call_body(
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": text or f"Calling {name}.",
+                "content": text or "Calling " + ", ".join(name for name, _ in calls) + ".",
                 "tool_calls": [{
-                    "id": "call_1",
+                    "id": f"call_{index}",
                     "type": "function",
                     "function": {"name": name, "arguments": json.dumps(arguments)},
-                }],
+                } for index, (name, arguments) in enumerate(calls, 1)],
             },
             "finish_reason": "tool_calls",
         }],
@@ -142,11 +165,15 @@ class ScriptedHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def serve(script: list[bytes]) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+def serve(
+    script: list[bytes], handler_base: type[ScriptedHandler] = ScriptedHandler
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """Serve *script* on a local port for the block's duration.
 
     Args:
         script: Response bodies in order; the last repeats forever.
+        handler_base: The handler class to serve with; a subclass of
+            :class:`ScriptedHandler` records more than the bodies.
 
     Yields:
         ``(base_url, requests)`` where *requests* fills with every
@@ -154,7 +181,7 @@ def serve(script: list[bytes]) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """
     requests: list[dict[str, Any]] = []
     handler = type(
-        "Handler", (ScriptedHandler,),
+        "Handler", (handler_base,),
         {"script": list(script), "requests": requests, "lock": threading.Lock()},
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)

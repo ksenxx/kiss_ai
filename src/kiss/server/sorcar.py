@@ -70,7 +70,8 @@ functions — the daemon loads the file itself, so the tools execute
                         sea_path="my_agent.py")
 
 The class may also define ``system_prompt(system_prompt)``,
-``llm_call_hook(new_messages)`` and ``tool_call_hook(name, args)``,
+``llm_call_hook(new_messages)``, ``tool_call_hook(name, args)`` and
+``llm_response_hook(reply)``,
 which the daemon applies to the run and passes to the underlying
 :class:`kiss.core.kiss_agent.KISSAgent` (see
 :meth:`~kiss.core.kiss_agent.KISSAgent.run`); like ``tools``, these
@@ -122,7 +123,7 @@ from kiss.core.remote_password import password_accepted
 from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
 from kiss.server import sidebar_panels
-from kiss.server.commands import broadcast_to_conn
+from kiss.server.commands import broadcast_to_conn, request_generation
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
 from kiss.server.signin import SigninLogin
@@ -464,6 +465,19 @@ def _auth_result(kind: AuthKind, msg: Any) -> Auth:
     """Return the :class:`Auth` of an accepted ``auth`` frame *msg*."""
     fields = msg if isinstance(msg, dict) else {}
     return Auth(kind, link=fields.get("link") is True, parts=fields.get("parts") is True)
+
+
+def _auth_ok(local: bool) -> str:
+    """Return the ``auth_ok`` frame admitting a client (*local*: one with the local token).
+
+    ``echoesGeneration`` tells a machine link (``machines.MachineLink``)
+    that this daemon echoes a request's ``generation`` on the replies it
+    also pushes unasked (``myModelsData``, ``machines``; see
+    :func:`~kiss.server.commands.request_generation`), so the link may
+    take only the echoing frame for its answer.  A link to an older
+    daemon, told nothing, keeps taking the first frame of the type.
+    """
+    return json.dumps({"type": "auth_ok", "local": local, "echoesGeneration": True})
 
 
 def _frame_token(msg: Any) -> str:
@@ -1327,7 +1341,7 @@ class ServerApi:
             return None
         if token or not self._is_loopback_browser(websocket):
             return None
-        await websocket.send(json.dumps({"type": "auth_ok", "local": False}))
+        await websocket.send(_auth_ok(local=False))
         return _auth_result("loopback", msg)
 
     async def _admit_local(self, websocket: Any, msg: dict[str, Any]) -> Auth:
@@ -1345,7 +1359,7 @@ class ServerApi:
         Returns:
             The ``"local"`` :class:`Auth` of the client.
         """
-        await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
+        await websocket.send(_auth_ok(local=True))
         auth = _auth_result("local", msg)
         if not auth.link and _is_legacy_vscode_client(websocket):
             await websocket.send(_vscode_retired_notice(self._backend._loopback_url))
@@ -1574,9 +1588,7 @@ class ServerApi:
                 if msg.get("type") == "auth" and not token and password_accepted(
                     client_pw, stored_password,
                 ):
-                    await websocket.send(json.dumps({
-                        "type": "auth_ok", "local": False,
-                    }))
+                    await websocket.send(_auth_ok(local=False))
                     # With no password set only a direct loopback peer
                     # gets here (the gate above): it is admitted as a
                     # loopback client, never password-checked per
@@ -1949,12 +1961,15 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         self._spawn_reply(
-            self._reply_machines(ctx.endpoint, bool(cmd.get("refresh")), "", "", "getMachines")
+            self._reply_machines(
+                ctx.endpoint, bool(cmd.get("refresh")), "", "", "getMachines",
+                generation=request_generation(cmd),
+            )
         )
 
     async def _reply_machines(
         self, endpoint: Any, refresh: bool, action: str, error: str, command: str,
-        name: str = "",
+        name: str = "", generation: int = 0,
     ) -> None:
         """Ping (or read the cache) and send the ``machines`` reply.
 
@@ -1965,15 +1980,19 @@ class ServerApi:
             error: The error text of that action when it was refused.
             command: The command being answered (for the reply log).
             name: The machine that action named (``""`` for a poll).
+            generation: The command's, echoed when not 0
+                (:func:`~kiss.server.commands.request_generation`).
         """
         try:
-            event = await asyncio.to_thread(self._machines_event, refresh, action, error, name)
+            event = await asyncio.to_thread(
+                self._machines_event, refresh, action, error, name, generation,
+            )
             await self._backend._reply_direct(endpoint, event, command)
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("%s reply failed", command, exc_info=True)
 
     def _machines_event(
-        self, refresh: bool, action: str, error: str, name: str = "",
+        self, refresh: bool, action: str, error: str, name: str = "", generation: int = 0,
     ) -> dict[str, Any]:
         """Return the ``machines`` event (blocking: pings when asked to or the cache is stale).
 
@@ -1984,13 +2003,19 @@ class ServerApi:
             name: The machine that action named (``""`` otherwise): the
                 subpanel re-arms a refused removal's Delete only on the
                 reply naming that machine.
+            generation: The answered command's, echoed when not 0; a
+                push (:meth:`broadcast_machines`) carries none, so a
+                machine link never takes one for its answer.
         """
         ip, port = self._local_machine_address()
         rows, checked_at = sidebar_panels.machines_report(ip, port, refresh)
-        return {
+        event: dict[str, Any] = {
             "type": "machines", "machines": rows, "checkedAt": checked_at,
             "action": action, "name": name, "error": error,
         }
+        if generation:
+            event["generation"] = generation
+        return event
 
     async def broadcast_machines(self) -> None:
         """Send a fresh ``machines`` reply (pinged anew) to every connection.
@@ -2053,7 +2078,9 @@ class ServerApi:
             except Exception as exc:  # noqa: BLE001 - a background task must not die silently
                 logger.warning("machineAction %s failed", action, exc_info=True)
                 error = str(exc) or type(exc).__name__
-            await self._reply_machines(endpoint, True, action, error, "machineAction", name)
+            await self._reply_machines(
+                endpoint, True, action, error, "machineAction", name, request_generation(cmd),
+            )
 
     async def get_machine_work_dirs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the working directories of a registered machine.

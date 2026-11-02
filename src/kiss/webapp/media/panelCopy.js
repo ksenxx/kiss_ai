@@ -251,6 +251,24 @@
     ta.setAttribute('readonly', '');
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
+    // Selecting the textarea focuses it and takes the document
+    // selection: both go back to what they are now (a text field with
+    // its own selection, the tips sheet's field inside its shadow root)
+    // once the command has run, else typing after a copy from the
+    // composer or a terminal goes nowhere and a copy from a preview
+    // drops its highlighted text.
+    let focused = d.activeElement;
+    while (focused && focused.shadowRoot && focused.shadowRoot.activeElement) {
+      focused = focused.shadowRoot.activeElement;
+    }
+    const tag = String((focused && focused.tagName) || '').toLowerCase();
+    const field = tag === 'input' || tag === 'textarea';
+    const win = d.defaultView;
+    const sel = !field && win && win.getSelection ? win.getSelection() : null;
+    const ranges = [];
+    for (let i = 0; sel && i < sel.rangeCount; i++) {
+      ranges.push(sel.getRangeAt(i).cloneRange());
+    }
     d.body.appendChild(ta);
     ta.select();
     let ok = false;
@@ -260,17 +278,42 @@
       ok = false;
     } finally {
       d.body.removeChild(ta);
+      if (focused && focused !== d.body && focused.isConnected) {
+        const start = focused.selectionStart;
+        const end = focused.selectionEnd;
+        const direction = focused.selectionDirection;
+        focused.focus({preventScroll: true});
+        if (field) {
+          try {
+            focused.setSelectionRange(start, end, direction);
+          } catch (_err) {
+            // number / email inputs have no selection API; theirs is kept
+          }
+        }
+      }
+      if (sel && ranges.length) {
+        sel.removeAllRanges();
+        ranges.forEach(r => sel.addRange(r));
+      }
     }
     return ok;
   }
 
+  // The copy asked for most recently, over every control of the page:
+  // an earlier copy whose async write rejects after a later one must
+  // not fall back over it (see copyText).
+  let copySeq = 0;
+
   /**
    * Copy `text` to the clipboard: the async clipboard API first, then
-   * `fallbackCopyText` when the API is missing, throws or rejects.
-   * Every same-page copy control (main.js, tips.js and this module)
-   * goes through here; contentContextMenu.js keeps its own copy because
-   * it also runs inside the sandboxed preview iframe, where this module
-   * is not loaded.
+   * `fallbackCopyText` when the API is missing, throws or rejects.  A
+   * write that rejects only after a newer copy was asked for resolves
+   * false instead of falling back: the fallback would replace the newer
+   * text on the clipboard while the newer control shows it as copied.
+   * Every same-page copy control (main.js, tips.js, this module and
+   * the content context menu of the parent document) goes through
+   * here; contentContextMenu.js keeps a copy of its own for the
+   * sandboxed preview iframe, where this module is not loaded.
    *
    * @param {string} text What to place on the clipboard.
    * @param {Document} [doc] Owner document; defaults to the page's.
@@ -278,6 +321,7 @@
    */
   function copyText(text, doc) {
     const d = doc || document;
+    const seq = ++copySeq;
     const win =
       d.defaultView || (typeof window !== 'undefined' ? window : null);
     const nav = win ? win.navigator : null;
@@ -296,7 +340,7 @@
     }
     return Promise.resolve(written).then(
       () => true,
-      () => fallbackCopyText(text, d),
+      () => (seq === copySeq ? fallbackCopyText(text, d) : false),
     );
   }
 

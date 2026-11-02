@@ -243,7 +243,8 @@ def test_a_tail_of_a_big_file_counts_as_a_read(tmp_path: Path) -> None:
             file.write(f"filler line number {n:08d}\n")
         file.write("the very last line\n")
     tools = UsefulTools(work_dir=str(tmp_path))
-    assert tools.Bash("tail -n 1 big.log", "tail") == "the very last line\n"
+    # (the first short read-only call of an instance carries the batching hint)
+    assert tools.Bash("tail -n 1 big.log", "tail").startswith("the very last line\n")
     out = tools.Edit(str(big), "the very last line", "edited last line")
     assert out.startswith("Successfully"), out[:200]
     assert big.read_text().endswith("edited last line\n")

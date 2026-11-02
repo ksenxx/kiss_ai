@@ -111,6 +111,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -122,6 +123,7 @@ from xml.parsers.expat import ExpatError
 
 from kiss.core.brand import BRAND
 from kiss.core.config import kiss_home
+from kiss.core.processes import run_process_group
 from kiss.server.helpers import MEDIA_DIR
 
 ICON_FILE = MEDIA_DIR / "kiss-icon.png"
@@ -552,33 +554,45 @@ def write_linux_launcher(
     entry.chmod(0o755)
 
 
+SETUP_TIMEOUT_SECS = 120.0
+"""How long each command that builds the launcher gets before it is given up on.
+
+``sips``, ``iconutil``, ``cp``, ``codesign`` and
+``update-desktop-database`` run from the installer and from a macOS
+launch that rebuilds a stale bundle; a stuck one must not park either
+for good.  The margin is for ``cp`` without clones: a plain copy of a
+browser's Frameworks (a gigabyte) on a slow disk.
+"""
+
+
 def write_icns(png: Path, icns: Path) -> bool:
     """Convert *png* to the macOS icon file *icns*; True on success.
 
     Uses the ``sips`` and ``iconutil`` tools every macOS ships.  False
-    (and no file) when either is missing or fails, in which case the
-    bundle is written without an icon.
+    (and no file) when either is missing, fails or does not finish
+    within :data:`SETUP_TIMEOUT_SECS`, in which case the bundle is
+    written without an icon.  The iconset is staged in a directory of
+    this call's own (named ``*.iconset``, as ``iconutil`` wants): two
+    conversions at once must not delete each other's inputs.
     """
     sips, iconutil = shutil.which("sips"), shutil.which("iconutil")
     if not sips or not iconutil:
         return False
-    iconset = icns.with_suffix(".iconset")
-    shutil.rmtree(iconset, ignore_errors=True)
-    iconset.mkdir(parents=True)
+    icns.parent.mkdir(parents=True, exist_ok=True)
+    iconset = Path(tempfile.mkdtemp(prefix=f"{icns.stem}.", suffix=".iconset", dir=icns.parent))
     try:
         for size in (16, 32, 64, 128, 256, 512):
             for scale in (1, 2):
                 pixels = size * scale
                 name = f"icon_{size}x{size}{'@2x' if scale == 2 else ''}.png"
-                subprocess.run(
+                run_process_group(
                     [sips, "-z", str(pixels), str(pixels), str(png), "--out", str(iconset / name)],
-                    check=True,
-                    capture_output=True,
-                )
-        subprocess.run(
-            [iconutil, "-c", "icns", str(iconset), "-o", str(icns)], check=True, capture_output=True
-        )
-    except (OSError, subprocess.CalledProcessError):
+                    SETUP_TIMEOUT_SECS,
+                ).check_returncode()
+        run_process_group(
+            [iconutil, "-c", "icns", str(iconset), "-o", str(icns)], SETUP_TIMEOUT_SECS
+        ).check_returncode()
+    except (OSError, subprocess.SubprocessError):
         return False
     finally:
         shutil.rmtree(iconset, ignore_errors=True)
@@ -741,11 +755,12 @@ def macos_bundle_processes(
     procps ``ps`` cuts each line at 80 columns when its output is piped
     and ``TERM`` is unset, which drops a long bundle path.  None (not
     the empty list, which means no such process) when ``ps`` cannot
-    start or does not answer within *timeout* seconds: the callers
-    that would delete the bundle must not take that for "nothing runs".
+    start, exits with an error or does not answer within *timeout*
+    seconds: the callers that would delete the bundle must not take
+    that for "nothing runs".
     """
     listing = _probe(["ps", "-ww", "-axo", "pid=,command="], timeout)
-    if listing is None:
+    if listing is None or listing.returncode != 0:
         return None
     prefix = f"{bundle / 'Contents'}/"
     processes = []
@@ -988,7 +1003,8 @@ def clone_macos_browser(contents: Path, browser: Path, identifier: str) -> Path 
     the copied binary is re-signed ad hoc as *identifier* (see the
     module docstring).  None, with the reason on stderr and nothing
     left under *contents*, when a step fails: no ``Frameworks`` next to
-    the browser, no ``codesign`` (part of macOS), a full disk.
+    the browser, no ``codesign`` (part of macOS), a full disk, a step
+    that does not finish within :data:`SETUP_TIMEOUT_SECS`.
     """
     browser_bundle = macos_browser_bundle(browser)
     if browser_bundle is None:
@@ -1006,8 +1022,8 @@ def clone_macos_browser(contents: Path, browser: Path, identifier: str) -> Path 
     (contents / "MacOS").mkdir(parents=True, exist_ok=True)
     for step in steps:
         try:
-            result = subprocess.run(step, capture_output=True, text=True)
-        except OSError as exc:
+            result = run_process_group(step, SETUP_TIMEOUT_SECS)
+        except (OSError, subprocess.TimeoutExpired) as exc:
             result = subprocess.CompletedProcess(step, 1, "", str(exc))
         if result.returncode != 0:
             print(
@@ -1132,7 +1148,10 @@ def install_launcher(
         write_linux_launcher(entry, brand, icon, exe, state_dir, browser or Path("chrome"))
         refresh = shutil.which("update-desktop-database")
         if refresh:
-            subprocess.run([refresh, str(entry.parent)], check=False, capture_output=True)
+            try:
+                run_process_group([refresh, str(entry.parent)], SETUP_TIMEOUT_SECS)
+            except subprocess.TimeoutExpired:
+                pass  # the refresh is optional: the menus pick the entry up later
         return entry
     if system == "Darwin":
         bundle = macos_bundle_path(home, brand)

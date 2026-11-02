@@ -14,8 +14,8 @@
 'use strict';
 
 const assert = require('assert');
-const {makePage, send, loadRemoteCss} = require('./simplify2_harness.js');
-const {makeSession, loadHistory} = require('./history_helpers');
+const {makePage, loadRemoteCss} = require('./simplify2_harness.js');
+const {makeSession, loadHistory, sendHistory} = require('./history_helpers');
 
 function historyRow(win) {
   return win.document.querySelector('#history-list .sidebar-item');
@@ -99,36 +99,40 @@ function testCollapsedByDefaultAndToggles() {
   console.log('PASS collapsed by default; toggle expands and collapses');
 }
 
+/** The task's session as a history reply carries it, titled `title`. */
+function freshSession(title) {
+  return JSON.parse(JSON.stringify(makeSession({title, preview: title})));
+}
+
 function testExpandedStateSurvivesRerender() {
-  const {win} = makePage();
+  const {win, posted} = makePage();
   loadHistory(win, [makeSession()]);
-  historyRow(win).querySelector('.sidebar-item-collapse').click();
-  assert.ok(!historyRow(win).classList.contains('collapsed'));
+  const firstRow = historyRow(win);
+  firstRow.querySelector('.sidebar-item-collapse').click();
+  assert.ok(!firstRow.classList.contains('collapsed'));
   // Re-render with a FRESH, serialized session payload, exactly as a
   // backend-driven history refresh delivers it (the server constructs
   // new session dicts on every getHistory response, so no client-side
-  // property stored on the old object can survive).
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: 1,
-    sessions: [JSON.parse(JSON.stringify(makeSession()))],
-  });
+  // property stored on the old object can survive).  The reply answers
+  // the page's current history generation (one of another generation is
+  // dropped unseen) and changes a rendered field: a refresh that repeats
+  // what is on screen keeps the existing row, and only a rebuilt row can
+  // lose the expanded state.
+  sendHistory(win, posted, [freshSession('refactor the parser, again')]);
+  const secondRow = historyRow(win);
+  assert.notStrictEqual(secondRow, firstRow, 'the refresh rebuilt the row');
   assert.ok(
-    !historyRow(win).classList.contains('collapsed'),
+    !secondRow.classList.contains('collapsed'),
     'expanded state keyed by task id survives a fresh-payload re-render',
   );
   // Collapsing again must also survive a further fresh re-render.
-  historyRow(win).querySelector('.sidebar-item-collapse').click();
-  assert.ok(historyRow(win).classList.contains('collapsed'));
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: 2,
-    sessions: [JSON.parse(JSON.stringify(makeSession()))],
-  });
+  secondRow.querySelector('.sidebar-item-collapse').click();
+  assert.ok(secondRow.classList.contains('collapsed'));
+  sendHistory(win, posted, [freshSession('refactor the parser')]);
+  const thirdRow = historyRow(win);
+  assert.notStrictEqual(thirdRow, secondRow, 'the refresh rebuilt the row');
   assert.ok(
-    historyRow(win).classList.contains('collapsed'),
+    thirdRow.classList.contains('collapsed'),
     're-collapsed state survives a fresh-payload re-render',
   );
   win.close();

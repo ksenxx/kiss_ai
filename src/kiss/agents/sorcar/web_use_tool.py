@@ -441,6 +441,28 @@ def _cdp_call(sync_obj: Any, coro: Any, timeout_secs: float = _CDP_CALL_TIMEOUT_
             coro.close()
 
 
+def _dispose_handle(page: Any, handle: Any) -> None:
+    """Release the temporary ``JSHandle`` *handle* of a page read, with a deadline.
+
+    ``wait_for_function`` returns a handle that ``json_value()`` leaves
+    registered in the driver's connection, where Python's garbage
+    collector never reaches it: every title, tree, viewport, challenge
+    or liveness read would otherwise keep one for the life of the page.
+    The release is a renderer round trip of its own, so it runs through
+    :func:`_cdp_call`; a page whose context is gone or whose renderer
+    no longer answers fails or times it out, which is logged and
+    ignored (the handle dies with the page).
+
+    Args:
+        page: The sync Playwright page the handle belongs to.
+        handle: The sync ``JSHandle`` wrapper to release.
+    """
+    try:
+        _cdp_call(page, handle._impl_obj.dispose())
+    except Exception:  # noqa: BLE001 - context gone, renderer wedged, driver dead
+        logger.debug("Could not release a page-read handle", exc_info=True)
+
+
 @dataclass
 class _Session:
     """What moves with the browsing session between two browsers."""
@@ -488,9 +510,20 @@ _RESTORE_STORAGE_JS = """([origin, items, removed]) => {
 }"""
 
 
-def _cookie_key(cookie: dict[str, Any]) -> tuple[str, str, str]:
-    """The identity of a cookie: name, domain and path."""
-    return (cookie["name"], cookie["domain"], cookie["path"])
+def _cookie_key(cookie: dict[str, Any]) -> tuple[str, str, str, str, bool]:
+    """The identity of a cookie: name, domain, path and (CHIPS) partition.
+
+    Chromium keeps one cookie per partition (the top-level site a
+    third-party cookie was set under, and whether a cross-site frame
+    sat between the two: the driver's ``_crHasCrossSiteAncestor``,
+    true by default as in :meth:`WebUseTool._delete_cookie`): the same
+    ``session`` cookie of an identity provider may be alive under one
+    site and logged out under another, and one must not stand in for
+    the other.
+    """
+    partition = cookie.get("partitionKey") or ""
+    ancestor = bool(partition and cookie.get("_crHasCrossSiteAncestor", True))
+    return (cookie["name"], cookie["domain"], cookie["path"], partition, ancestor)
 
 
 def _is_browser_ui(page: Any) -> bool:
@@ -1867,8 +1900,9 @@ class WebUseTool:
         immediately; ``polling=100`` (not the default ``raf``) so
         throttled background tabs still answer.  Works for SVG and other
         non-HTML documents (``document.title`` is defined for them).  The
-        follow-up ``json_value()`` has no timeout, but it only runs after
-        the renderer answered the same expression an instant earlier.
+        follow-up ``json_value()`` is bounded by :meth:`_read_page`: a
+        getter that answers at once with an object whose own getter
+        never returns passes the first wait and wedges the serialization.
         A hostile getter still leaves the renderer spinning after the
         bounded error (its loop never exits); ``close_browser()`` is the
         agent's escape hatch, exactly as for any other wedged page.
@@ -1892,6 +1926,14 @@ class WebUseTool:
         ``_PAGE_READ_NAVIGATIONS`` navigations in a row (a challenge page
         that reloads into the real page, which then redirects again).
 
+        ``json_value()`` is a second renderer round trip with no deadline
+        of its own: serializing the answer runs the page's getters, and a
+        value whose getter never returns (or a renderer that wedged in
+        between) would hang it forever.  It runs under what is left of
+        the read's deadline (never less than :data:`_CDP_CALL_TIMEOUT_SECS`)
+        through :func:`_cdp_call`, and the handle it leaves in the driver
+        is released with the same bound (:func:`_dispose_handle`).
+
         Args:
             page: The Playwright page to read.
             expression: JavaScript function source returning a list.
@@ -1899,13 +1941,30 @@ class WebUseTool:
 
         Returns:
             The list the expression returned, as Python values.
+
+        Raises:
+            TimeoutError: The serialization of the answer did not finish
+                within the read's deadline.
         """
         for attempt in range(_PAGE_READ_NAVIGATIONS + 1):
+            deadline = time.monotonic() + _PAGE_READ_TIMEOUT_MS / 1000
             try:
                 handle = page.wait_for_function(
                     expression, arg=arg, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
                 )
-                return handle.json_value()
+                try:
+                    return _cdp_call(
+                        page,
+                        handle._impl_obj.json_value(),
+                        timeout_secs=max(deadline - time.monotonic(), _CDP_CALL_TIMEOUT_SECS),
+                    )
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"Timeout {_PAGE_READ_TIMEOUT_MS}ms exceeded: the page did not hand "
+                        "over its answer (a getter that never returns?)"
+                    ) from None
+                finally:
+                    _dispose_handle(page, handle)
             except web_stealth.playwright_api().Error as exc:
                 # A page that keeps navigating surfaces its error like any other.
                 if (
@@ -1932,7 +1991,8 @@ class WebUseTool:
         probe first — so the callers also wrap the input in
         :meth:`_input_hang_watchdog`.
         """
-        self._page.wait_for_function("() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
+        handle = self._page.wait_for_function("() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
+        _dispose_handle(self._page, handle)
 
     def _input_hang_watchdog(self, deadline_secs: float = _INPUT_WATCHDOG_SECS) -> Any:
         """Cut off the guarded raw input call if it outlives *deadline_secs*.
@@ -2208,7 +2268,10 @@ class WebUseTool:
         token challenge, then its CAPTCHA puzzle) gets that page's own,
         possibly shorter, wait from then on.  A Google
         "unusual traffic" page is not waited on: it rates the network's
-        IP, not the browser, so the same query is opened on Bing.  The
+        IP, not the browser, so the same query is opened on Bing; a
+        semanticscholar.org page kept behind AWS WAF's puzzle (the same
+        kind of rating) is looked up on Crossref instead
+        (:func:`web_stealth.content_fallback`).  The
         interstitial is recognised by what the page shows
         (:func:`web_stealth.challenge_vendor`), which is also what tells
         when it has cleared.
@@ -2272,11 +2335,69 @@ class WebUseTool:
                 "changes, so the same query was opened on Bing instead."
             )
         host = urlparse(self._page.url).netloc
+        waited = f"{time.monotonic() - started:.0f}s"
+        # A page the user can see stays: they may be solving the puzzle.
+        content = None if self._user_sees_page() else web_stealth.content_fallback(self._page.url)
+        if content is not None:
+            crossref_url, terms = content
+            puzzle_url = self._page.url
+            try:
+                self._page.goto(crossref_url, wait_until="domcontentloaded", timeout=30000)
+                shown = int(self._page.evaluate(web_stealth.CROSSREF_RENDER_JS, terms))
+                if shown < 0:
+                    raise ValueError("the answer is not Crossref's works list")
+            except Exception as exc:  # noqa: BLE001 — best effort; the puzzle is reported then
+                logger.info("Crossref fallback for %s failed: %s", host, exc)
+                # Back from Crossref's (error) page to the puzzle, whose tree
+                # carries the show_browser() way out.  A failed request's
+                # error page commits after ``goto`` raised, whatever
+                # ``page.url`` says now, and can interrupt the reopening
+                # navigation: that one is tried once more after a pause.
+                back: str | None = None
+                for attempt in range(2):
+                    try:
+                        response = self._page.goto(
+                            puzzle_url, wait_until="domcontentloaded", timeout=30000
+                        )
+                    except Exception as reopen_exc:  # noqa: BLE001 — reported, not hidden
+                        back = type(reopen_exc).__name__
+                    else:
+                        # The puzzle itself is a 405 (the token challenge a
+                        # 202); a server error is not the puzzle back.
+                        status = 200 if response is None else response.status
+                        back = None if status < 500 else f"HTTP {status}"
+                        if back is None:
+                            break
+                    if not attempt:
+                        self._page.wait_for_timeout(500)
+                if back is not None:
+                    logger.info("Reopening %s failed: %s", puzzle_url, back)
+                    return (
+                        f"Note: {host} answered with a bot-protection page ({vendor}) that did "
+                        f"not clear within {waited}; Crossref (api.crossref.org) gave no answer "
+                        f"for it and the page could not be reopened afterwards ({back}). "
+                        f"Call go_to_url('{puzzle_url}') again, or use another source for "
+                        "the same information."
+                    )
+            else:
+                self._wait_for_stable()
+                return (
+                    f"Note: {host} answered with a bot-protection page ({vendor}) that did not "
+                    f"clear within {waited}. It rates this network's IP address, which no "
+                    f"browser setting changes, so '{terms}' was looked up on Crossref "
+                    f"(api.crossref.org) instead: {shown} work(s) found. For the original "
+                    f"page, call show_browser() and then go_to_url('{puzzle_url}') so the "
+                    "user can complete the check."
+                )
         return (
             f"Note: {host} answered with a bot-protection page ({vendor}) that did not "
-            f"clear within {time.monotonic() - started:.0f}s. Call show_browser() so the user "
+            f"clear within {waited}. Call show_browser() so the user "
             "can complete the check, or use another source for the same information."
         )
+
+    def _user_sees_page(self) -> bool:
+        """Whether the user can see the page: the Browser tab, a window, their own Chrome."""
+        return self._live or not self._headless or self._attached_url is not None
 
     def _get_ax_tree(self) -> str:
         """The numbered accessibility tree of the current page.
@@ -2944,9 +3065,10 @@ class WebUseTool:
             " return disappear ? !found : found; }"
         )
         try:
-            self._page.wait_for_function(
+            handle = self._page.wait_for_function(
                 predicate, arg=[text, disappear], timeout=timeout * 1000, polling=100
             )
+            _dispose_handle(self._page, handle)
             return self._get_ax_tree()
         except web_stealth.playwright_api().TimeoutError:
             verb = "disappear" if disappear else "appear"
@@ -3300,10 +3422,8 @@ class WebUseTool:
         for cookie in self._carried_cookies:
             if _cookie_key(cookie) not in alive:
                 try:
-                    self._context.clear_cookies(
-                        name=cookie["name"], domain=cookie["domain"], path=cookie["path"]
-                    )
-                except Exception:  # pragma: no cover — clearing a cookie rarely fails
+                    self._delete_cookie(cookie)
+                except Exception:  # noqa: BLE001 - the page's CDP session did not answer
                     logger.debug("Could not drop a dead cookie after relaunch", exc_info=True)
         self._carried_cookies = session.cookies
         if session.cookies:
@@ -3312,6 +3432,29 @@ class WebUseTool:
             except Exception:  # pragma: no cover — a malformed cookie is rare
                 logger.debug("Could not restore cookies after relaunch", exc_info=True)
         self._restore_local_storage(session)
+
+    def _delete_cookie(self, cookie: dict[str, Any]) -> None:
+        """Delete *cookie* (one name, domain, path and partition) from the current browser.
+
+        ``BrowserContext.clear_cookies`` knows no partition: it takes
+        every partition's cookie of that name, domain and path with it,
+        another top-level site's live login among them.  The CDP call
+        names the partition the way the driver does when it adds a
+        partitioned cookie (``hasCrossSiteAncestor`` is the driver's
+        non-standard ``_crHasCrossSiteAncestor``, true by default); without
+        one, only the unpartitioned cookie goes.  Bounded like every CDP
+        round trip (:func:`_cdp_call`).
+        """
+        params: dict[str, Any] = {
+            "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"],
+        }
+        if cookie.get("partitionKey"):
+            params["partitionKey"] = {
+                "topLevelSite": cookie["partitionKey"],
+                "hasCrossSiteAncestor": cookie.get("_crHasCrossSiteAncestor", True),
+            }
+        session = self._page_session(self._page)
+        _cdp_call(self._page, session.send("Network.deleteCookies", params))
 
     def _restore_local_storage(self, session: _Session) -> None:
         """Write the captured origin's localStorage into the current browser.

@@ -12,29 +12,38 @@ leaves alone, and that the ``context_reset_hook`` is called.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
+    ARGUMENT_PREVIEW_CHARS,
+    ARGUMENT_STUB_PREFIX,
     COMPACTION_MIN_STEP_GAP,
     COMPACTION_START_TOKENS,
     COMPACTION_STEP_TOKENS,
+    PAYBACK_STEPS,
     STUB_PREFIX,
     apply_compaction,
+    compaction_target_tokens,
     dropped_chars,
     make_stub,
+    payback_floor,
     plan_compaction,
     should_compact,
 )
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.models.model_info import get_cache_discount
+from kiss.core.printer import Printer
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
     serve,
     tool_call_body,
 )
+from kiss.tests.core import local_anthropic_server as anthropic_server
 
 BIG = "x" * 3000
 SMALL = "ok"
@@ -258,10 +267,12 @@ def bigger_output() -> str:
 
 def test_second_compaction_waits_for_the_step_gap() -> None:
     # The first compaction fires before step 32 (as above).  From step 32
-    # on every response reports 210k context, past the next 200.1k
-    # threshold, and by step 48 the aged-out outputs would already be a
-    # quarter of the context -- but the second compaction is not
-    # considered before 30 steps passed, so it fires before step 62.
+    # on every response reports 210k context, past the 150k steady-state
+    # target (30 % of the 500k window), so every step is a candidate; the
+    # step gap spaces the compactions 10 steps apart (before steps 42, 52
+    # and 62), each dropping the results that aged out meanwhile (11 then
+    # 10 outputs, 37k-50k tokens: over the 10 % floor above the target,
+    # under the 25 % floor that applies below it).
     script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
     script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
     script.extend(tool_call_body("bigger_output", {}, 210_000) for _ in range(35))
@@ -279,10 +290,11 @@ def test_second_compaction_waits_for_the_step_gap() -> None:
             verbose=False,
             model_config={"base_url": url, "api_key": "local"},
         )
-    assert hook_calls == [32, 32 + COMPACTION_MIN_STEP_GAP]
+    assert hook_calls == [32 + i * COMPACTION_MIN_STEP_GAP for i in range(4)]
     stubbed = _stubbed(agent)
-    # Steps 1..24 went in the first batch, 25..54 in the second; the newest
-    # six seen results (55..60) and the unseen 61st stay whole.
+    # Steps 1..24 went in the first batch, 25..34, 35..44 and 45..54 in the
+    # next three; the newest six seen results (55..60) and the unseen 61st
+    # stay whole.
     assert all(stubbed[:54])
     assert not any(stubbed[54:])
 
@@ -317,3 +329,212 @@ def test_results_after_the_last_assistant_turn_are_never_compacted() -> None:
     assert all(t.startswith(STUB_PREFIX) for t in texts[:3])
     assert all(t == BIG for t in texts[3:])
     assert "do not repeat a command that has side effects" in texts[0]
+
+
+FILE_TEXT = "def f():\n    return 1\n" * 100  # 2,300 characters
+
+
+def _write_call(shape: str, call_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """One assistant turn calling *name* with *args* in the given provider *shape*."""
+    if shape == "anthropic":
+        return {"role": "assistant",
+                "content": [{"type": "tool_use", "id": call_id, "name": name, "input": args}]}
+    if shape == "responses":
+        return {"type": "function_call", "call_id": call_id, "name": name,
+                "arguments": json.dumps(args)}
+    return {"role": "assistant", "content": None,
+            "tool_calls": [{"id": call_id, "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+def _result(shape: str, call_id: str, text: str) -> dict[str, Any]:
+    if shape == "anthropic":
+        return {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text}]}
+    if shape == "responses":
+        return {"type": "function_call_output", "call_id": call_id, "output": text}
+    return {"role": "tool", "tool_call_id": call_id, "content": text}
+
+
+def _arguments(message: dict[str, Any]) -> dict[str, Any]:
+    """The arguments of the one tool call in *message*, whatever the shape."""
+    if message.get("type") == "function_call":
+        return dict(json.loads(message["arguments"]))
+    if message.get("tool_calls"):
+        return dict(json.loads(message["tool_calls"][0]["function"]["arguments"]))
+    return dict(message["content"][0]["input"])
+
+
+@pytest.mark.parametrize("shape", ["generic", "anthropic", "responses"])
+def test_old_write_and_edit_arguments_are_stubbed_and_point_at_the_file(shape: str) -> None:
+    """The content of old Writes/Edits goes; the stub says which file and that Read shows it."""
+    conversation: list[dict[str, Any]] = [{"role": "user", "content": "task"}]
+    calls: list[tuple[str, str, dict[str, Any]]] = [
+        ("w1", "Write", {"file_path": "/app/a.py", "content": FILE_TEXT}),
+        ("e1", "Edit", {"file_path": "/app/a.py", "old_string": FILE_TEXT[:600],
+                        "new_string": "x" * 700}),
+        ("b1", "Bash", {"command": "cat <<'EOF' > /app/b.txt\n" + FILE_TEXT + "EOF",
+                        "description": "make b"}),
+        ("w2", "Write", {"file_path": "/app/c.py", "content": FILE_TEXT}),
+        ("f1", "finish", {"success": True, "summary_in_html": FILE_TEXT}),
+        ("w3", "Write", {"file_path": "/app/a.py", "content": FILE_TEXT}),
+    ]
+    for call_id, name, args in calls:
+        conversation.append(_write_call(shape, call_id, name, args))
+        conversation.append(_result(shape, call_id, "ok"))
+    conversation.append(_write_call(shape, "last", "Bash", {"command": "ls"}))
+    conversation.append(_result(shape, "last", "ok"))
+    # Results are all short ("ok"), so only arguments are planned; the newest
+    # result (keep_recent=1) keeps its call's arguments.
+    plan = plan_compaction(conversation, keep_recent=1)
+    assert {r.kind for r in plan} == {"argument"}
+    # Two Write contents, a command and two Edit strings go, minus the stubs.
+    assert dropped_chars(plan) > 3 * len(FILE_TEXT) - 5 * 300
+    assert apply_compaction(plan) == 4
+    turns = [m for m in conversation if m.get("role") == "assistant"
+             or m.get("type") == "function_call"]
+    w1, e1, b1, w2, f1, w3, last = (_arguments(m) for m in turns)
+    # The first Write of a.py was superseded by the Edit and the later Write.
+    assert w1["file_path"] == "/app/a.py"
+    assert w1["content"].startswith(ARGUMENT_STUB_PREFIX)
+    assert "Write.content to /app/a.py; the file was changed again later" in w1["content"]
+    assert "Read /app/a.py to see it as it is now" in w1["content"]
+    assert w1["content"].endswith(FILE_TEXT[:ARGUMENT_PREVIEW_CHARS])
+    # Both strings of the Edit are long enough to stub; the file path stays.
+    assert e1["old_string"].startswith(ARGUMENT_STUB_PREFIX)
+    assert e1["new_string"].startswith(ARGUMENT_STUB_PREFIX)
+    assert e1["file_path"] == "/app/a.py"
+    # A long shell command is stubbed with its tool and argument named; the
+    # short description is left alone.
+    command_chars = len(str(calls[2][2]["command"]))
+    assert b1["command"].startswith(
+        f"{ARGUMENT_STUB_PREFIX} {command_chars:,} chars of Bash.command;"
+    )
+    assert b1["description"] == "make b"
+    # The last Write of c.py is the file's current content.
+    assert "this call made the file's current content" in w2["content"]
+    # finish is never touched; the newest call (kept window) neither.
+    assert f1["summary_in_html"] == FILE_TEXT
+    assert w3["content"] == FILE_TEXT
+    assert last == {"command": "ls"}
+    # A second plan finds nothing more to do.
+    assert plan_compaction(conversation, keep_recent=1) == []
+    # Arguments can be left alone.
+    assert plan_compaction(conversation, keep_recent=0, arguments=False) == []
+
+
+def test_malformed_arguments_are_skipped() -> None:
+    conversation: list[dict[str, Any]] = [
+        {"role": "user", "content": "task"},
+        {"type": "function_call", "call_id": "r0", "name": "Write", "arguments": "{not json"},
+        {"type": "function_call_output", "call_id": "r0", "output": "ok"},
+        {"type": "function_call", "call_id": "r1", "name": "Bash", "arguments": "[1, 2]"},
+        {"type": "function_call_output", "call_id": "r1", "output": "ok"},
+        {"type": "function_call", "call_id": "r2", "name": "Bash", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "r2", "output": "ok"},
+    ]
+    assert plan_compaction(conversation, keep_recent=0) == []
+
+
+def test_target_and_the_lower_floor_above_it() -> None:
+    assert compaction_target_tokens(500_000, 100_000, 0.3) == 150_000
+    # The start threshold is the floor of the target ...
+    assert compaction_target_tokens(200_000, 100_000, 0.3) == 100_000
+    # ... and an unknown window or fraction leaves the start threshold.
+    assert compaction_target_tokens(None, 100_000, 0.3) == 100_000
+    assert compaction_target_tokens(500_000, 100_000, 0.0) == 100_000
+    # Below the target a quarter of the context must go; above it a tenth.
+    assert should_compact(140_000, 20_000, None, 150_000) is False
+    assert should_compact(160_000, 16_000, None, 150_000) is True
+    assert should_compact(160_000, 15_999, None, 150_000) is False
+    # The hand-off proximity rule still applies above the target.
+    assert should_compact(300_000, 60_000, 350_000, 150_000) is False
+
+
+def test_payback_floor_follows_the_cache_discount() -> None:
+    """The floor is the share whose drop pays the miss back within PAYBACK_STEPS steps."""
+    # No cache discount: a compaction costs no miss, so nothing is added to the floor.
+    assert payback_floor(None) == 0.0
+    assert payback_floor(0.0) == 0.0
+    assert payback_floor(1.0) == 0.0
+    assert payback_floor(1.5) == 0.0
+    # r = 1/discount - 1; floor = r / (r + PAYBACK_STEPS).
+    assert payback_floor(0.05) == pytest.approx(19 / (19 + PAYBACK_STEPS))
+    assert payback_floor(0.1) == pytest.approx(9 / (9 + PAYBACK_STEPS))
+    # The dearer the miss, the larger the drop a compaction needs ...
+    assert payback_floor(0.025) > payback_floor(0.05) > payback_floor(0.1)
+    # ... and above the target the floor is the larger of the two rules.
+    assert should_compact(200_000, 20_000, None, 150_000) is True
+    assert should_compact(200_000, 20_000, None, 150_000, cache_discount=0.1) is False
+    assert should_compact(200_000, 31_000, None, 150_000, cache_discount=0.1) is True
+    assert should_compact(200_000, 31_000, None, 150_000, cache_discount=0.05) is False
+    assert should_compact(200_000, 56_000, None, 150_000, cache_discount=0.05) is True
+    # Below the target the quarter rule already exceeds OpenAI's payback floor.
+    assert should_compact(100_000, 25_000, None, 150_000, cache_discount=0.1) is True
+    assert should_compact(100_000, 25_000, None, 150_000, cache_discount=0.05) is False
+    # The catalogue knows the discount of a priced model and not of an unknown one.
+    assert get_cache_discount("claude-opus-5-5") == pytest.approx(0.05)
+    assert get_cache_discount("gpt-5.6-sol-xhigh") == pytest.approx(0.1)
+    assert get_cache_discount("no-such-model-2026") is None
+
+
+class _Recorder(Printer):
+    """A printer that keeps every event it is given."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:
+        self.events.append({"type": type, "content": content, **kwargs})
+
+    def token_callback(self, token: str) -> None:
+        pass
+
+
+def test_agent_emits_a_compaction_event_with_the_tokens_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The applied compaction is published as a ``compaction`` event (proposal 10).
+
+    A printer makes the agent stream, so the scripted Anthropic stand-in
+    (which serves server-sent events) plays the model; its tool-use turns
+    are the Anthropic shape, so a Write's content is compacted as an
+    argument too.
+    """
+    script = [anthropic_server.tool_use_message("big_output", {}, 3000, f"toolu_{i}")
+              for i in range(30)]
+    script[5] = anthropic_server.tool_use_message(
+        "Write", {"file_path": "/tmp/x.txt", "content": "z" * 4000}, 3000, "toolu_5")
+    script.append(anthropic_server.tool_use_message(
+        "big_output", {}, COMPACTION_START_TOKENS, "toolu_30"))
+    script.append(anthropic_server.tool_use_message(
+        "finish", {"result": "<p>done</p>"}, 60_000, "toolu_31"))
+    recorder = _Recorder()
+    with anthropic_server.serve(script) as (url, _requests):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        agent = KISSAgent("compaction-event-test")
+        agent.run(
+            model_name=anthropic_server.MODEL, prompt_template="Call big_output repeatedly.",
+            tools=[big_output, Write], max_steps=len(script) + 5, max_budget=50.0,
+            printer=recorder,
+        )
+    events = [e for e in recorder.events if e["type"] == "compaction"]
+    assert len(events) == 1
+    event = events[0]
+    # Compacted before the 32nd model call (the step counter has advanced).
+    assert event["step"] == 32
+    assert event["context_tokens"] == 100_000 + 30
+    # 24 old outputs less the protected Write's, plus that Write's content.
+    assert event["results"] == 23
+    assert event["arguments"] == 1
+    assert event["target_tokens"] == 150_000
+    # 23 outputs of 8,000 chars and a 4,000-char argument, less their stubs.
+    assert 40_000 < event["dropped_tokens"] < 48_000
+    write_turn = agent.model.conversation[11]
+    assert write_turn["content"][0]["name"] == "Write"
+    assert write_turn["content"][0]["input"]["content"].startswith(ARGUMENT_STUB_PREFIX)
+    # The stop reason of every model call is in its llm_call event.
+    calls = [e for e in recorder.events if e["type"] == "llm_call"]
+    assert len(calls) == len(script)
+    assert all(e["stop_reason"] == "tool_use" for e in calls)

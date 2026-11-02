@@ -136,7 +136,8 @@ def is_valid_page_name(name: str) -> bool:
     Args:
         name: A page name without the ``.md`` extension.
     """
-    return bool(PAGE_NAME_RE.match(name))
+    # fullmatch: the pattern's ``$`` would also accept a trailing newline.
+    return bool(PAGE_NAME_RE.fullmatch(name))
 
 
 def slugify(text: str, max_length: int = 60) -> str:
@@ -183,7 +184,9 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
     try:
         data = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError):
+        # ValueError: an unquoted timestamp whose value no datetime accepts
+        # (``updated: 2026-13-01``) escapes PyYAML's constructor as is.
         return {}, text
     if not isinstance(data, dict):
         return {}, text
@@ -316,10 +319,11 @@ class MemoryDir:
         """Create or replace page *name* with generated frontmatter.
 
         On create, ``uuid`` and ``created`` are generated. On update, the
-        stored ``uuid`` and ``created`` are always preserved (incoming values
-        for them are ignored), ``title`` and ``summary`` are kept unless
-        overridden, and ``updated`` is refreshed. If *body* itself starts with
-        a frontmatter block, its remaining values are merged in.
+        stored ``uuid`` and ``created`` are always preserved (values for
+        them in *body* or *extra* are ignored), ``title`` and ``summary``
+        are kept unless overridden, and ``updated`` is refreshed. If *body*
+        itself starts with a frontmatter block, its remaining values are
+        merged in.
 
         Args:
             name: Page name (``.md`` optional).
@@ -349,12 +353,14 @@ class MemoryDir:
                 existing = ""  # create semantics
             if existing:
                 frontmatter = split_frontmatter(existing)[0]
-                for identity_key in ("uuid", "created"):
-                    if identity_key in frontmatter:
-                        incoming.pop(identity_key, None)
+            # The stored identity outlives both incoming and extra values.
+            identity: dict[str, Any] = {
+                k: frontmatter[k] for k in ("uuid", "created") if k in frontmatter
+            }
             frontmatter.update({k: v for k, v in incoming.items() if v not in (None, "")})
             if extra:
                 frontmatter.update(extra)
+            frontmatter.update(identity)
             if title:
                 frontmatter["title"] = title
             if summary:

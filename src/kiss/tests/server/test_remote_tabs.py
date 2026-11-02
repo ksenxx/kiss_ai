@@ -244,7 +244,7 @@ class RemoteTabsHarness(IsolatedAsyncioTestCase):
         _FinishingModel.parallel_on_first_call = True
         _FinishingModel.hold_sub_agent = hold
         _FinishingModel.calls = 0
-        await self._submit(tab, "Fan out", "box")
+        await self._submit(tab, "Fan out to a sub-agent", "box")
         for _ in range(400):
             msg = await self._next()
             if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
@@ -384,7 +384,7 @@ class TestRemoteTabs(RemoteTabsHarness):
         _FinishingModel.hold_sub_agent = 60.0
         tab = "tab-lost-parent"
         child = f"{tab}__sub"
-        await self._submit(tab, "Fan out", "box")
+        await self._submit(tab, "Fan out to a sub-agent", "box")
         for _ in range(400):
             msg = await self._next()
             if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
@@ -426,7 +426,7 @@ class TestRemoteTabs(RemoteTabsHarness):
         _FinishingModel.parallel_on_first_call = True
         _FinishingModel.hold_sub_agent = 60.0
         tab = "tab-lost-unresumed-parent"
-        await self._submit(tab, "Fan out", "box")
+        await self._submit(tab, "Fan out to a sub-agent", "box")
         for _ in range(400):
             msg = await self._next()
             if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == tab:
@@ -497,7 +497,7 @@ class TestRemoteTabs(RemoteTabsHarness):
         _FinishingModel.parallel_on_first_call = True
         tab = "tab-parent"
         child = f"{tab}__sub"
-        await self._submit(tab, "Fan out", "box")
+        await self._submit(tab, "Fan out to a sub-agent", "box")
         seen: list[dict[str, Any]] = []
         resumed = False
         for _ in range(400):
@@ -519,7 +519,7 @@ class TestRemoteTabs(RemoteTabsHarness):
                 # the sub-agent's transcript, all to that surface alone.
                 late = await self._late_surface(tab)
                 self.assertEqual(late["tabMachine"]["machine"], "box")
-                self.assertEqual(late["task_events"]["task"], "Fan out")
+                self.assertEqual(late["task_events"]["task"], "Fan out to a sub-agent")
                 self.assertEqual(late["openSubagentTab"]["parent_tab_id"], tab)
                 sub_tab = late["openSubagentTab"]["tab_id"]
                 self.assertEqual(late["sub_task_events"]["tabId"], sub_tab)
@@ -743,7 +743,7 @@ class TestRemoteTabs(RemoteTabsHarness):
         """
         _FinishingModel.parallel_on_first_call = True
         remote_tabs = self.server._server_api.remote_tabs
-        await self._submit("tab-p", "Fan out", "box")
+        await self._submit("tab-p", "Fan out to a sub-agent", "box")
         child_task = ""
         for _ in range(500):
             msg = await self._next()
@@ -756,10 +756,10 @@ class TestRemoteTabs(RemoteTabsHarness):
         await self._until("tabs_state")
 
         tab = "tab-click"
-        await self._send({"type": "openTab", "tabId": tab, "title": "Fan out"})
-        await self._click_history_row(tab, await self._box_row("Fan out"))
+        await self._send({"type": "openTab", "tabId": tab, "title": "Fan out to a sub-agent"})
+        await self._click_history_row(tab, await self._box_row("Fan out to a sub-agent"))
         seen = await self._replay_of(tab)
-        self.assertEqual(seen["task_events"]["task"], "Fan out")
+        self.assertEqual(seen["task_events"]["task"], "Fan out to a sub-agent")
         # What unfolding the fan-out panel sends: a sub-agent tab under
         # the parent, resumed by the child's task id.
         sub = f"{tab}__sub_{child_task}"

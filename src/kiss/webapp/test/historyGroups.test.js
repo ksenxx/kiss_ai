@@ -107,6 +107,17 @@ async function main() {
   const DAY = 86400;
   const todayNoon = todayNoonSec();
 
+  // The separator label of a day that is neither today nor yesterday:
+  // the year is shown only for a day outside the current year, so a
+  // fixture that falls in another year (three days ago on January 2,
+  // January 2026 in any later year) expects it too.
+  function dayLabel(tsSec) {
+    const d = new Date(tsSec * 1000);
+    const opts = {weekday: 'short', month: 'short', day: 'numeric'};
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+  }
+
   function groups(win) {
     return all(win, '#history-list > .history-chat-group');
   }
@@ -148,11 +159,7 @@ async function main() {
   await test('History: tasks grouped by chat, chats by latest task, day separators', async () => {
     const {win, posted} = makePage();
     const threeDaysAgo = todayNoon - 3 * DAY;
-    const label = new Date(threeDaysAgo * 1000).toLocaleDateString(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-    });
+    const label = dayLabel(threeDaysAgo);
     sendHistory(win, posted, 0, [
       session('A', 'a2', todayNoon),
       session('B', 'b2', todayNoon - 600),
@@ -1738,12 +1745,7 @@ async function main() {
         'one local day after the zone change',
       );
       assert.deepStrictEqual(listShape(win).slice(0, 3), [
-        'sep:' +
-          new Date(t1 * 1000).toLocaleDateString(undefined, {
-            weekday: 'short',
-            month: 'short',
-            day: 'numeric',
-          }),
+        'sep:' + dayLabel(t1),
         'chat:B[task b1]',
         'chat:C[task c1]',
       ]);

@@ -35,6 +35,7 @@ from kiss.tests.agents.sorcar.test_change_model import (  # noqa: F401  (autouse
     _isolate_sorcar_db,
     _make_agent,
 )
+from kiss.tests.conftest import executor_of
 from kiss.tests.core.models.test_v2_handoff_output_items_wave2 import (
     _TOGETHER_CALL,
     _TOGETHER_MESSAGE,
@@ -87,8 +88,9 @@ def test_same_endpoint_handoff_keeps_reasoning_items(together: _Endpoint) -> Non
 
 
 def _together_agent() -> tuple[Any, Any]:
-    """A Sorcar agent whose live model is a Together model mid-task, and its ``set_model`` tool."""
-    agent, tools = _make_agent()
+    """A Sorcar agent's executor on a Together model mid-task, and the ``set_model`` tool."""
+    sorcar, tools = _make_agent()
+    agent = executor_of(sorcar)
     agent.model = model_factory("openai/gpt-oss-120b", model_config={"api_key": "k"})
     agent.model_name = "openai/gpt-oss-120b"
     agent.model.initialize("")

@@ -12,6 +12,7 @@ test session's ``KISS_HOME``.
 
 from __future__ import annotations
 
+import dis
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -747,7 +748,9 @@ def test_ssh_enrollment_tunnels_the_daemon_port_and_the_client_certificate_is_ad
                 raw.recv(timeout=10)
     with ws_connect(mach.ws_url(machine.url), ssl=ctx, open_timeout=10) as raw:
         raw.send(json.dumps({"type": "auth"}))  # no password, no token
-        assert json.loads(raw.recv(timeout=10)) == {"type": "auth_ok", "local": True}
+        assert json.loads(raw.recv(timeout=10)) == {
+            "type": "auth_ok", "local": True, "echoesGeneration": True,
+        }
 
     # The certificate is the credential: the same daemon registered by
     # URL without a password is refused (no password is set there).
@@ -1346,6 +1349,129 @@ def test_ssh_tunnel_through_a_fake_ssh_relay_and_its_failures(
         with pytest.raises(mach.MachineError, match="ssh is not installed on this machine"):
             mach.SshTunnel(login, daemon.port).open(timeout=1.0)
     finally:
+        mach.close_links()
+        daemon.stop()
+
+
+@fake_ssh_only
+def test_a_kept_socket_follows_the_login_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request dials again when the kept socket's forward is not the login's live one.
+
+    The forward's ssh process ending closes the port the socket is
+    connected to, but the socket learns of it on its reader thread
+    only: a request that won the race with that thread sent on the
+    dead socket, and a close after the send is never retried, so a
+    full-load run reported the machine down instead of opening the
+    forward again.  The link now asks the forward before the send
+    (``MachineLink._forward_gone``): its process exited, it was
+    closed, or another lane opened it again on a fresh local port.
+    The reader thread's timing is not controllable from a test, so
+    the decision is asserted on the link directly as well as through
+    the request.  Two branches stay uncovered, both races: a socket
+    closed under the request by ``retire`` (``getpeername`` fails),
+    and ``_exited`` asked about a process another thread's ``wait``
+    reaps at that instant (``ChildProcessError``).
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    login = "ksen@far.example.org"
+    try:
+        machine = mach.add_machine("far", login)
+        link = mach.link_for(machine)
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        tunnel = mach._tunnels[login]
+        assert tunnel.process is not None and not link._forward_gone()
+        assert not mach.MachineLink(mach.Machine("direct", daemon.url))._forward_gone()
+
+        # The forward's ssh process died.
+        pid = tunnel.process.pid
+        tunnel.process.kill()
+        tunnel.process.wait()
+        assert link._forward_gone()
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        assert tunnel.process is not None and tunnel.process.pid != pid and tunnel.alive()
+        assert _tunnel_peer_port(link) == tunnel.local_port and not link._forward_gone()
+
+        # Another lane opened the forward again on a fresh port.
+        port, pid = tunnel.local_port, tunnel.process.pid
+        tunnel.close()
+        assert tunnel.process is None and link._forward_gone()
+        if tunnel.open() == port:
+            pytest.skip("the OS handed the forward opened again the same port")
+        assert tunnel.process is not None and tunnel.process.pid != pid
+        assert link._forward_gone()
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        assert _tunnel_peer_port(link) == tunnel.local_port and not link._forward_gone()
+    finally:
+        mach.close_links()
+        daemon.stop()
+
+
+def _pause_after_opcode(code: Any, offset: int, pause: Callable[[], None]) -> Any:
+    """A trace function that calls *pause* once *code* has run its instruction at *offset*."""
+
+    def trace(frame: Any, event: str, arg: object) -> Any:
+        if frame.f_code is not code:
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode" and frame.f_lasti > offset and not getattr(trace, "done", False):
+            trace.done = True  # type: ignore[attr-defined]
+            pause()
+        return trace
+
+    return trace
+
+
+@fake_ssh_only
+def test_a_forward_closed_under_the_check_is_dialled_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_forward_gone`` reads the forward's process once: a close meanwhile breaks nothing.
+
+    The check runs under the link's lock, not the tunnel's: another
+    thread's ``tunnel.close()`` can set the process to ``None`` at any
+    point in it.  Read twice (the ``None`` test, then the argument of
+    ``_exited``), the second read raised ``AttributeError`` out of
+    ``request`` (review 14).  The interleaving is forced with a trace
+    function: the request pauses right after its one read while the
+    close runs, then finds the process dead and dials again.
+    """
+    daemon = start_remote_daemon(tmp_path / "home", password="pw")
+    _install_fake_ssh(tmp_path, monkeypatch, daemon.home)
+    login = "ksen@far.example.org"
+    previous = sys.gettrace()
+    try:
+        machine = mach.add_machine("far", login)
+        link = mach.link_for(machine)
+        assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        tunnel = mach._tunnels[login]
+        code = mach.MachineLink._forward_gone.__code__
+        reads = [
+            i.offset
+            for i in dis.get_instructions(code)
+            if i.opname == "LOAD_ATTR" and i.argval == "process"
+        ]
+        assert len(reads) == 1, reads
+        closer = threading.Thread(target=tunnel.close)
+
+        def close_meanwhile() -> None:
+            closer.start()
+            closer.join(timeout=30)
+            assert not closer.is_alive() and tunnel.process is None
+
+        trace = _pause_after_opcode(code, reads[0], close_meanwhile)
+        sys.settrace(trace)
+        try:
+            assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+        finally:
+            sys.settrace(previous)
+        assert trace.done, "the request never reached the check"  # type: ignore[attr-defined]
+        assert tunnel.process is not None and tunnel.alive()
+        assert _tunnel_peer_port(link) == tunnel.local_port and not link._forward_gone()
+    finally:
+        sys.settrace(previous)
         mach.close_links()
         daemon.stop()
 

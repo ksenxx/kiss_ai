@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import threading
 import time
 from collections.abc import Iterator, Sequence
@@ -34,6 +33,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sea_commands import SeaRun
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_available_models
+from kiss.core.processes import run_process_group
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve
 
@@ -81,6 +81,10 @@ def git(
 ) -> str:
     """Run ``git *args`` in *repo* under :data:`HERMETIC_GIT` and return its stripped stdout.
 
+    The command leads its own process group (:func:`run_process_group`),
+    so a *timeout* kills git together with the editor or hook it is
+    waiting on and their children, not git alone.
+
     Args:
         repo: The working tree (or, for ``init``, any directory).
         *args: The git arguments.
@@ -88,14 +92,14 @@ def git(
         check: Raise :exc:`subprocess.CalledProcessError` on a non-zero exit (default).
         timeout: Seconds after which the call fails with :exc:`subprocess.TimeoutExpired`.
     """
-    return subprocess.run(
+    result = run_process_group(
         ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=check,
-        timeout=timeout,
+        timeout,
         env={**os.environ, **HERMETIC_GIT, **(env or {})},
-    ).stdout.strip()
+    )
+    if check:
+        result.check_returncode()
+    return result.stdout.strip()
 
 
 def init_repo(repo: Path) -> None:
@@ -234,7 +238,7 @@ def run_sea(
 
     The agent is configured the way the daemon configures a SEA run: the
     resolved settings (``tool_profile``, ``max_budget``, ``use_web_tools``,
-    ``use_memory``) and the four hooks of *run*.  *overrides* are passed to
+    ``use_memory``) and the five hooks of *run*.  *overrides* are passed to
     :meth:`ChatSorcarAgent.run` last (``tool_profile="bash"``,
     ``is_parallel=False`` ...); *agent* replaces the default one for a
     caller that registers it first.
@@ -253,6 +257,7 @@ def run_sea(
         "tools_hook": run.tools_hook,
         "tool_call_hook": run.tool_call_hook,
         "llm_call_hook": run.llm_call_hook,
+        "llm_response_hook": run.llm_response_hook,
         "tool_profile": settings.get("tool_profile", ""),
         "web_tools": settings.get("use_web_tools", False),
         "use_memory": settings.get("use_memory", False),

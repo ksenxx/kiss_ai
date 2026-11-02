@@ -58,6 +58,7 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
 )
 from kiss.tests.conftest import (
+    executor_of,
     requires_anthropic_api_key,
     requires_gemini_api_key,
     requires_openai_api_key,
@@ -133,8 +134,8 @@ class TestSorcarSetModelMultiHopLive:
         """Call the real ``set_model`` tool and verify the swap landed.
 
         Args:
-            agent: The SorcarAgent whose live model is being swapped.
-            set_model: The ``set_model`` tool from ``agent._get_tools()``.
+            agent: The executor whose live model is being swapped.
+            set_model: The ``set_model`` tool of its SorcarAgent.
             model_name: The model to switch to.
         """
         old_schema = agent._cached_tools_schema
@@ -155,10 +156,10 @@ class TestSorcarSetModelMultiHopLive:
         """gpt-4o -> gpt-5.5 (Responses) -> Claude -> Gemini -> gpt-5.5,
         each hop making a live tool call; the final model recalls all
         secrets, proving the production hand-off is lossless."""
-        agent: Any = SorcarAgent("multihop-set-model-live")
-        agent._use_web_tools = False
-        tools = agent._get_tools()
-        set_model = _find_tool(tools, "set_model")
+        sorcar: Any = SorcarAgent("multihop-set-model-live")
+        sorcar._use_web_tools = False
+        set_model = _find_tool(sorcar._get_tools(), "set_model")
+        agent: Any = executor_of(sorcar)
 
         agent.model = model_factory("gpt-4o")
         agent.model_name = "gpt-4o"
@@ -293,7 +294,7 @@ class TestSorcarAgentRunMultiHopLive:
 def _live_agent_with_set_model(
     model_name: str, model_config: dict[str, Any] | None = None
 ) -> tuple[Any, Any]:
-    """Build a SorcarAgent holding a live *model_name* plus its set_model tool.
+    """Build a SorcarAgent's executor holding a live *model_name*, plus the set_model tool.
 
     Mirrors exactly how a running executor holds the model: routed through
     the real ``model()`` factory, initialized (client built), with a tools
@@ -305,12 +306,13 @@ def _live_agent_with_set_model(
             user-explicit ``reasoning_effort`` or ``use_responses_api``).
 
     Returns:
-        ``(agent, set_model)`` — the agent and its real ``set_model`` tool.
+        ``(executor, set_model)`` — the executor and the agent's real
+        ``set_model`` tool.
     """
-    agent: Any = SorcarAgent("set-model-config-sanitize")
-    agent._use_web_tools = False
-    tools = agent._get_tools()
-    set_model = _find_tool(tools, "set_model")
+    sorcar: Any = SorcarAgent("set-model-config-sanitize")
+    sorcar._use_web_tools = False
+    set_model = _find_tool(sorcar._get_tools(), "set_model")
+    agent: Any = executor_of(sorcar)
     agent.model = model_factory(model_name, model_config=model_config)
     agent.model_name = model_name
     agent.model.initialize("You are a terse assistant.")

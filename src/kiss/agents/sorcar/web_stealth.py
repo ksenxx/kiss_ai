@@ -42,7 +42,11 @@ An un-automated Google Chrome with a fresh profile gets the same puzzle
 from this machine, so it rates the network's IP address, not the
 browser: the page is recognised (by its wording, or by its title and
 ``captcha.awswaf.com`` script for other languages) and reported after a
-3 s grace -- nothing is pressed, since the puzzle needs a person.  AWS WAF's
+3 s grace -- nothing is pressed, since the puzzle needs a person -- and the
+same paper or search is then looked up on Crossref, the DOI registry's
+open API, which served every probe from this network (:func:`content_fallback`;
+Semantic Scholar's own API answers 429 to nine of ten unauthenticated
+calls and OpenAlex rate-limits anonymous search under load).  AWS WAF's
 *Challenge* action (HTTP 202) is a blank interstitial whose
 ``token.awswaf.com/.../challenge.js`` acquires a token and reloads the
 page in about a second; read before that, it was an "(empty page)" three
@@ -86,7 +90,7 @@ import time
 from importlib import import_module
 from types import ModuleType
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse, urlsplit
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit
 
 from kiss.agents.sorcar._concurrency import locked
 from kiss.core.processes import terminate_process_group
@@ -417,11 +421,12 @@ def virtual_display() -> str | None:
     _XVFB_PROC, _XVFB_DISPLAY = None, None
     if not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
         return None
-    read_fd, write_fd = os.pipe()
+    read_fd = write_fd = -1
     proc: subprocess.Popen[bytes] | None = None
     display = None
     try:
         try:
+            read_fd, write_fd = os.pipe()
             proc = subprocess.Popen(
                 ["sh", "-c", _XVFB_WRAPPER, "xvfb", str(os.getpid()), str(write_fd)],
                 pass_fds=(write_fd,),
@@ -431,8 +436,8 @@ def virtual_display() -> str | None:
                 start_new_session=True,
             )
         except OSError:
-            # Descriptor or process exhaustion: browse headless rather
-            # than fail the whole tool.
+            # Descriptor or process exhaustion (the pipe or Popen's own
+            # pipe): browse headless rather than fail the whole tool.
             logger.warning("could not start Xvfb; falling back to headless", exc_info=True)
             return None
         os.close(write_fd)
@@ -442,7 +447,8 @@ def virtual_display() -> str | None:
         # Both pipe ends are ours to close whether or not Popen raised.
         if write_fd >= 0:
             os.close(write_fd)
-        os.close(read_fd)
+        if read_fd >= 0:
+            os.close(read_fd)
         if proc is not None and display is None and proc.poll() is None:
             # Timed out, or a Stop injected into the task thread while
             # the display number was awaited: the wrapper (and its Xvfb)
@@ -971,3 +977,100 @@ def search_fallback_url(url: str) -> str | None:
     if not terms:
         return None
     return "https://www.bing.com/search?q=" + quote_plus(terms[0])
+
+
+_SEMANTIC_SCHOLAR_HOST_RE = re.compile(r"^(www\.)?semanticscholar\.org$", re.I)
+# /paper/<title words and first authors, hyphenated>/<40-hex paper id>; the
+# id alone (no slug) names no words to search for.
+_SEMANTIC_SCHOLAR_PAPER_RE = re.compile(r"^/paper/(?:([^/]+)/)?[0-9a-f]{40}/?$", re.I)
+CROSSREF_WORKS_URL = "https://api.crossref.org/works"
+_CROSSREF_FIELDS = "DOI,title,author,container-title,issued,abstract,is-referenced-by-count,URL"
+
+
+def content_fallback(url: str) -> tuple[str, str] | None:
+    """Return a Crossref query answering a semanticscholar.org page the site's CAPTCHA keeps back.
+
+    Since 30 Oct 2026 semanticscholar.org answers paper and search pages
+    from this network's address space with AWS WAF's CAPTCHA puzzle, which
+    an un-automated Chrome gets too, so no browser setting clears it.
+    Crossref's public works API (https://api.crossref.org/swagger-ui/index.html,
+    no key, no CAPTCHA) finds the same paper from the words of the page's
+    URL slug -- ``query.bibliographic`` matches title words and author
+    names together -- and answers a search query with its own ranked list;
+    it served every probe from this network (Semantic Scholar's own API
+    answers 429 to most unauthenticated calls, OpenAlex rate-limits
+    anonymous search under load).
+
+    Args:
+        url: The URL that was navigated to.
+
+    Returns:
+        ``(crossref_url, terms)`` -- the API URL to open and the words
+        searched for -- or ``None`` when *url* is not a semanticscholar.org
+        search with a query or paper page with a title slug.
+    """
+    parsed = urlparse(url)
+    # ``hostname``: lower-cased, without port or userinfo (so an authority of
+    # ``semanticscholar.org@evil.example`` is evil.example).
+    if not _SEMANTIC_SCHOLAR_HOST_RE.match(parsed.hostname or ""):
+        return None
+    if parsed.path.rstrip("/") == "/search":
+        terms = (parse_qs(parsed.query).get("q") or [""])[0]
+        rows = 10
+    else:
+        match = _SEMANTIC_SCHOLAR_PAPER_RE.match(parsed.path)
+        if match is None or not match.group(1):
+            return None
+        terms = unquote(match.group(1)).replace("-", " ")
+        rows = 5
+    terms = " ".join(terms.split())
+    if not terms:
+        return None
+    return (
+        f"{CROSSREF_WORKS_URL}?query.bibliographic={quote_plus(terms)}"
+        f"&rows={rows}&select={_CROSSREF_FIELDS}",
+        terms,
+    )
+
+
+# Turns the Crossref JSON the browser shows as text into a readable page:
+# one article per work (title, authors, year, venue, DOI link, citation
+# count, abstract when deposited) under a heading naming the terms, with
+# the document title set so the agent and the bench can tell the page.
+# Evaluated with the search terms as its argument; returns the number of
+# works shown, or -1 when the page is not Crossref's JSON.
+CROSSREF_RENDER_JS = """(terms) => {
+  const pre = document.querySelector("pre");
+  let data;
+  try {
+    data = JSON.parse((pre ? pre.textContent : document.body.innerText) || "");
+  } catch (e) {
+    return -1;
+  }
+  const items = data && data.message && Array.isArray(data.message.items)
+    ? data.message.items : null;
+  if (items === null) { return -1; }
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+    (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  const first = (v) => Array.isArray(v) ? (v.length ? v[0] : "") : (v == null ? "" : v);
+  const articles = items.map((w) => {
+    const authors = (w.author || []).map((a) =>
+      [a.given, a.family].filter(Boolean).join(" ") || a.name || "").filter(Boolean).join(", ");
+    const parts = w.issued && w.issued["date-parts"] && w.issued["date-parts"][0];
+    const year = parts && parts[0] ? parts[0] : "";
+    const venue = first(w["container-title"]);
+    const abstract = String(w.abstract || "").replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim();
+    const doi = w.DOI ? "https://doi.org/" + w.DOI : "";
+    return "<article><h2>" + esc(first(w.title)) + "</h2>"
+      + "<p>" + esc(authors) + (year ? " (" + esc(year) + ")" : "")
+      + (venue ? ". " + esc(venue) : "") + "</p>"
+      + (doi ? '<p>DOI: <a href="' + esc(doi) + '">' + esc(doi) + "</a></p>" : "")
+      + "<p>Cited by " + esc(w["is-referenced-by-count"] || 0) + " (Crossref)</p>"
+      + (abstract ? "<p>" + esc(abstract) + "</p>" : "")
+      + "</article>";
+  });
+  document.title = "Crossref: " + terms;
+  const heading = items.length + " works on Crossref for \\"" + terms + "\\"";
+  document.body.innerHTML = "<h1>" + esc(heading) + "</h1>" + articles.join("");
+  return items.length;
+}"""

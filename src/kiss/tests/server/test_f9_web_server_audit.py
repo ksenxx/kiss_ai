@@ -52,6 +52,7 @@ from kiss.server.server import AgentServer
 from kiss.server.web_server import _SNIFF_TIMEOUT_SECONDS, RemoteAccessServer
 from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 from kiss.tests.server.pause import Pause
+from kiss.tests.server.test_plain_http_loopback_and_frame_password import AUTH_OK_LOCAL
 
 
 class _LoopbackServerCase(IsolatedAsyncioTestCase):
@@ -340,4 +341,4 @@ class TestPeerCertificateCheckOffTheLoop(_LoopbackServerCase):
             self.assertEqual((await self._recv(browser))["type"], "pong")
             self.assertLess(time.monotonic() - started, 2.0, "the browser waited for the check")
         reply = json.loads(await asyncio.wait_for(peer.recv(), 10))
-        self.assertEqual(reply, {"type": "auth_ok", "local": True})
+        self.assertEqual(reply, AUTH_OK_LOCAL)

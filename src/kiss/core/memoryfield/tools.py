@@ -215,7 +215,11 @@ class MemoryTools:
         sync scans the directory (and embeds any changed pages), so the
         call costs about one embedding round trip instead of two.  Hit
         names come back qualified with the memory they were found in.
-        Once *cancel* is set the sync starts no further embedding batch.
+        Once *cancel* is set the sync starts no further embedding batch
+        and the search is skipped: nobody reads an abandoned worker's
+        hits (see :meth:`_search`), and the search's lazy numpy import
+        would otherwise run on this thread, in the background, long
+        after the task thread has moved on.
         """
         if k <= 0:
             index.sync(cancel=cancel)
@@ -224,6 +228,8 @@ class MemoryTools:
             query_vector = pool.submit(index.embed_query, query)
             index.sync(cancel=cancel)
             query_vector.result()  # re-raises an embedding failure
+        if cancel.is_set():
+            return []
         return [replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)]
 
     def _search(self, query: str, k: int, memory: str) -> list[SearchHit]:
@@ -511,19 +517,25 @@ class MemoryTools:
         """Return ``(name, updated)`` for pages older than *stale_days* days.
 
         Reads the frontmatter the just-finished sync stored in *index*
-        rather than every page file again.  Pages whose ``updated``
-        frontmatter is missing or unparseable are skipped: staleness
-        cannot be established for them, and reporting them would train
-        the agent to "fix" pages that may be fresh.
+        rather than every page file again.  ``updated`` is the spec's
+        quoted ``YYYY-MM-DDTHH:MM:SSZ`` or, on a hand-written page, an
+        unquoted YAML timestamp (stored by the index as ``str(datetime)``,
+        ``2000-01-01 00:00:00+00:00``); both are ISO 8601, a value without
+        a zone is taken as UTC.  Pages whose ``updated`` frontmatter is
+        missing or unparseable are skipped: staleness cannot be
+        established for them, and reporting them would train the agent to
+        "fix" pages that may be fresh.
         """
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         stale: list[tuple[str, str]] = []
         for name, frontmatter in index.frontmatters().items():
             raw_updated = str(frontmatter.get("updated", ""))
             try:
-                updated = datetime.strptime(raw_updated, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+                updated = datetime.fromisoformat(raw_updated)
             except ValueError:
                 continue
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=UTC)
             if updated < cutoff:
                 stale.append((name, raw_updated))
         stale.sort(key=lambda entry: entry[1])

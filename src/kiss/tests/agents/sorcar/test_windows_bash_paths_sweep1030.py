@@ -61,5 +61,6 @@ def test_cat_of_a_git_bash_path_counts_as_a_read(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n")
     tools = UsefulTools(work_dir=str(tmp_path))
     _, git_bash = _spellings(tmp_path)
-    assert tools.Bash(f"cat {git_bash}/a.py", "view") == "x = 1\n"
+    out = tools.Bash(f"cat {git_bash}/a.py", "view")
+    assert out.startswith("x = 1\n"), out  # (then the batching hint of a first short call)
     assert tools.Edit(str(tmp_path / "a.py"), "x = 1", "x = 2").startswith("Successfully")

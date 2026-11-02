@@ -27,7 +27,8 @@ arithmetic substitution, a leading ``~`` or a glob is marked as not
 literal; of an arithmetic expression only the command substitutions
 are scanned (``<<`` in it is a shift).  It is a scanner for guards, not
 a shell, so syntax it does not model (``exec`` redirections) is read
-approximately.
+approximately, and where bash versions disagree on whether a
+substitution runs (the macOS system bash is 3.2) it is scanned.
 """
 
 from __future__ import annotations
@@ -66,6 +67,15 @@ _TOKEN = re.compile(
     r"|(?P<operator>;;&|;;|;&|&&|\|\||\|&|[;&|\n])"
 )
 _PARAMETER = re.compile(r"\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
+# The parameter a ``${`` opens: a name, a positional number or a special
+# parameter (``?``, ``#``, ``-``, ...; the characters that are operators
+# after a parameter), after the ``!`` of ``${!x}``; or the ``#`` of
+# ``${#x}`` with the parameter it measures, which is one only when that
+# parameter ends the expansion (``${##}`` measures ``$#``; ``${##pat}``
+# strips ``pat`` from it).
+_BRACE_PARAMETER = re.compile(
+    r"#(?:[A-Za-z_]\w*|[0-9]+|[@*#?$!-])(?=[}\[])|!?(?:[A-Za-z_]\w*|[0-9]+|[@*#?$!-])"
+)
 # Redirections of standard output (``>&`` only when its operand is a file).
 _STDOUT = frozenset({">", ">>", ">|", ">&"})
 _BOTH = frozenset({"&>", "&>>"})
@@ -114,6 +124,9 @@ class Group:
             command, it follows ``||``, or its group is conditional (a
             subshell starts afresh).
         outputs: The files its standard output is redirected to.
+        redirections: Every redirection after it, in order:
+            ``(descriptor, operator, operand)``, the descriptor as
+            written (``""`` for the operator's default).
         heredoc: Whether a here-document is its standard input.
         piped: Whether a pipe is its standard input.
         reader: The command or group its standard output is piped to.
@@ -124,6 +137,7 @@ class Group:
     group: Group | None
     conditional: bool = False
     outputs: list[Word] = field(default_factory=list)
+    redirections: list[tuple[str, str, Word]] = field(default_factory=list)
     heredoc: bool = False
     piped: bool = False
     reader: SimpleCommand | Group | None = None
@@ -140,6 +154,12 @@ class SimpleCommand:
         words: Its words (assignments, wrappers, the command word and
             its arguments), without the redirections.
         outputs: The files its standard output is redirected to.
+        redirections: Every redirection of it, in order: ``(descriptor,
+            operator, operand)``, the descriptor as written (``""`` for
+            the operator's default), the operand of a here-document its
+            delimiter.  What :attr:`outputs` and :attr:`heredoc` leave
+            out (``< file``, ``2> file``, ``1>&2``) is here, for a guard
+            that must know a command's every redirection.
         heredoc: Whether a here-document is its own standard input.
         piped: Whether a pipe is its own standard input.
         reader: The command or group its standard output is piped to.
@@ -149,6 +169,7 @@ class SimpleCommand:
     group: Group | None
     words: list[Word] = field(default_factory=list)
     outputs: list[Word] = field(default_factory=list)
+    redirections: list[tuple[str, str, Word]] = field(default_factory=list)
     heredoc: bool = False
     piped: bool = False
     reader: SimpleCommand | Group | None = None
@@ -456,6 +477,7 @@ class _Scanner:
             operand = self.substitution()
         else:
             operand = self.word()
+        node.redirections.append((fd, operator, operand))
         stdout = fd in ("", "1") and operator in _STDOUT
         duplicate = operator == ">&" and (operand.text.isdigit() or operand.text == "-")
         if operator in ("<<", "<<-"):
@@ -524,18 +546,23 @@ class _Scanner:
                 self.pos += 1
         return Word("".join(parts), literal)
 
-    def double_quoted(self, parts: list[str]) -> bool:
-        """Scan the ``"..."`` string at the position into *parts*; return whether it is literal."""
+    def double_quoted(self, parts: list[str], close: str = '"') -> bool:
+        """Scan the ``"..."`` string at the position into *parts*; return whether it is literal.
+
+        *close* ends it: the single quote of a ``'...'`` in an operand
+        of a ``${...}`` that bash reads by the same rules
+        (:meth:`parameter`).
+        """
         text, literal = self.text, True
         self.pos += 1
-        while self.pos < len(text) and text[self.pos] != '"':
+        while self.pos < len(text) and text[self.pos] != close:
             char = text[self.pos]
             escaped = text[self.pos + 1:self.pos + 2]
             if char == "\\" and escaped and escaped in '$`"\\\n':
                 parts.append(escaped.replace("\n", ""))
                 self.pos += 2
             elif char in "$`":
-                parts.append(self.expansion())
+                parts.append(self.expansion(True, True))
                 literal = False
             else:
                 parts.append(char)
@@ -543,10 +570,14 @@ class _Scanner:
         self.pos += 1
         return literal
 
-    def expansion(self) -> str:
+    def expansion(self, quoted: bool = False, expands: bool = False) -> str:
         """Scan the expansion at the position and return its text.
 
-        ``$x``, ``${x}``, ``$((...))``, ``$(...)``, ``$'...'`` or a backtick string.
+        ``$x``, ``${x}``, ``$((...))``, ``$(...)``, ``$'...'`` or a backtick
+        string.  In a double-quoted string (*quoted*) ``$'`` is a dollar
+        and a quote character, not an ANSI-C string.  *expands*: bash
+        reads the word of a ``${x:-word}`` double-quoted
+        (:meth:`parameter`).
         """
         text, start = self.text, self.pos
         end = self.arithmetic(start + 3) if text.startswith("$((", start) else 0
@@ -557,13 +588,86 @@ class _Scanner:
         elif text.startswith("`", start):
             self.backtick()
         elif text.startswith("${", start):
-            self.pos = self.closing(start + 2, "}")
-        elif text.startswith("$'", start):
+            self.parameter(quoted, expands)
+        elif text.startswith("$'", start) and not quoted:
             self.pos = self.closing(start + 2, "'")
         else:
             parameter = _PARAMETER.match(text, start)
             self.pos = parameter.end() if parameter else start + 1
         return text[start:self.pos]
+
+    def parameter(self, quoted: bool = False, expands: bool = False) -> None:
+        """Scan the ``${...}`` at the position to its closing brace, and the commands in it.
+
+        The word of ``${x:-word}`` (``:=``, ``:+``, ``:?``), the pattern
+        and the replacement of ``${x#pat}``, ``${x%pat}`` and
+        ``${x/pat/string}``, and the offset and length of
+        ``${x:off:len}`` are expanded, so a command substitution or a
+        backtick in them runs and is scanned.  As bash finds the end,
+        quotes are skipped whole, a backslash escapes the character after
+        it, a nested ``${`` closes with its own brace, and a bare ``{``
+        does not nest.  The end of the text closes an unterminated one.
+        Whether the single quotes of an operand quote (what is between
+        them is text) or are characters to bash (what is between them
+        expands by the double-quote rules, so its commands run and are
+        scanned) depends on the operand: in the word of ``${x:-word}``
+        (``-``, ``=``, ``+``) they are characters when bash reads the
+        expansion double-quoted (*expands*: it is in a double-quoted
+        string, or in such a word or offset of an outer one), in an
+        offset or length always; in the message of ``${x:?word}`` and
+        in a pattern they quote, and so in the expansions nested in
+        them.  Two operands depend on the bash version, and are read as
+        the version that runs their commands reads them: bash 3.2 (the
+        macOS system bash) reads the replacement of a double-quoted
+        ``${x/pat/string}`` by the double-quote rules (bash 4.3 and
+        later remove its quotes), and it inserts the text of an ANSI-C
+        ``$'...'`` in a double-quoted ``${...}`` (*quoted*) unquoted, so
+        the commands in it run wherever the operand expands (bash 5.2
+        single-quotes it in a pattern or a replacement).
+        """
+        text = self.text
+        self.pos += 2
+        # The parameter comes first: the ``?`` of ``${?:+word}`` and the
+        # ``#`` of ``${#:+word}`` name a parameter, not an operator.
+        parameter = _BRACE_PARAMETER.match(text, self.pos)
+        if parameter:
+            self.pos = parameter.end()
+        # ``run``: the commands between single quotes run.  The first operator
+        # character (``:`` with the one after it) decides it; ``slash`` is the
+        # index after a ``/`` operator, where its pattern starts (a ``/`` there
+        # is the operator's, ``${x//pat/string}``) and the next ``/`` ends it.
+        run, operator, slash = expands, False, 0
+        while self.pos < len(text):
+            char = text[self.pos]
+            if char == "}":
+                self.pos += 1
+                return
+            if char == "\\":
+                self.pos += 2
+            elif text.startswith("$'", self.pos) and (run or quoted):
+                self.pos += 1
+                self.double_quoted([], "'")
+            elif char in "$`":
+                self.expansion(quoted, run)
+            elif char == '"':
+                self.double_quoted([])
+            elif char == "'" and run:
+                self.double_quoted([], "'")
+            elif char == "'":
+                self.pos = self.closing(self.pos + 1, "'")
+            else:
+                if not operator and char in "#%/^,:-=?+":
+                    operator = True
+                    if char in "#%/^,":
+                        run = False
+                        slash = self.pos + 1 if char == "/" else 0
+                    elif char == "?" or text.startswith(":?", self.pos):
+                        run = False
+                    elif char == ":" and text[self.pos + 1:self.pos + 2] not in ("-", "=", "+"):
+                        run = True
+                elif slash and char == "/" and self.pos != slash:
+                    run, slash = expands, 0  # the replacement
+                self.pos += 1
 
     def arithmetic(self, pos: int) -> int:
         """Scan the arithmetic expression from *pos* to its ``))``; return the index past it.

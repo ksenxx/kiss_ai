@@ -38,6 +38,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.core.models.model_info import model as model_factory
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
+from kiss.tests.conftest import executor_of
 from kiss.tests.server._memory_printer import MemoryPrinter
 from kiss.tests.server.conftest import init_repo
 
@@ -74,10 +75,12 @@ class _SwitchingAgent(ChatSorcarAgent):
         self.started.set()
         self.proceed.wait(timeout=60)
         self._use_web_tools = False
-        # The real loop builds the live model here; do the same so
-        # `set_model` runs its actual model-swap path rather than the
-        # "no live model yet" shortcut.
-        self.model = model_factory(self.model_name)
+        # The real loop builds the live model on the executor here; do
+        # the same so `set_model` runs its actual model-swap path rather
+        # than the "no live model yet" shortcut.
+        executor = executor_of(self)
+        executor.model = model_factory(self.model_name)
+        executor.model_name = self.model_name
         for tool in self._get_tools():
             if getattr(tool, "__name__", "") == "set_model":
                 self.switch_result = tool(self._target_model)

@@ -39,13 +39,16 @@ from pathlib import Path
 #: assignments contain ``=``), so matching stays linear in the command length;
 #: a repeated wrapper (``sudo -n sudo -n …``) is absorbed by the single
 #: wrapper's argument list instead of a nested repetition, which backtracked
-#: exponentially.
+#: exponentially.  The blanks after a separator stop at a newline, which is
+#: a separator of its own: letting them run across newlines made every
+#: newline of a blank-line command swallow the rest of the text and
+#: backtrack through it, quadratic in the command length.
 _END = r"(?=\s|$|[;&|)\"'>#])"
 _WORD = r"[^\s;&|<>()#][^\s;&|<>()]*"
 _ARGS = r"(?:" + _WORD + r"[ \t]+)*"
 _ARGS_LAZY = r"(?:" + _WORD + r"[ \t]+)*?"
 _CMD = (
-    r"(?:^|[;&|(\n])\s*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?"
+    r"(?:^|[;&|(\n])[^\S\n]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?"
     r"(?:\S*/)?"
 )
 #: A path operand: quoted on both sides or not at all, so ``"/work backup"`` is
@@ -81,9 +84,9 @@ DESTRUCTIVE_COMMANDS = (
 
 #: Text the model sees instead of running a destructive command.
 DESTRUCTIVE_VERDICT = (
-    "Blocked: this command would kill every process (your own shell and the agent "
-    "included) or delete the working directory, which ends the task with nothing to "
-    "deliver. Kill only the processes you started, by pid or exact name, and delete "
+    "REFUSED: the Bash call did NOT run: it would kill every process (your own shell and "
+    "the agent included) or delete the working directory, which ends the task with nothing "
+    "to deliver. Kill only the processes you started, by pid or exact name, and delete "
     "only files you created."
 )
 

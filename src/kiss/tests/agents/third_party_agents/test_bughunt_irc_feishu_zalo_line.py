@@ -174,7 +174,7 @@ class _JSONResponder(RecordingHandler):
     body: bytes = b"{}"
 
     def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self._read_body()
+        self.record_request(self._read_body(), headers=dict(self.headers))
         self._reply(200, type(self).body.decode())
 
 
@@ -186,11 +186,11 @@ def _zalo_backend(server: RecordingServer | None = None) -> ZaloChannelBackend:
 
 
 @contextmanager
-def _zalo_api(body: bytes) -> Iterator[ZaloChannelBackend]:
-    """Serve *body* to every POST and yield a backend whose API base is that server."""
+def _zalo_api(body: bytes) -> Iterator[tuple[ZaloChannelBackend, RecordingServer]]:
+    """Serve *body* to every POST; yield a backend whose API base is that server, and the server."""
     handler = type("Handler", (_JSONResponder,), {"body": body})
     with recording_server(handler) as server:
-        yield _zalo_backend(server)
+        yield _zalo_backend(server), server
 
 
 class TestZaloBugs:
@@ -198,14 +198,22 @@ class TestZaloBugs:
 
     def test_send_message_raises_on_api_error(self) -> None:
         """(G) send_message must raise when the Zalo API reports an error."""
-        with _zalo_api(b'{"error": 1, "message": "token expired"}') as backend:
+        with _zalo_api(b'{"error": 1, "message": "token expired"}') as (backend, _):
             with pytest.raises(RuntimeError, match="token expired"):
                 backend.send_message("U1", "hello")
 
     def test_send_message_success_does_not_raise(self) -> None:
-        """(G) send_message succeeds silently when the API accepts the message."""
-        with _zalo_api(b'{"error": 0, "data": {"message_id": "m1"}}') as backend:
+        """(G) send_message succeeds silently when the API accepts the message it was sent."""
+        with _zalo_api(b'{"error": 0, "data": {"message_id": "m1"}}') as (backend, server):
             backend.send_message("U1", "hello")
+        assert [(r["method"], r["path"], r["body"]) for r in server.requests] == [
+            (
+                "POST",
+                "/v2.0/oa/message/text",
+                {"recipient": {"user_id": "U1"}, "message": {"text": "hello"}},
+            )
+        ]
+        assert server.header("access_token") == "tok"
 
     def test_poll_messages_filters_by_channel_id(self) -> None:
         """(I) poll_messages must only return messages from the given user."""

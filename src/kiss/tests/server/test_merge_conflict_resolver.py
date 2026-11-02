@@ -40,7 +40,7 @@ from kiss.agents.sorcar import persistence, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
 from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
-from kiss.agents.sorcar.persistence import _add_task, _add_task_usage
+from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server import agent_state
@@ -267,17 +267,6 @@ class TestPersistMergeAgentUsage:
 
     def teardown_method(self) -> None:
         self.home.cleanup()
-
-    def test_add_task_usage_updates_row_and_returns_totals(self) -> None:
-        task_id, _ = _add_task("some task", "")
-        from kiss.agents.sorcar.persistence import _save_task_extra
-
-        _save_task_extra({"tokens": 100, "cost": 0.5, "steps": 3}, task_id=task_id)
-
-        assert _add_task_usage(task_id, 40, 0.25, 2) == (140, 0.75, 5)
-        assert _add_task_usage("no-such-row", 1, 1.0, 1) is None
-        (row,) = [r for r in _usage_rows() if r["id"] == task_id]
-        assert (row["tokens"], row["cost"], row["steps"]) == (140, 0.75, 5)
 
     def test_delta_is_charged_to_the_task_and_announced(self) -> None:
         from kiss.agents.sorcar.persistence import _save_task_extra

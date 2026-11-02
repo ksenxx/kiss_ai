@@ -80,7 +80,7 @@ import urllib.error
 import urllib.request
 import uuid
 from asyncio import sslproto
-from collections.abc import Callable, Coroutine, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -233,17 +233,20 @@ housekeeping.  (Sibling daemons are not covered — see
 """
 
 
-def _file_version(st: os.stat_result) -> str:
-    """Return the ``"<st_mtime_ns>:<st_size>"`` stamp of a file's state.
+def _file_version(data: bytes) -> str:
+    """Return the version stamp of a file's content: the SHA-256 of its bytes.
 
     Sent with ``fileContent`` and echoed by ``saveFile`` so
     ``RemoteAccessServer._handle_save_file`` can tell whether the file
-    changed on disk while it was open in the remote editor.  A string,
-    deliberately: ``st_mtime_ns`` (about 1.8e18) does not survive the
-    round trip through a JavaScript number (2^53 ≈ 9e15), so an
-    integer stamp compared back on the server would never match.
+    changed on disk while it was open in the remote editor.  A digest
+    of the bytes rather than an ``st_mtime_ns:st_size`` stamp: file
+    times are jiffy-grained on Linux (a few milliseconds), so a save
+    that kept the size and landed in the same tick as the opened state
+    left that stamp unchanged, and of two clients saving with the same
+    opening stamp both passed the check (audit 2026-11-01).  The digest
+    names the bytes the editor showed, whatever the clock did.
     """
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    return hashlib.sha256(data).hexdigest()
 
 
 def _write_bytes_with_mode(tmp: Path, data: bytes, st: os.stat_result) -> None:
@@ -458,6 +461,41 @@ class _DrainWatch:
     def cancel(self) -> None:
         """Disarm the watch: the send has returned."""
         self.handle.cancel()
+
+
+async def _await_while_draining[T](
+    transport: asyncio.WriteTransport, awaitable: Awaitable[T], timeout: float,
+) -> T:
+    """Await *awaitable*; drop *transport*'s peer once it took nothing for a whole deadline.
+
+    A :class:`_DrainWatch` looks at the peer's unsent bytes while the
+    wait is pending and aborts the transport once they did not shrink
+    for *timeout* seconds, which ends the wait with the connection's
+    closing error; a peer that keeps reading, however slowly, is never
+    given up on.  Shared by the frame sends
+    (:meth:`WebPrinter._send_while_draining`) and the watchdog's ping
+    write and pong wait (:meth:`RemoteAccessServer._ping_one_ws`),
+    which sit in the same TCP stream behind the frames queued ahead
+    of them.
+
+    Args:
+        transport: The peer's connection transport.
+        awaitable: The send, ping or pong wait bound to that transport.
+        timeout: Seconds the unsent bytes may stay put before the
+            peer is dropped.
+
+    Raises:
+        TimeoutError: When the wait returned although the peer's
+            unsent bytes did not shrink for *timeout* seconds.
+    """
+    watch = _DrainWatch(transport, timeout, asyncio.get_running_loop())
+    try:
+        result = await awaitable
+    finally:
+        watch.cancel()
+    if watch.expired:
+        raise TimeoutError(f"peer read nothing for {timeout:g}s")
+    return result
 
 
 _SEND_TIMEOUT = 30.0
@@ -3097,7 +3135,9 @@ class WebPrinter(JsonPrinter):
         """
         return self._tab_worktree_dirs.get(tab_id, "")
 
-    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
+    def cleanup_tab(
+        self, tab_id: str, keep_task_id: Any = None, headless: bool = False,
+    ) -> None:
         """Drop *tab_id*'s per-tab state, including its worktree dir.
 
         A tab closed without merging (no successful ``worktree_result``
@@ -3127,8 +3167,9 @@ class WebPrinter(JsonPrinter):
         Args:
             tab_id: The frontend tab identifier to drop.
             keep_task_id: See :meth:`JsonPrinter.cleanup_tab`.
+            headless: See :meth:`JsonPrinter.cleanup_tab`.
         """
-        super().cleanup_tab(tab_id, keep_task_id)
+        super().cleanup_tab(tab_id, keep_task_id, headless)
         if tab_id:
             locked_call(self._lock, self._tab_worktree_dirs.pop, tab_id, None)
 
@@ -3270,6 +3311,19 @@ class WebPrinter(JsonPrinter):
         """
         return locked_call(self._ws_lock, self._local_client_addressed_locked, tab_ids)
 
+    def local_client_addressed(self, tab_id: str) -> bool:
+        """Return True when a connected local client addressed *tab_id*.
+
+        A ``daemon_client`` run addresses its own ``api-…`` tab on the
+        connection it waits on; the server keeps such a tab's
+        subscription when a web app closes it (see
+        :meth:`JsonPrinter.cleanup_tab`).
+
+        Args:
+            tab_id: The frontend tab id.
+        """
+        return self._local_client_addressed({tab_id})
+
     def _local_client_addressed_locked(self, tab_ids: set[str]) -> bool:
         """``_local_client_addressed`` under ``_ws_lock``."""
         return any(tabs & tab_ids for tabs in self._local_tab_sets.values())
@@ -3350,13 +3404,19 @@ class WebPrinter(JsonPrinter):
         produce ambiguous JSON with duplicate keys — routed correctly
         today only because parsers happen to keep the last member.
 
+        A headless tab's copy (a tab closed on every surface, kept
+        subscribed for the local client that addressed it, see
+        :meth:`JsonPrinter.cleanup_tab`) goes to local peers only: no
+        web app has the tab, and a browser must not learn of a tab
+        the user closed.
+
         Args:
             event: The task event (carrying ``taskId``).
             encoded: ``json.dumps(event)`` from a caller that encodes
                 before taking ``delivery_lock``, or ``""``.  Ignored
                 when *event* carries a ``tabId``.
         """
-        targets = self._fanout_targets(event.get("taskId"))
+        targets, headless = self._fanout_plan(event.get("taskId"))
         if not targets:
             return
         if "tabId" in event:
@@ -3365,9 +3425,11 @@ class WebPrinter(JsonPrinter):
         base = (encoded or json.dumps(event))[:-1]
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
-            self._send_to_ws_clients(
-                f'{base}, "tabId": {json.dumps(tab_id)}}}', tab_id,
-            )
+            copy = f'{base}, "tabId": {json.dumps(tab_id)}}}'
+            if tab_id in headless:
+                self._send_to_local_clients(copy, tab_id)
+            else:
+                self._send_to_ws_clients(copy, tab_id)
 
     def _local_clients_for_tab(self, tab_id: str) -> list[ServerConnection]:
         """Local clients that receive a task event copy stamped *tab_id*.
@@ -3682,13 +3744,7 @@ class WebPrinter(JsonPrinter):
         if transport is None:
             await endpoint.send(text)
             return
-        watch = _DrainWatch(transport, self._send_timeout, asyncio.get_running_loop())
-        try:
-            await endpoint.send(text)
-        finally:
-            watch.cancel()
-        if watch.expired:
-            raise TimeoutError(f"peer read nothing for {self._send_timeout:g}s")
+        await _await_while_draining(transport, endpoint.send(text), self._send_timeout)
 
     def add_client(
         self, ws: ServerConnection, local: bool = False, link: bool = False,
@@ -5093,6 +5149,7 @@ class RemoteAccessServer:
         # (:meth:`_await_active_merges`).
         self._merges_given_up: set[str] = set()
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._ping_tasks: dict[Any, asyncio.Task[None]] = {}
         self._tunnel_check_task: asyncio.Task[None] | None = None
         self._tls_refresh_task: asyncio.Task[None] | None = None
         self._trusted_clients_task: asyncio.Task[None] | None = None
@@ -5646,7 +5703,13 @@ class RemoteAccessServer:
         allowance.  It is per connection (gone with the socket) and
         never widens who is admitted: that connection was already in.
         Every other password-authenticated client is shut out at its
-        next frame, as before.
+        next frame, as before.  The allowance belongs to that one
+        rotation: ``conn_state["rotated_to"]`` keeps the password the
+        frame asked for, and once the stored password is another one
+        (a later change by another client or ``install.sh``) the old
+        password is as stale on this connection as on any other
+        (audit 2026-11-01: it used to stay admitted, and a ``getConfig``
+        so admitted disclosed the replacement password).
 
         An EMPTY stored password means remote access is off: every
         frame of every password-authenticated client is refused, the
@@ -5670,9 +5733,13 @@ class RemoteAccessServer:
                 new_pw = cfg.get("remote_password") if isinstance(cfg, dict) else None
                 if isinstance(new_pw, str) and new_pw != stored:
                     conn_state["rotated_from"] = stored
+                    conn_state["rotated_to"] = new_pw
             return True
         rotated_from = conn_state.get("rotated_from", "")
-        return bool(rotated_from) and password_accepted(client_pw, rotated_from)
+        if not rotated_from or not password_accepted(conn_state.get("rotated_to", ""), stored):
+            conn_state.pop("rotated_from", None)
+            return False
+        return password_accepted(client_pw, rotated_from)
 
     async def _dispatch_client_command(
         self,
@@ -6675,7 +6742,7 @@ class RemoteAccessServer:
              "name": <basename>, "tabId": <echo of cmd tabId>,
              "line": <echo of cmd line, when a positive int>,
              "content": <utf-8 text>,
-             "version": "<st_mtime_ns>:<st_size>"}   # on success
+             "version": <_file_version of the bytes read>}   # on success
             {"type": "fileContent", "path": ..., "name": ..., "tabId": ...,
              "binary": true, "mime": "application/pdf" | "image/...",
              "size": <bytes>, "base64": <bytes>}   # PDF / image viewer
@@ -6762,13 +6829,11 @@ class RemoteAccessServer:
                     reply["isDirectory"] = True
                     reply["content"] = _directory_listing_text(path)
                     return reply
-                st = path.stat()
                 inline_mime = _inline_binary_mime(path)
                 # The cap is enforced on the bytes actually read, not
-                # on ``st_size``: a file still being appended to (a log
-                # a transcript links to) can outgrow its stat between
-                # the two calls, and the whole of it would land in one
-                # frame.
+                # on a ``stat`` size: a file still being appended to (a
+                # log a transcript links to) can outgrow its stat before
+                # the read, and the whole of it would land in one frame.
                 preview = path.suffix.lower() in _PREVIEW_SUFFIXES
                 cap = _OPEN_BINARY_MAX_BYTES if inline_mime else _OPEN_FILE_MAX_BYTES
                 with open(path, "rb") as f:
@@ -6811,7 +6876,7 @@ class RemoteAccessServer:
                 # so _handle_save_file can tell that the file changed on
                 # disk while it was open in the editor.  Its presence is
                 # also what makes the client's editor editable.
-                reply["version"] = _file_version(st)
+                reply["version"] = _file_version(data)
             except OSError as exc:
                 reply["error"] = f"Failed to read {raw_path}: {exc}"
             return reply
@@ -6833,7 +6898,7 @@ class RemoteAccessServer:
             {"type": "fileSaved", "ok": true,
              "path": <resolved abs path>, "name": <basename>,
              "tabId": <echo>, "token": <echo>,
-             "version": "<st_mtime_ns>:<st_size>" after the write}  # ok
+             "version": <_file_version of the bytes written>}  # ok
             {"type": "fileSaved", "ok": false, "path": ..., "name": ...,
              "tabId": ..., "token": ..., "error": <message>,
              "conflict": true}   # conflict=true only for a stale version
@@ -6915,21 +6980,23 @@ class RemoteAccessServer:
                 # second silently overwrite the first.
                 with _SAVE_FILE_LOCK:
                     st = path.stat()
-                    if (
-                        expected_version
-                        and not force
-                        and _file_version(st) != expected_version
-                    ):
-                        reply["error"] = (
-                            f"{path.name} changed on disk since it was opened"
-                        )
-                        reply["conflict"] = True
-                        return reply
+                    if expected_version and not force:
+                        # Bounded like _handle_open_file's read: a file
+                        # that outgrew the display cap since it was
+                        # opened cannot match its stamp anyway.
+                        with open(path, "rb") as f:
+                            current = f.read(_OPEN_FILE_MAX_BYTES + 1)
+                        if _file_version(current) != expected_version:
+                            reply["error"] = (
+                                f"{path.name} changed on disk since it was opened"
+                            )
+                            reply["conflict"] = True
+                            return reply
                     _atomic_publish(
                         path, partial(_write_bytes_with_mode, data=data, st=st),
                     )
                     reply["ok"] = True
-                    reply["version"] = _file_version(path.stat())
+                    reply["version"] = _file_version(data)
             except OSError as exc:
                 reply["error"] = f"Failed to save {raw_path}: {exc}"
             return reply
@@ -8400,7 +8467,7 @@ class RemoteAccessServer:
         # and on none once it closes: the snapshot lets this
         # (re)connecting client add the live ones and drop any it kept
         # from before a disconnect or a daemon restart.
-        broadcast_to_conn(self._printer, self._agent_server.browser_tabs.snapshot_event(), conn_id)
+        self._agent_server.browser_tabs.send_snapshot(conn_id)
         await self._send_welcome_info(conn_id)
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
@@ -9207,9 +9274,14 @@ class RemoteAccessServer:
         :meth:`WebPrinter._timed_send` happened to abort the peer —
         forever on an idle daemon.  The ping frame gets the tolerance
         every frame gets (:attr:`WebPrinter._send_timeout`), the pong
-        :data:`_WS_PING_TIMEOUT`.  Any failure aborts the transport,
-        which ends the connection's handler; ``close()`` would wait for
-        the same drain.
+        :data:`_WS_PING_TIMEOUT` — both as no-progress deadlines
+        (:func:`_await_while_draining`): the ping sits in the TCP
+        stream behind the transcript parts queued ahead of it and its
+        pong cannot arrive before the peer has read those, so an
+        absolute deadline dropped a peer on a slow link that was
+        taking the transcript the whole time (audit 2026-11-01).  Any
+        failure aborts the transport, which ends the connection's
+        handler; ``close()`` would wait for the same drain.
 
         The heartbeat is queued like any other frame
         (:meth:`WebPrinter._schedule_send`): it takes its place in the
@@ -9230,10 +9302,17 @@ class RemoteAccessServer:
         away is still closed.
         """
         try:
-            pong = await asyncio.wait_for(
-                ws.ping(), timeout=self._printer._send_timeout,
-            )
-            await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
+            transport = getattr(ws, "transport", None)
+            if transport is None:
+                pong = await asyncio.wait_for(
+                    ws.ping(), timeout=self._printer._send_timeout,
+                )
+                await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
+            else:
+                pong = await _await_while_draining(
+                    transport, ws.ping(), self._printer._send_timeout,
+                )
+                await _await_while_draining(transport, pong, _WS_PING_TIMEOUT)
             if ws in self._printer._pending_sends:
                 self._printer._schedule_send(ws, _WS_HEARTBEAT_FRAME)
         except Exception:
@@ -9586,21 +9665,25 @@ class RemoteAccessServer:
         """Ping every connected WSS client, closing unresponsive ones.
 
         Delegates the per-connection timeout/close logic to
-        :meth:`_ping_one_ws`; exceptions from individual pings are
-        collected via ``return_exceptions`` so one bad client cannot
-        skip the rest.
+        :meth:`_ping_one_ws`, run as one task per connection kept in
+        :attr:`_ping_tasks`: a ping lasts as long as the peer keeps
+        taking the frames queued ahead of it (a transcript of
+        megabytes on a slow link), so the tick waits
+        :data:`_WS_PING_TIMEOUT` at most and leaves a slower ping in
+        flight, where the next tick finds it instead of pinging that
+        peer again.  A task's exception stays in the task (every
+        failure path of :meth:`_ping_one_ws` is caught there), so one
+        bad client cannot skip the rest.
         """
-        connections = [
-            ws
-            for server in (self._ws_server, self._ws_loopback_server)
-            if server is not None
-            for ws in server.connections
-        ]
-        if connections:
-            await asyncio.gather(
-                *[self._ping_one_ws(ws) for ws in connections],
-                return_exceptions=True,
-            )
+        self._ping_tasks = {
+            ws: task for ws, task in self._ping_tasks.items() if not task.done()
+        }
+        for server in (self._ws_server, self._ws_loopback_server):
+            for ws in (server.connections if server is not None else ()):
+                if ws not in self._ping_tasks:
+                    self._ping_tasks[ws] = asyncio.create_task(self._ping_one_ws(ws))
+        if self._ping_tasks:
+            await asyncio.wait(list(self._ping_tasks.values()), timeout=_WS_PING_TIMEOUT)
 
     def _reset_tunnel_proc_state(self) -> None:
         """Reset per-process tunnel bookkeeping.
@@ -9947,10 +10030,21 @@ class RemoteAccessServer:
         return True
 
     async def _watchdog_reclaim_loopback(self) -> None:
-        """Retry :meth:`_bind_loopback_alias` while another process holds ``127.0.0.1``."""
+        """Retry :meth:`_bind_loopback_alias` while another process holds ``127.0.0.1``.
+
+        The bind and the endpoint publication run under
+        :attr:`_lifecycle_lock`, like a start: :meth:`stop_async`
+        holds it for the whole shutdown, so a shutdown waits for a
+        publication in flight instead of cancelling its awaiter —
+        cancelling ``to_thread`` does not stop the worker, which
+        used to write the stopped listener's endpoint back after
+        ``stop_async`` had removed it (audit 2026-11-01).
+        """
         if self._ws_loopback_server is not None or not self._wants_loopback_alias():
             return
-        if await self._bind_loopback_alias():
+        async with self._lifecycle_lock:
+            if self._shutdown_initiated or not await self._bind_loopback_alias():
+                return
             logger.info(
                 "Reclaimed 127.0.0.1:%d: http://127.0.0.1:%d reaches this "
                 "server again",
@@ -10878,6 +10972,9 @@ class RemoteAccessServer:
                 self._server_reset_handle = None
             await _cancel_task(self._watchdog_task)
             self._watchdog_task = None
+            for ping in self._ping_tasks.values():
+                await _cancel_task(ping)
+            self._ping_tasks.clear()
             await _cancel_task(self._tunnel_check_task)
             self._tunnel_check_task = None
             await _cancel_task(self._trusted_clients_task)

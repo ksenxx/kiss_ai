@@ -26,6 +26,7 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import model_families
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.core.models.openai_sse_harness import (
@@ -42,6 +43,12 @@ from kiss.tests.core.models.test_openrouter_reported_cost import (
 
 _TRUNCATED_COST = 0.004
 _FINISH_COST = 0.0005
+
+
+@pytest.fixture(autouse=True)
+def _no_other_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the truncated run failing: no model of another family to fail over to."""
+    monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
 
 
 def _truncated_reply(request: Request) -> Reply:

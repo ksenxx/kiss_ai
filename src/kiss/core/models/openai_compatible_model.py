@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 from kiss.core import stop_signal
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import ContentFilterError, KISSError, OutputCapError
 from kiss.core.locked import locked
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -86,6 +86,37 @@ _CUT_SHORT_FINISH_REASONS = {
     "content_filter": "the provider's content filter stopped the output",
     "error": "the provider failed mid-generation",
 }
+
+
+def _terminal_error(reason: str, output_cap_reason: str, message: str) -> KISSError:
+    """Return the error for a completion the provider ended short of success.
+
+    The one classification both transports share; each keeps its own
+    message and guards (Chat Completions types every cut-short
+    ``finish_reason``, the Responses transport only an ``incomplete``
+    status).
+
+    Args:
+        reason: The provider's stop reason (Chat Completions
+            ``finish_reason``, Responses ``incomplete_details.reason``),
+            ``""`` when none applies.
+        output_cap_reason: The *reason* that names the output-token
+            budget on this transport (``"length"`` /
+            ``"max_output_tokens"``).
+        message: The error message.
+
+    Returns:
+        :class:`OutputCapError` (carrying *reason* as ``stop_reason``)
+        when the output budget was hit, :class:`ContentFilterError` for
+        ``content_filter`` -- both make the agentic loop fail over to
+        another model family instead of retrying the same one -- else a
+        plain :class:`KISSError`.
+    """
+    if reason == output_cap_reason:
+        return OutputCapError(message, stop_reason=reason)
+    if reason == "content_filter":
+        return ContentFilterError(message)
+    return KISSError(message)
 
 
 def _call_into(outcome: dict[str, Any], create: Callable[..., Any], kwargs: dict[str, Any]) -> None:
@@ -1349,7 +1380,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         has_tool_calls = bool(msg_copy.get("tool_calls"))
 
         if isinstance(content, str):
-            if content.strip() or has_tool_calls:
+            # A blank tool result still answers its tool call: dropping
+            # it leaves the assistant's ``tool_calls`` unanswered, which
+            # the next request is refused for.
+            if content.strip() or has_tool_calls or msg_copy.get("role") == "tool":
                 return [msg_copy]
             return []
         if not isinstance(content, list):
@@ -1525,19 +1559,23 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 there instead of on the choice.
 
         Raises:
-            KISSError: When the provider cut the completion short.
+            KISSError: When the provider cut the completion short:
+                :class:`OutputCapError` for ``length``,
+                :class:`ContentFilterError` for ``content_filter``, a
+                plain :class:`KISSError` for a gateway's ``error``.
         """
-        finish_reason = getattr(choice, "finish_reason", None)
-        cause = _CUT_SHORT_FINISH_REASONS.get(finish_reason or "")
+        finish_reason: str = getattr(choice, "finish_reason", None) or ""
+        cause = _CUT_SHORT_FINISH_REASONS.get(finish_reason)
         if cause is None:
             return
         error = self._response_error_message(choice) or self._response_error_message(response)
         advice = " Raise max_tokens or lower reasoning_effort." if finish_reason == "length" else ""
-        raise KISSError(
+        message = (
             f"Chat Completions response was truncated (finish_reason={finish_reason!r}): "
             f"{cause}{f' ({error})' if error else ''}, so its text and any tool-call "
             f"arguments are incomplete.{advice}"
         )
+        raise _terminal_error(finish_reason, "length", message)
 
     def _raise_for_failed_completion(self, response: Any) -> None:
         """Reject a non-streamed response that carries no usable choice.
@@ -1590,7 +1628,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             ``(content, tool_call_accumulator, response, finish_choice)``;
             ``finish_choice`` is the choice that carried the
-            ``finish_reason``, or ``None`` when none did.
+            ``finish_reason`` (:meth:`_consume_chat_stream` refuses a
+            stream that ended without one).
         """
         kwargs["stream_options"] = {"include_usage": True}
         if adaptive:
@@ -1628,8 +1667,12 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             ``(content, tool_call_accumulator, usage_chunk, last_chunk,
             finish_choice)``; ``usage_chunk`` is ``None`` when no chunk
-            carried usage, ``finish_choice`` (the choice that carried the
-            ``finish_reason``) when none ended the stream.
+            carried usage, ``finish_choice`` is the choice that carried
+            the ``finish_reason``.
+
+        Raises:
+            KISSError: When the stream ended before any choice carried a
+                ``finish_reason``.
         """
         content = ""
         tool_calls_accum: dict[int, dict[str, str]] = {}
@@ -1704,6 +1747,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     finish_choice.finish_reason,
                     err,
                 )
+        if finish_choice is None:
+            # The body ended (EOF or ``[DONE]``) before any choice carried
+            # a ``finish_reason``: a gateway can close the stream cleanly
+            # before the upstream model is done, so the partial text and
+            # tool-call arguments must not become the turn.  The same
+            # plain ``KISSError`` v2 raises for a stream without
+            # ``response.completed``; usage already seen stays in
+            # ``_rejected_response`` for ``take_partial_usage_response``.
+            raise KISSError(
+                "Chat Completions stream ended without a finish_reason, so its text "
+                "and any tool-call arguments may be incomplete."
+            )
         return content, tool_calls_accum, response, last_chunk, finish_choice
 
     def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:

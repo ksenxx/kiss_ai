@@ -22,6 +22,16 @@ class BudgetExceededError(KISSError):
     """
 
 
+class StepLimitExceededError(KISSError):
+    """Raised when an agent's loop ends because it ran out of steps.
+
+    A distinct type lets a caller tell exhaustion (the agent did its
+    allotted work and found no answer) from a failure at the last step
+    (a credential or transport error), which the step count alone cannot
+    do because the count is advanced before the step runs.
+    """
+
+
 class ContextWindowExceededError(KISSError):
     """Raised when the conversation no longer fits the model's context window.
 
@@ -53,6 +63,48 @@ class ModelRefusalError(KISSError):
     security-research prompts).  Retrying the identical request is useless —
     the refusal is deterministic for the same content — so the adapter
     raises this error instead of silently returning an empty turn, and
-    ``KISSAgent._run_agentic_loop`` immediately switches to the registered
-    fallback model (see ``MODEL_INFO.json``) when one exists.
+    ``KISSAgent._run_agentic_loop`` immediately switches to a model of
+    another family (see :mod:`kiss.core.models.model_families`) when one
+    is configured.
     """
+
+    stop_reason = "refusal"
+    """The provider's stop reason, named by the agent's fail-over warning."""
+
+
+class ContentFilterError(ModelRefusalError):
+    """Raised when the provider's content filter stopped the response.
+
+    OpenAI's Responses API reports it as an ``incomplete`` response with
+    ``incomplete_details.reason == "content_filter"``, Chat Completions as
+    ``finish_reason == "content_filter"``.  Like a safety refusal it is
+    deterministic for the same request and shared by every model of the
+    family, so the agentic loop fails over to another family instead of
+    retrying the same one.
+    """
+
+    stop_reason = "content_filter"
+
+
+class OutputCapError(KISSError):
+    """Raised when the response hit the output-token cap before a usable answer.
+
+    Responses API ``incomplete_details.reason == "max_output_tokens"``,
+    Chat Completions ``finish_reason == "length"`` and Anthropic
+    ``stop_reason == "max_tokens"`` with no complete tool call: the
+    adapters raise instead of returning the cut-off text, since the
+    agent cannot act on it.  The agentic loop retries the same request
+    once at a lower reasoning effort and then fails over to a model of
+    another family.
+    """
+
+    def __init__(self, message: str, stop_reason: str = "max_tokens") -> None:
+        """Create the error.
+
+        Args:
+            message: What was cut short; it names the stop reason.
+            stop_reason: The provider's stop reason (``max_output_tokens``,
+                ``length`` or ``max_tokens``), named by the fail-over warning.
+        """
+        super().__init__(message)
+        self.stop_reason = stop_reason

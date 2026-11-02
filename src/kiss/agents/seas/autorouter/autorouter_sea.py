@@ -84,10 +84,10 @@ RSI7D_JOB_SCHEDULE = "0 1 * * 6"
 """Saturday 01:00 America/Los_Angeles (cron expressions are Pacific-evaluated), a day
 before the hand-scheduled full ``/rsi7d all`` sweep so the two never share the checkout."""
 
-RSI7D_JOB_MODEL = "claude-fable-5-1"
+RSI7D_JOB_MODEL = "claude-fable-5-1-max"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
-ROUTER_MODEL = "openrouter/moonshotai/kimi-k3"
+ROUTER_MODEL = "claude-opus-5-5-max"
 """Model every routed session runs on (the ``model`` of :meth:`AutorouterSea.settings`)."""
 
 RSI7D_JOB_BUDGET_USD = 25.0
@@ -148,35 +148,89 @@ Tiers = dict[str, tuple[tuple[str, str], ...]]
 TIERS: Tiers = {
     "small": (
         ("zai-org/GLM-5.3-Flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
-        ("openrouter/z-ai/glm-5.3-flash", "same model via OpenRouter"),
-        ("gpt-6-luna", "OpenAI small model, 1M context; cheapest cost per task"),
-        ("openrouter/openai/gpt-6-luna", "same model via OpenRouter"),
+        ("openrouter/z-ai/glm-5.3-flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
+        ("gpt-6-luna-xhigh", "OpenAI small model, 1M context; cheapest cost per task"),
+        (
+            "openrouter/openai/gpt-6-luna-xhigh",
+            "OpenAI small model, 1M context; cheapest cost per task",
+        ),
         ("deepseek-ai/DeepSeek-V4.1-Flash", "DeepSeek flash"),
+        ("openrouter/deepseek/deepseek-v4.1-flash", "DeepSeek flash"),
+        ("openrouter/xiaomi/mimo-v2.6-flash", "Xiaomi's flash model"),
         ("openrouter/qwen/qwen3.8-flash", "Qwen flash"),
-        ("gpt-5.6-luna", "previous-generation OpenAI small model"),
-        ("claude-haiku-4-5", "Anthropic small; 10x gpt-6-luna, only when Anthropic is required"),
+        (
+            "claude-haiku-5-5-max",
+            "Anthropic small; 10x gpt-6-luna, only when Anthropic is required",
+        ),
+        (
+            "openrouter/anthropic/claude-haiku-5.5-max",
+            "Anthropic small; 10x gpt-6-luna, only when Anthropic is required",
+        ),
     ),
     "medium": (
-        ("gemini-3.8-flash", "Google flash; best coding score per dollar in the tier"),
-        ("openrouter/google/gemini-3.8-flash", "same model via OpenRouter"),
-        ("zai-org/GLM-5.3", "Z.ai flagship, open weights"),
-        ("openrouter/z-ai/glm-5.3", "same model via OpenRouter"),
-        ("deepseek-ai/DeepSeek-V4-Pro-0813", "DeepSeek pro"),
-        ("openrouter/x-ai/grok-4.7", "xAI"),
-        ("gpt-6-sol", "OpenAI mid model, 400k context; cheapest measured per step"),
-        ("claude-sonnet-5", "Anthropic mid model; default when Anthropic is required"),
-        ("claude-opus-5-5", "Anthropic frontier; cheapest, fastest frontier per step measured"),
         (
-            "kimi-k3",
-            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5-1. Go-to model "
+            "openrouter/meta/muse-wonder",
+            "Good general purpose model from Meta",
+        ),
+        ("gemini-4-argon", "Google flash; best coding score per dollar in the tier"),
+        (
+            "openrouter/google/gemini-4-argon",
+            "Google flash; best coding score per dollar in the tier",
+        ),
+        ("openrouter/~z-ai/glm-latest", "Z.ai flagship, open weights"),
+        ("openrouter/deepseek/deepseek-v4.1-flash-1017", "DeepSeek pro"),
+        ("openrouter/x-ai/grok-4.7", "xAI"),
+        (
+            "gpt-6.1-sol-high",
+            "OpenAI mid model, 400k context; cheapest measured per step",
+        ),
+        (
+            "openrouter/openai/gpt-6.1-sol-high",
+            "OpenAI mid model, 400k context; cheapest measured per step",
+        ),
+        (
+            "claude-sonnet-5-5-max",
+            "Anthropic mid model; default when Anthropic is required",
+        ),
+        (
+            "openrouter/anthropic/claude-sonnet-5.5-max",
+            "Anthropic mid model; default when Anthropic is required",
+        ),
+        (
+            "openrouter/moonshotai/kimi-k3.1-pro",
+            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5.1. Go-to model "
             "for security analysis and hardening.",
         ),
     ),
     "frontier": (
-        ("gpt-6-astra", "OpenAI frontier; priciest per step measured, reliable reviewer"),
-        ("claude-fable-5-1", "Anthropic top model; longest, hardest tasks only; measured stalls"),
+        (
+            "gpt-6-astra",
+            "OpenAI frontier; priciest per step measured, reliable reviewer",
+        ),
+        (
+            "openrouter/openai/gpt-6-astra",
+            "OpenAI frontier; priciest per step measured, reliable reviewer",
+        ),
+        (
+            "claude-fable-5-1-max",
+            "Anthropic top model; longest, hardest tasks only; measured stalls",
+        ),
+        (
+            "openrouter/anthropic/claude-fable-5.1-max",
+            "Anthropic top model; longest, hardest tasks only; measured stalls",
+        ),
+        (
+            "claude-opus-5-5-max",
+            "Anthropic's coding model; best coding model",
+        ),
+        (
+            "openrouter/anthropic/claude-opus-5.5-max",
+            "Anthropic's coding model; best coding model",
+        ),
     ),
 }
+
+
 """Ordered ``(model, note)`` candidates per tier; the first runnable one wins.
 
 The order is by measured coding quality per dollar as of 2026-09-24; the

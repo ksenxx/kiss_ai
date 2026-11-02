@@ -46,7 +46,8 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError
-from kiss.core.tool_verdict import ALLOW, refuse
+from kiss.core.llm_reply import LLMReply, zero_usage
+from kiss.core.tool_verdict import ALLOW, end_run, refuse
 from kiss.tests.agents.seas.sea_contract import assert_worker_contract, tool_names
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -248,7 +249,7 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
     sea = tmp_path / "full_sea.py"
     sea.write_text(
         '''
-from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, refuse
+from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, end_run, refuse
 
 PROMPT = 'p'
 
@@ -271,6 +272,9 @@ class Sea(BaseSea):
 
     def tool_call_hook(self, name, args):
         return refuse('refused') if name == 'Bash' else ALLOW
+
+    def llm_response_hook(self, reply):
+        return end_run('TERMINAL') if 'TERMINAL' in reply.text else ALLOW
 
     def tools(self, tools):
         return tools + [greet]
@@ -301,6 +305,9 @@ def greet(name: str) -> str:
     assert kwargs["llm_call_hook"](["m"]) == ["m", "seen"]
     assert kwargs["tool_call_hook"]("Bash", {}) == refuse("refused")
     assert kwargs["tool_call_hook"]("Read", {}) == ALLOW
+    # The response hook reaches the rollout like the other two hooks.
+    assert kwargs["llm_response_hook"](_reply("TERMINAL reached")) == end_run("TERMINAL")
+    assert kwargs["llm_response_hook"](_reply("going on")) == ALLOW
     assert [t.__name__ for t in kwargs["tools_hook"]([greet_stub])] == ["greet_stub", "greet"]
     assert kwargs["prompt"]("any task") == "fixed prompt suffix"
     assert "add_to_prompt" not in kwargs and "tools" not in kwargs
@@ -363,16 +370,23 @@ def append_to_system_prompt():
     # The module-level getters are not SEA methods: no setting is mapped
     # and every fold but ``system_prompt`` is ``BaseSea``'s identity.
     assert sorted(only) == [
-        "llm_call_hook", "prompt", "system_prompt_hook", "tool_call_hook", "tools_hook",
+        "llm_call_hook", "llm_response_hook", "prompt", "system_prompt_hook",
+        "tool_call_hook", "tools_hook",
     ]
     assert only["system_prompt_hook"]("x") == "q"
     assert only["tools_hook"]([greet_stub]) == [greet_stub] and only["prompt"]("t") == "t"
     assert only["llm_call_hook"]([1]) == [1] and only["tool_call_hook"]("Bash", {}) == ALLOW
+    assert only["llm_response_hook"](_reply("TERMINAL")) == ALLOW
 
 
 def greet_stub(name: str) -> str:
     """Stand-in built-in tool handed to a SEA's ``tools()``."""
     return name
+
+
+def _reply(text: str) -> LLMReply:
+    """A model reply of *text* alone, as the response hook receives one."""
+    return LLMReply(text, [], zero_usage(), 1, 0.0, 0)
 
 
 def test_sea_target_rejects_invalid_tool_getters(tmp_path: Path) -> None:
@@ -1101,7 +1115,9 @@ class Sea(BaseSea):
     )
     daemon = RecordingDaemon(text="child ok", tokens=1, steps=1, chat_id="c")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
-    task = EvalTask(id="t", prompt="parent task", expect=["done"])
+    # The task asks for a sub-agent in so many words: a same-family child
+    # for the caller's own task would otherwise be refused (fanout_guard).
+    task = EvalTask(id="t", prompt="parent task: delegate to a sub-agent", expect=["done"])
     bodies = [
         tool_call_body("run_agent", {"task": "child task", "agent": "", "timeout": "30"}, 500),
         finish_body("<p>done</p>", 600),

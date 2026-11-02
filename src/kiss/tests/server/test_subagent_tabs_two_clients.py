@@ -56,7 +56,7 @@ from kiss.agents.sorcar.agent_dispatch import run_agents_parallel
 from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
-PARENT_PROMPT = "fan out: spawn two children xq9"
+PARENT_PROMPT = "fan out: spawn two sub-agents xq9"
 CHILD_MARK = "CHILDTASK"
 NEST_MARK = "NESTING"
 GRANDCHILD_MARK = "GRANDCHILD"
@@ -113,7 +113,10 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
                 kwargs.get("work_dir")
                 or getattr(self_agent, "work_dir", ".") or ".",
             )
-            plan(self_agent, str(kwargs.get("prompt_template", "")))
+            # What the real ``run`` records: the dispatcher reads it to see
+            # that the task asks for sub-agents (same-family children).
+            self_agent.task_description = str(kwargs.get("prompt_template", ""))
+            plan(self_agent, self_agent.task_description)
             self_agent.total_tokens_used = 5
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -143,7 +146,7 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             elif PARENT_PROMPT in prompt:
                 _fan_out(agent, [
                     f"{CHILD_MARK} plain leaf",
-                    f"{CHILD_MARK} {NEST_MARK} parent of a grandchild",
+                    f"{CHILD_MARK} {NEST_MARK} parent of a grandchild sub-agent",
                 ])
 
         self._install_plan(plan)

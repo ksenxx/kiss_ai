@@ -577,8 +577,14 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
         inferred = infer_subagent_seas(db, parent_id)
         with db:
             for child_id, sea in inferred.items():
-                db.execute("UPDATE task_history SET sea = ? WHERE id = ?", (sea, child_id))
-        counts["sea"] += len(inferred)
+                # Fill only a still-empty column: the child may have
+                # finished since the inference and saved its own SEA.
+                counts["sea"] += db.execute(
+                    "UPDATE task_history SET sea = ? WHERE id = ? AND (sea IS NULL OR sea = '')",
+                    (sea, child_id),
+                ).rowcount
+    from kiss.agents.sorcar.persistence import _immediate_txn
+
     chats = db.execute(
         "SELECT DISTINCT chat_id FROM task_history t "
         f"WHERE {NOT_SUBAGENT} AND chat_id != '' "
@@ -586,7 +592,13 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
         "WHERE c.chat_id = t.chat_id AND c.summary != '')"
     ).fetchall()
     for start in range(0, len(chats), _BACKFILL_BATCH):
-        with db:
+        # ``upsert_chat_summary`` reads the chat's tasks and then writes
+        # the row, so the batch is one write transaction from its first
+        # read (``with db:`` alone would begin at the first INSERT): a
+        # task finishing meanwhile cannot have its completion replaced
+        # by the stale read, and a chat deleted meanwhile cannot make
+        # the second read come back empty.
+        with _immediate_txn(db):
             for (chat_id,) in chats[start : start + _BACKFILL_BATCH]:
                 upsert_chat_summary(db, chat_id)
     counts["chats"] = len(chats)

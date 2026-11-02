@@ -15,6 +15,7 @@ import mimetypes
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,10 +31,17 @@ from typing import IO, Any
 
 from kiss.agents.sorcar.checkpoints import Checkpoints
 from kiss.agents.sorcar.edit_guards import (
+    HEREDOC_VERDICT,
+    HeredocCopy,
+    MechanicalEdit,
+    edit_call,
+    heredoc_copy,
     heredoc_guard,
     line_of,
+    mechanical_edit,
     numbered_region,
     output_shows_file,
+    preview,
     region_around_string,
     repo_read_key,
     rewrite_guard,
@@ -45,7 +53,13 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
 )
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
-from kiss.agents.sorcar.shell_scan import Word, bash_path, host_path, simple_commands
+from kiss.agents.sorcar.shell_scan import (
+    SimpleCommand,
+    Word,
+    bash_path,
+    host_path,
+    simple_commands,
+)
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.models.model import (
@@ -60,6 +74,7 @@ from kiss.core.processes import (
     pid_alive,
     popen_process_group,
 )
+from kiss.core.tool_verdict import ToolRedirect, followup_result
 
 logger = logging.getLogger(__name__)
 
@@ -874,35 +889,305 @@ def _sleep_seconds(operands: list[Word]) -> float:
     return total
 
 
-def sleep_guard(command: str) -> str | None:
-    """Refuse a ``sleep`` longer than :data:`FOREGROUND_SLEEP_MAX_SECONDS`.
+def long_sleep(command: str, limit: float) -> tuple[float, list[str], bool] | None:
+    """Return the first ``sleep`` of *command* longer than *limit*: its seconds, operands, looped.
 
-    A long sleep is a polling turn: the model pays a full step to wait.
-    The wait belongs in ``bash_job(action="wait", until=<regex>,
-    timeout_seconds=N)``, which blocks server-side at no step cost.
     Every ``sleep`` the shell runs counts (read with
     :func:`~kiss.agents.sorcar.shell_scan.simple_commands`: in a loop,
     a substitution, behind ``nohup``), with GNU sleep's ``s``/``m``/
     ``h``/``d`` suffixes and the sum of its operands.  A ``sleep N &``
-    is refused too: the child keeps the call's output pipe, so the call
+    counts too: the child keeps the call's output pipe, so the call
     blocks until the sleep ends all the same.  Text that only mentions
-    a sleep (quoted, a here-document body outside its substitutions) is
-    allowed.
+    a sleep (quoted, a here-document body outside its substitutions)
+    does not.  *looped* tells whether the sleep paces a ``for``/
+    ``while``/``until``/``select`` loop.
+
+    Args:
+        command: The shell command text.
+        limit: Seconds a sleep may take without counting.
     """
     for simple in simple_commands(command, None):
         if simple.program() != "sleep":
             continue
-        seconds = _sleep_seconds(simple.argv()[1:])
-        if seconds > FOREGROUND_SLEEP_MAX_SECONDS:
-            shown = "infinity" if math.isinf(seconds) else f"{seconds:.10g}s"
-            return (
-                f"REFUSED: the Bash call did NOT run: a foreground sleep of {shown} "
-                "is a polling turn. Start the thing you are waiting for with "
-                "Bash(background=True) and block on it with "
-                'bash_job(job_id, action="wait", until="<regex in its log>", '
-                "timeout_seconds=N); or agent_job(job_id, \"wait\") for a sub-agent."
-            )
+        operands = simple.argv()[1:]
+        seconds = _sleep_seconds(operands)
+        if seconds > limit:
+            return seconds, [word.text for word in operands], _in_loop(simple)
     return None
+
+
+_LOOPS = frozenset({"for", "while", "until", "select"})
+
+
+def _in_loop(simple: SimpleCommand) -> bool:
+    """Whether *simple* runs in the body of a loop (at any depth)."""
+    group = simple.group
+    while group is not None:
+        if group.kind in _LOOPS:
+            return True
+        group = group.group
+    return False
+
+
+def sleep_guard(
+    command: str, limit: float = FOREGROUND_SLEEP_MAX_SECONDS, job_id: str = "",
+) -> str | None:
+    """Refuse a ``sleep`` longer than *limit* seconds (:func:`long_sleep`).
+
+    A long sleep is a polling turn: the model pays a full step to wait.
+    The wait belongs in ``bash_job(action="wait", until=<regex>,
+    timeout_seconds=N)``, which blocks server-side at no step cost; the
+    refusal names that call with *job_id* (the running job to wait on,
+    when there is one) and the sleep's own length.
+
+    Args:
+        command: The shell command text.
+        limit: Seconds a foreground sleep may take; the default is the
+            parallel runner's.
+        job_id: The id of a running background job to name, or ``""``.
+    """
+    sleep = long_sleep(command, limit)
+    return None if sleep is None else sleep_refusal(sleep[0], job_id)
+
+
+def sleep_refusal(seconds: float, job_id: str = "") -> str:
+    """Return the refusal of a foreground sleep of *seconds*, naming the wait to make instead.
+
+    Args:
+        seconds: The sleep's length (``inf`` for ``sleep infinity``).
+        job_id: The id of a running background job to wait on, or ``""``.
+    """
+    shown = "infinity" if math.isinf(seconds) else f"{seconds:.10g}s"
+    wait = f"{min(seconds, 3600):.10g}"
+    return (
+        f"REFUSED: the Bash call did NOT run: a foreground sleep of {shown} "
+        "is a polling turn. Start the thing you are waiting for with "
+        "Bash(<its command>, background=True) and block on it with "
+        f'bash_job({job_id or "job_id"!r}, action="wait", until="<regex in its log>", '
+        f"timeout_seconds={wait}); or agent_job(job_id, \"wait\") for a sub-agent."
+    )
+
+
+# A ``sleep`` and its operands as written, to take out of a command: the
+# program (by its path too), then operands with at most simple quotes.
+_SLEEP_TEXT = re.compile(
+    r"(?<![\w.-])(?:[\w./-]*/)?sleep((?:[ \t]+(?:'[^']*'|\"[^\"]*\"|[^\s;&|<>()'\"]+))+)"
+)
+
+
+def _sleeps(command: str) -> list[list[str]]:
+    """Return the operands of every ``sleep`` the shell runs in *command*, in order."""
+    return [
+        [word.text for word in simple.argv()[1:]]
+        for simple in simple_commands(command, None) if simple.program() == "sleep"
+    ]
+
+
+def _without_sleep(command: str, operands: list[str]) -> str | None:
+    """Return *command* with its first ``sleep`` taking *operands* replaced by ``true``.
+
+    ``None`` when the sleep is spelled in a way the text search does
+    not find (then the command runs as written).  A match the shell
+    does not run as that sleep (the words of a quoted argument, a
+    here-document body) is passed over: ``true`` there would change
+    that text and leave the sleep in, so the match taken is the one
+    whose removal leaves the other sleeps as they are.
+    """
+    sleeps = _sleeps(command)
+    sleeps.remove(operands)
+    for match in _SLEEP_TEXT.finditer(command):
+        words = [word.strip("'\"") for word in match.group(1).split()]
+        if words != operands:
+            continue
+        rewritten = command[:match.start()] + "true" + command[match.end():]
+        if _sleeps(rewritten) == sleeps:
+            return rewritten
+    return None
+
+
+def wait_instead_of_sleep(
+    command: str,
+    timeout_seconds: float,
+    running_job: Callable[[], str | None],
+    wait: Callable[[str, float], str],
+) -> tuple[str | None, str, str]:
+    """Settle a long foreground ``sleep`` of *command* before it runs.
+
+    The one rule of the host and the container ``Bash`` tools.  A
+    ``sleep`` of at most :data:`FOREGROUND_SLEEP_MAX_SECONDS` runs as
+    written.  A longer one past *timeout_seconds* is refused: the wait
+    belongs in ``bash_job``.  While a background job runs, the sleep is
+    spent waiting on the one started last and the command runs with
+    that sleep taken out (``sleep 60; tail log`` waits, then runs
+    ``tail log``): refusing it only made the model poll with shorter
+    sleeps, each a turn.  With no running job, or when the sleep paces
+    a loop (taking it out would spin the loop), the sleep runs as
+    written.
+
+    Args:
+        command: The shell command text.
+        timeout_seconds: The call's deadline.
+        running_job: Returns the id of the running background job
+            started last, or ``None``; called only for a long sleep.
+        wait: ``wait(job_id, seconds)`` blocks until that job exits or
+            the seconds pass and returns its status line.
+
+    Returns:
+        ``(refusal, note, command)``: the refusal (``None`` when the
+        command may run), the line telling what was waited on (``""``
+        when nothing) and the command to run.
+    """
+    sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
+    if sleep is None:
+        return None, "", command
+    seconds, operands, looped = sleep
+    job_id = running_job()
+    if seconds > timeout_seconds:
+        return sleep_refusal(seconds, job_id or ""), "", command
+    rest = None if job_id is None or looped else _without_sleep(command, operands)
+    if job_id is None or rest is None:
+        return None, "", command
+    status = wait(job_id, seconds)
+    note = f"Waited on job {job_id} for up to {seconds:.10g} s instead of sleeping ({status}).\n"
+    return None, note, rest
+
+
+BATCHING_HINT = (
+    "\n[hint: this turn made one short read-only call; independent greps, reads and git "
+    "queries fit in one Bash call or one run_commands_parallel call]"
+)
+"""Appended to a short read-only Bash result, at most once per :data:`BATCHING_HINT_EVERY` calls."""
+BATCHING_HINT_EVERY = 20
+# A call is short when it took less than these seconds and returned fewer characters.
+_SHORT_CALL_SECONDS = 2.0
+_SHORT_CALL_CHARS = 2000
+_READ_ONLY_PROGRAMS = frozenset({"grep", "cat", "ls", "sed", "head", "tail", "git", "find", "wc"})
+_READ_ONLY_GIT = frozenset({"log", "status", "diff", "show"})
+_FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+_SED_IN_PLACE = re.compile(r"-[a-zA-Z]*i|--in-place")
+
+
+def _is_read_only(command: str) -> bool:
+    """Whether every program of *command* only reads, with no output redirection.
+
+    Those are ``grep``, ``cat``, ``ls``, ``sed -n``, ``head``, ``tail``,
+    ``git log``/``status``/``diff``/``show``, ``find`` without an action
+    and ``wc``.
+    """
+    commands = simple_commands(command, None)
+    if not commands:
+        return False
+    for simple in commands:
+        program = simple.program()
+        args = [word.text for word in simple.argv()[1:]]
+        if program not in _READ_ONLY_PROGRAMS or simple.outputs:
+            return False
+        if program == "sed" and ("-n" not in args or any(_SED_IN_PLACE.match(a) for a in args)):
+            return False
+        if program == "git" and (not args or args[0] not in _READ_ONLY_GIT):
+            return False
+        if program == "find" and any(a in _FIND_ACTIONS or a.startswith("-fprint") for a in args):
+            return False
+    return True
+
+
+def edit_args(path: str, edits: list[tuple[str, str, bool]]) -> dict[str, Any]:
+    """Return the ``Edit`` arguments making *edits* of *path*: a pair inline, several as ``edits``.
+
+    Args:
+        path: The file to edit.
+        edits: ``(old, new, replace_all)`` per replacement, in order.
+    """
+    if len(edits) == 1:
+        old, new, every = edits[0]
+        return {"file_path": path, "old_string": old, "new_string": new, "replace_all": every}
+    pairs = [
+        {"old_string": old, "new_string": new, "replace_all": every} for old, new, every in edits
+    ]
+    return {"file_path": path, "edits": json.dumps(pairs)}
+
+
+def _applied(call: str, result: str, appended: bool = False) -> str:
+    """Report *result* of the Write/Edit *call* a shell rewrite was applied as.
+
+    A *result* starting with ``Error`` says the call failed instead of
+    claiming the change was applied.
+    """
+    if result.startswith("Error"):
+        return f"Not applied: the command stands for {call}, which failed: {result}"
+    return f"{'Appended through' if appended else 'Applied as'} {call}: {result}"
+
+
+def rewrite_redirect(
+    name: str,
+    args: dict[str, Any],
+    call: str,
+    appended: bool = False,
+    followup: tuple[str, dict[str, Any]] | None = None,
+) -> ToolRedirect:
+    """Return the redirect making the *name* call (*args*) a shell rewrite stands for.
+
+    The agent makes the call through its own tool path and the result
+    of the rewrite opens with what it was applied as (*call*, the call
+    as :func:`edit_call` spells it).
+
+    Args:
+        name: ``"Write"`` or ``"Edit"``.
+        args: The call's arguments.
+        call: The call as the result names it.
+        appended: Whether the rewrite appended (a ``>>`` copy).
+        followup: The ``Bash`` call running the rest of the command
+            (:func:`followup_call`), made once the call went through.
+    """
+    made = "Appended through" if appended else "Applied as"
+    return ToolRedirect(name, args, f"{made} {call}, whose result follows:", followup)
+
+
+CD_VERDICT = (
+    "REFUSED: the command did not run: its `cd {cwd}` fails, there is no such directory, "
+    "so bash would run nothing after it."
+)
+"""The refusal of a compound rewrite whose leading ``cd`` names a missing directory."""
+
+
+def followup_call(
+    cwd: str,
+    remainder: str,
+    description: str,
+    timeout_seconds: float,
+    max_output_chars: int,
+    **options: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the ``Bash`` call running *remainder*, the rest of a compound rewrite command.
+
+    The rest runs where the command's leading ``cd`` moved to (``cd
+    <cwd> && <remainder>``), with the original call's *description*,
+    *timeout_seconds*, *max_output_chars* and *options*; the same
+    guards apply to it as to any ``Bash`` call.
+
+    Args:
+        cwd: The absolute POSIX directory of the leading ``cd``; ``""`` without one.
+        remainder: The rest of the command after its rewrite; ``""`` without one.
+        description: The original call's description.
+        timeout_seconds: The original call's deadline.
+        max_output_chars: The original call's output budget.
+        **options: The original call's other arguments, which say how
+            it runs (the host ``Bash``'s ``background`` and
+            ``on_timeout``): the rest runs as the model asked.
+
+    Returns:
+        ``("Bash", arguments)``, or ``None`` when there is no rest to run.
+    """
+    if not remainder:
+        return None
+    command = f"cd {shlex.quote(cwd)} && {remainder}" if cwd else remainder
+    return "Bash", {
+        "command": command,
+        "description": description,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+        **options,
+    }
 
 
 def _lines_within_budget(lines: list[str], budget: int) -> list[str]:
@@ -1008,8 +1293,10 @@ def _refuse_or_lift(
 ) -> tuple[str | None, float]:
     """Apply the shell guards to *command* and lift its timeout for installs.
 
-    Shared by :meth:`UsefulTools.Bash` and :func:`_run_one_command` so a
-    command is refused, and its deadline raised, identically on both paths.
+    The guard chain of :func:`_run_one_command`; :meth:`UsefulTools.Bash`
+    runs the same guards but applies a mechanical rewrite through
+    ``Write``/``Edit`` instead of refusing it
+    (:meth:`UsefulTools._rewrite_instead`).
 
     Args:
         command: The shell command the model wants to run.
@@ -1034,6 +1321,40 @@ def _refuse_or_lift(
 def _host_lexists(path: str) -> bool:
     """Return whether the absolute bash *path* (see :func:`bash_path`) exists on this host."""
     return os.path.lexists(host_path(path))
+
+
+def _host_isdir(path: str) -> bool:
+    """Return whether the absolute bash *path* (see :func:`bash_path`) is a directory here."""
+    return os.path.isdir(host_path(path))
+
+
+def _sed_replaces_link(path: str) -> bool:
+    """Return whether a ``sed -i`` on the host *path* changes other files than an ``Edit`` of it.
+
+    GNU sed writes a new file and renames it over the operand: a
+    symlink is replaced by a regular file and its target left as it
+    was; a hard link is cut from its other names, which keep the old
+    text.  ``Edit`` writes the file in place, through the link.
+    """
+    try:
+        return os.path.islink(path) or os.lstat(path).st_nlink > 1
+    except OSError:
+        return False
+
+
+def cd_refusal(cwd: str, exists: Callable[[str], bool]) -> str | None:
+    """Return the refusal of a compound rewrite whose leading ``cd`` *cwd* names no directory.
+
+    Args:
+        cwd: The directory the ``cd`` before the rewrite moves to; ``""`` without one.
+        exists: Whether a path exists where the command would run.
+
+    Returns:
+        :data:`CD_VERDICT` when *cwd* is set and does not exist, else ``None``.
+    """
+    if cwd and not exists(cwd):
+        return CD_VERDICT.format(cwd=cwd)
+    return None
 
 
 def _run_one_command(
@@ -1385,6 +1706,17 @@ class UsefulTools:
         self.written_files: set[Path] = set()
         # Snapshots saved by ``checkpoint`` for ``rollback``, by name.
         self._checkpoints = Checkpoints(stop_event)
+        # Set by the agent that registers these tools: the Write/Edit a
+        # shell rewrite stands for is then raised as a ToolRedirect for
+        # the agent to make (its hook, guard and events see it) instead
+        # of being made here directly, as it is without an agent.
+        self.redirect = False
+        # The append a here-document copy stands for (:meth:`_write_instead`):
+        # the file, its text when the copy was read for the Write and the
+        # body.  The ``Write`` made for it appends to what the file holds
+        # by then (an append does not overwrite what another writer added
+        # in between); any other call forgets it.
+        self._pending_append: tuple[Path, str, str] | None = None
 
     def _mark_read(self, resolved: Path) -> None:
         """Record that the model has seen *resolved* (a Read, a Write, or a Bash view of it)."""
@@ -1670,6 +2002,7 @@ class UsefulTools:
         if max_lines < 1:
             return f"Error: max_lines must be >= 1 (got {max_lines})."
         try:
+            self._pending_append = None
             resolved = resolve_tool_path(file_path, self.work_dir, Path.exists)
 
             if resolved.is_dir():
@@ -1805,6 +2138,7 @@ class UsefulTools:
             content: The full content to write to the file.
         """
         try:
+            pending, self._pending_append = self._pending_append, None
             resolved = resolve_tool_path(file_path, self.work_dir)
             if resolved.exists() and not resolved.is_file():
                 return (
@@ -1818,7 +2152,16 @@ class UsefulTools:
             ):
                 return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8", newline="")
+            if pending is not None and (resolved, content) == (pending[0], pending[1] + pending[2]):
+                # The Write stands for an append (``_pending_append``): the body
+                # goes after what the file holds as the Write lands, the file
+                # opened for appending as the shell's ``>>`` opens it, so what
+                # another writer appended since the file was read for the
+                # call, or appends now, is kept.
+                with resolved.open("a", encoding="utf-8", newline="") as appended:
+                    appended.write(pending[2])
+            else:
+                resolved.write_text(content, encoding="utf-8", newline="")
             self._mark_read(resolved)
             self.written_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -1851,6 +2194,7 @@ class UsefulTools:
             verifying Read is needed), or an error naming what went wrong.
         """
         try:
+            self._pending_append = None
             resolved = resolve_tool_path(file_path, self.work_dir, Path.is_file)
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
@@ -1912,6 +2256,269 @@ class UsefulTools:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
+    def _rewrite_instead(
+        self,
+        command: str,
+        cwd: str,
+        description: str,
+        timeout_seconds: float,
+        max_output_chars: int,
+        **options: Any,
+    ) -> str | None:
+        """Apply the ``Write``/``Edit`` a shell rewrite of a file stands for, or refuse the rewrite.
+
+        A ``cat``/``tee`` here-document copy into an existing file
+        (:func:`heredoc_copy`), a python ``.replace`` rewrite or a
+        one-substitution ``sed -i`` (:func:`mechanical_edit`) is applied
+        through :meth:`Write` / :meth:`Edit` when the file was shown, so
+        the change is logged and reviewable and the model pays no turn
+        to re-issue it; a file not shown is refused naming the exact
+        calls to make.  The rest of a compound command (``cd DIR &&
+        <rewrite> && <rest>``) then runs as the ``Bash`` call
+        :func:`followup_call` names, once the ``Write``/``Edit`` went
+        through; a ``cd`` to a missing directory is refused up front, as
+        bash would run nothing after it.  Any other rewrite is refused
+        as :func:`rewrite_guard` and :func:`heredoc_guard` refuse it.
+
+        Args:
+            command: The shell command text.
+            cwd: The host directory it would run in.
+            description: The call's description, for the follow-up.
+            timeout_seconds: The call's deadline, for the follow-up.
+            max_output_chars: The call's output budget, for the follow-up.
+            **options: The call's ``background`` and ``on_timeout``, for
+                the follow-up (:func:`followup_call`).
+
+        Returns:
+            The result of the applied call, a refusal, or ``None`` when
+            *command* is no such rewrite and may run.
+        """
+        bash_cwd = bash_path(os.path.abspath(cwd))
+        copy = heredoc_copy(command, bash_cwd)
+        if copy is not None and copy.path is not None:
+            if copy.path.startswith("/dev/"):
+                return None
+            refusal = cd_refusal(copy.cwd, _host_isdir)
+            if refusal is not None:
+                return refusal
+            if not _host_lexists(copy.path):
+                return None  # the here-document creates the file: the shell may
+            followup = followup_call(
+                copy.cwd, copy.remainder, description, timeout_seconds, max_output_chars,
+                **options,
+            )
+            return self._write_instead(copy, host_path(copy.path), followup)
+        edit = mechanical_edit(command, bash_cwd)
+        if edit is not None and edit.path is not None:
+            refusal = cd_refusal(edit.cwd, _host_isdir)
+            if refusal is not None:
+                return refusal
+            followup = followup_call(
+                edit.cwd, edit.remainder, description, timeout_seconds, max_output_chars,
+                **options,
+            )
+            applied = self._edit_instead(edit, host_path(edit.path), followup)
+            if applied is not None:
+                return applied
+        return rewrite_guard(command) or heredoc_guard(command, bash_cwd, _host_lexists)
+
+    def _write_instead(
+        self, copy: HeredocCopy, path: str, followup: tuple[str, dict[str, Any]] | None,
+    ) -> str:
+        """Write the here-document *copy* into the existing file *path* through :meth:`Write`.
+
+        The file must have been shown (or be a scratch file, which
+        :meth:`Write` overwrites unread); otherwise the refusal names the
+        ``Read`` to make before the same command, and the ``Write``.
+        An append (``>>``, ``tee -a``) is the ``Write`` of the file's
+        text followed by the body, and is remembered as the pending
+        append :meth:`Write` makes as the shell would, after the file's
+        text by then; one into a file that is not regular is refused
+        unread.
+        *followup* is the ``Bash`` call running the rest of the command
+        after the ``Write`` (:func:`followup_call`), if any.
+        """
+        resolved = resolve_tool_path(path, self.work_dir)
+        shown = json.dumps(path)
+        if not self._is_read(resolved) and not _is_scratch_path(resolved, self.work_dir):
+            content = (
+                f"<the current content followed by {preview(copy.body)}>" if copy.append
+                else preview(copy.body)
+            )
+            return (
+                HEREDOC_VERDICT.format(path=copy.path)
+                + f"\nThe file was not shown in this session: call Read(file_path={shown}) and "
+                "then the same command again (it is then applied as that Write), or "
+                f"Write(file_path={shown}, content={content})."
+            )
+        content = copy.body
+        old = ""
+        if copy.append and resolved.exists():
+            if not resolved.is_file():
+                # Not read before the Write refuses it: reading a FIFO blocks.
+                return (
+                    f"Error: {path} exists and is not a regular file "
+                    f"(directory/FIFO/device/socket); refusing to append to it."
+                )
+            try:
+                old = resolved.read_text(encoding="utf-8", newline="")
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error: cannot append to {path}: {e}"
+            content = old + content
+        if copy.append:
+            # Remembered for a file gone since the command was checked too:
+            # another writer may create it before the Write lands, and
+            # ``>>`` would have kept its bytes.
+            self._pending_append = (resolved, old, copy.body)
+        call = f"Write(file_path={shown}, content={preview(content)})"
+        args = {"file_path": path, "content": content}
+        return self._apply(call, "Write", args, copy.append, followup)
+
+    def _edit_instead(
+        self, edit: MechanicalEdit, path: str, followup: tuple[str, dict[str, Any]] | None,
+    ) -> str | None:
+        """Apply the *edit* a python heredoc or ``sed -i`` stands for to *path* via :meth:`Edit`.
+
+        The pairs are the ones exact for the file's text
+        (:meth:`MechanicalEdit.edits_for`: a per-line ``sed`` matching
+        several lines gets ``replace_all``); when none is exact (a line
+        holds the pattern twice) the result is ``None`` and the rewrite
+        guards decide.  A file not shown is refused with the ``Edit``
+        call to make and the region around its first ``old_string``; the
+        file then counts as read (as after an ``Edit`` of an unread
+        file), so the re-issued call goes through.  *followup* is the
+        ``Bash`` call running the rest of the command after the ``Edit``
+        (:func:`followup_call`), if any.  A ``sed -i`` on a link is
+        not converted (:func:`_sed_replaces_link`): the guards decide.
+        """
+        if edit.what != "python heredoc" and _sed_replaces_link(path):
+            return None
+        resolved = resolve_tool_path(path, self.work_dir, Path.is_file)
+        content: str | None = None
+        if resolved.is_file():
+            try:
+                content = resolved.read_text(encoding="utf-8", newline="")
+            except (OSError, UnicodeDecodeError):
+                if not self._is_read(resolved):
+                    call = edit_call(path, edit.edits)
+                    return (
+                        f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was "
+                        f"not shown in this session. Read(file_path={json.dumps(path)}) first, "
+                        f"then {call}."
+                    )
+        edits = edit.edits if content is None else edit.edits_for(content)
+        if edits is None:
+            return None
+        call = edit_call(path, edits)
+        if content is not None and not self._is_read(resolved):
+            self._mark_read(resolved)
+            return (
+                f"REFUSED: the {edit.what} did NOT run: it rewrites {path}, which was not shown "
+                f"in this session, with no reviewable change. Make the same change with {call} "
+                "— the region around its first old_string follows and the file now counts as "
+                "read, so that call (or the same command, applied as that Edit) goes through.\n"
+                + region_around_string(content, edits[0][0])
+            )
+        return self._apply(call, "Edit", edit_args(path, edits), followup=followup)
+
+    def _apply(
+        self,
+        call: str,
+        name: str,
+        args: dict[str, Any],
+        appended: bool = False,
+        followup: tuple[str, dict[str, Any]] | None = None,
+    ) -> str:
+        """Make the ``Write``/``Edit`` *call* (*name* with *args*) a shell rewrite stands for.
+
+        Under an agent (:attr:`redirect`) the call is raised as a
+        :class:`ToolRedirect` for the agent to make through its own tool
+        path, so its hook, guard and events see the ``Write``/``Edit``
+        as if the model had issued it, and the *followup* after it;
+        without one both are made here.
+
+        Args:
+            call: The call as the result names it (:func:`edit_call`).
+            name: ``"Write"`` or ``"Edit"``.
+            args: The call's arguments.
+            appended: Whether the rewrite appended (a ``>>`` copy).
+            followup: The ``Bash`` call running the rest of the command
+                (:func:`followup_call`), made once the call went through.
+
+        Returns:
+            The call's result, prefixed with what it was applied as, then
+            the follow-up's (:func:`followup_result`).
+
+        Raises:
+            ToolRedirect: Under an agent, naming the calls to make.
+        """
+        if self.redirect:
+            raise rewrite_redirect(name, args, call, appended, followup)
+        result = self.Write(**args) if name == "Write" else self.Edit(**args)
+        text = _applied(call, result, appended)
+        if followup is not None:
+            tool, arguments = followup
+            after = None if result.startswith("Error") else self.Bash(**arguments)
+            text += "\n" + followup_result(tool, arguments, after, name)
+        return text
+
+    def _last_running_job(self) -> BackgroundJob | None:
+        """Return the background job of this instance started last that is still running."""
+        for job in reversed(self._jobs.values()):
+            if job.process.poll() is None:
+                return job
+        return None
+
+    def _last_running_job_id(self) -> str | None:
+        """Return the id of the running background job started last, or ``None``."""
+        job = self._last_running_job()
+        return None if job is None else job.job_id
+
+    def _wait_on_job(self, job_id: str, seconds: float) -> str:
+        """Wait up to *seconds* for the job *job_id* to exit and return its status line."""
+        job = self._jobs[job_id]
+        self._wait_for_job(job, seconds)
+        return job.status()
+
+    def _wait_instead_of_sleep(
+        self, command: str, timeout_seconds: float,
+    ) -> tuple[str | None, str, str]:
+        """Settle a long ``sleep`` of *command* before it runs (:func:`wait_instead_of_sleep`)."""
+        return wait_instead_of_sleep(
+            command, timeout_seconds, self._last_running_job_id, self._wait_on_job,
+        )
+
+    # Bash calls made and the call number at which the next batching hint may go out.
+    _bash_calls = 0
+    _hint_due_at = 1
+
+    def batching_hint(self, name: str, args: dict[str, Any], result: str, seconds: float) -> str:
+        """Return :data:`BATCHING_HINT` for a short read-only ``Bash`` call, once per 20 calls.
+
+        Args:
+            name: The tool called; only ``"Bash"`` is rated.
+            args: Its arguments (``command``).
+            result: What it returned.
+            seconds: How long it took.
+
+        Returns:
+            The hint when the call only read (:func:`_is_read_only`), took
+            under 2 s and returned under 2,000 characters, and no hint went
+            out in the last :data:`BATCHING_HINT_EVERY` Bash calls; else ``""``.
+        """
+        if name != "Bash":
+            return ""
+        self._bash_calls += 1
+        if (
+            self._bash_calls < self._hint_due_at
+            or seconds >= _SHORT_CALL_SECONDS
+            or len(result) >= _SHORT_CALL_CHARS
+            or not _is_read_only(str(args.get("command", "")))
+        ):
+            return ""
+        self._hint_due_at = self._bash_calls + BATCHING_HINT_EVERY + 1
+        return BATCHING_HINT
+
     def Bash(  # noqa: N802
         self,
         command: str,
@@ -1928,9 +2535,13 @@ class UsefulTools:
         ``nohup cmd > log 2>&1 < /dev/null &``) and the call returns at
         once with a job id; follow the job with ``bash_job``.  Use it for
         anything expected to run longer than about a minute (builds,
-        training runs, servers, large test suites).  A foreground
-        ``sleep N`` with N over 30 is refused: wait with
-        ``bash_job(action="wait", until=...)`` instead.
+        training runs, servers, large test suites).  A foreground call
+        with ``timeout_seconds`` over the configured grace period (120 s)
+        that is still running after that grace goes on as a background
+        job: the result gives its job id, its output so far and the
+        ``bash_job`` wait to make.  A foreground ``sleep N`` longer than
+        ``timeout_seconds`` is refused; while a background job of this
+        task is running, a long sleep waits on that job instead.
 
         Args:
             command: The bash command to run.
@@ -1958,27 +2569,56 @@ class UsefulTools:
             The output of the command, or for a background job its job
             id, pid and log file path.
         """
-        del description
         max_output_chars = _output_budget(max_output_chars)
+        started = time.monotonic()
+        self._pending_append = None
 
         cwd = self._resolve_cwd()
-        guard, timeout_seconds = _refuse_or_lift(
-            command, self.work_dir, timeout_seconds, None if machine else cwd or os.getcwd(),
-        )
+        guard, timeout_seconds = refuse_or_lift(command, self.work_dir, timeout_seconds)
+        guard = _bash_parent_repo_guard(command, self.work_dir) or guard
+        if guard is None:
+            # A shell rewrite of a file is applied as the Write/Edit it stands
+            # for, or refused naming it; a machine's files this host cannot see.
+            guard = (
+                rewrite_guard(command) if machine
+                else self._rewrite_instead(
+                    command, cwd or os.getcwd(), description, timeout_seconds, max_output_chars,
+                    background=background, on_timeout=on_timeout,
+                )
+            )
         if guard is not None:
             return guard
         if background:
             return self._start_background_job(command, cwd, machine)[1]
         if machine:
             return "Error: machine= applies to background=True only."
-        refused = sleep_guard(command)
+        if on_timeout not in ("kill", "background"):
+            return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
+        refused, note, command = self._wait_instead_of_sleep(command, timeout_seconds)
         if refused is not None:
             return refused
+        grace = DEFAULT_CONFIG.bash_detach_seconds
+        result = None
         if on_timeout == "background":
-            return self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
-        if on_timeout != "kill":
-            return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
+            result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd)
+        elif 0 < grace < timeout_seconds:
+            result = self._run_then_detach(command, timeout_seconds, max_output_chars, cwd, grace)
+        if result is None:
+            result = self._run_foreground(command, timeout_seconds, max_output_chars, cwd)
+        hint = self.batching_hint(
+            "Bash", {"command": command}, result, time.monotonic() - started,
+        )
+        return note + result + hint
 
+    def _run_foreground(
+        self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,
+    ) -> str:
+        """Run *command* in the foreground (:meth:`_bash_streaming`) and format its result.
+
+        A command killed at the deadline, or one that could not be
+        launched, gives a result starting with ``Error:``; a finished one
+        counts as a view of the file it showed (:meth:`_note_shell_view`).
+        """
         capture = _Capture(max_output_chars, self._new_spill)
         try:
             returncode, output = self._bash_streaming(command, timeout_seconds, cwd, capture)
@@ -2046,39 +2686,114 @@ class UsefulTools:
         return f"{SPILL_DIR}/{name}", spill_dir / name
 
     def _run_then_detach(
-        self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,
-    ) -> str:
-        """Run *command* as a background job in *cwd* and wait up to *timeout_seconds* for it.
+        self,
+        command: str,
+        timeout_seconds: float,
+        max_output_chars: int,
+        cwd: str | None,
+        grace_seconds: float = 0,
+    ) -> str | None:
+        """Run *command* as a background job in *cwd*; wait for it, then report or leave it running.
 
-        The ``on_timeout="background"`` path of :meth:`Bash`: a command
-        that finishes in time reads like a foreground result (its log,
-        exit code first); one that does not stays running under its job
-        id instead of being killed at the deadline.
+        The ``on_timeout="background"`` path of :meth:`Bash` waits
+        *timeout_seconds*; its auto-detach path waits only the
+        *grace_seconds* of ``DEFAULT_CONFIG.bash_detach_seconds``.  A
+        command that finishes in time reads like a foreground result
+        (its output, exit code first, the same truncation and spill, and
+        it counts as a view for Edit/Write) and leaves no job or log
+        behind; one that does not stays running under its job id instead
+        of being killed, and the result gives its output so far and the
+        ``bash_job`` wait to make for the rest of the deadline.  A
+        tool-panel Stop during the grace kills the command, as it kills
+        a foreground shell, and so does a stream callback that raises
+        (:meth:`_bash_streaming` does the same); during an
+        ``on_timeout="background"`` wait both leave the job running, as
+        ``bash_job`` does.
+
+        Returns:
+            The result, or ``None`` when no job could be started (no log
+            directory) on the auto-detach path: the command then runs in
+            the foreground as before.
         """
         job, started = self._start_background_job(command, cwd)
         if job is None:
-            return started
-        self._wait_for_job(job, timeout_seconds)
-        returncode = job.process.poll()
-        if returncode is None:
-            return (
-                f"Still running after {timeout_seconds:g}s; left running as background job "
-                f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path}\n"
-                f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
-                f"timeout_seconds=...).\n" + _tail_lines(job.log_path, 30, max_output_chars // 2)
-            )
+            return None if grace_seconds else started
+        wait_seconds = grace_seconds or timeout_seconds
         capture = _Capture(max_output_chars, self._new_spill)
         try:
-            with open(job.log_path, encoding="utf-8", errors="replace") as log:
-                for piece in iter(functools.partial(log.read, _READ_CHARS), ""):
-                    capture.append(piece)
+            finished = self._follow_job(job, wait_seconds, capture)
+        except BaseException:
+            if grace_seconds:
+                # The model asked for a foreground command: the tool panel's
+                # Stop kills it, as it kills a foreground shell, and the job
+                # the model never saw leaves neither an entry nor a log.
+                _kill_job_group(job.process)
+                self._jobs.pop(job.job_id, None)
+                job.log_path.unlink(missing_ok=True)
+            raise
         finally:
             capture.close()
         output = capture.text()
+        # A job the wait left (deadline, stop) may have exited since its last
+        # read: it is reported as running, with its log, not as finished with
+        # the output that read missed.
+        returncode = job.process.poll() if finished else None
+        if returncode is None:
+            remaining = timeout_seconds - grace_seconds if grace_seconds else timeout_seconds
+            return (
+                f"Still running after {wait_seconds:g}s; left running as background job "
+                f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path}\n"
+                f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
+                f"timeout_seconds={remaining:g}).\nOutput so far:\n"
+                + _truncate_output(output, max_output_chars, capture.spilled_to, capture.dropped)
+            )
+        # Finished in time, this is a foreground result: the model never saw
+        # the job id, so neither the registry entry nor the log lingers.
+        self._jobs.pop(job.job_id, None)
+        job.log_path.unlink(missing_ok=True)
         self._note_shell_view(command, returncode, output)
         return _format_bash_result(
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
         )
+
+    def _follow_job(self, job: BackgroundJob, seconds: float, capture: _Capture) -> bool:
+        """Wait up to *seconds* for *job* as :meth:`_wait_for_job` does, reading its growing log.
+
+        Every new piece of the log goes to *capture* and to
+        ``stream_callback``, so the tool panel shows the output live as
+        it does a foreground command's.  The deadline and a stop are
+        looked at between pieces, whether the shell is running or has
+        exited: a job writing faster than the pieces are taken, or a
+        writer the exited shell left on its log, cannot hold the wait
+        past them.  The wait ends early on a stop, and a tool-panel
+        Stop raises after it.
+
+        Returns:
+            Whether the job exited and its log was then read to the end:
+            the output is complete.  ``False`` at the deadline or on a
+            stop, when the job may have exited since the last read or
+            its log may still grow.
+        """
+        deadline = time.monotonic() + seconds
+        with open(job.log_path, encoding="utf-8", errors="replace") as log:
+            while True:
+                exited = job.process.poll() is not None
+                piece = log.read(_READ_CHARS)
+                if piece:
+                    capture.append(piece)
+                    if self.stream_callback is not None:
+                        self.stream_callback(piece)
+                elif exited:
+                    finished = True
+                    break
+                remaining = deadline - time.monotonic()
+                if _stop_requested(self.stop_event) or remaining <= 0:
+                    finished = False
+                    break
+                if not piece:
+                    time.sleep(min(remaining, 0.2))
+        tool_interrupt.raise_if_interrupted()
+        return finished
 
     def bash_job(
         self,

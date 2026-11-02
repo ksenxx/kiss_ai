@@ -72,10 +72,10 @@ class _SubscribeCapturingPrinter(JsonPrinter):
         super().broadcast(event)
 
     def subscribe_tab(
-        self, task_id: Any, tab_id: str,
+        self, task_id: Any, tab_id: str, headless: bool = False,
     ) -> list[dict[str, Any]] | None:
         self.subscribe_calls.append((str(task_id), tab_id))
-        return super().subscribe_tab(task_id, tab_id)
+        return super().subscribe_tab(task_id, tab_id, headless)
 
 
 class TestReplaySessionRunningSubagentNoEvents:

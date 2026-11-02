@@ -98,7 +98,7 @@ def test_children_are_sub_tasks_sharing_the_budget_and_results_keep_task_order(
     model = StandInModelServer(responder)
     try:
         result = sorcar.run(
-            "PARENT-TASK fan out",
+            "PARENT-TASK fan out to sub-agents",
             work_dir=str(env.repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
@@ -160,7 +160,7 @@ def test_timeout_returns_job_notices_without_stopping_the_children(
     model = StandInModelServer(responder)
     try:
         result = sorcar.run(
-            "PARENT-TASK fan out and wait",
+            "PARENT-TASK fan out to sub-agents and wait",
             work_dir=str(env.repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
