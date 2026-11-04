@@ -233,6 +233,23 @@ class TestLanCapableServer(_LiveServerCase):
         finally:
             self.server._last_ips = old
 
+    async def test_webclip_url_prefers_tunnel_then_first_lan_url(self) -> None:
+        """The Home Screen web clip opens the tunnel URL, else the first LAN URL.
+
+        ``/webclip.mobileconfig`` embeds that URL in the profile it
+        serves (test_tls_local_ca checks the served profile itself).
+        """
+        self.assertTrue(self.server._ips_probed)
+        old = self.server._last_ips
+        try:
+            self.server._last_ips = frozenset({"10.9.8.8", "10.9.8.7"})
+            self.assertEqual(self.server._webclip_url(), f"https://10.9.8.7:{self.port}")
+            self.server._active_url = "https://clip.trycloudflare.com"
+            self.assertEqual(self.server._webclip_url(), "https://clip.trycloudflare.com")
+        finally:
+            self.server._active_url = self.server._local_url
+            self.server._last_ips = old
+
     async def test_lan_urls_empty_before_first_probe(self) -> None:
         """Before the first off-thread probe, no LAN URLs are advertised.
 

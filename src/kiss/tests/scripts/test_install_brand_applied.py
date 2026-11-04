@@ -37,6 +37,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -145,8 +146,12 @@ class BrandAppliedTest(unittest.TestCase):
             (self.project / name).write_text("#!/bin/bash\n")
         (self.tmp / "release").touch()
         (self.tmp / "release2").touch()
-        python = shutil.which("python3")
-        assert python is not None
+        # The interpreter running the tests: install.sh's active-tasks
+        # probe (scripts/check-kiss-web-active-tasks.py) imports
+        # ``websockets`` from it on the update pass, so a ``python3``
+        # found on PATH outside the project's venv would make the probe
+        # refuse and the installer defer the daemon's restart.
+        python = sys.executable
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]

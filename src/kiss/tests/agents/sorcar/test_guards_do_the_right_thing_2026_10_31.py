@@ -48,10 +48,11 @@ from kiss.agents.sorcar.edit_guards import (
 from kiss.agents.sorcar.shell_scan import simple_commands
 from kiss.agents.sorcar.useful_tools import (
     BATCHING_HINT,
+    UV_REWRITTEN_NOTE,
     UsefulTools,
     _is_read_only,
-    _uv_in_worktree_guard,
     sleep_guard,
+    uv_in_worktree,
 )
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.tool_interrupt import (
@@ -470,22 +471,21 @@ def test_long_sleep_waits_on_the_running_job_and_runs_the_rest(tools: UsefulTool
     out = tools.Bash("sleep 60; echo after", "poll", timeout_seconds=100)
     assert time.monotonic() - before < 10
     waited = f"Waited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
-    assert out == waited + "after\n"
+    assert out == "after\n" + waited  # the note after the result, whose head readers parse
     # ...the last started running job, in any spelling the text search finds
     first = _job_id(tools.Bash("sleep 30", "slow", background=True))
     last = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
     command = "echo before && nohup /bin/sleep '1' 1m >/dev/null && echo after"
     out = tools.Bash(command, "poll", timeout_seconds=100)
     waited = f"Waited on job {last} for up to 61 s instead of sleeping (exited with code 0).\n"
-    assert out.startswith(waited)
-    assert out.endswith("before\nafter\n")
+    assert out == "before\nafter\n" + waited
     tools.bash_job(first, action="kill")
     report = tools.bash_job(first, action="wait", timeout_seconds=10)
     assert report.startswith(f"Job {first}: killed")
     # on_timeout="background" keeps the note
     assert tools.Bash("sleep 1", "slow", background=True)
     out = tools.Bash("sleep 40; echo x", "poll", timeout_seconds=50, on_timeout="background")
-    assert out.startswith("Waited on job ") and out.endswith("x\n")
+    assert out.startswith("x\n") and "Waited on job " in out
 
 
 def test_long_sleep_without_a_running_job_runs_as_written(tools: UsefulTools) -> None:
@@ -518,7 +518,7 @@ def test_sleep_pacing_a_loop_runs_as_written_even_with_a_job(tools: UsefulTools)
     # a sleep in a conditional, not a loop, is still spent on the job
     job = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
     out = tools.Bash("if true; then sleep 60; fi; echo ran", "poll", timeout_seconds=100)
-    assert out.startswith(f"Waited on job {job} for up to 60 s") and out.endswith("ran\n")
+    assert out.startswith("ran\n") and f"Waited on job {job} for up to 60 s" in out
 
 
 def test_sleep_longer_than_the_timeout_is_refused_naming_bash_job(
@@ -678,10 +678,14 @@ def test_read_only_commands() -> None:
         assert not _is_read_only(command), command
 
 
-def test_uv_in_a_worktree_is_refused_naming_the_shared_environments_binary(tmp_path: Path) -> None:
+def test_uv_run_in_a_worktree_runs_as_the_shared_environments_binary(tmp_path: Path) -> None:
     """A worktree shares the main checkout's environment: ``uv sync``/``uv run`` there
     would build it one of its own or re-point the shared editable install (the
-    2026-11-01 audit's 19 ``check --full`` runs); the refusal names what to run."""
+    2026-11-01 audit's 19 ``check --full`` runs). A ``uv run`` whose rewrite is
+    unambiguous runs as the environment's binary on the worktree's sources, the
+    result saying so (the 2026-11-03 audit's 6 refusals were each followed by the
+    agent copying the suggested command by hand); the rest are refused naming what
+    to run."""
     repo = tmp_path / "repo"
     worktree = repo / ".kiss-worktrees" / "kiss_wt-1-abc"
     worktree.mkdir(parents=True)
@@ -691,33 +695,51 @@ def test_uv_in_a_worktree_is_refused_naming_the_shared_environments_binary(tmp_p
         (repo / ".venv" / "bin" / binary).chmod(0o755)
     sources = f"PYTHONPATH={worktree}/src:{worktree}/projects"
     tools = UsefulTools(work_dir=str(worktree))
-    # uv run: refused, with the command to copy
+    # uv run: rewritten and run, the note after the result (review 2026-11-03: a
+    # note before it hid the timeout or error the result opens with)
+    rewritten = f"{sources} {repo}/.venv/bin/check --full --fix"
     out = tools.Bash("uv run check --full --fix", "lint")
-    assert out.startswith("REFUSED: `uv run` did NOT run")
-    suggested = out.split("Copy this rewritten command as is: ")[1]
-    assert suggested == f"{sources} {repo}/.venv/bin/check --full --fix"
-    assert tools.Bash(suggested, "the suggestion runs").strip() == (
+    assert out == (f"ran {repo}/.venv/bin/check --full --fix\n"
+                   + UV_REWRITTEN_NOTE.format(command=rewritten))
+    (repo / ".venv" / "bin" / "slow").write_text("#!/bin/sh\nsleep 5\n")
+    (repo / ".venv" / "bin" / "slow").chmod(0o755)
+    timed_out = tools.Bash("uv run slow", "slow", timeout_seconds=1)
+    assert timed_out.startswith("Error: Command") and "time" in timed_out.splitlines()[0]
+    assert timed_out.endswith(UV_REWRITTEN_NOTE.format(command=f"{sources} {repo}/.venv/bin/slow"))
+    assert tools.Bash(rewritten, "the rewrite itself runs").strip() == (
         f"ran {repo}/.venv/bin/check --full --fix")
-    for command, rewritten in (
+    # every uv run of the command is rewritten; the fan-out tool rewrites too
+    report = tools.run_commands_parallel(
+        '["uv run pytest -q a.py && uv run python -c 1", "uv sync"]', description="both")
+    assert (f"{sources} {repo}/.venv/bin/pytest -q a.py && {sources} {repo}/.venv/bin/python -c 1"
+            in report)
+    assert f"ran {repo}/.venv/bin/pytest -q a.py\nran {repo}/.venv/bin/python -c 1" in report
+    assert "REFUSED: `uv sync` did NOT run" in report
+    for command, expected in (
         ("cd src && uv run --no-sync pytest -q a.py | tail -3",
          f"cd src && {sources} {repo}/.venv/bin/pytest -q a.py | tail -3"),
-        ("UV_PROJECT_ENVIRONMENT=../../.venv uv run --project . python3 -c 'print(1)'",
+        ("UV_PROJECT_ENVIRONMENT=../../.venv uv run --no-project python3 -c 'print(1)'",
          f"UV_PROJECT_ENVIRONMENT=../../.venv {sources} {repo}/.venv/bin/python -c 'print(1)'"),
+        # global flags before the subcommand are dropped from the rewrite
+        ("uv -q --offline run pytest -q a.py", f"{sources} {repo}/.venv/bin/pytest -q a.py"),
     ):
-        refusal = _uv_in_worktree_guard(command, str(worktree))
-        assert refusal is not None and refusal.endswith(rewritten)
-    # global flags before the subcommand are dropped from the rewrite
-    refusal = _uv_in_worktree_guard("uv -q --offline run pytest -q a.py", str(worktree))
-    assert refusal is not None and refusal.endswith(f"{sources} {repo}/.venv/bin/pytest -q a.py")
-    # a program the environment lacks, the sync itself, and a global option whose
-    # value (``--directory .``) a rewrite would drop: refused without a rewrite
+        assert uv_in_worktree(command, str(worktree)) == (
+            None, UV_REWRITTEN_NOTE.format(command=expected), expected)
+    # a program the environment lacks, the sync itself, an option whose value
+    # (``--directory .``, before or after ``run``) a rewrite would drop, and a uv
+    # run next to one of those: refused as a whole, nothing rewritten
     for command in ("uv run nosuchtool --x", "uv sync", "echo x && uv add requests",
                     "uv --directory . run check --full --fix", "uv --project=. sync",
-                    "uv --color never -q run pytest"):
-        verdict = _uv_in_worktree_guard(command, str(worktree))
-        assert verdict is not None and "Copy this" not in verdict and "bin/check --full" in verdict
+                    "uv --color never -q run pytest", "uv run pytest -q && uv sync",
+                    "uv run --directory /tmp python -c 'import os; print(os.getcwd())'",
+                    "uv run --project . python3 -c 1", "uv run -p 3.12 pytest -q",
+                    "uv run --with=rich python -c 1"):
+        verdict, note, unchanged = uv_in_worktree(command, str(worktree))
+        assert verdict is not None and "bin/check --full" in verdict, command
+        assert (note, unchanged) == ("", command)
+        assert tools.Bash(command, "refused") == verdict
     # ``uv`` as text (a heredoc body, a quoted word) or outside a worktree runs
     for command in ("cat > s.sh <<'EOF'\nuv run pytest\nEOF\n", "echo 'uv sync'", "uv lock",
                     "uv --version", "uv -q pip list", "uv tool run ruff check ."):
-        assert _uv_in_worktree_guard(command, str(worktree)) is None, command
-    assert _uv_in_worktree_guard("uv run pytest", str(repo)) is None
+        assert uv_in_worktree(command, str(worktree)) == (None, "", command), command
+    assert uv_in_worktree("uv run pytest", str(repo)) == (None, "", "uv run pytest")

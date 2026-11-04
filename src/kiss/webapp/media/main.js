@@ -8798,19 +8798,38 @@
    * runs: the running task is not moved (a message typed meanwhile is
    * appended to it wherever it runs), the pick is where the NEXT
    * submit goes.  Empty (hidden) until a name is known.
+   *
+   * The options are rebuilt only when their values or labels differ
+   * from what is shown: a phone opens the native picker on the focus
+   * that asks the daemon for a fresh list (the `focus` listener
+   * below), and iOS dismisses a picker whose options are replaced
+   * under it (or keeps showing the old ones), so a reply that changes
+   * nothing must not touch them.
    */
   function renderChatMachine() {
     const chosen = activeMachine();
     const reachable = reachableMachines || [];
-    chatMachineSelect.textContent = '';
+    const entries = [];
     if (localMachineName || reachable.length || chosen) {
       const names = reachable.slice();
       if (chosen && !names.includes(chosen)) names.push(chosen);
-      appendOption(chatMachineSelect, '', localMachineName || 'this machine');
-      names.forEach(name =>
-        appendOption(chatMachineSelect, name, machineLabel(name)),
+      entries.push(['', localMachineName || 'this machine']);
+      names.forEach(name => entries.push([name, machineLabel(name)]));
+    }
+    const shown = Array.from(chatMachineSelect.options);
+    const same =
+      shown.length === entries.length &&
+      shown.every(
+        (o, i) => o.value === entries[i][0] && o.textContent === entries[i][1],
       );
-      chatMachineSelect.value = chosen;
+    if (!same) {
+      chatMachineSelect.textContent = '';
+      entries.forEach(([value, label]) =>
+        appendOption(chatMachineSelect, value, label),
+      );
+    }
+    if (entries.length) {
+      if (chatMachineSelect.value !== chosen) chatMachineSelect.value = chosen;
       chatMachineSelect.classList.toggle('remote', !!chosen);
       chatMachineSelect.classList.toggle(
         'down',
@@ -24126,6 +24145,16 @@
     if (terminalBtn) {
       terminalBtn.addEventListener('click', () => {
         openTerminalTab();
+      });
+    }
+    const webclipBtn = document.getElementById('webclip-btn');
+    if (webclipBtn) {
+      webclipBtn.addEventListener('click', () => {
+        // A top-level navigation, not a fetch: Safari on the phone
+        // hands a response of that MIME type to the profile installer
+        // and leaves the page in place; a desktop browser downloads
+        // the file.
+        window.location.assign('/webclip.mobileconfig');
       });
     }
     if (moreBtn && moreMenu) {

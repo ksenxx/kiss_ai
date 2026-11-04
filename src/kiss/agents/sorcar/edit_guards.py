@@ -52,6 +52,7 @@ from kiss.agents.sorcar.shell_scan import (
     SimpleCommand,
     Word,
     bash_path,
+    handed_text,
     host_path,
     receiver,
     resolve,
@@ -259,6 +260,27 @@ def _unguarded(
     return all(path is not None and not guarded(path) for path in paths)
 
 
+def _handed_program(reader: SimpleCommand) -> str | None:
+    """The text of the here-document the python command *reader* reads, or ``None``."""
+    node = reader.heredoc_reader()
+    return node.heredoc_body if node is not None else None
+
+
+def _rewrites_unguarded(
+    reader: SimpleCommand, program: str | None, guarded: Callable[[str], bool] | None,
+) -> bool:
+    """Whether the python *program* the command *reader* runs rewrites unguarded files only.
+
+    The files it writes must all be known (:func:`python_written_paths`)
+    and pass :func:`_unguarded` in the command's directory.
+    """
+    if program is None:
+        return False
+    written = python_written_paths(program)
+    return written is not None and _unguarded(
+        reader.cwd, [Word(path, True) for path in written], guarded)
+
+
 def rewrite_guard(
     command: str, cwd: str | None = None, guarded: Callable[[str], bool] | None = None,
 ) -> str | None:
@@ -316,14 +338,19 @@ def rewrite_guard(
         and (".replace(" in command or _RE_SUB.search(command))
         and _PYTHON_WRITE.search(command)
     ):
-        program = heredoc_text(command)
-        if guarded is not None and program is not None:
-            written = python_written_paths(program)
-            python = [c for c in commands if c.reads_heredoc() and c.program().startswith("python")]
-            if written is not None and python and _unguarded(
-                python[0].cwd, [Word(path, True) for path in written], guarded,
-            ):
-                return None
+        python = [c for c in commands if c.reads_heredoc() and c.program().startswith("python")]
+        whole = heredoc_text(command)
+        # The program each python reads: the here-document that is the
+        # whole command, else the text the scanner kept on the node
+        # reading it (a ``cd`` before it, commands after it, a second
+        # here-document).  The command runs as written only when EVERY
+        # python's program is known and rewrites unguarded files alone.
+        programs = [whole if whole is not None else _handed_program(reader) for reader in python]
+        if python and all(_rewrites_unguarded(reader, program, guarded)
+                          for reader, program in zip(python, programs)):
+            return None
+        program = whole if whole is not None else next(
+            (text for text in programs if text is not None), None)
         path, edits, _ = python_edit(program) if program is not None else (None, [], False)
         file = "<the literal path>" if path is None else json.dumps(path)
         call = (
@@ -413,28 +440,6 @@ def _heredoc_delimiter(text: str) -> tuple[str, bool] | None:
     return ("".join(parts), quoted) if parts else None
 
 
-def _unescaped_heredoc(body: str) -> str | None:
-    """Return the text an unquoted here-document *body* becomes, ``None`` when the shell expands it.
-
-    Without a ``$`` or a backtick the shell only drops the backslash
-    of ``\\\\`` and joins the lines of ``\\<newline>``.
-    """
-    if "$" in body or "`" in body:
-        return None
-    parts: list[str] = []
-    position = 0
-    while position < len(body):
-        char = body[position]
-        if char == "\\" and body[position + 1:position + 2] in ("\\", "\n"):
-            if body[position + 1] == "\\":
-                parts.append("\\")
-            position += 2
-        else:
-            parts.append(char)
-            position += 1
-    return "".join(parts)
-
-
 def _first_line(command: str) -> tuple[str, str]:
     """Return the first non-blank line of *command* and the text after it."""
     head, _, rest = command.lstrip(" \t\n").partition("\n")
@@ -464,7 +469,7 @@ def _heredoc_body(line: str, rest: str) -> tuple[str, str] | None:
     unquoted one joins a line ending in a backslash with the next
     (:func:`_continued`) before the delimiter is looked for, as bash
     does, and keeps the body only without ``$`` or backticks
-    (:func:`_unescaped_heredoc`); ``<<-`` strips the leading tabs of
+    (:func:`~kiss.agents.sorcar.shell_scan.handed_text`); ``<<-`` strips the leading tabs of
     the body and delimiter lines (of a joined line, those of its start).
 
     Returns:
@@ -491,7 +496,7 @@ def _heredoc_body(line: str, rest: str) -> tuple[str, str] | None:
         text = raw.lstrip("\t") if strip_tabs else raw
         if text == word:
             joined = "".join(part + "\n" for part in body)
-            handed = joined if quoted else _unescaped_heredoc(joined)
+            handed = handed_text(joined, not quoted)
             return None if handed is None else (handed, "\n".join(lines[index + 1:]))
         body.append(text)
         index += 1
@@ -1348,15 +1353,17 @@ def _write_target(call: ast.Call) -> ast.expr | None:
 
 
 def _literal_path(node: ast.expr, names: dict[str, str]) -> str | None:
-    """Return the path *node* names: a string, ``Path(<string>)`` or a name of *names*."""
+    """Return the path *node* names: a string, ``Path(<string>)`` or a name of *names*.
+
+    ``Path`` is the bare name or ``pathlib.Path``.
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.Name):
         return names.get(node.id)
     if (
         isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "Path"
+        and ast.unparse(node.func) in ("Path", "pathlib.Path")
         and len(node.args) == 1
         and not node.keywords
     ):

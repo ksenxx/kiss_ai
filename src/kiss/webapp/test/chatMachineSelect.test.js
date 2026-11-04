@@ -470,9 +470,13 @@ function testAClosedTabForgetsAndAReloadRestores() {
   );
 }
 
+// A phone opens the native picker on that focus, and iOS dismisses (or
+// leaves stale) a picker whose options are replaced under it: the
+// reply must leave the option nodes alone when it changes nothing, and
+// repaint only what a changed list (a machine down, relabelled, new)
+// needs.
 function testReachingForTheDropDownAsksForAFreshList() {
-  const {win, posted} = makePage();
-  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  const {win, posted} = readyPage();
   posted.length = 0;
   select(win).dispatchEvent(new win.Event('focus'));
   assert.deepStrictEqual(
@@ -480,8 +484,41 @@ function testReachingForTheDropDownAsksForAFreshList() {
     ['getMachines'],
     'a focus asks the daemon for the machines again',
   );
+  const before = Array.from(select(win).options);
+  send(win, {type: 'machines', machines: MACHINES, checkedAt: 2});
+  send(win, {type: 'configData', config: {}, machine: 'laptop'});
+  const after = Array.from(select(win).options);
+  assert.ok(
+    after.length === before.length && after.every((o, i) => o === before[i]),
+    'an unchanged list keeps the option nodes (the open picker) as they are',
+  );
+  assert.deepStrictEqual(options(win), [
+    ['', 'laptop'],
+    ['gpu-box', 'gpu-box'],
+  ]);
+  const relabelled = MACHINES.map(m =>
+    m.name === 'gpu-box' ? Object.assign({}, m, {label: 'gpu-host'}) : m,
+  );
+  send(win, {type: 'machines', machines: relabelled, checkedAt: 3});
+  assert.deepStrictEqual(
+    options(win),
+    [
+      ['', 'laptop'],
+      ['gpu-box', 'gpu-host'],
+    ],
+    'a relabelled machine is repainted',
+  );
+  send(win, {type: 'machines', machines: GPU_BOX_DOWN, checkedAt: 4});
+  assert.deepStrictEqual(
+    options(win),
+    [['', 'laptop']],
+    'a machine that went down (not picked) leaves the list',
+  );
   win.close();
-  console.log('  ok - reaching for the drop-down asks for a fresh list');
+  console.log(
+    '  ok - reaching for the drop-down asks for a fresh list without ' +
+      'repainting an unchanged one',
+  );
 }
 
 function testTheGlobalPickFollowsTheDaemon() {

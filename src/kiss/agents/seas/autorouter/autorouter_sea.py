@@ -87,7 +87,7 @@ before the hand-scheduled full ``/rsi7d all`` sweep so the two never share the c
 RSI7D_JOB_MODEL = "claude-fable-5-1-max"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
-ROUTER_MODEL = "claude-opus-5-5-max"
+ROUTER_MODEL = "claude-opus-5-5-medium"
 """Model every routed session runs on (the ``model`` of :meth:`AutorouterSea.settings`)."""
 
 RSI7D_JOB_BUDGET_USD = 25.0

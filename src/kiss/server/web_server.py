@@ -309,6 +309,10 @@ _MEDIA_VERSION_CACHE: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 # blip keeps the token and so keeps the page.
 DAEMON_INSTANCE = secrets.token_hex(8)
 DAEMON_API = "/api/daemon"
+WEBCLIP_PATH = "/webclip.mobileconfig"
+"""The signed iOS Web Clip profile for the daemon's public URL (:mod:`kiss.scripts.webclip`)."""
+WEBCLIP_MIME = "application/x-apple-aspen-config"
+"""The MIME type iOS keys on to offer a configuration profile for installation."""
 
 TRAJECTORY_TEMPLATE = (
     Path(__file__).resolve().parents[1]
@@ -2928,6 +2932,19 @@ def _local_ca_cert_bytes() -> bytes | None:
         return None
 
 
+def _webclip_profile(url: str) -> bytes:
+    """Return the signed Web Clip profile that opens *url* full screen (blocking).
+
+    Built per request by :func:`kiss.scripts.webclip.brand_profile`
+    with the signing certificate under :func:`_tls_dir`.  The module
+    is imported here, not at load time: it needs Pillow for the icon,
+    which only this route uses.
+    """
+    from kiss.scripts import webclip
+
+    return webclip.brand_profile(url, _tls_dir())
+
+
 class FifoSendLock:
     """Per-endpoint FIFO lock whose waiters cost O(1) each.
 
@@ -5335,6 +5352,29 @@ class RemoteAccessServer:
                 "application/json; charset=utf-8",
                 json.dumps({"instance": DAEMON_INSTANCE, "version": version}).encode(),
             )
+        if path == WEBCLIP_PATH:
+            # A signed configuration profile that puts a full-screen
+            # icon for the webapp on an iPhone's Home Screen (the "..."
+            # menu's "iPhone Home Screen" item).  The MIME type is what
+            # makes Safari offer the install; no Content-Disposition,
+            # because ``attachment`` sends the file to the Files app
+            # instead of the profile installer.  The URL is the one a
+            # phone can reach (tunnel, else LAN); without one there is
+            # nothing to put on a Home Screen.
+            webclip_url = await asyncio.to_thread(self._webclip_url)
+            if not webclip_url:
+                return _error_page(
+                    404,
+                    "There is no address to put on a Home Screen yet",
+                    f"{PRODUCT_NAME} is only reachable from this computer "
+                    "right now: it publishes no tunnel URL and no LAN URL. "
+                    "Set a remote password in Settings, then try again "
+                    "from the phone.",
+                    f"{WEBCLIP_PATH} needs a tunnel or LAN URL; "
+                    "_webclip_url() returned ''.",
+                )
+            profile = await asyncio.to_thread(_webclip_profile, webclip_url)
+            return _http_response(200, WEBCLIP_MIME, profile)
         if path == "/ca.crt":
             # The auto-generated local CA certificate (public data, no
             # key) so a phone on the LAN can install and trust it and
@@ -7976,6 +8016,18 @@ class RemoteAccessServer:
         if self._active_url and self._active_url != self._local_url:
             return self._active_url
         return None
+
+    def _webclip_url(self) -> str:
+        """Return the URL a Home Screen web clip opens, ``''`` when no phone can reach the daemon.
+
+        The tunnel URL when one is up (it reaches the phone anywhere),
+        else the first LAN URL (same network only); never the local
+        URL, which only this machine resolves.  The same preference
+        as :func:`kiss.scripts.webclip.default_url` reading the URL
+        file.  Blocking like :meth:`_lan_urls` (it reads the config
+        file); callers on the event loop use ``asyncio.to_thread``.
+        """
+        return self._current_tunnel_url() or next(iter(self._lan_urls()), "")
 
     def _remote_url_message(self, url: str) -> dict[str, object]:
         """Build the ``remote_url`` event every connected client receives.

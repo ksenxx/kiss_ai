@@ -37,6 +37,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -184,8 +185,10 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         # The git/curl stubs hold until these exist; nothing here waits.
         (self.tmp / "release").touch()
         (self.tmp / "release2").touch()
-        python = shutil.which("python3")
-        assert python is not None
+        # The interpreter running the tests (the project's venv, with the
+        # ``websockets`` install.sh's active-tasks probe imports), not a
+        # ``python3`` found on PATH.
+        python = sys.executable
         # No DISPLAY and no systemctl: a remote Linux box whose daemon is a
         # detached process; the webapp step prints the tunnel URL instead
         # of opening a browser.  KISS_WEB_START_TIMEOUT=0: the stub daemon

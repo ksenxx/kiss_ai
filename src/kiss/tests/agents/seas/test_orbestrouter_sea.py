@@ -33,11 +33,16 @@ _SEA_PATH = Path(orbestrouter_sea.__file__).resolve()
 
 def test_both_models_are_openrouter_twins_of_the_bestrouter_models() -> None:
     """Fable 5.1 works, Astra reviews, both as priced ``openrouter/`` catalog entries."""
+    assert orbestrouter_sea.SIMPLE_MODEL == "openrouter/anthropic/claude-opus-5.5-medium"
     assert orbestrouter_sea.PRIMARY_MODEL == "openrouter/anthropic/claude-fable-5.1-max"
     assert orbestrouter_sea.REVIEW_MODEL == "openrouter/openai/gpt-6-astra"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1-max"
     assert bestrouter_sea.REVIEW_MODEL == "gpt-6-astra"
-    for model in (orbestrouter_sea.PRIMARY_MODEL, orbestrouter_sea.REVIEW_MODEL):
+    for model in (
+        orbestrouter_sea.SIMPLE_MODEL,
+        orbestrouter_sea.PRIMARY_MODEL,
+        orbestrouter_sea.REVIEW_MODEL,
+    ):
         assert model in MODEL_INFO, model
         assert MODEL_INFO[model].input_price_per_1M > 0, model
 
@@ -47,18 +52,22 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     sea = OrbestrouterSea()
     assert sea.register_as_model() is True
     assert sea.settings({"tool_profile": "shell"}) == {
-        "tool_profile": "shell", "model": orbestrouter_sea.PRIMARY_MODEL,
+        "tool_profile": "shell", "model": orbestrouter_sea.SIMPLE_MODEL,
     }
     protocol = orbestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith("## Model routing protocol (orbestrouter)\n\n")
     assert protocol == bestrouter_sea.routing_prompt(
-        "orbestrouter", orbestrouter_sea.PRIMARY_MODEL, orbestrouter_sea.REVIEW_MODEL
+        "orbestrouter",
+        orbestrouter_sea.SIMPLE_MODEL,
+        orbestrouter_sea.PRIMARY_MODEL,
+        orbestrouter_sea.REVIEW_MODEL,
     )
     flat = " ".join(protocol.split())
     for phrase in (
-        "Use 'openrouter/anthropic/claude-fable-5.1-max' model for all tasks, including software "
-        "development.",
+        "Use 'openrouter/anthropic/claude-opus-5.5-medium' for simple questions and queries.",
+        "Use 'openrouter/anthropic/claude-fable-5.1-max' model for all other tasks, including "
+        "software development.",
         "Use openrouter/openai/gpt-6-astra (not codex) through "
         "`run_agent(model=\"openrouter/openai/gpt-6-astra\", tool_profile=\"review\", "
         "wait=\"false\")` for a thorough read-only review and debugging of the other model's "
@@ -68,6 +77,7 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     ):
         assert phrase in flat, phrase
     # The bestrouter's direct-vendor names never leak into the OpenRouter protocol.
+    assert f"'{bestrouter_sea.SIMPLE_MODEL}'" not in protocol
     assert f"'{bestrouter_sea.PRIMARY_MODEL}'" not in protocol and " gpt-6-astra " not in protocol
     # Same working rules as the bestrouter, word for word.
     rules = protocol.split("Working rules:", 1)[1]
@@ -79,15 +89,15 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     assert_no_removed_getters(orbestrouter_sea)
 
 
-def test_agent_file_loader_pins_the_openrouter_primary_model() -> None:
+def test_agent_file_loader_pins_the_openrouter_simple_model() -> None:
     """The only setting is the model; the daemon-side loader pins it and stages the protocol.
 
     The tools pass through unchanged: the SEA has no tools hook of its own.
     """
-    assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.PRIMARY_MODEL}
+    assert sea_commands.sea_settings(_SEA_PATH) == {"model": orbestrouter_sea.SIMPLE_MODEL}
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "toolProfile": "full", "model": "x"}
     assert apply_sea(cmd) == {"model"}
-    assert cmd["model"] == orbestrouter_sea.PRIMARY_MODEL
+    assert cmd["model"] == orbestrouter_sea.SIMPLE_MODEL
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + orbestrouter_sea.SYSTEM_PROMPT
     assert cmd["toolsHook"]([finish_body]) == [finish_body]
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,7 @@ from kiss.agents.sorcar import coding_gate as cg
 from kiss.agents.sorcar import sorcar_agent as sorcar_agent_module
 from kiss.agents.sorcar.agent_dispatch import digest_agent_results
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
+from kiss.agents.sorcar.decide_tool import decisions_tool_available
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
 from kiss.core import user_config
@@ -199,9 +201,16 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     assert cg.names_code_file({"command": "cp source.py changed.py"})
     assert cg.names_code_file({"command": "sed -i 's/x=0/x=1/' a.py && pytest -q"})
     assert cg.names_code_file({"commands": '["echo x > notes.md", "python gen.py > out.py"]'})
-    assert cg.names_code_file({"command": "echo 'oops > a.py"})  # unbalanced quote: plain split
+    assert not cg.names_code_file({"command": "echo 'oops > a.py"})  # unbalanced: runs nothing
     assert not cg.names_code_file({"command": "echo 'all done' > notes.md"})
     assert not cg.names_code_file({"command": "ls -la"})
+    # a code file read, named in text, or written under the scratch directory arms nothing
+    assert not cg.names_code_file({"command": "cat install.sh && bash -n scripts/install.sh"})
+    assert not cg.names_code_file({"command": "rm -rf tmp/x && python tests/test_install.py"})
+    assert not cg.names_code_file({"command": "S=tmp/x; gh api repos > $S/pages.json"})
+    assert not cg.names_code_file({"command": "python3 - <<EOF\nopen('MODEL_INFO.json')\nEOF"})
+    assert not cg.names_code_file({"command": "cp src/a.py tmp/x/a.py"})
+    assert cg.names_code_file({"command": "cp tmp/x/a.py src/a.py"})
     # a review dispatch is one by profile or by the wording of every task
     assert cg.dispatches_review({"task": "do it", "tool_profile": "review"})
     assert cg.dispatches_review({"tasks": '["Review the diff of foo.py for bugs"]'})
@@ -374,8 +383,13 @@ def test_the_review_sees_the_diff_and_its_findings_must_be_answered(tmp_path: Pa
         (tmp_path / "hello.py").write_text("print('hello')\n")
         assert gate.finish_verdict(dict(done), TASK) is None
         assert len(requests) == 2 and gate.reviews == 2 and gate.open_findings == []
-        assert "Findings of your previous review" in requests[1]["messages"][-1]["content"]
-        assert "since your previous review" in requests[1]["messages"][-1]["content"]
+        second = requests[1]["messages"][-1]["content"]
+        assert "Findings of your previous review" in second
+        assert "1. hello.py: prints bye, not hello." in second
+        # the re-review is scoped to those findings (audit 2026-11-03: reviewers added a
+        # new edge case of their own each round)
+        assert "This review judges those findings: report a new one only when" in second
+        assert "do not add spellings, inputs or edge cases of your own" in second
     # the agent's own read-only reviewer, dispatched after the last change, replaces the
     # gate's once a sub-task of it succeeded: a dispatch that failed, a sub-task that
     # failed, or one a change followed, does not
@@ -397,7 +411,7 @@ def test_the_review_sees_the_diff_and_its_findings_must_be_answered(tmp_path: Pa
         # a reviewer left running counts once agent_job reports it finished and successful
         _turn(own, "run_agent", {**review, "wait": "false"},
               "Started the sorcar agent task as job agent-1a2b; its tab is open.")
-        assert not own.reviewed_by_agent and own.jobs == {"agent-1a2b": (True, own.changes)}
+        assert not own.reviewed_by_agent and own.jobs == {"agent-1a2b": (True, own.changes, None)}
         _turn(own, "agent_job", {"job_id": "agent-1a2b", "action": "tail"},
               "Job agent-1a2b (sorcar agent task) is still running.")
         _turn(own, "agent_job", {"job_id": "agent-9", "action": "wait"},
@@ -415,8 +429,13 @@ def test_the_review_sees_the_diff_and_its_findings_must_be_answered(tmp_path: Pa
         _turn(own, "run_parallel", {"tasks": '["Review hello.py", "Review hello2.py"]'},
               yaml.safe_dump(["Error: no budget", "ran: sorcar\nsuccess: true\nsummary: ok\n"]))
         assert own.reviewed_by_agent
-        _turn(own, "run_agent", {"task": "Implement hello3.py so it prints hello"},
-              "ran: sorcar\nsuccess: true\nsummary: written\n")
+        implement = {"task": "Implement hello3.py so it prints hello"}
+        _turn(own, "run_agent", implement, "ran: sorcar\nsuccess: true\nsummary: written\n")
+        assert not own.delegated and own.reviewed_by_agent  # the child wrote nothing
+        own.observe("run_agent", implement)
+        (tmp_path / "hello3.py").write_text("print('hello')\n")  # the child's write
+        own.result("run_agent", implement, "ran: sorcar\nsuccess: true\nsummary: written\n",
+                   False)
         assert own.delegated and not own.reviewed_by_agent and own.review_wanted()
         assert own.evidence.unchecked_change
         _turn(own, "Bash", {"command": "bash tmp/verify.sh"}, "")
@@ -550,6 +569,89 @@ def test_the_diff_is_taken_against_the_runs_base_commit(tmp_path: Path) -> None:
     assert plain.base_commit is None and plain.diff_report() == "### c.py (new file)\nc = 1"
 
 
+def test_the_base_follows_head_after_a_sync_tool_unless_the_run_moved_it(tmp_path: Path) -> None:
+    """Commits a sync tool pulled are not the run's work (audit 2026-11-03: the /sync
+    diff armed the gate); a HEAD the run moved itself stays in the diff.  A git
+    subcommand named as an argument (``echo git commit``) moves nothing; one a
+    launcher runs (``uv run git commit``) does."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "core.autocrlf", "false")
+    (repo / "a.py").write_text("a = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "start")
+    gate = _gate(repo, custom_tools=frozenset({"git_sync"}))
+    _turn(gate, "Bash", {"command": "echo git commit -m x; git log --oneline | head -1"}, "x\n")
+    _turn(gate, "Bash", {"command": "uv run --no-sync echo git commit -m x"}, "git commit -m x\n")
+    assert gate.base_commit is not None and not gate.moved_head
+    # what the sync tool pulls (here: a commit made behind the gate's back) moves HEAD
+    (repo / "pulled.py").write_text("p = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pulled")
+    _turn(gate, "git_sync", {"repo": str(repo)}, "merged origin/main")
+    assert gate.base_commit == _git(repo, "rev-parse", "HEAD").strip()
+    assert gate.diff_report() == "(no changed files found)" and not gate.coding_run()
+    # a commit of the run's own is its work: the base stays behind it
+    _turn(gate, "Edit", {"file_path": str(repo / "a.py"), "old_string": "1", "new_string": "2"},
+          "ok")
+    (repo / "a.py").write_text("a = 2\n")
+    _turn(gate, "Bash", {"command": "uv run git commit -q -am 'the change'"}, "")
+    _git(repo, "commit", "-q", "-am", "the change")
+    base = gate.base_commit
+    _turn(gate, "git_sync", {"repo": str(repo)}, "pushed")
+    assert gate.moved_head and gate.base_commit == base
+    assert "+a = 2" in gate.diff_report()
+
+
+def test_the_agents_verifier_run_is_reused_only_when_its_exit_decided_the_commands(
+    tmp_path: Path,
+) -> None:
+    """The gate reuses the agent's own passing run of the verifier instead of running it
+    again, but only a run whose exit status the command's shows: ``bash -n``, ``|| true``,
+    ``| cat``, ``true ||``, ``!``, a command after it, ``&`` or an ``exit`` / ``exec``
+    before it hide a failing verifier."""
+    gate = _gate(tmp_path, verifier="echo FAILURE; exit 7\n")
+    _turn(gate, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"}, "ok")
+    hidden = ("bash -n tmp/verify.sh", "bash tmp/verify.sh || true", "bash tmp/verify.sh | cat",
+              "true || bash tmp/verify.sh", "bash tmp/verify.sh; echo done",
+              "bash tmp/verify.sh &", "(bash tmp/verify.sh) || true", "sh -xn ./tmp/verify.sh",
+              "bash tmp/verify.sh && echo PASS || echo FAIL", "bash tmp/verify.sh && true &",
+              "bash tmp/verify.sh && echo ok; true", "bash tmp/verify.sh && (true; true) || true",
+              "bash tmp/verify.sh\necho \"exit $?\"", "ls || bash tmp/verify.sh && echo ok",
+              "! bash tmp/verify.sh", "exit 0; bash tmp/verify.sh", "! (bash tmp/verify.sh)",
+              "exec true; bash tmp/verify.sh", "true && ! bash tmp/verify.sh")
+    for command in hidden:
+        result = _host_result(command, tmp_path)
+        assert not result.startswith("Error"), (command, result)  # exit 0, verifier or not
+        _turn(gate, "Bash", {"command": command}, result)
+        assert gate.verifier_passed_at is None, command
+        assert gate.runs_verifier(command) == (command != "bash -n tmp/verify.sh"
+                                               and command != "sh -xn ./tmp/verify.sh"), command
+    code, output = gate.verifier_run()
+    assert code == 7 and "FAILURE" in output
+    # a run whose exit is the verifier's: reused (the verifier changed on disk behind
+    # the gate's back would exit 5 if it ran again)
+    (tmp_path / "tmp" / "verify.sh").write_text("echo RUN; exit 0\n")
+    for command in (f"cd {shlex.quote(str(tmp_path))} && bash tmp/verify.sh",
+                    "timeout 60 bash -x ./tmp/verify.sh 2>&1", "bash tmp/verify.sh > tmp/log",
+                    # what follows the verifier under && cannot hide its failure
+                    "bash tmp/verify.sh && echo VERIFIED", "true; bash tmp/verify.sh && echo ok",
+                    "bash tmp/verify.sh && echo done | tee tmp/log && (echo a; echo b)",
+                    "bash tmp/verify.sh && echo $(date) `true`"):
+        _turn(gate, "Bash", {"command": command}, _host_result(command, tmp_path))
+        assert gate.verifier_passed_at == gate.changes, command
+        (tmp_path / "tmp" / "verify.sh").write_text("exit 5\n")
+        assert gate.verifier_run()[0] == 0
+        gate.verifier_passed_at = None
+        (tmp_path / "tmp" / "verify.sh").write_text("echo RUN; exit 0\n")
+    # an edit of the verifier, or a command naming it, drops the pass
+    _turn(gate, "Bash", {"command": "bash tmp/verify.sh"}, _host_result("bash tmp/verify.sh",
+                                                                        tmp_path))
+    _turn(gate, "Bash", {"command": "chmod +x tmp/verify.sh"}, "")
+    assert gate.verifier_passed_at is None
+
+
 def test_gate_stage_records_from_the_stage_threads_are_filed_under_the_task(
     tmp_path: Path,
 ) -> None:
@@ -565,7 +667,7 @@ def test_gate_stage_records_from_the_stage_threads_are_filed_under_the_task(
             gate = _gate(tmp_path, verifier="exit 0\n", reviewer=MODEL,
                          model_config={"base_url": url, "api_key": "local"})
             gate.observe("Write", {"file_path": str(tmp_path / "a.py"), "content": "x = 1\n"})
-            _turn(gate, "Bash", {"command": "bash tmp/verify.sh"}, "")
+            _turn(gate, "Bash", {"command": "python a.py"}, "")
             assert gate.finish_verdict({"success": True, "summary_in_html": DONE}, TASK) is None
             assert len(requests) == 1 and gate.reviews == 1
     finally:
@@ -818,28 +920,54 @@ def test_a_merge_with_the_reviews_findings_open_and_no_change_is_refused(tmp_pat
 def test_a_merge_that_went_through_leaves_its_rounds_and_findings_behind(tmp_path: Path) -> None:
     """Audit 2026-11-01 (task 4aa14638): three refused merges spent the round cap, the
     merge then went through, and the finish delivered the merge's stale findings as
-    caveats. ``merged()`` resets the rounds and findings; so does a review the agent
-    dispatched itself after a later change."""
-    script = [text_body("VERDICT: NOT DONE\n1. hello.py prints bye, not hello.")]
+    caveats; audit 2026-11-03: two runs ended with their work stranded on a branch
+    after the cap. The merge refused for the last time says so, the next refused
+    merge goes through with its open findings in the result, and the finish summary
+    carries them as caveats unless it answers them. ``merged()`` resets the rounds
+    and findings; so does a review the agent dispatched itself after a later change."""
+    finding = "1. README.md: the usage section the task asks for is missing."
+    script = [text_body(f"VERDICT: NOT DONE\n{finding}")]
     hello = tmp_path / "hello.py"
     with serve(script) as (url, requests):
         gate = _gate(tmp_path, reviewer=MODEL, model_config={"base_url": url, "api_key": "local"})
-        hello.write_text("print('bye')\n")
-        _turn(gate, "Write", {"file_path": str(hello), "content": "print('bye')\n"}, "ok")
-        _turn(gate, "Bash", {"command": "python hello.py"}, "bye\n")
-        for round_number in (1, 2, 3):
-            verdict = gate.merge_verdict(TASK)
-            assert verdict is not None and f"round {round_number} of 3" in verdict
-        assert gate.merge_verdict(TASK) is None  # past the cap the merge goes through
-        assert gate.gate_rounds == 3
-        assert gate.open_findings == ["1. hello.py prints bye, not hello."]
-        gate.merged()
-        assert gate.gate_rounds == 0 and gate.open_findings == []
-        # the finish after the merge: no file changed, nothing to re-review, no caveat
+        hello.write_text("print('hello')\n")
+        _turn(gate, "Write", {"file_path": str(hello), "content": "print('hello')\n"}, "ok")
+        _turn(gate, "Bash", {"command": "python hello.py"}, "hello\n")
+        first = gate.merge_verdict(TASK)
+        assert first is not None and "round 1 of 3" in first and cg.MERGE_CAP_NOTE not in first
+        second = gate.merge_verdict(TASK)
+        assert second is not None and "round 2 of 3" in second
+        assert second.endswith(cg.MERGE_CAP_NOTE)
+        # the third refused round is not refused: the merge goes through with its findings
+        assert gate.merge_verdict(TASK) is None
+        assert gate.gate_rounds == 3 and gate.merge_rounds == 3
+        assert gate.open_findings == [finding]
+        assert gate.merge_caveats == [cg.MERGE_UNANSWERED_VERDICT.format(findings=finding)]
+        result = gate.merged()
+        assert result.startswith("\n\nMerged after 3 refused rounds with these findings open:")
+        assert finding in result and gate.gate_rounds == 0 and gate.open_findings == []
+        # the finish after the merge: no file changed, nothing to re-review; the
+        # merge's open finding is a caveat of a summary that says nothing of it
+        # (without the decisions model, every open finding is)
         args: dict[str, Any] = {"success": True, "summary_in_html": DONE}
         assert gate.finish_verdict(args, TASK) is None
-        assert args["summary_in_html"] == DONE and gate.delivered_findings == []
-        assert len(requests) == 1
+        assert args["summary_in_html"].startswith(DONE + "\n<h4>Merged after 3 refused merge")
+        assert finding in args["summary_in_html"]
+        assert gate.delivered_findings == ["Not merged: these findings of the review are still "
+                                           "open and no file changed since:"]
+        assert gate.merge_caveats == [] and len(requests) == 1
+        # a merge that went through with no finding open appends nothing
+        assert gate.merged() == ""
+        args = {"success": True, "summary_in_html": DONE}
+        assert gate.finish_verdict(args, TASK) is None and args["summary_in_html"] == DONE
+        # a summary that answers the finding with a command and its output carries no caveat
+        if decisions_tool_available():
+            gate.merge_caveats, gate.merge_rounds = [finding], 3
+            answered = DONE + ("<p>1. README.md has the usage section: <code>grep -n Usage "
+                               "README.md</code> prints <code>3:## Usage</code>.</p>")
+            args = {"success": True, "summary_in_html": answered}
+            assert gate.finish_verdict(args, TASK) is None
+            assert args["summary_in_html"] == answered and gate.merge_caveats == []
     # a review the agent dispatched after a later change supersedes the gate's findings
     gate = _gate(tmp_path)
     gate.gate_rounds, gate.open_findings = 2, ["1. stale"]
@@ -895,10 +1023,20 @@ def test_a_delegated_change_is_judged_by_the_diff(tmp_path: Path) -> None:
     init_repo(repo)
     gate = _gate(repo)
     done = {"success": True, "summary_in_html": DONE}
-    _turn(gate, "run_agent", {"task": "Implement hello.py so it prints hello"},
+    implement = {"task": "Implement hello.py so it prints hello"}
+    # a child that wrote nothing (audit 2026-11-03: a sub-agent that answered a
+    # question) is no change: the work's fingerprint is the same before and after
+    _turn(gate, "run_agent", implement, "ran: sorcar\nsuccess: true\nsummary: nothing to do\n")
+    assert not gate.delegated and not gate.coding_run() and gate.changes == 0
+    assert gate.finish_verdict(dict(done), TASK) is None
+    # one sent to another machine touches no file here
+    _turn(gate, "run_agent", {**implement, "machine": "gpu-box"},
           "ran: sorcar\nsuccess: true\nsummary: written\n")
+    assert not gate.delegated and gate.changes == 0
+    gate.observe("run_agent", implement)
     (repo / "notes.md").write_text("done\n")  # the child wrote prose only: not gated
-    assert gate.delegated and not gate.coding_run()
+    gate.result("run_agent", implement, "ran: sorcar\nsuccess: true\nsummary: written\n", False)
+    assert gate.delegated and not gate.coding_run() and gate.changes == 1
     assert gate.finish_verdict(dict(done), TASK) is None
     (repo / "hello.py").write_text("print('hello')\n")  # the child changed code
     assert gate.coding_run() and gate.changed_paths() == [("hello.py", True), ("notes.md", True)]

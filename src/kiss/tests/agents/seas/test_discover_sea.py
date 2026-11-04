@@ -261,10 +261,10 @@ def test_settings_name_the_bestrouter_and_the_full_toolset() -> None:
     }
     assert sea_commands.sea_settings(_SEA_PATH) == {"model": "bestrouter", "tool_profile": "full"}
     # ``bestrouter`` is a model-picker SEA, so the daemon resolves the
-    # model to the picker's primary model instead of forwarding the name.
+    # model to the picker's own model instead of forwarding the name.
     picker = Path(bestrouter_sea.__file__).resolve()
     assert sea_commands.model_sea("bestrouter") == picker
-    assert sea_commands.sea_settings(picker)["model"] == bestrouter_sea.PRIMARY_MODEL
+    assert sea_commands.sea_settings(picker)["model"] == bestrouter_sea.SIMPLE_MODEL
     assert DiscoverSea().register_as_model() is False
     assert DiscoverSea().tools([print]) == [print]
     assert DiscoverSea().prompt("the task") == "the task"

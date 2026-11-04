@@ -207,7 +207,9 @@ def test_gate_runs_the_agents_own_verifier_in_the_container(tmp_path: Path) -> N
                                                       "call.</p>"}
         refused = passing.on_tool_call("finish", hedged)
         assert not refused.allowed
-        assert '"not verified", "should work", "if the grader", "judgement call"' in refused.text
+        # "not verified" is no hedge of its own since the 2026-11-03 audit (a
+        # label the summary cites); the three hedges that remain refuse the finish
+        assert '"should work", "if the grader", "judgement call"' in refused.text
         assert passing.last_verifier_run[1] == 0
         assert passing.checkpoints == ["verified"]
         archive = f"{coding_sea.CHECKPOINT_DIR}/verified.tar"

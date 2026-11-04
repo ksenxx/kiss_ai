@@ -934,6 +934,13 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
     user_entries = _read_my_models()
     built: dict[str, ModelInfo] = {}
     for name in list(user_entries):
+        alias_of = (raw.get(name) or {}).get("alias_of")
+        if alias_of and not user_entries[name].get("alias_of"):
+            # An override of a generated thinking alias (``gpt-5.6-sol-xhigh``
+            # with its own endpoint) stays an alias: its endpoint knows the
+            # base model id only (see :func:`_strip_thinking_alias`), and the
+            # settings panel writes the override without the marker.
+            user_entries[name] = {**user_entries[name], "alias_of": alias_of}
         try:
             built[name] = _build_model_info_entry(user_entries[name])
         except (KeyError, TypeError, ValueError):
@@ -1486,8 +1493,12 @@ def _strip_thinking_alias(bare: str) -> str:
     Provider pricing tables and endpoints only know the base names, so
     every pricing lookup and outbound request must consult the base name.
 
-    ``-xhigh`` is stripped unconditionally (no real upstream model ends in
-    it). The other level suffixes collide with real upstream model names
+    ``-xhigh`` is stripped unless ``bare`` is itself a registered model id
+    (see :func:`_is_registered_model_id`): no vendor model ends in it, but
+    a ``MY_MODELS.json`` endpoint model may be registered under such a
+    name (a router that reads the effort off the name, e.g.
+    ``s10s-scout-xhigh``), and that name is what its endpoint expects.
+    The other level suffixes collide with real upstream model names
     (e.g. ``openrouter/openai/o3-mini-high``), so they are stripped only
     when ``bare`` is EXACTLY a catalog key carrying the ``alias_of``
     marker that ``update_models.py`` writes on every generated alias; in
@@ -1503,10 +1514,12 @@ def _strip_thinking_alias(bare: str) -> str:
 
     Returns:
         The alias's recorded base catalog key when ``bare`` is a generated
-        alias, otherwise ``bare`` unchanged (modulo unconditional
-        ``-xhigh`` stripping).
+        alias, otherwise ``bare`` unchanged (modulo ``-xhigh`` stripping
+        of a name that is not a registered model id).
     """
     if bare.endswith(_XHIGH_SUFFIX):
+        if _is_registered_model_id(bare):
+            return bare
         return bare[: -len(_XHIGH_SUFFIX)]
     for suffix in _LEVEL_ALIAS_SUFFIXES:
         if not bare.endswith(suffix):
@@ -1516,6 +1529,30 @@ def _strip_thinking_alias(bare: str) -> str:
             return info.alias_of
         return bare
     return bare
+
+
+def _is_registered_model_id(name: str) -> bool:
+    """Return whether *name* is registered as a model id of its own, not as an alias.
+
+    True for a loaded catalog entry without the ``alias_of`` marker and
+    for a ``MY_MODELS.json`` entry registered under *name* itself (read
+    live, as :func:`_lookup_model_info` does, so a model added after the
+    daemon started is seen before the next restart).  Only the raw entry
+    is consulted, never built: the catalog normalization that runs at
+    import and on a hot-added entry reaches this through
+    :func:`_strip_thinking_alias`.
+
+    Args:
+        name: The full catalog key.
+
+    Returns:
+        ``True`` when the name itself is what the model's endpoint expects.
+    """
+    info = MODEL_INFO.get(name)
+    if info is not None:
+        return not info.alias_of
+    entry = _read_my_models().get(name)
+    return entry is not None and not entry.get("alias_of")
 
 
 # Rolling "latest" aliases (OpenRouter ``~openai`` passthroughs) that track
