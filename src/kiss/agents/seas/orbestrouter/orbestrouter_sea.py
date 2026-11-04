@@ -6,9 +6,10 @@
 
 Same protocol as :mod:`kiss.agents.seas.bestrouter.bestrouter_sea` (one
 frontier model does the work, a second one reviews it read-only through
-a non-blocking ``run_agent`` on at most 75% of the budget), with both models taken from
-the OpenRouter vendor: :data:`PRIMARY_MODEL` is Claude Fable 5.1 (max effort) and
-:data:`REVIEW_MODEL` is GPT-6 Astra, both as ``openrouter/...`` catalog
+a non-blocking ``run_agent`` on at most 75% of the budget), with every model taken from
+the OpenRouter vendor: :data:`SIMPLE_MODEL` is Claude Opus 5.5 (medium effort) for
+simple questions, :data:`PRIMARY_MODEL` is Claude Fable 5.1 (max effort) and
+:data:`REVIEW_MODEL` is GPT-6 Astra, all as ``openrouter/...`` catalog
 entries, so one OpenRouter key runs the whole session.
 
 Three ways to run it::
@@ -28,13 +29,16 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.bestrouter.bestrouter_sea import routing_prompt
 
+SIMPLE_MODEL = "openrouter/anthropic/claude-opus-5.5-medium"
+"""The model a tab starts on: Claude Opus 5.5 at medium effort via OpenRouter."""
+
 PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.1-max"
-"""The model that does every task: Claude Fable 5.1 at max effort via OpenRouter."""
+"""The model for every other task: Claude Fable 5.1 at max effort via OpenRouter."""
 
 REVIEW_MODEL = "openrouter/openai/gpt-6-astra"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""
 
-SYSTEM_PROMPT = routing_prompt("orbestrouter", PRIMARY_MODEL, REVIEW_MODEL)
+SYSTEM_PROMPT = routing_prompt("orbestrouter", SIMPLE_MODEL, PRIMARY_MODEL, REVIEW_MODEL)
 """The routing protocol added to the system prompt of every run."""
 
 
@@ -44,7 +48,8 @@ class OrbestrouterSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/orbestrouter help``."""
         return (
-            f"Runs every task on {PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
+            f"Answers simple questions on {SIMPLE_MODEL}, runs every other task on "
+            f"{PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
             "result read-only through a non-blocking run_agent on at most 75% of the task "
             "budget (the "
             "bestrouter on OpenRouter models only); pick `orbestrouter` in the model picker, "
@@ -56,7 +61,7 @@ class OrbestrouterSea(BaseSea):
         """List ``orbestrouter`` in the model picker.
 
         A picked ``orbestrouter`` makes the daemon run every task of the tab
-        through this SEA on :data:`PRIMARY_MODEL` (``settings()`` below), with
+        through this SEA on :data:`SIMPLE_MODEL` (``settings()`` below), with
         :data:`SYSTEM_PROMPT` added to the system prompt (``system_prompt()``).
         """
         return True
@@ -66,5 +71,5 @@ class OrbestrouterSea(BaseSea):
         return system_prompt + "\n\n" + SYSTEM_PROMPT
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run every task of the tab on :data:`PRIMARY_MODEL`."""
-        return settings | {"model": PRIMARY_MODEL}
+        """Start every task of the tab on :data:`SIMPLE_MODEL`."""
+        return settings | {"model": SIMPLE_MODEL}

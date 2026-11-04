@@ -4,8 +4,9 @@
 # add your name here
 """Bestrouter agent — one frontier model does the work, a second one reviews it.
 
-The routing protocol (:data:`SYSTEM_PROMPT`) fixes both models by name:
-:data:`PRIMARY_MODEL` runs every task, including software development, and
+The routing protocol (:data:`SYSTEM_PROMPT`) fixes the models by name:
+:data:`SIMPLE_MODEL` answers simple questions and queries (the tab starts on it),
+:data:`PRIMARY_MODEL` runs every other task, including software development, and
 :data:`REVIEW_MODEL` is dispatched through a non-blocking ``run_agent`` for a read-only
 review and debugging pass over the primary model's work, on at most 75% of
 the task budget.
@@ -29,8 +30,11 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 
+SIMPLE_MODEL = "claude-opus-5-5-medium"
+"""The model a tab starts on; it answers simple questions and queries itself."""
+
 PRIMARY_MODEL = "claude-fable-5-1-max"
-"""The model that does every task."""
+"""The model that does every task but simple questions and queries."""
 
 REVIEW_MODEL = "gpt-6-astra"
 """The model that reviews and debugs the primary model's work."""
@@ -38,7 +42,8 @@ REVIEW_MODEL = "gpt-6-astra"
 SYSTEM_PROMPT = f"""\
 ## Model routing protocol (bestrouter)
 
-Use '{PRIMARY_MODEL}' model for all tasks, including software development. Use
+Use '{SIMPLE_MODEL}' for simple questions and queries.
+Use '{PRIMARY_MODEL}' model for all other tasks, including software development. Use
 {REVIEW_MODEL} (not codex) through `run_agent(model="{REVIEW_MODEL}", tool_profile="review",
 wait="false")` for a thorough read-only review and debugging of the other model's work,
 keep working while it runs and collect it with `agent_job(job_id, "wait")`. Check
@@ -69,21 +74,23 @@ this one (``orbestrouter``) take it through :func:`routing_prompt`.
 """
 
 
-def routing_prompt(router: str, primary: str, review: str) -> str:
+def routing_prompt(router: str, simple: str, primary: str, review: str) -> str:
     """Return :data:`SYSTEM_PROMPT` for a derived router with its own worker and reviewer.
 
-    The heading names *router* and every mention of :data:`PRIMARY_MODEL`
-    and :data:`REVIEW_MODEL` becomes *primary* and *review*; the rules are
-    shared word for word.
+    The heading names *router* and every mention of :data:`SIMPLE_MODEL`,
+    :data:`PRIMARY_MODEL` and :data:`REVIEW_MODEL` becomes *simple*,
+    *primary* and *review*; the rules are shared word for word.
 
     Args:
         router: The SEA's command name, shown in the heading
             ``## Model routing protocol (<router>)``.
-        primary: Catalog name of the model that does every task.
+        simple: Catalog name of the model for simple questions and queries.
+        primary: Catalog name of the model that does every other task.
         review: Catalog name of the model that reviews the primary model's work.
     """
     return (
         SYSTEM_PROMPT.replace("(bestrouter)", f"({router})", 1)
+        .replace(SIMPLE_MODEL, simple)
         .replace(PRIMARY_MODEL, primary)
         .replace(REVIEW_MODEL, review)
     )
@@ -95,7 +102,8 @@ class BestrouterSea(BaseSea):
     def description(self) -> str:
         """Return the one-sentence help text shown by ``/bestrouter help``."""
         return (
-            f"Runs every task on {PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
+            f"Answers simple questions on {SIMPLE_MODEL}, runs every other task on "
+            f"{PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
             "result read-only through a non-blocking run_agent on at most 75% of the task "
             "budget; pick "
             "`bestrouter` in the model picker, use `/bestrouter <task>` in the chat, or "
@@ -106,7 +114,7 @@ class BestrouterSea(BaseSea):
         """List ``bestrouter`` in the model picker.
 
         A picked ``bestrouter`` makes the daemon run every task of the tab
-        through this SEA on :data:`PRIMARY_MODEL` (``settings()`` below), with
+        through this SEA on :data:`SIMPLE_MODEL` (``settings()`` below), with
         :data:`SYSTEM_PROMPT` added to the system prompt (``system_prompt()``).
         """
         return True
@@ -116,7 +124,7 @@ class BestrouterSea(BaseSea):
         return system_prompt + "\n\n" + SYSTEM_PROMPT
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run every task of the tab on :data:`PRIMARY_MODEL`."""
-        return settings | {"model": PRIMARY_MODEL}
+        """Start every task of the tab on :data:`SIMPLE_MODEL`."""
+        return settings | {"model": SIMPLE_MODEL}
 
 

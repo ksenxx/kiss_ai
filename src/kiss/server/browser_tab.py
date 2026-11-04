@@ -94,10 +94,16 @@ _CLOSE_TIMEOUT = 2.0
 # under a second; one that does not exit on ``Browser.close`` must not
 # keep the lifecycle lock, or every later open would queue behind it.
 _TEARDOWN_TIMEOUT = 5.0
+# Longest line kept from a browser's own stderr in a launch-failure summary.
+_FAILURE_LINE_LIMIT = 300
 
 _MODIFIER_BITS = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}
 _KEY_TEXT = {"Enter": "\r"}
 _HOST_RE = re.compile(r"^[\w.-]+(\.[a-z]{2,})(:\d+)?(/.*)?$", re.IGNORECASE)
+# The ``BrowserType.launch_persistent_context: `` prefix of a Playwright
+# message: a capitalised class name, a dot and a method (a lower-case
+# ``chrome.exe: Access is denied.`` is a file name, not an API).
+_PLAYWRIGHT_API_PREFIX_RE = re.compile(r"^[A-Z]\w+\.\w+: ")
 
 
 @dataclass
@@ -210,6 +216,35 @@ def _result_in_slices[T](future: concurrent.futures.Future[T], timeout: float) -
             raise TimeoutError(f"no answer from the browser within {timeout:g}s")
         concurrent.futures.wait([future], min(remaining, _WAIT_SLICE))
     return future.result()
+
+
+def launch_failure_summary(exc: BaseException) -> str:
+    """Return the lines of a browser launch failure a person needs to read.
+
+    Playwright's message for a browser that would not start repeats the
+    whole command line and the call log.  The headline ("Failed to
+    launch the browser process.", without the API name Playwright puts
+    in front), the first line of the browser's own stderr (tagged
+    ``[pid=N][err]``: a library it cannot load, a corrupt install) and
+    the way it ended (``<process did exit: ...>``) say what happened;
+    everything else is noise in a notification or a tooltip.
+
+    Args:
+        exc: The exception the launch raised.
+
+    Returns:
+        One to three lines; ``""`` for an exception without a message.
+    """
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    if not lines:
+        return ""
+    summary = [_PLAYWRIGHT_API_PREFIX_RE.sub("", lines[0])]
+    for marker in ("[err]", "<process did exit"):
+        for line in lines[1:]:
+            if marker in line:
+                summary.append(line.split("] ", 1)[-1][:_FAILURE_LINE_LIMIT])
+                break
+    return "\n".join(summary)
 
 
 def _is_ip_address(text: str) -> bool:
@@ -559,7 +594,7 @@ class BrowserTabService:
         playwright = await async_playwright().start()
         self._playwright = playwright
         try:
-            context = await self._launch_browser(playwright)
+            context = await self._launch_resolved(playwright)
             # Still inside the try: the mask's own awaits are the last
             # points where an abandoned open's cancellation can land, and
             # the launched browser would then hold the profile with no
@@ -587,6 +622,30 @@ class BrowserTabService:
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)
         return context
+
+    async def _launch_resolved(self, playwright: Playwright) -> BrowserContext:
+        """Launch the resolved browser, else Playwright's bundled Chromium.
+
+        An installed browser can still be unable to start: a Chrome whose
+        update replaced the launcher but lost the framework it loads
+        aborts on every start until it is reinstalled, for instance.
+        The bundled Chromium then shows the page, and the tab's badge
+        names the browser that failed and why (``ResolvedBrowser.note``).
+        """
+        assert self._browser is not None
+        try:
+            return await self._launch_browser(playwright)
+        except Exception as exc:  # noqa: BLE001 — any failure of that binary means "use ours"
+            if self._browser.executable is None:
+                raise
+            reason = launch_failure_summary(exc) or repr(exc)
+            logger.warning(
+                "browser tab: %s (%s) cannot start, using the bundled Chromium: %s",
+                self._browser.name, self._browser.executable, reason,
+            )
+            note = f"{self._browser.name} could not be started: {reason}"
+            self._browser = ResolvedBrowser("Chromium (bundled)", None, False, note)
+            return await self._launch_browser(playwright)
 
     async def _launch_browser(self, playwright: Playwright) -> BrowserContext:
         """Launch headed on the desktop (or a shared Xvfb), else headless."""
@@ -673,7 +732,10 @@ class BrowserTabService:
             await asyncio.wait_for(self._open(url, conn_id), _OPEN_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — any launch failure is reported to the user
             logger.warning("browser tab: cannot open %s: %s", url, exc)
-            self._emit({"type": "browserError", "tab_id": "", "text": str(exc)}, conn_id)
+            self._emit(
+                {"type": "browserError", "tab_id": "", "text": launch_failure_summary(exc)},
+                conn_id,
+            )
 
     async def _open(self, url: str, conn_id: str) -> str:
         rec = await self._new_tab()

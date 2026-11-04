@@ -63,6 +63,17 @@ ADVERSARIAL = {
     "uv " + "-a pip " * 20000 + "test": False,
     "git " + '-c "a b" ' * 20000 + "status": False,
     "cargo " + "+a " * 20000 + "fmt": True,
+    # the nested-shell scan: shells with options and no -c, shells with -c, quotes,
+    # command starts with assignments or paths
+    "bash -a " * 20000 + "status": False,
+    "bash -c " * 20000 + "'x'": False,
+    "bash -a " * 20000 + "-c 'x > y'": True,
+    "'" * 20000 + " > f": True,
+    ";x=1" * 20000 + " > f": True,
+    "(x=" * 20000: False,
+    "(" * 20000 + "/x/" * 10000 + "sh": False,
+    "sudo " * 20000 + "echo": False,
+    "find x " * 10000 + "-exec sh -c 'x > y'": True,
 }
 
 
@@ -104,7 +115,6 @@ QUOTED_WRITES = (
     'apt -o "Debug::X=a b" upgrade',
     "git -C repo \\\n  checkout main",
     "bash -c \"npm --prefix 'my app' ci\"",
-    'ssh host "cd $DIR && git -C \\"my repo\\" pull"',
     "echo ok && sudo git -C 'my repo' reset --hard",
     "(cd x; npm --prefix \"a b\" i)",
     "x=$(git -C 'a b' rebase main)",
@@ -117,6 +127,8 @@ QUOTED_CHECKS = (
     'cargo --manifest-path "a b/Cargo.toml" test',
     "bash -c \"npm --prefix 'my app' test\"",
     "git -C repo\ncheckout main",
+    # a remote shell's command string is text to this host's shell
+    'ssh host "cd $DIR && git -C \\"my repo\\" pull"',
 )
 
 

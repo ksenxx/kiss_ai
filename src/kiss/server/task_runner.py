@@ -71,7 +71,7 @@ from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_too
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.core import tool_interrupt
 from kiss.core.llm_reply import LLMReply
-from kiss.core.models.model import Attachment
+from kiss.core.models.model import Attachment, framework_flags_over
 from kiss.core.models.model_info import (
     custom_model_config,
     get_available_models,
@@ -2052,11 +2052,16 @@ class _TaskRunnerMixin:
         # entry carrying an endpoint) OWN endpoint / key / headers,
         # else the global config's.  The classifier must call the same
         # endpoint as the run — a custom-endpoint model routed by name
-        # to the default provider fails or stalls there.
+        # to the default provider fails or stalls there.  A sent
+        # configuration of framework flags alone (a SEA's ``coding_gate:
+        # false``) keeps that endpoint (``framework_flags_over``).
         _vcfg = load_config()
         _raw_model_config = cmd.get("modelConfig")
-        _agent_model_config = _raw_model_config if isinstance(_raw_model_config, dict) else None
         _model_config = custom_model_config(model) or build_model_config(_vcfg)
+        _agent_model_config = (
+            framework_flags_over(_raw_model_config, _model_config)
+            if isinstance(_raw_model_config, dict) else None
+        )
         # A run whose effective configuration names an endpoint never
         # needs a vendor key: ``model_info.model`` builds the
         # OpenAI-compatible adapter for that ``base_url`` whatever the

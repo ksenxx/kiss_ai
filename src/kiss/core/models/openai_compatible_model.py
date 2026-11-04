@@ -231,8 +231,11 @@ def _model_thinking_level(model_name: str) -> str | None:
     The level lives on ``MODEL_INFO[model_name].thinking`` and is set
     per-model via the ``thinking`` key in ``MODEL_INFO.json`` /
     ``~/.kiss/MY_MODELS.json`` (e.g. ``thinking="xhigh"`` for the gpt-5.5
-    family).  Models not in ``MODEL_INFO`` (e.g. custom endpoints with
-    arbitrary model names) return ``None`` so we never send an unsupported
+    family).  A ``MY_MODELS.json`` entry registered after the catalog was
+    loaded is read from the file, as ``model_info._lookup_model_info``
+    does, so a custom model behaves the same before and after a daemon
+    restart.  Models in neither (e.g. custom endpoints with arbitrary
+    model names) return ``None`` so we never send an unsupported
     ``reasoning_effort`` to such providers.
 
     Args:
@@ -242,12 +245,16 @@ def _model_thinking_level(model_name: str) -> str | None:
 
     Returns:
         The thinking level string (e.g. ``"xhigh"``) if the matching
-        ``MODEL_INFO`` entry sets one, otherwise ``None``.
+        ``MODEL_INFO`` or ``MY_MODELS.json`` entry sets one, otherwise
+        ``None``.
     """
-    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.model_info import MODEL_INFO, _read_my_models
 
     info = MODEL_INFO.get(model_name)
-    return info.thinking if info is not None else None
+    if info is not None:
+        return info.thinking
+    thinking = (_read_my_models().get(model_name) or {}).get("thinking")
+    return thinking if isinstance(thinking, str) else None
 
 
 DEEPSEEK_REASONING_MODELS = {

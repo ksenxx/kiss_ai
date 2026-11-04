@@ -319,7 +319,7 @@ not exist is reported as `missing: <path>` and fails the run either way.
 | `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; default: the caller's (`""`, like `None`, is no override — true of every string key). |
 | `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a channel, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `max_budget` | `int \| float` | `maxBudget` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
-| `model_config` | `dict` | `modelConfig` | Model configuration dict passed to the LLM (temperature, ...). `base_url` (with `api_key`) routes every model call of the run, in a tab and headless alike, to that OpenAI-compatible endpoint (a proxy the SEA starts, say); `model` must still name a catalogued model so the calls are priced. `plain_io: true` leaves the framework's own additions out of what the model reads: the system prompt is the SEA's `system_prompt` return alone (no `# Restricted tool profile` or `# Web tools are off` note, no `# MOST IMPORTANT INSTRUCTIONS`, `# Task Settings` or `AGENTS.md` trailer; the memory protocol stays while the run has the memory tools, and a CLI-backed model's text tool catalog stays) and tool results carry no usage line (`Steps: ..., Context: ...`). Replaces the caller's `model_config` whole. |
+| `model_config` | `dict` | `modelConfig` | Model configuration dict passed to the LLM (temperature, ...). `base_url` (with `api_key`) routes every model call of the run, in a tab and headless alike, to that OpenAI-compatible endpoint (a proxy the SEA starts, say); `model` must still name a catalogued model so the calls are priced. `plain_io: true` leaves the framework's own additions out of what the model reads: the system prompt is the SEA's `system_prompt` return alone (no `# Restricted tool profile` or `# Web tools are off` note, no `# MOST IMPORTANT INSTRUCTIONS`, `# Task Settings` or `AGENTS.md` trailer; the memory protocol stays while the run has the memory tools, and a CLI-backed model's text tool catalog stays) and tool results carry no usage line (`Steps: ..., Context: ...`). `coding_gate: false` makes the run no coding run for the finish gate: no verifier, review or unchecked-change stage, whatever its edits (a sync resolving conflicts); the evidence and hedge checks stay. Replaces the caller's `model_config` whole, except that a dict of such framework flags alone is added to the configuration that applies anyway (a settings-panel endpoint stays). |
 | `use_web_tools` | `bool` | `useWebTools` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | `classifyTasks` | Let the pre-run classifier decide whether the task is simple (lite prompt) (daemon default: the persisted setting). |
 | `use_memory` | `bool` | `useMemory` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
@@ -2306,18 +2306,23 @@ SEA's own `tool_call_hook` need not restate:
   a worktree, a command naming the main checkout's path outside its
   `.venv` (`Error: command references the parent-repo path ...`, with
   the command rewritten against the worktree to copy as is) and a
-  `uv sync`/`uv run`/`uv add`/`uv remove`, with or without global options
+  `uv sync`/`uv add`/`uv remove`, with or without global options
   before the subcommand (`uv --directory . run`, `uv -q sync`;
-  `useful_tools._uv_in_worktree_guard`,
+  `useful_tools.uv_in_worktree`,
   ``REFUSED: `uv run` did NOT run: the worktree '<path>' has no
   environment of its own and shares the main checkout's
   (<checkout>/.venv); ...``: a worktree has no environment
   of its own, so uv would build it one or, through `UV_PROJECT_ENVIRONMENT`
   or a `.venv` link, install the worktree as the main checkout's editable
   project; the refusal names the main checkout's environment binary to
-  run with the worktree's `src/` and `projects/` first on `PYTHONPATH`,
-  `uv run <program> ...` rewritten to copy as is unless a global option
-  with a value, `--directory x`, would be dropped); a shell rewrite of a
+  run with the worktree's `src/` and `projects/` first on `PYTHONPATH`).
+  A `uv run <program> ...` there is not refused but rewritten to that
+  binary and run, every `uv run` of the command, the result prefixed
+  with `Note: the worktree has no environment of its own ... run it so
+  yourself next time: <rewritten command>` (`useful_tools.UV_REWRITTEN_NOTE`;
+  also in `run_commands_parallel`), unless the rewrite is ambiguous: a
+  global option with a value, `--directory x`, would be dropped, or the
+  environment lacks the program, which is refused as above; a shell rewrite of a
   file that the bullet above did not apply as a `Write`/`Edit`: a
   `sed` editing in place (`-i`, `-i.bak`, `-Ei`, `--in-place`) with
   `\n` in one of its words and a `python -` or `python3 -` heredoc that reads a
@@ -3164,8 +3169,13 @@ the Anthropic adapter sends it as `output_config.effort`
 (`anthropic_model._effort_level_for`; a caller's own
 `output_config.effort` wins, and an entry that rejects the parameter,
 such as Haiku 4.5 or Sonnet 4.5, carries no `thinking` and gets
-none).  A custom endpoint whose name no catalog entry matches gets no
-effort parameter.  The OpenRouter Claude twins
+none).  `_model_thinking_level` uses the loaded catalog entry when
+the name is present there and otherwise reads
+`$KISS_HOME/MY_MODELS.json` as it is now, so an entry saved in the
+settings panel under a new name after the daemon started carries its
+`thinking` level before the next restart; a custom endpoint whose
+name matches neither the loaded catalog nor the file gets no effort
+parameter.  The OpenRouter Claude twins
 (`openrouter/anthropic/claude-*`) carry the same ladder: OpenRouter
 forwards `reasoning.effort` to Anthropic unchanged, so the catalog
 updater (`update_models._thinking_scale_for`) gives such a slug, like
@@ -3201,9 +3211,29 @@ and `set_model` switches the live executor, `_current_executor`,
 the session running at the time, and with no live executor only
 records the name for the next session, `Model deferred-changed to
 ...`) hands the live
-conversation over (`model.hand_off_conversation`, which also moves
+conversation over.  `set_model` copies the old adapter's
+`model_config` onto the new one, minus the keys the target's
+provider family cannot accept (`_sanitize_model_config_for_switch`)
+and minus a `reasoning_effort` equal to the old model's own default
+level (`_model_thinking_level`), so the new model gets its own
+default while an effort that differs from that default is kept; a
+switch to
+a settings-panel custom model (a `MY_MODELS.json` entry with an
+`endpoint`, `model_info.custom_model_config`) drops the run's
+`base_url`, `api_key` and `extra_headers` and uses that entry's own,
+as the task runner starts it, and a switch away from one drops them
+and gives the new model its normal routing and credentials, so a
+different model never inherits a custom entry's endpoint (nor does a
+sub-agent, `agent_dispatch._parent_model_config`); otherwise a
+custom `base_url` and its key carry over to the new
+model, a standard provider endpoint carries over only when the new
+model routes to the same provider default, and a Gemini-to-Gemini or
+Claude-to-Claude switch (direct and Bedrock kept apart) keeps the
+task's own key, so a per-task key is not silently replaced by the
+process-global one.  The conversation handed over
+(`model.hand_off_conversation`, which also moves
 the `llm_call_hook` boundary, the helper spend record and the
-agent's limit check): kept verbatim when both models talk
+agent's limit check) is kept verbatim when both models talk
 to the same endpoint (`base_url`), so an OpenAI model keeps another
 OpenAI model's reasoning items, and converted to plain chat messages
 (`responses_items_to_chat_messages`, which every adapter reads) across
@@ -3328,7 +3358,17 @@ generic defaults (128,000 context, $0 prices,
 so hand-written keys such as `thinking` or real prices survive an
 endpoint change; a name not yet in the loaded catalog is looked up
 in the file as it is now, so a model saved in the panel is priced by
-the running daemon without a restart.  A custom entry may keep a
+the running daemon without a restart.  An entry named after a
+generated effort alias (`gpt-5.6-sol-xhigh` given its own endpoint)
+keeps the catalog's `alias_of` marker when it loads, since the panel
+writes none, so its requests still go out under the base id
+(`_strip_thinking_alias`) while its own context length and prices
+stay in force; a `-xhigh` name that is an entry of its
+own, with no marker (`_is_registered_model_id`, which reads the file
+live, so a router model such as `s10s-scout-xhigh` added after
+start-up counts), is kept whole, since that is the name its endpoint
+expects — the one case where `-xhigh` is not stripped.  A custom
+entry may keep a
 harbor-style provider prefix in its name: the model factory strips a
 redundant `openai/`, `anthropic/` or `google/` prefix only when the
 bare name is a known model or the full name is not, so

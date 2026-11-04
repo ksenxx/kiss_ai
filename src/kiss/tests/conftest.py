@@ -68,12 +68,6 @@ from typing import Any
 import numpy  # noqa: F401
 import pytest
 
-from kiss.agents.sorcar import persistence as _th
-from kiss.core import stop_signal, user_config
-from kiss.core.kiss_error import KISSError
-from kiss.core.processes import suppress_error_dialogs
-from kiss.tests import subprocess_reaper
-
 # Generous: a sweep only walks the sentinel rows of one temporary
 # database, so it finishes in milliseconds unless the machine is badly
 # overloaded.
@@ -84,12 +78,6 @@ if os.path.isfile(_subprocess_rc):
     os.environ.setdefault("COVERAGE_PROCESS_START", os.path.abspath(_subprocess_rc))
 
 os.environ["BROWSER"] = "true"
-
-# A pytest process launched from a hidden window (the Windows full-suite
-# driver) inherits an error mode under which CreateProcess of a corrupt
-# executable blocks on a dialog nobody can click; the daemon opts out
-# at start-up and so does the test process.
-suppress_error_dialogs()
 
 # Muse-auth is on by default in production (see muse_auth._common.
 # muse_auth_enabled), but the legacy connector suites emulate raw
@@ -291,6 +279,22 @@ _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid(), _session_tmp_root)
 _seed_voice_models(_test_kiss_home, Path(os.environ.get("KISS_HOME") or Path.home() / ".kiss"))
 os.environ["KISS_HOME"] = _test_kiss_home
+# The kiss modules are imported only now: several read ``$KISS_HOME`` at
+# import (``model_info`` loads ``MODEL_INFO`` and ``MY_MODELS.json``), so
+# an earlier import made every test see the developer's own custom models
+# (a host whose ``~/.s10s/MY_MODELS.json`` lists 25 endpoint models failed
+# the catalog, picker and user-config tests, 2026-11-04).
+from kiss.agents.sorcar import persistence as _th  # noqa: E402
+from kiss.core import stop_signal, user_config  # noqa: E402
+from kiss.core.kiss_error import KISSError  # noqa: E402
+from kiss.core.processes import suppress_error_dialogs  # noqa: E402
+from kiss.tests import subprocess_reaper  # noqa: E402
+
+# A pytest process launched from a hidden window (the Windows full-suite
+# driver) inherits an error mode under which CreateProcess of a corrupt
+# executable blocks on a dialog nobody can click; the daemon opts out
+# at start-up and so does the test process.
+suppress_error_dialogs()
 # The chat page auto-opens the Tips window once per version in every
 # fresh browser context (web_server._build_html sends ``show: true``).
 # The modal would intercept the clicks of the Playwright suites, so the
@@ -334,6 +338,27 @@ def posix_only(reason: str) -> pytest.MarkDecorator:
         A ``skipif`` mark that fires on Windows.
     """
     return pytest.mark.skipif(IS_WINDOWS, reason=f"POSIX-only: {reason}")
+
+
+def openssl_cli() -> str:
+    """Return the ``openssl`` command line tool the tests use as an oracle.
+
+    Windows has none on ``PATH`` unless someone put one there, but Git for
+    Windows ships one in ``<Git>\\usr\\bin`` next to the ``<Git>\\cmd``
+    directory that holds ``git.exe``.
+
+    Returns:
+        The tool's path, or plain ``"openssl"`` when it is nowhere to be found.
+    """
+    found = shutil.which("openssl")
+    if found:
+        return found
+    git = shutil.which("git")
+    if IS_WINDOWS and git:
+        bundled = Path(git).resolve().parent.parent / "usr" / "bin" / "openssl.exe"
+        if bundled.is_file():
+            return str(bundled)
+    return "openssl"
 
 
 def is_root() -> bool:

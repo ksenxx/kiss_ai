@@ -48,7 +48,7 @@ from kiss.agents.seas.autorouter.autorouter_sea import (
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 
-ROUTER_MODEL = "openrouter/anthropic/claude-opus-5.5-max"
+ROUTER_MODEL = "openrouter/anthropic/claude-opus-5.5-medium"
 """The orchestrator's model: the OpenRouter twin of the autorouter's
 :data:`~kiss.agents.seas.autorouter.autorouter_sea.ROUTER_MODEL` (which needs a direct
 vendor key), so one OpenRouter key runs the whole session."""

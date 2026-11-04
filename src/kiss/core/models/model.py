@@ -1003,6 +1003,11 @@ FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
         # ``True``: the model reads exactly what the agent and its tools
         # say, without the framework's own additions (see ``plain_io``).
         "plain_io",
+        # ``False``: the run is no coding run for Sorcar's finish gate
+        # (``kiss.agents.sorcar.coding_gate``): no verifier, review or
+        # unchecked-change stage, whatever it changes (a SEA such as
+        # ``/sync``, whose edits resolve merge conflicts, sets it).
+        "coding_gate",
     }
 )
 
@@ -1038,6 +1043,29 @@ def plain_io(model_config: dict[str, Any] | None) -> bool:
         model_config: The run's model configuration, or ``None``.
     """
     return bool(model_config and model_config.get("plain_io"))
+
+
+def framework_flags_over(
+    model_config: dict[str, Any] | None, base: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the model configuration a run gets from *model_config* on top of *base*.
+
+    A model configuration a run is given (a SEA's ``model_config``
+    setting, a client-sent one) replaces the one that would apply
+    otherwise, *base* (the settings panel's custom endpoint), so a SEA
+    can route its run to an endpoint of its own.  One that names no
+    provider setting, only framework flags (``plain_io``,
+    ``coding_gate``: :data:`FRAMEWORK_ONLY_CONFIG_KEYS`), has no
+    endpoint to route to: its flags are added to *base*, so the custom
+    endpoint stays.
+
+    Args:
+        model_config: The configuration the run was given, or ``None``.
+        base: The configuration that applies otherwise, or ``None``.
+    """
+    if base and model_config and set(model_config) <= FRAMEWORK_ONLY_CONFIG_KEYS:
+        return {**base, **model_config}
+    return model_config
 
 
 def accepted_request_params(method: Any) -> frozenset[str]:

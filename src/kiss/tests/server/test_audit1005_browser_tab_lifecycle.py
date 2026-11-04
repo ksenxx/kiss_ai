@@ -80,6 +80,8 @@ def test_a_failed_launch_stops_the_playwright_driver(
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("KISS_BROWSER", str(fake))
     monkeypatch.setenv("KISS_HEADLESS", "1")
+    # No bundled Chromium to fall back to either: the launch fails for good.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "no-browsers"))
     drivers_before = _driver_processes()
 
     for conn_id in ("c1", "c2"):
@@ -110,12 +112,14 @@ def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     slow.chmod(slow.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("KISS_BROWSER", str(slow))
     monkeypatch.setenv("KISS_HEADLESS", "1")
+    # The bundled Chromium the service falls back to is missing as well.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "no-browsers"))
     server._handle_command({"type": "browserOpen", "url": "", "connId": "c1"})
     _wait(lambda: service._playwright is not None, "driver started")
     assert service._loop is not None
     asyncio.run_coroutine_threadsafe(service._teardown(announce=True), service._loop).result(30)
     err = _wait(lambda: _events(printer, "browserError", connId="c1"), "launch error")[0]
-    assert "launch" in err["text"] and "NoneType" not in err["text"]
+    assert "Executable doesn't exist" in err["text"] and "NoneType" not in err["text"]
     assert service._playwright is None
     _wait(lambda: _driver_processes() in (None, 0), "driver exit")
 
