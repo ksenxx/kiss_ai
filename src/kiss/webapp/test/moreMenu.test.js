@@ -13,7 +13,10 @@
 //  - every required action lives in the menu (mic, share, attach,
 //    Git Commit, Settings, theme toggle) and clicking an item closes
 //    the menu even when the item's own handler stops propagation
-//    (Git Commit does).
+//    (Git Commit does),
+//  - the "iPhone Home Screen" item navigates the page to
+//    /webclip.mobileconfig (jsdom cannot navigate, so the test records
+//    what the page hands to location.assign) and closes the menu.
 
 'use strict';
 
@@ -116,6 +119,52 @@ function testOutsideClickAndItemClickCloseMenu() {
   console.log('  ok - outside clicks and item clicks close the menu');
 }
 
+// jsdom cannot navigate and its Location is unforgeable, so the test
+// swaps assign() on the implementation object behind the wrapper (the
+// wrapper's "impl" symbol property) to record each destination.
+function recordNavigations(win) {
+  const destinations = [];
+  const loc = win.location;
+  const impl = Object.getOwnPropertySymbols(loc).find(
+    s => s.description === 'impl',
+  );
+  assert.ok(impl, 'jsdom must expose the Location implementation');
+  loc[impl].assign = url => destinations.push(url);
+  return destinations;
+}
+
+function testWebclipItemNavigatesAndClosesMenu() {
+  const {win} = makePage();
+  const navigations = recordNavigations(win);
+  const doc = win.document;
+  const menu = doc.getElementById('more-menu');
+  const item = doc.getElementById('webclip-btn');
+  assert.ok(item && menu.contains(item), '#webclip-btn must live in the menu');
+  assert.strictEqual(item.tagName, 'BUTTON');
+  assert.strictEqual(
+    item.querySelector('.more-item-label').textContent,
+    'iPhone Home Screen',
+  );
+  const items = Array.from(menu.querySelectorAll('.more-menu-item'));
+  assert.strictEqual(
+    items.indexOf(item),
+    items.indexOf(doc.getElementById('settings-btn')) - 1,
+    'the Home Screen item sits right before Settings',
+  );
+  click(win, doc.getElementById('more-btn'));
+  assert.ok(menu.classList.contains('open'), 'menu opens');
+  assert.deepStrictEqual(navigations, [], 'no navigation before the click');
+  click(win, item);
+  assert.deepStrictEqual(
+    navigations,
+    ['/webclip.mobileconfig'],
+    'the click must navigate the page to the profile route, once',
+  );
+  assert.ok(!menu.classList.contains('open'), 'the click closes the menu');
+  win.close();
+  console.log('  ok - the iPhone Home Screen item navigates and closes the menu');
+}
+
 function main() {
   console.log('moreMenu.test.js');
   const {win} = makePage();
@@ -123,6 +172,7 @@ function main() {
   testSettingsIsTheLastMenuItem(win);
   testOnlyOneComposerPopupAtATime(win);
   testOutsideClickAndItemClickCloseMenu();
+  testWebclipItemNavigatesAndClosesMenu();
   console.log('all ok');
 }
 

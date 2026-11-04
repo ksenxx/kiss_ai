@@ -119,8 +119,11 @@ def test_write_overwrites_unread_scratch_file_under_tmp(repo: Path) -> None:
 
     All eleven read-before-write refusals in the 2026-09-22 audit were on
     ``tmp/`` notes (``tmp/ideas.md``, a cron run's own report file), each a
-    wasted step.  Source files keep the guard: ``Edit`` on a scratch file
-    still needs a Read, and a ``tmp``-named *file* is not a scratch dir.
+    wasted step; so were three of the seven read-before-edit refusals of the
+    2026-11-03 audit (``tmp/<id>/information.md``, edited by a later session),
+    so ``Edit`` of a scratch file goes through unread too, its result showing
+    the region changed.  Source files keep the guard, and a ``tmp``-named
+    *file* is not a scratch dir.
     """
     tools = UsefulTools(work_dir=str(repo))
     scratch = repo / "tmp" / "notes.md"
@@ -135,9 +138,12 @@ def test_write_overwrites_unread_scratch_file_under_tmp(repo: Path) -> None:
     assert nested.read_text() == "[]"
     other = UsefulTools(work_dir=str(repo))
     out = other.Edit(str(scratch), "new", "newer")
-    assert out.startswith("Error:") and "had not been read" in out
+    assert out.startswith("Successfully replaced 1 occurrence(s)") and "1 | newer" in out
+    assert scratch.read_text() == "newer\n"
     tmp_named_file = repo / "tmp"
     assert other.Write(str(repo / "a.py"), "x = 9\n").startswith("Error:")
+    out = other.Edit(str(repo / "a.py"), "x = 1", "x = 2")
+    assert out.startswith("Error:") and "had not been read" in out
     assert tmp_named_file.is_dir()
 
 

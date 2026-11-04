@@ -178,7 +178,7 @@ def test_sleep_in_quoted_data_is_kept_and_the_real_sleep_is_waited_on(
     command = "printf '%s\\n' 'sleep 60'; timeout 1 sleep 60; echo ran"
     out = tools.Bash(command, "poll", timeout_seconds=100)
     waited = f"Waited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
-    assert out == waited + "sleep 60\nran\n"
+    assert out == "sleep 60\nran\n" + waited
     assert time.monotonic() - before < 10
     # the text search skips the words of a quoted argument and a here-document body
     assert _without_sleep("printf '%s\\n' 'sleep 60'; sleep 60", ["60"]) == (

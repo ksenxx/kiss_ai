@@ -54,6 +54,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.shell_scan import (
+    UV_VALUED_OPTIONS,
     SimpleCommand,
     Word,
     bash_path,
@@ -372,7 +373,7 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
       prefix (not the worktree's prefix — that's a legitimate write
       inside the worktree), outside its ``.venv``: the shared
       environment's binaries (``<repo>/.venv/bin/pytest``) are how a
-      worktree runs the project's tools (:func:`_uv_in_worktree_guard`).
+      worktree runs the project's tools (:func:`uv_in_worktree`).
 
     Args:
         command: The Bash command line the model wants to run.
@@ -440,14 +441,6 @@ def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
 
 #: The ``uv`` subcommands that sync the project environment first.
 _UV_SYNCING = frozenset({"sync", "run", "add", "remove"})
-#: ``uv`` options whose value is the next word, global ones before the
-#: subcommand (``uv --directory . run``) and ``uv run``'s own.
-_UV_VALUED = frozenset({
-    "--project", "--directory", "--config-file", "--cache-dir", "--color",
-    "--allow-insecure-host", "--python-preference", "--with", "--with-editable",
-    "--with-requirements", "--python", "-p", "--env-file", "--extra", "--group",
-    "--only-group", "--package", "--index", "--find-links", "-w", "--python-platform",
-})
 #: Where ``uv [global options] sync|run|add|remove`` starts in a command's text.
 _UV_COMMAND = re.compile(
     r"(?<![\w./-])uv(?:[ \t]+[^ \t;&|\n]+)*?[ \t]+(sync|run|add|remove)(?=[ \t;&|\n]|$)")
@@ -456,17 +449,83 @@ _UV_COMMAND = re.compile(
 def _after_uv_options(argv: list[str], index: int) -> int:
     """Return the index of the first word of ``argv`` from ``index`` on that is no option.
 
-    An option in :data:`_UV_VALUED` takes the next word with it, so
-    ``uv --directory . run`` finds ``run`` and ``uv run -p 3.12 pytest``
-    finds ``pytest``.
+    An option in :data:`~kiss.agents.sorcar.shell_scan.UV_VALUED_OPTIONS`
+    takes the next word with it, so ``uv --directory . run`` finds ``run``
+    and ``uv run -p 3.12 pytest`` finds ``pytest``.
     """
     while index < len(argv) and argv[index].startswith("-"):
-        index += 2 if argv[index] in _UV_VALUED else 1
+        index += 2 if argv[index] in UV_VALUED_OPTIONS else 1
     return index
 
 
-def _uv_in_worktree_guard(command: str, work_dir: str | None) -> str | None:
-    """Refuse a ``uv sync``, ``uv run``, ``uv add`` or ``uv remove`` run inside a worktree.
+#: Appended to the result of a ``uv run`` rewritten by :func:`uv_in_worktree`:
+#: after it, so the result still opens with the status its readers look for
+#: (``Error (exit code N):``, ``Error: Command timed out``).
+UV_REWRITTEN_NOTE = (
+    "\nNote: the worktree has no environment of its own (it shares the main checkout's), "
+    "so `uv run` ran as the environment's binary on the worktree's sources; run it so "
+    "yourself next time: {command}"
+)
+
+
+def _uv_syncing_command(command: str) -> tuple[list[str], int] | None:
+    """The first ``uv sync|run|add|remove`` among *command*'s simple commands.
+
+    Returns:
+        ``(argv, at)``: the command's words and the index of the
+        subcommand, or ``None`` when no simple command is one (``uv`` in
+        a quoted word or a here-document body is text, not a command).
+    """
+    for simple in simple_commands(command, None):
+        argv = [word.text for word in simple.argv()]
+        at = _after_uv_options(argv, 1) if argv and argv[0] == "uv" else len(argv)
+        if at < len(argv) and argv[at] in _UV_SYNCING:
+            return argv, at
+    return None
+
+
+def _uv_run_rewritten(command: str, argv: list[str], at: int, environment: Path,
+                      sources: str) -> str | None:
+    """*command* with its first ``uv run PROGRAM`` replaced by the environment's binary.
+
+    Args:
+        command: The command text.
+        argv: The words of its ``uv`` simple command (:func:`_uv_syncing_command`).
+        at: The index of the subcommand in *argv*.
+        environment: The main checkout's environment.
+        sources: The ``PYTHONPATH=...`` prefix that puts the worktree's sources first.
+
+    Returns:
+        The rewritten command, or ``None`` when the rewrite is not
+        unambiguous: a subcommand other than ``run``, an option with a
+        value before or after ``run`` (``--directory x`` changes what
+        runs where, ``--with x`` what is installed; flags such as ``-q``
+        are dropped without harm), a program the environment lacks, or a
+        text whose words the scanner's do not match.
+    """
+    if argv[at] != "run":
+        return None
+    index = _after_uv_options(argv, at + 1)
+    options = argv[1:at] + argv[at + 1:index]
+    if any(o in UV_VALUED_OPTIONS or "=" in o for o in options):
+        return None
+    program = argv[index] if index < len(argv) else ""
+    binary = environment / "bin" / ("python" if program in ("python", "python3") else program)
+    match = _UV_COMMAND.search(command)
+    if not program or not binary.is_file() or match is None:
+        return None
+    # The program's word in the text: the (index - at)-th after ``run``.
+    words = list(re.finditer(r"\S+", command[match.end():]))
+    if len(words) <= index - at - 1:
+        return None
+    word = words[index - at - 1]
+    if word.group().strip("'\"") != program:
+        return None
+    return command[:match.start()] + f"{sources} {binary}" + command[match.end() + word.end():]
+
+
+def uv_in_worktree(command: str, work_dir: str | None) -> tuple[str | None, str, str]:
+    """Rewrite or refuse a ``uv sync``/``run``/``add``/``remove`` run inside a worktree.
 
     A worktree has no environment of its own, so ``uv`` either builds it
     one (every dependency again, on whatever Python it finds newest) or,
@@ -474,62 +533,49 @@ def _uv_in_worktree_guard(command: str, work_dir: str | None) -> str | None:
     checkout's environment, installs the worktree as that environment's
     editable project, a path that is removed when the work is merged
     (the 2026-11-01 audit counted 19 ``check --full`` runs doing so).
-    The refusal names the command to run instead: the main checkout's
-    environment binary with the worktree's sources first on
-    ``PYTHONPATH``, so a project script (``check``, ``pytest``, ``python``)
-    runs on the worktree's code in the daemon's own environment.
+    A ``uv run PROGRAM`` whose rewrite is unambiguous
+    (:func:`_uv_run_rewritten`) runs as the main checkout's environment
+    binary with the worktree's sources first on ``PYTHONPATH``, so a
+    project script (``check``, ``pytest``, ``python``) runs on the
+    worktree's code in the daemon's own environment, and the result says
+    so (:data:`UV_REWRITTEN_NOTE`; the 2026-11-03 audit counted 6
+    refusals whose rewritten command the agent then copied by hand).  Any
+    other such ``uv`` command is refused naming what to run instead.
 
     Args:
         command: The Bash command line the model wants to run.
         work_dir: The agent's working directory.
 
     Returns:
-        The refusal, or ``None`` when the command may run (it is not in a
-        worktree, or runs no such ``uv`` command; one quoted or in a
-        here-document body is text, not a command).
+        ``(refusal, note, command)``: the refusal (``None`` when the
+        command may run: it is not in a worktree, runs no such ``uv``
+        command, or was rewritten), the note to append to the result
+        (``""`` when nothing was rewritten) and the command to run.
     """
     roots = _worktree_roots(work_dir)
     if not roots:
-        return None
+        return None, "", command
     main_repo, wt_root = roots[0]
-    for simple in simple_commands(command, None):
-        argv = [word.text for word in simple.argv()]
-        at = _after_uv_options(argv, 1) if argv and argv[0] == "uv" else len(argv)
-        if at >= len(argv) or argv[at] not in _UV_SYNCING:
-            continue
-        environment = Path(main_repo) / ".venv"
-        sources = f"PYTHONPATH={wt_root}/src:{wt_root}/projects"
-        refusal = (
-            f"REFUSED: `uv {argv[at]}` did NOT run: the worktree {wt_root!r} has no environment "
-            f"of its own and shares the main checkout's ({environment}); a sync from here "
-            f"would build the worktree one or re-point that environment's editable install "
-            f"at the worktree, which is removed when the work is merged.  Run the "
-            f"environment's binaries directly, with the worktree's sources first: "
-            f"{sources} {environment}/bin/<program> ...  (the project check: "
-            f"{sources} {environment}/bin/check --full --fix)."
-        )
-        # A global option with a value (``--directory x``) changes what runs
-        # where, so the rewritten command, which drops the options, is not
-        # offered; flags such as ``-q`` are dropped without harm.
-        if argv[at] != "run" or any(o in _UV_VALUED or "=" in o for o in argv[1:at]):
-            return refusal
-        index = _after_uv_options(argv, at + 1)
-        program = argv[index] if index < len(argv) else ""
-        binary = environment / "bin" / ("python" if program in ("python", "python3") else program)
-        match = _UV_COMMAND.search(command)
-        if not program or not binary.is_file() or match is None:
-            return refusal
-        # The program's word in the text: the (index - at)-th after ``run``.
-        words = list(re.finditer(r"\S+", command[match.end():]))
-        if len(words) <= index - at - 1:
-            return refusal
-        word = words[index - at - 1]
-        if word.group().strip("'\"") != program:
-            return refusal
-        suggested = (command[:match.start()] + f"{sources} {binary}"
-                     + command[match.end() + word.end():])
-        return refusal + f"  Copy this rewritten command as is: {suggested[:20000]}"
-    return None
+    environment = Path(main_repo) / ".venv"
+    sources = f"PYTHONPATH={wt_root}/src:{wt_root}/projects"
+    original = command
+    while (found := _uv_syncing_command(command)) is not None:
+        argv, at = found
+        rewritten = _uv_run_rewritten(command, argv, at, environment, sources)
+        if rewritten is None:
+            return (
+                f"REFUSED: `uv {argv[at]}` did NOT run: the worktree {wt_root!r} has no "
+                f"environment of its own and shares the main checkout's ({environment}); a "
+                f"sync from here would build the worktree one or re-point that environment's "
+                f"editable install at the worktree, which is removed when the work is merged.  "
+                f"Run the environment's binaries directly, with the worktree's sources first: "
+                f"{sources} {environment}/bin/<program> ...  (the project check: "
+                f"{sources} {environment}/bin/check --full --fix)."
+            ), "", original
+        command = rewritten
+    if command == original:
+        return None, "", command
+    return None, UV_REWRITTEN_NOTE.format(command=command[:20000]), command
 
 
 # Windows paths are case-insensitive, so the parent-repo guard must not be
@@ -1387,7 +1433,7 @@ def _refuse_or_lift(
     work_dir: str | None,
     timeout_seconds: float,
     cwd: str | None,
-) -> tuple[str | None, float]:
+) -> tuple[str | None, str, str, float]:
     """Apply the shell guards to *command* and lift its timeout for installs.
 
     The guard chain of :func:`_run_one_command`; :meth:`UsefulTools.Bash`
@@ -1405,12 +1451,17 @@ def _refuse_or_lift(
             another machine, whose files this host cannot see.
 
     Returns:
-        ``(refusal, timeout_seconds)``: the guard's error message (``None``
-        when the command may run) and the possibly lifted deadline.
+        ``(refusal, note, command, timeout_seconds)``: the guard's error
+        message (``None`` when the command may run), the note to prefix
+        to the result and the command to run (a ``uv run`` in a worktree
+        is rewritten, :func:`uv_in_worktree`), and the possibly lifted
+        deadline.
     """
     guard, timeout_seconds = refuse_or_lift(command, work_dir, timeout_seconds)
-    refusal = (_bash_parent_repo_guard(command, work_dir)
-               or _uv_in_worktree_guard(command, work_dir) or guard)
+    refusal, note = _bash_parent_repo_guard(command, work_dir), ""
+    if refusal is None and cwd is not None:
+        refusal, note, command = uv_in_worktree(command, work_dir)
+    refusal = refusal or guard
     if refusal is None and cwd is None:
         refusal = rewrite_guard(command)  # another machine's files: no scratch exemption
     elif refusal is None and cwd is not None:
@@ -1418,7 +1469,7 @@ def _refuse_or_lift(
         bash_cwd = bash_path(os.path.abspath(cwd))
         refusal = rewrite_guard(command, bash_cwd, guarded) or heredoc_guard(
             command, bash_cwd, guarded)
-    return refusal, timeout_seconds
+    return refusal, note, command, timeout_seconds
 
 
 def _host_lexists(path: str) -> bool:
@@ -1502,7 +1553,8 @@ def _run_one_command(
     # the task.
     runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
     cwd = runner._resolve_cwd()
-    guard, timeout_seconds = _refuse_or_lift(command, work_dir, timeout_seconds, cwd or os.getcwd())
+    guard, note, command, timeout_seconds = _refuse_or_lift(
+        command, work_dir, timeout_seconds, cwd or os.getcwd())
     # Every command of the fan-out is a foreground wait for the caller,
     # so a long sleep is refused as in a foreground ``Bash`` call.
     guard = guard or sleep_guard(command)
@@ -1517,7 +1569,7 @@ def _run_one_command(
         return -1, f"Error: {e}", time.monotonic() - started
     if capture.dropped:
         output = _truncate_output(output, max_output_chars, dropped=capture.dropped)
-    return returncode, output, time.monotonic() - started
+    return returncode, output + note, time.monotonic() - started
 
 
 CommandRunner = Callable[[str, threading.Event], tuple[int | None, str, float]]
@@ -2402,7 +2454,9 @@ class UsefulTools:
             pairs = _edit_pairs(edits) if edits else [(old_string, new_string, replace_all)]
             if isinstance(pairs, str):
                 return pairs
-            if not self._is_read(resolved):
+            if not self._is_read(resolved) and not _is_scratch_path(resolved, self.work_dir):
+                # a scratch file (a note of an earlier session, say) is edited unread,
+                # as Write overwrites one: the result shows the region changed
                 return self._unread_edit_refusal(file_path, resolved, pairs[0][0])
             content = resolved.read_text(encoding="utf-8", newline="")
             crlf = "\r\n" in content
@@ -2780,9 +2834,10 @@ class UsefulTools:
 
         cwd = self._resolve_cwd()
         guard, timeout_seconds = refuse_or_lift(command, self.work_dir, timeout_seconds)
-        guard = (_bash_parent_repo_guard(command, self.work_dir)
-                 or (None if machine else _uv_in_worktree_guard(command, self.work_dir))
-                 or guard)
+        refusal, note = _bash_parent_repo_guard(command, self.work_dir), ""
+        if refusal is None and not machine:
+            refusal, note, command = uv_in_worktree(command, self.work_dir)
+        guard = refusal or guard
         if guard is None:
             # A shell rewrite of a file is applied as the Write/Edit it stands
             # for, or refused naming it; a machine's files this host cannot see.
@@ -2796,14 +2851,15 @@ class UsefulTools:
         if guard is not None:
             return guard
         if background:
-            return self._start_background_job(command, cwd, machine)[1]
+            return self._start_background_job(command, cwd, machine)[1] + note
         if machine:
             return "Error: machine= applies to background=True only."
         if on_timeout not in ("kill", "background"):
             return f"Error: on_timeout must be \"kill\" or \"background\", got {on_timeout!r}."
-        refused, note, command = self._wait_instead_of_sleep(command, timeout_seconds)
+        refused, waited, command = self._wait_instead_of_sleep(command, timeout_seconds)
         if refused is not None:
             return refused
+        note += waited
         grace = DEFAULT_CONFIG.bash_detach_seconds
         result = None
         if on_timeout == "background":
@@ -2815,7 +2871,7 @@ class UsefulTools:
         hint = self.batching_hint(
             "Bash", {"command": command}, result, time.monotonic() - started,
         )
-        return note + result + hint
+        return result + hint + note
 
     def _run_foreground(
         self, command: str, timeout_seconds: float, max_output_chars: int, cwd: str | None,

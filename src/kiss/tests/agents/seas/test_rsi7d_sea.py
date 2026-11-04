@@ -295,7 +295,7 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
             orautorouter_sea,
             ("{EVIDENCE}", "You are the autorouter. Finish the task"),
         ),
-        (bestrouter_sea, orbestrouter_sea, ("Use '{PRIMARY_MODEL}' model for all tasks",)),
+        (bestrouter_sea, orbestrouter_sea, ("Use '{PRIMARY_MODEL}' model for all other tasks",)),
     ],
     ids=["autorouter", "bestrouter"],
 )

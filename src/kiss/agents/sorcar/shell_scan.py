@@ -44,17 +44,32 @@ from dataclasses import dataclass, field
 _METACHARACTERS = frozenset(" \t\n;&|<>()")
 # Words before the command word: wrappers that run the next word.
 _PREFIXES = frozenset({
-    "sudo", "command", "builtin", "exec", "nohup", "env", "nice", "timeout", "stdbuf",
+    "sudo", "doas", "command", "builtin", "exec", "nohup", "env", "nice", "timeout", "stdbuf",
+    "xargs",
 })
 # The options of those wrappers that take the next word as their value.
 _PREFIX_VALUE_OPTIONS = {
     "sudo": frozenset({"-C", "-D", "-g", "-h", "-p", "-R", "-r", "-T", "-t", "-U", "-u"}),
+    "doas": frozenset({"-C", "-u"}),
     "exec": frozenset({"-a"}),
     "env": frozenset({"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "timeout": frozenset({"-k", "-s", "--kill-after", "--signal"}),
     "stdbuf": frozenset({"-e", "-i", "-o", "--error", "--input", "--output"}),
+    "xargs": frozenset({
+        "-a", "-d", "-E", "-e", "-I", "-L", "-l", "-n", "-P", "-s", "--arg-file", "--delimiter",
+        "--eof", "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars",
+        "--process-slot-var",
+    }),
 }
+#: ``uv`` options whose value is the next word: global ones before the
+#: subcommand (``uv --directory . run``) and ``uv run``'s own.
+UV_VALUED_OPTIONS = frozenset({
+    "--project", "--directory", "--config-file", "--cache-dir", "--color",
+    "--allow-insecure-host", "--python-preference", "--with", "--with-editable",
+    "--with-requirements", "--python", "-p", "--env-file", "--extra", "--group",
+    "--only-group", "--package", "--index", "--find-links", "-w", "--python-platform",
+})
 # Reserved words in command position: those that open or close a group, and
 # those that only lead to the next command.
 _OPENERS = frozenset({"{", "if", "while", "until", "for", "select", "case"})
@@ -112,6 +127,16 @@ _BOTH = frozenset({"&>", "&>>"})
 # whose output is a word of another command rather than a stream.
 _SUBSHELLS = frozenset({"(", "$(", "`"})
 _SUBSTITUTIONS = frozenset({"$(", "`"})
+#: Groups within groups a scan follows; past them the text is not a command
+#: line anyone runs, and the scan ends with the commands found so far
+#: (each level costs a few Python frames, so the interpreter's limit stays far).
+MAX_NESTING = 100
+
+
+class _TooDeepError(Exception):
+    """The groups nest deeper than :data:`MAX_NESTING`."""
+
+
 # On Windows host commands run in Git Bash, which spells ``C:\Users\x``
 # as ``/c/Users/x`` and reads a ``C:/x`` word as that path.
 _WINDOWS = sys.platform == "win32"
@@ -157,8 +182,14 @@ class Group:
             ``(descriptor, operator, operand)``, the descriptor as
             written (``""`` for the operator's default).
         heredoc: Whether a here-document is its standard input.
+        heredoc_body: The text that here-document hands on (see
+            :attr:`SimpleCommand.heredoc_body`).
         piped: Whether a pipe is its standard input.
         reader: The command or group its standard output is piped to.
+        after_and: Whether it (or the pipeline it is in) follows ``&&``.
+        background: Whether ``&`` ends it (or the pipeline it ends).
+        negated: Whether ``!`` precedes it (or the pipeline it starts):
+            the shell inverts its exit status.
     """
 
     kind: str
@@ -168,8 +199,12 @@ class Group:
     outputs: list[Word] = field(default_factory=list)
     redirections: list[tuple[str, str, Word]] = field(default_factory=list)
     heredoc: bool = False
+    heredoc_body: str | None = None
     piped: bool = False
     reader: SimpleCommand | Group | None = None
+    after_and: bool = False
+    background: bool = False
+    negated: bool = False
 
 
 @dataclass
@@ -190,8 +225,25 @@ class SimpleCommand:
             out (``< file``, ``2> file``, ``1>&2``) is here, for a guard
             that must know a command's every redirection.
         heredoc: Whether a here-document is its own standard input.
+        heredoc_body: The text that here-document hands on, every line
+            newline-terminated (the leading tabs of a ``<<-`` body
+            stripped): the body as written after a quoted delimiter, and
+            after an unquoted one the body without a ``$`` or a backtick,
+            with the backslash of ``\\\\`` dropped and ``\\<newline>``
+            joined, as the shell hands it on.  ``None`` when there is no
+            here-document, the shell would expand it, or the command
+            does not end it.
         piped: Whether a pipe is its own standard input.
         reader: The command or group its standard output is piped to.
+        conditional: Whether it follows ``||``: it runs only when the
+            commands before it failed.
+        after_and: Whether it (or the pipeline it is in) follows ``&&``:
+            it runs only when the commands before it succeeded, and the
+            list fails when it fails.
+        background: Whether ``&`` ends it (or the pipeline it ends): the
+            shell goes on without its exit status.
+        negated: Whether ``!`` precedes it (or the pipeline it starts):
+            the shell inverts its exit status.
     """
 
     cwd: str | None
@@ -200,8 +252,13 @@ class SimpleCommand:
     outputs: list[Word] = field(default_factory=list)
     redirections: list[tuple[str, str, Word]] = field(default_factory=list)
     heredoc: bool = False
+    heredoc_body: str | None = None
     piped: bool = False
     reader: SimpleCommand | Group | None = None
+    conditional: bool = False
+    after_and: bool = False
+    background: bool = False
+    negated: bool = False
 
     def argv(self) -> list[Word]:
         """Return the command word and its arguments: assignments and wrappers dropped.
@@ -233,23 +290,70 @@ class SimpleCommand:
 
     def reads_heredoc(self) -> bool:
         """Return whether a here-document is its standard input: its own or a group's."""
+        return self.heredoc_reader() is not None
+
+    def heredoc_reader(self) -> SimpleCommand | Group | None:
+        """Return the node whose here-document is its standard input, or ``None``.
+
+        Itself, or the group it is in.
+        """
         node: SimpleCommand | Group | None = self
         while node is not None:
             if node.heredoc:
-                return True
+                return node
             node = node.group
-        return False
+        return None
 
 
-def simple_commands(command: str, cwd: str | None) -> list[SimpleCommand]:
+def handed_text(body: str, expands: bool) -> str | None:
+    """Return the text a here-document *body* hands on, or ``None`` when the shell expands it.
+
+    After a quoted delimiter (*expands* false) the body is handed on as
+    written.  After an unquoted one the shell expands a ``$`` or a
+    backtick, so the text is unknown; without them it only drops the
+    backslash of ``\\\\`` and joins the lines of ``\\<newline>``.
+
+    Args:
+        body: The body, every line newline-terminated.
+        expands: Whether the delimiter was unquoted.
+    """
+    if not expands:
+        return body
+    if "$" in body or "`" in body:
+        return None
+    parts: list[str] = []
+    position = 0
+    while position < len(body):
+        char = body[position]
+        if char == "\\" and body[position + 1:position + 2] in ("\\", "\n"):
+            if body[position + 1] == "\\":
+                parts.append("\\")
+            position += 2
+        else:
+            parts.append(char)
+            position += 1
+    return "".join(parts)
+
+
+def simple_commands(command: str, cwd: str | None,
+                    optimistic: bool = False) -> list[SimpleCommand]:
     """Return the simple commands of the bash text *command*, in the order they start.
 
     Args:
         command: The shell command text, possibly several lines.
         cwd: The absolute POSIX directory it starts in; ``None`` when unknown.
+        optimistic: Assume every list ran through: an assignment or a
+            ``cd`` after ``&&`` or ``||`` holds for the rest of the
+            command (``cd d && T=tmp/x && a; cp b $T/``), not only for
+            the rest of its list.  A guard that must not let a write
+            through keeps the default; a gate that judges what the
+            agent changed reads the command as it was meant to run.
     """
-    scanner = _Scanner(command, cwd, None)
-    scanner.command_list()
+    scanner = _Scanner(command, cwd, None, optimistic=optimistic)
+    try:
+        scanner.command_list()
+    except _TooDeepError:
+        pass  # the commands before the nesting are the reading
     return scanner.commands
 
 
@@ -322,12 +426,18 @@ def _cd(cwd: str | None, args: list[Word]) -> str | None:
 class _Scanner:
     """The position and state of one :func:`simple_commands` scan."""
 
-    def __init__(self, text: str, cwd: str | None, group: Group | None) -> None:
-        """Start at the beginning of *text*, in the directory *cwd*, inside *group*."""
+    def __init__(self, text: str, cwd: str | None, group: Group | None,
+                 depth: int = 0, optimistic: bool = False) -> None:
+        """Start at the beginning of *text*, in the directory *cwd*, inside *group*.
+
+        *depth* is how many groups *group* is nested in (:data:`MAX_NESTING`).
+        """
         self.text = text
         self.pos = 0
         self.cwd = cwd
         self.group = group
+        self.depth = depth
+        self.optimistic = optimistic  # see :func:`simple_commands`
         # The variables the command assigned so far and their literal values:
         # ``None`` for one whose value only the shell knows (an expansion in
         # it, or an assignment that may not run).  Read back where a later
@@ -336,14 +446,21 @@ class _Scanner:
         self.variables: dict[str, str | None] = {}
         self.commands: list[SimpleCommand] = []
         # The here-documents opened on the current line: (delimiter, strip
-        # leading tabs, whether the substitutions of the body run).
-        self.heredocs: list[tuple[str, bool, bool]] = []
+        # leading tabs, whether the substitutions of the body run, the
+        # node reading it as its standard input or None).
+        self.heredocs: list[tuple[str, bool, bool, SimpleCommand | Group | None]] = []
         # What a ``|`` just piped, until the next command starts and reads it.
         self.pipe_from: SimpleCommand | Group | None = None
         # Whether the command or group being scanned follows ``||``, and
-        # whether it follows ``&&`` (an assignment there may not run).
+        # whether it follows ``&&``: an assignment there runs only when the
+        # commands before it succeeded, as do the commands after it in the
+        # same and-list (``cd d && T=tmp/x && cat > $T/f``), so its variable
+        # is known to them and forgotten when the list ends any other way.
         self.after_or = False
         self.after_and = False
+        self.and_assigned: set[str] = set()
+        # Whether a ``!`` was read and no command has taken it yet.
+        self.negate = False
         # Where in the text a ``((`` was found not to close as ``))``: shared
         # with the scanners of its arithmetic expressions, so no expression is
         # scanned twice (nested ones would double the work at each level).
@@ -380,7 +497,9 @@ class _Scanner:
                     continue
                 current = self.group_command("(")
             elif not isinstance(current, SimpleCommand) and (word := self.reserved_word()):
-                if word in _OPENERS:
+                if word == "!":
+                    self.negate = True
+                elif word in _OPENERS:
                     current = self.group_command(word)
                 elif word in _CLOSERS and self.group is not None and (
                         self.group.kind not in _SUBSHELLS):
@@ -391,6 +510,10 @@ class _Scanner:
                     operator = token["operator"]
                     self.pos = token.end()
                     self.end_command(current)
+                    if operator == "&" and current is not None:
+                        current.background = True
+                    if operator not in ("&&", "|", "|&"):
+                        self.forget_and_assigned()
                     if operator in ("|", "|&"):
                         self.pipe_from, self.cwd, piped = current, pipeline_cwd, True
                         self.variables = dict(pipeline_variables)
@@ -447,9 +570,12 @@ class _Scanner:
 
     def start_command(self) -> SimpleCommand:
         """Start a simple command at the position; it reads the pipe a ``|`` left open."""
-        command = SimpleCommand(self.cwd, self.group)
+        command = SimpleCommand(self.cwd, self.group, conditional=self.after_or,
+                                after_and=self.after_and, negated=self.negate)
+        self.negate = False
         self.commands.append(command)
         if self.pipe_from is not None:
+            command.after_and = self.pipe_from.after_and
             self.pipe_from.reader, self.pipe_from = command, None
             command.piped = True
         return command
@@ -463,6 +589,8 @@ class _Scanner:
         word it is past the word.
         """
         piped_from, self.pipe_from = self.pipe_from, None
+        after_and = self.after_and if piped_from is None else piped_from.after_and
+        negated, self.negate = self.negate, False
         arithmetic = opener == "(" and self.text.startswith("((", self.pos)
         end = self.arithmetic(self.pos + 2) if arithmetic else 0
         if end:
@@ -476,6 +604,7 @@ class _Scanner:
             group = self.subshell("(")
         else:
             group = self.compound(opener)
+        group.after_and, group.negated = after_and, negated
         if piped_from is not None:
             piped_from.reader, group.piped = group, True
         return group
@@ -494,7 +623,8 @@ class _Scanner:
         A ``cd`` in it holds after it, unless it may not have run.  An
         assignment in it holds for the commands after it in the group;
         after a group that may not have run (a compound command, or a
-        brace group after ``&&`` or ``||``) the variable is unknown.
+        brace group after ``||``) the variable is unknown, and after a
+        brace group after ``&&`` it is known to the rest of the and-list.
         """
         outer = self.group
         conditional = word != "{" or self.after_or or (outer is not None and outer.conditional)
@@ -509,32 +639,58 @@ class _Scanner:
         before = dict(self.variables)
         group = self.group = Group(word, self.cwd, outer, conditional)
         self.after_or = self.after_and = False
-        self.command_list()
+        and_assigned, self.and_assigned = self.and_assigned, set()
+        self.nested_command_list()
         self.group = outer
+        self.and_assigned = and_assigned
         if may_not_run:
             for name in before.keys() | self.variables.keys():
                 if self.variables.get(name) != before.get(name):
-                    self.variables[name] = None
+                    if conditional:
+                        self.variables[name] = None
+                    else:  # a brace group after ``&&``: known to the rest of the and-list
+                        self.and_assigned.add(name)
         return group
+
+    def forget_and_assigned(self) -> None:
+        """End the and-list: the variables assigned after its ``&&`` may not have been.
+
+        An optimistic scan keeps them: the list is assumed to have run through.
+        """
+        if not self.optimistic:
+            for name in self.and_assigned:
+                self.variables[name] = None
+        self.and_assigned = set()
 
     def subshell(self, kind: str) -> Group:
         """Scan the commands of a subshell or a substitution to its ``)``; return its group.
 
         A ``cd`` in it ends with it.
         """
-        saved = self.cwd, self.group, self.after_or, self.after_and, self.variables
+        saved = (self.cwd, self.group, self.after_or, self.after_and, self.variables,
+                 self.and_assigned)
         group = self.group = Group(kind, self.cwd, self.group)
         self.after_or = self.after_and = False
         self.variables = dict(self.variables)  # its assignments end with it too
-        self.command_list()
-        self.cwd, self.group, self.after_or, self.after_and, self.variables = saved
+        self.and_assigned = set()
+        self.nested_command_list()
+        (self.cwd, self.group, self.after_or, self.after_and, self.variables,
+         self.and_assigned) = saved
         return group
+
+    def nested_command_list(self) -> None:
+        """Scan the commands of the group just entered; past :data:`MAX_NESTING` end the scan."""
+        if self.depth >= MAX_NESTING:
+            raise _TooDeepError
+        self.depth += 1
+        self.command_list()
+        self.depth -= 1
 
     def substitution(self) -> Word:
         """Scan the ``$(...)``, ``<(...)`` or ``>(...)`` at the position as one word."""
         start = self.pos
         self.pos += 2
-        self.subshell("$(")
+        self.subshell("$(").after_and = self.after_and  # as the word's command
         return Word(self.text[start:self.pos], literal=False)
 
     def end_command(self, command: SimpleCommand | Group | None) -> None:
@@ -557,9 +713,19 @@ class _Scanner:
         argv = command.argv()
         name = argv[0].text if argv else ""
         group = command.group
-        conditional = self.after_or or (group is not None and group.conditional)
-        if name in ("cd", "pushd"):
+        conditional = (self.after_or and not self.optimistic) or (
+            group is not None and group.conditional)
+        if name == "cd":
             self.cwd = None if conditional else _cd(self.cwd, argv[1:])
+        elif name == "pushd":
+            # ``pushd DIR`` is a cd; ``pushd -n DIR`` only pushes and stays;
+            # ``pushd`` alone or ``pushd +N`` / ``-N`` rotates the stack to a
+            # directory only the shell knows.
+            operands = [word for word in argv[1:] if word.text != "-n"]
+            if conditional or not operands or operands[0].text[:1] in ("+", "-"):
+                self.cwd = None
+            elif len(operands) == len(argv) - 1:  # no -n
+                self.cwd = _cd(self.cwd, operands)
         elif name == "popd":
             self.cwd = None
         elif name in _SOURCING_BUILTINS:
@@ -593,9 +759,11 @@ class _Scanner:
                 continue
             # ``T+=x`` appends to a value this scan may not know; ``T[0]=x``
             # makes an array, whose ``$T`` is its first element.
-            known = (word.literal and not conditional and not self.after_and
+            known = (word.literal and not conditional
                      and not match["append"] and not match["subscript"])
             self.variables[match["name"]] = word.text[match.end():] if known else None
+            if known and self.after_and:
+                self.and_assigned.add(match["name"])
 
     def line_breaks(self) -> None:
         """Skip the blanks and newlines after ``&&``, ``||`` or ``|``: the list goes on."""
@@ -620,34 +788,53 @@ class _Scanner:
         if operator in ("<<", "<<-"):
             # Quoting any of the delimiter keeps the body literal.
             expands = self.text[start:self.pos] == operand.text
-            self.heredocs.append((operand.text, operator == "<<-", expands))
-            node.heredoc = node.heredoc or fd in ("", "0")
+            reads = fd in ("", "0")
+            self.heredocs.append((operand.text, operator == "<<-", expands,
+                                  node if reads else None))
+            node.heredoc = node.heredoc or reads
         elif operator in _BOTH or (stdout and not duplicate):
             node.outputs.append(operand)
 
     def heredoc_bodies(self) -> None:
-        """Scan the bodies of the here-documents opened on the line that just ended."""
+        """Scan the bodies of the here-documents opened on the line that just ended.
+
+        The text a body hands on is kept on the node reading it
+        (:attr:`SimpleCommand.heredoc_body`).
+        """
         pending, self.heredocs = self.heredocs, []
-        for delimiter, strip_tabs, expands in pending:
+        for delimiter, strip_tabs, expands, node in pending:
+            lines: list[str] = []
             ended = False
             while not ended and self.pos < len(self.text):
-                ended = self.body_line(delimiter, strip_tabs, expands)
+                ended, line = self.body_line(delimiter, strip_tabs, expands)
+                if not ended:
+                    lines.append(line)
+            if node is not None and ended:
+                node.heredoc_body = handed_text("".join(f"{line}\n" for line in lines), expands)
 
-    def body_line(self, delimiter: str, strip_tabs: bool, expands: bool) -> bool:
-        """Scan one line of a here-document body; return whether it was the delimiter.
+    def body_line(self, delimiter: str, strip_tabs: bool, expands: bool) -> tuple[bool, str]:
+        """Scan one line of a here-document body.
 
         A body is text, but the substitutions of an unquoted one
         (*expands*) run, so their commands are scanned.
+
+        Returns:
+            Whether the line was the delimiter, and the line (its leading
+            tabs stripped when *strip_tabs*).
         """
         text = self.text
+        start = self.pos
         newline = text.find("\n", self.pos)
         end = len(text) if newline < 0 else newline
         line = text[self.pos:end]
-        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+        if strip_tabs:
+            line = line.lstrip("\t")
+        if line == delimiter:
             self.pos = end + 1
-            return True
+            return True, line
         if not expands:
-            self.pos = end
+            self.pos = end + 1
+            return False, line
         while self.pos < len(text) and text[self.pos] != "\n":
             if text[self.pos] == "\\":
                 self.pos += 2
@@ -655,8 +842,10 @@ class _Scanner:
                 self.expansion()
             else:
                 self.pos += 1
+        # the logical line: a ``\``-newline pair continued it on the next one
+        line = text[start:self.pos]
         self.pos += 1
-        return False
+        return False, line.lstrip("\t") if strip_tabs else line
 
     def word(self) -> Word:
         """Scan the word at the position: quotes removed, expansions kept as written."""
@@ -709,14 +898,19 @@ class _Scanner:
         """Scan the expansion at the position into *parts*; return whether its value is known.
 
         An expansion that is one variable the command assigned a literal
-        value (:attr:`variables`) contributes that value, and the word
-        stays literal; any other expansion is kept as written, as is an
-        unquoted one whose value bash would split into several words or
-        expand as a pattern (blanks, ``*``, ``?``, ``[`` in it).
+        value (:attr:`variables`) contributes that value, as does
+        ``$PWD`` where the directory is known and the command did not
+        assign it, and the word stays literal; any other expansion is
+        kept as written, as is an unquoted one whose value bash would
+        split into several words or expand as a pattern (blanks, ``*``,
+        ``?``, ``[`` in it).
         """
         expansion = self.expansion(quoted, expands)
         variable = _VARIABLE.match(expansion)
-        value = self.variables.get(variable[1] or variable[2]) if variable else None
+        name = (variable[1] or variable[2]) if variable else None
+        value = self.variables.get(name) if name else None
+        if name == "PWD" and name not in self.variables:
+            value = self.cwd
         if value is not None and not quoted and _SPLIT_OR_GLOB.search(value):
             value = None
         parts.append(expansion if value is None else value)
@@ -836,7 +1030,7 @@ class _Scanner:
         if pos in self.not_arithmetic:
             return 0
         text = self.text
-        scanner = _Scanner(text, self.cwd, self.group)
+        scanner = _Scanner(text, self.cwd, self.group, self.depth, self.optimistic)
         scanner.pos, scanner.not_arithmetic, depth = pos, self.not_arithmetic, 0
         while scanner.pos < len(text):
             char = text[scanner.pos]
@@ -864,9 +1058,10 @@ class _Scanner:
         self.pos = self.closing(start + 1, "`")
         body = self.text[start + 1:self.pos].removesuffix("`")
         scanner = _Scanner(re.sub(r"\\([$`\\])", r"\1", body), self.cwd,
-                           Group("`", self.cwd, self.group))
+                           Group("`", self.cwd, self.group, after_and=self.after_and),
+                           self.depth, self.optimistic)
         scanner.variables = dict(self.variables)
-        scanner.command_list()
+        scanner.nested_command_list()
         self.commands.extend(scanner.commands)
 
     def closing(self, pos: int, char: str) -> int:

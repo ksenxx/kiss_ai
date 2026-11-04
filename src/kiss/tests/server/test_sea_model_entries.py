@@ -94,19 +94,25 @@ def test_bundled_routers_are_the_model_picker_seas() -> None:
 
 
 def test_bestrouter_protocol_names_its_models_literally() -> None:
-    """The protocol fixes the primary and the review model by name and the 75% cap."""
+    """The protocol fixes the simple, primary and review models by name and the 75% cap.
+
+    The tab runs on the simple model, which the protocol sends to the
+    primary model for everything but simple questions.
+    """
     sea = bestrouter_sea.BestrouterSea()
     assert sea.register_as_model() is True
     assert sea.settings({"tool_profile": "shell"}) == {
-        "tool_profile": "shell", "model": bestrouter_sea.PRIMARY_MODEL,
+        "tool_profile": "shell", "model": bestrouter_sea.SIMPLE_MODEL,
     }
+    assert bestrouter_sea.SIMPLE_MODEL == "claude-opus-5-5-medium"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1-max"
     protocol = bestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith(BESTROUTER_MARKER)
     flat = " ".join(protocol.split())
     for phrase in (
-        "Use 'claude-fable-5-1-max' model for all tasks, including software development.",
+        "Use 'claude-opus-5-5-medium' for simple questions and queries.",
+        "Use 'claude-fable-5-1-max' model for all other tasks, including software development.",
         "Use gpt-6-astra (not codex) through `run_agent(model=\"gpt-6-astra\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
         "debugging of the other model's work,",
@@ -115,7 +121,9 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         "Use the model names literally without hallucinating new model names.",
     ):
         assert phrase in flat, phrase
-    for name in (bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL):
+    for name in (
+        bestrouter_sea.SIMPLE_MODEL, bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL,
+    ):
         assert name in MODEL_INFO, name
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
     assert "bestrouter" in sea.description()
@@ -301,12 +309,13 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def test_bestrouter_model_runs_the_task_on_its_primary_model_with_the_protocol(
         self,
     ) -> None:
-        """The wire ``model`` field ``bestrouter`` runs on its primary model plus protocol."""
+        """The wire ``model`` field ``bestrouter`` runs on its simple model plus protocol."""
         run = self._run("say hello", model=BESTROUTER)
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert run["system_prompt"].startswith("<identity>"), run["system_prompt"][:200]
         assert BESTROUTER_MARKER in run["system_prompt"]
-        assert f"Use '{bestrouter_sea.PRIMARY_MODEL}' model for all tasks" in run["system_prompt"]
+        primary = bestrouter_sea.PRIMARY_MODEL
+        assert f"Use '{primary}' model for all other tasks" in run["system_prompt"]
         assert AUTOROUTER_MARKER not in run["system_prompt"]
         assert "say hello" in run["prompt"]
 
@@ -324,7 +333,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         with vs._state_lock:
             vs._default_model = BESTROUTER
         run = self._run("say hello")
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert BESTROUTER_MARKER in run["system_prompt"]
 
     def test_user_sea_without_model_setting_runs_on_the_default_model(self) -> None:
@@ -364,7 +373,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
             "PLAIN SEA PROTOCOL"
         )
         run = self._run("say hello", model=BESTROUTER, sea_path=str(sea))
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert run["system_prompt"].index(BESTROUTER_MARKER) < run["system_prompt"].index(
             "PLAIN SEA PROTOCOL"
         )
@@ -410,11 +419,11 @@ class Sea(BaseSea):
             encoding="utf-8",
         )
         run = self._run("say hello", model="gpt-6-astra", sea_path=str(sea))
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert "PICKS BESTROUTER" in run["system_prompt"]
         # The same name under the bestrouter tab: the picker's model, once.
         run = self._run("say hello", model=BESTROUTER, sea_path=str(sea))
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert run["system_prompt"].count(BESTROUTER_MARKER) == 1
         assert "PICKS BESTROUTER" in run["system_prompt"]
 
@@ -433,7 +442,7 @@ class Sea(BaseSea):
             encoding="utf-8",
         )
         run = self._run("say hello", model=BESTROUTER, sea_path=str(sea))
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert run["system_prompt"].count(BESTROUTER_MARKER) == 1
         assert run["system_prompt"].index(BESTROUTER_MARKER) < run["system_prompt"].index(
             "ONBEST PROTOCOL"
@@ -493,7 +502,7 @@ class Sea(BaseSea):
         included, so the Bash-only worker runs on its own prompt.
         """
         run = self._run("/sh echo hi", model=BESTROUTER)
-        assert run["model_name"] == bestrouter_sea.PRIMARY_MODEL
+        assert run["model_name"] == bestrouter_sea.SIMPLE_MODEL
         assert BESTROUTER_MARKER not in run["system_prompt"]
         assert run["prompt"] == "# Task\necho hi", run["prompt"]
         assert run["system_prompt"].startswith(sh_sea.SYSTEM_PROMPT), run["system_prompt"]

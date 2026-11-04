@@ -156,16 +156,22 @@ def test_sea_methods_follow_the_user_contract() -> None:
     # A URL the message names (`/sync origin/main of <url>`) is the one the machines
     # get; `remote_url` is for a message that names none.
     assert re.search(r"when it names\s+none, what `remote_url` returns", prompt)
+    # No coding run for the finish gate: what a sync changes is the merge
+    # of commits made elsewhere; the flag joins a model_config the caller set.
     assert sea.settings({"model": "m"}) == {
         "model": "m",
         "tool_profile": "shell+edit+agents",
         "max_budget": sync_sea.MAX_BUDGET_USD,
         "locked": ["tool_profile"],
+        "model_config": {"coding_gate": False},
     }
+    with_endpoint = sea.settings({"model_config": {"base_url": "http://x"}})
+    assert with_endpoint["model_config"] == {"base_url": "http://x", "coding_gate": False}
     assert sea_commands.base_settings([sea]) == {
         "tool_profile": "shell+edit+agents",
         "max_budget": sync_sea.MAX_BUDGET_USD,
         "locked": ["tool_profile"],
+        "model_config": {"coding_gate": False},
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,

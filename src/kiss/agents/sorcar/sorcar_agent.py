@@ -93,13 +93,14 @@ from kiss.core.llm_reply import LLMReply
 from kiss.core.memoryfield.tools import MemoryTools
 from kiss.core.models.model import Attachment, plain_io
 from kiss.core.models.model_info import (
-    MODEL_INFO,
     OPENAI_COMPATIBLE_PROVIDERS,
     _match_openai_compatible_provider,
     _strip_provider_prefix,
+    custom_model_config,
     get_default_model,
 )
 from kiss.core.models.model_info import model as _model_factory
+from kiss.core.models.openai_compatible_model import _model_thinking_level
 from kiss.core.printer import Printer
 from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import substitute_prompt_args
@@ -1669,16 +1670,18 @@ class SorcarAgent(RelentlessAgent):
                 )
                 if refused is not None:
                     return refused
+                # The note follows the result, as on the host: the result's
+                # head is what its exit-code readers parse.
                 if on_timeout == "background":
                     job_id, started = jobs.start(command)
                     if job_id is None:
-                        return note + started
-                    return note + jobs.bash_job(
+                        return started + note
+                    return jobs.bash_job(
                         job_id, "wait", timeout_seconds, 50, max_output_chars,
-                    )
-                return note + self._docker_bash(
+                    ) + note
+                return self._docker_bash(
                     command, description, timeout_seconds, max_output_chars,
-                )
+                ) + note
 
             tools: list = [
                 Bash, jobs.bash_job, self.docker_manager.run_commands_parallel,
@@ -1773,10 +1776,12 @@ class SorcarAgent(RelentlessAgent):
                 return f"Model is already {model_name}; no change."
 
             new_config: dict[str, Any] = dict(old_model.model_config or {})
-            old_info = MODEL_INFO.get(old_model.model_name)
-            if (
-                old_info is not None
-                and new_config.get("reasoning_effort") == old_info.thinking
+            # The same oracle the adapter's constructor sets the default
+            # from, so a hot-added ``MY_MODELS.json`` model counts too: a
+            # default effort is dropped (the new model gets its own), an
+            # explicit one is kept.
+            if new_config.get("reasoning_effort") == _model_thinking_level(
+                old_model.model_name
             ):
                 new_config.pop("reasoning_effort", None)
             _sanitize_model_config_for_switch(
@@ -1784,6 +1789,19 @@ class SorcarAgent(RelentlessAgent):
             )
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
+            custom = custom_model_config(model_name)
+            if custom or custom_model_config(old_model.model_name):
+                # A settings-panel custom model (a ``MY_MODELS.json`` entry
+                # with its own endpoint) runs against THAT endpoint, as the
+                # task runner starts it.  The endpoint, key and headers are
+                # the model's own, not the run's, so a different model never
+                # inherits them (as a sub-agent does not: see
+                # ``agent_dispatch._parent_model_config``) and the native
+                # same-family key carry-over below does not apply.
+                for key in ("base_url", "api_key", "extra_headers"):
+                    new_config.pop(key, None)
+                new_config.update(custom or {})
+                old_base_url = old_api_key = None
             if "use_responses_api" in new_config:
                 # `use_responses_api` forces /responses delegation, which
                 # only some OpenAI-compatible vendors support.  Keep it
@@ -3089,7 +3107,7 @@ class SorcarAgent(RelentlessAgent):
             message += reattached
             merged = self._wt_for_repo(wt.repo_root) is None
             if merged:
-                self._coding_gate.merged()
+                message += self._coding_gate.merged()
             self._broadcast_to_watchers({
                 "type": "worktree_result",
                 "action": "merge",
@@ -4438,7 +4456,8 @@ class SorcarAgent(RelentlessAgent):
             self._charge_gate_usage, epoch=self._usage_epoch(), task_id=_persisted_task_id(self),
         )
         return CodingGate(self._gate_shell, self.work_dir or os.getcwd(), self._scratch_dir(),
-                          reviewer, charge, model_config=self.model_config)
+                          reviewer, charge, model_config=self.model_config,
+                          custom_tools=frozenset(tool.__name__ for tool in self._extra_tools))
 
     def _gate_shell(self, command: str, timeout: int) -> tuple[int | None, str]:
         """Run *command* for the gate where the run's tools run: ``(exit code, output)``.

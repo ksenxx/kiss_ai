@@ -1016,6 +1016,10 @@ def clone_macos_browser(contents: Path, browser: Path, identifier: str) -> Path 
         [*copy, str(browser), str(exe_copy)],
     ]
     if sys.platform == "darwin":
+        # codesign refuses a file with extended attributes ("resource fork,
+        # Finder information, or similar detritus not allowed"), and a Chrome
+        # installed from a Safari download carries com.apple.FinderInfo.
+        steps.append(["xattr", "-c", str(exe_copy)])
         steps.append(
             ["codesign", "--force", "--sign", "-", "--identifier", identifier, str(exe_copy)]
         )

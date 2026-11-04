@@ -1755,6 +1755,8 @@ class ContainerHarness:
         summary = str(args.get("summary_in_html", ""))
         answered = answered_findings(summary, self.open_findings)
         self._log({"event": "findings_answered", "turn": self.turns, "answered": answered})
+        if answered is None:
+            return None
         unanswered = [f for f, ok in zip(self.open_findings, answered, strict=True) if not ok]
         if not unanswered:
             return None
