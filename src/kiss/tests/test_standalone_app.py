@@ -1863,6 +1863,31 @@ def test_macos_clone_failure_leaves_the_launcher_alone(
     assert standalone_app.macos_launch_browser(browser, home=tmp_path) == browser
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="codesign and xattr are macOS tools")
+def test_macos_clone_of_a_browser_with_finder_info_is_signed(tmp_path: Path) -> None:
+    """A browser binary carrying Finder information still gets a signed clone.
+
+    A Chrome downloaded with Safari is a Mach-O binary with a non-empty
+    ``com.apple.FinderInfo`` (these bytes are that Chrome's), and
+    codesign refuses such a file ("resource fork, Finder information,
+    or similar detritus not allowed"); the brand bundle was then the
+    launcher alone and the real-browser tests failed on that Mac.
+    """
+    browser = _fake_browser_app(tmp_path / "apps")
+    shutil.copyfile("/usr/bin/true", browser)
+    finder_info = "00" * 10 + "FF" * 4 + "00" * 18
+    subprocess.run(["xattr", "-wx", "com.apple.FinderInfo", finder_info, str(browser)], check=True)
+    icon, exe = tmp_path / "icon.png", tmp_path / "kiss-app"
+    icon.write_bytes(BRAND_ICON_PNG)
+    bundle = standalone_app.install_launcher(
+        SEAMLESS_LOOP, icon, exe, home=tmp_path, system="Darwin", browser=browser
+    )
+    assert bundle is not None
+    exe_copy = bundle / "Contents" / "MacOS" / "Chromium"
+    assert standalone_app.macos_bundle_browser(bundle, browser) == exe_copy
+    assert _signed_identifier(exe_copy) == "org.kiss-sorcar.seamless-loop"
+
+
 def test_macos_bundle_without_a_browser_bundle_is_the_launcher_alone(tmp_path: Path) -> None:
     """A bare binary (or no browser) gives the plain wrapper bundle of before."""
     bare = _write_stub_browser(tmp_path / "bin" / "chrome", tmp_path / "log")

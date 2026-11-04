@@ -25,8 +25,12 @@ is mocked.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from kiss.core.models import model_info as mi
 from kiss.core.models.model_info import (
     MODEL_INFO,
     _strip_thinking_alias,
@@ -124,9 +128,46 @@ def test_strip_thinking_alias_keeps_unknown_suffixed_names() -> None:
     assert _strip_thinking_alias("plain-model") == "plain-model"
 
 
-def test_strip_thinking_alias_always_strips_xhigh() -> None:
-    """-xhigh has no upstream collisions and strips unconditionally."""
+def test_strip_thinking_alias_strips_xhigh_unless_registered_under_that_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """-xhigh strips for an unknown or bundled-alias name, but a ``MY_MODELS.json``
+    model registered under a ``-xhigh`` name itself (a router that reads the
+    effort off the name) keeps it on the wire, with or without a restart; an
+    entry carrying ``alias_of`` is an alias and strips as before, and so does a
+    settings-panel override of a bundled alias, which is written without the
+    marker (the loader restores it from the catalog)."""
+    monkeypatch.setattr(mi, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
     assert _strip_thinking_alias("anything-at-all-xhigh") == "anything-at-all"
+    assert _provider_model_name("gpt-5.6-sol-xhigh") == "gpt-5.6-sol"
+    fields = {"context_length": 262144, "input_price_per_1M": 0.07, "output_price_per_1M": 0.15}
+    (tmp_path / "MY_MODELS.json").write_text(
+        json.dumps(
+            {
+                "s10s-scout-xhigh": {**fields, "thinking": "xhigh", "endpoint": "http://r/v1"},
+                "acme/alias-xhigh": {**fields, "alias_of": "acme/alias"},
+                "gpt-5.6-sol-xhigh": {**fields, "endpoint": "http://a/v1"},
+            }
+        )
+    )
+    # Hot-added (registered after the catalog was loaded): read live from the file.
+    assert "s10s-scout-xhigh" not in MODEL_INFO
+    assert _strip_thinking_alias("s10s-scout-xhigh") == "s10s-scout-xhigh"
+    assert _provider_model_name("s10s-scout-xhigh") == "s10s-scout-xhigh"
+    assert _strip_thinking_alias("acme/alias-xhigh") == "acme/alias"
+    # The bundled alias entry wins over the override until a restart.
+    assert _provider_model_name("gpt-5.6-sol-xhigh") == "gpt-5.6-sol"
+    # Loaded with the catalog (what a restart does): the same answers.
+    loaded = mi._load_catalog_file(mi.PACKAGE_MODEL_INFO_PATH)
+    for name in ("s10s-scout-xhigh", "acme/alias-xhigh", "gpt-5.6-sol-xhigh"):
+        monkeypatch.setitem(MODEL_INFO, name, loaded[name])
+    (tmp_path / "MY_MODELS.json").write_text("{}")
+    assert _provider_model_name("s10s-scout-xhigh") == "s10s-scout-xhigh"
+    assert _model_thinking_level("s10s-scout-xhigh") == "xhigh"
+    assert _strip_thinking_alias("acme/alias-xhigh") == "acme/alias"
+    assert loaded["gpt-5.6-sol-xhigh"].alias_of == "gpt-5.6-sol"
+    assert loaded["gpt-5.6-sol-xhigh"].context_length == 262144  # the override's own fields
+    assert _provider_model_name("gpt-5.6-sol-xhigh") == "gpt-5.6-sol"
 
 
 def test_provider_model_name_maps_alias_to_base_wire_id() -> None:

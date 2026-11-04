@@ -238,17 +238,17 @@ def test_container_long_sleep_waits_on_the_running_job(env: DockerManager) -> No
     began = time.monotonic()
     out = bash("sleep 60; echo after", "wait", timeout_seconds=120)
     assert time.monotonic() - began < 40, "the sleep was not replaced by the wait on the job"
-    assert out == f"Waited on job {job_id} for up to 60 s instead of sleeping (exited 0).\nafter\n"
+    assert out == f"after\nWaited on job {job_id} for up to 60 s instead of sleeping (exited 0).\n"
     assert h.jobs.last_running() is None
     assert h.jobs.wait("deadbeef", 1) == "status unknown"
     # on_timeout="background" after the wait: the rest starts as a job and is waited for.
     started = bash("sleep 3; echo done", "job", background=True)
     job_id = started.split()[3]
     out = bash("sleep 50; echo late", "late", timeout_seconds=60, on_timeout="background")
-    assert out.startswith(
+    assert out.endswith(
         f"Waited on job {job_id} for up to 50 s instead of sleeping (exited 0).\n",
     )
-    assert "status: exited 0" in out and out.rstrip().endswith("late")
+    assert "status: exited 0" in out and "late" in out.splitlines()
     # A job that cannot start (a file sits where the jobs dir goes) is an error, not a job.
     try:
         env.Bash(f"mv {JOBS_DIR} {JOBS_DIR}.bak && touch {JOBS_DIR}", "block", 30, 500)

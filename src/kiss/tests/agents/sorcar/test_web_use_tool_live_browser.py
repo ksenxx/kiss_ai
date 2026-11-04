@@ -493,6 +493,11 @@ def test_browser_that_cannot_launch_is_reported_by_show_browser(
     web = WebUseTool(user_data_dir=str(tmp_path / "p"), live_browser=svc)
     try:
         web.go_to_url(f"{server}/inert")
+        # The tab service falls back to Playwright's bundled Chromium when
+        # KISS_BROWSER cannot start; hide it from the service's driver (started
+        # by show_browser) so the launch fails for good.  The tool's own driver
+        # already runs and keeps browsing headless on the real one.
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "no-browsers"))
         err = web.show_browser()
         assert err.startswith("Error making the browser visible: Cannot open a Browser tab:")
         assert not web._live and not _events(printer, "openBrowserTab")

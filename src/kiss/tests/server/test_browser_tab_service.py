@@ -24,7 +24,6 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -40,6 +39,7 @@ from kiss.server.browser_tab import (
     _key_params,
     _mouse_params,
     home_url,
+    launch_failure_summary,
     normalize_url,
 )
 from kiss.server.server import AgentServer
@@ -141,6 +141,52 @@ def test_key_and_mouse_translation() -> None:
     wheel = _mouse_params({"action": "mouseWheel", "x": 1, "y": 2, "deltaY": 120})
     assert wheel["deltaX"] == 0.0 and wheel["deltaY"] == 120.0 and wheel["button"] == "none"
     assert "deltaX" not in _mouse_params({})
+
+
+# Playwright's message for a Chrome whose update left no framework to load
+# (kiss-web-stderr.log, 2026-11-03), command line shortened.
+_FRAMEWORK = (
+    "/Applications/Google Chrome.app/Contents/MacOS/../Frameworks/"
+    "Google Chrome Framework.framework/Versions/156.0.8078.80/Google Chrome Framework"
+)
+_LAUNCH_LINE = "<launching> /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless"
+_CHROME_ABORT_MESSAGE = "\n".join(
+    [
+        "BrowserType.launch_persistent_context: Failed to launch the browser process.",
+        "Browser logs:",
+        "",
+        _LAUNCH_LINE,
+        "<launched> pid=83207",
+        f"[pid=83207][err] dlopen {_FRAMEWORK}: dlopen({_FRAMEWORK}, 0x0105): tried: "
+        f"'{_FRAMEWORK}' (no such file), '/System/Volumes/Preboot/Cryptexes/OS{_FRAMEWORK}' "
+        "(no such file)",
+        "[pid=83207] <process did exit: exitCode=null, signal=SIGABRT>",
+        "[pid=83207] starting temporary directories cleanup",
+        "Call log:",
+        f"  - {_LAUNCH_LINE}",
+        "  - <launched> pid=83207",
+        f"  - [pid=83207][err] dlopen {_FRAMEWORK} (no such file)",
+        "  - [pid=83207] <process did exit: exitCode=null, signal=SIGABRT>",
+        "  - [pid=83207] <gracefully close end>",
+        "",
+    ]
+)
+
+
+def test_launch_failure_summary() -> None:
+    """The headline, the browser's own complaint and its exit; no command line, no call log."""
+    lines = launch_failure_summary(Exception(_CHROME_ABORT_MESSAGE)).split("\n")
+    assert lines[0] == "Failed to launch the browser process."
+    assert lines[1].startswith("dlopen /Applications/Google Chrome.app") and len(lines[1]) <= 300
+    assert lines[2] == "<process did exit: exitCode=null, signal=SIGABRT>"
+    assert len(lines) == 3
+    # A message without browser output keeps its headline only; no message, no text.
+    missing = RuntimeError("BrowserType.launch: Executable doesn't exist at /x\nCall log:\n  - a")
+    assert launch_failure_summary(missing) == "Executable doesn't exist at /x"
+    assert launch_failure_summary(TimeoutError()) == ""
+    # Only Playwright's ``Class.method: `` prefix goes; a file name stays.
+    denied = RuntimeError("chrome.exe: Access is denied.")
+    assert launch_failure_summary(denied) == "chrome.exe: Access is denied."
 
 
 # ---------------------------------------------------------------------------
@@ -440,23 +486,40 @@ def test_browser_commands_end_to_end(daemon: Any, page_server: str) -> None:
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
-def test_browser_that_cannot_launch_reports_to_requester(
-    daemon: Any, monkeypatch: pytest.MonkeyPatch
+def test_browser_that_cannot_launch_falls_back_to_bundled_chromium(
+    daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str, tmp_path: Path
 ) -> None:
+    """A default browser that dies on start (a half-updated Chrome) still shows the page."""
     server, printer = daemon
     # A "browser" that exits immediately: Playwright fails to launch it.
-    fake = Path(tempfile.mkdtemp()) / "not-a-browser"
-    fake.write_text("#!/bin/sh\nexit 0\n")
-    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    fake = _fake_binary(tmp_path, "not-a-browser")
     monkeypatch.setenv("KISS_BROWSER", str(fake))
     monkeypatch.setenv("KISS_HEADLESS", "1")
-    server._handle_command({"type": "browserOpen", "url": "", "connId": "c9"})
-    err = _wait(lambda: _events(printer, "browserError", connId="c9"), "launch error", timeout=60)[
+    server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c9"})
+    opened = _wait(
+        lambda: _events(printer, "openBrowserTab", connId="c9"), "openBrowserTab", timeout=90
+    )[0]
+    assert opened["browser"] == "Chromium (bundled)" and opened["isDefaultBrowser"] is False
+    # The badge's tooltip names the browser that failed and Playwright's
+    # headline, not its command line or call log.
+    assert opened["note"].startswith("not-a-browser could not be started: ")
+    assert "Failed to launch the browser process" in opened["note"]
+    assert "<launching>" not in opened["note"] and "Call log" not in opened["note"]
+    assert not _events(printer, "browserError")
+    _wait(lambda: _events(printer, "browserState", tab_id=opened["tab_id"], title="Tall"), "state")
+    server.browser_tabs.shutdown()
+
+    # Without the bundled Chromium either, the requester gets a short error
+    # (the headline, not the call log) and no tab.
+    server.browser_tabs = BrowserTabService(printer, tmp_path / "profile2")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "no-browsers"))
+    server._handle_command({"type": "browserOpen", "url": "", "connId": "c10"})
+    err = _wait(lambda: _events(printer, "browserError", connId="c10"), "launch error", timeout=60)[
         0
     ]
     assert err["tab_id"] == "" and err["text"]
-    assert not _events(printer, "openBrowserTab")
-    shutil.rmtree(fake.parent, ignore_errors=True)
+    assert "Call log" not in err["text"] and len(err["text"]) < 1000
+    assert not _events(printer, "openBrowserTab", connId="c10")
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")

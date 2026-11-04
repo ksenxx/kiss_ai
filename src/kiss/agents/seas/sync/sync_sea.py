@@ -222,12 +222,19 @@ class SyncSea(WorkerSea):
         sync the registered machines, and nothing else.  The budget
         covers this checkout and two syncs per registered machine, one
         before this checkout and one after it (a machine's sub-task
-        spend counts in this run's).
+        spend counts in this run's).  The run is no coding run for the
+        finish gate (``coding_gate`` of ``model_config``): what it
+        changes is the merge of commits made elsewhere, plus the
+        resolution of their conflicts, which no reviewer of this run's
+        diff can tell from the pulled commits.
         """
+        model_config = settings.get("model_config")
         return settings | {
             "tool_profile": "shell+edit+agents",
             "max_budget": MAX_BUDGET_USD * (1 + 2 * len(load_machines())),
             "locked": ["tool_profile"],
+            "model_config": {**(model_config if isinstance(model_config, dict) else {}),
+                             "coding_gate": False},
         }
 
     def tools(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:

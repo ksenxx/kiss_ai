@@ -22,6 +22,7 @@ changed model.  These tests verify:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ import pytest
 import kiss.core.user_config as user_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.models import model_info
 from kiss.core.models.model_info import model as model_factory
 from kiss.tests.conftest import executor_of
 
@@ -198,6 +200,57 @@ class TestChangeModelLiveSwap:
 
         assert getattr(agent.model, "base_url", None) == original_base_url
         assert getattr(agent.model, "api_key", None) == original_api_key
+
+    def test_custom_endpoint_model_runs_against_its_own_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A switch to a ``MY_MODELS.json`` model with its own endpoint, key and headers
+        uses them (as the task runner starts such a model) instead of carrying the
+        launch endpoint or its key over, even within the Claude family; the entries
+        are registered after the catalog was loaded, so a switch between two of them
+        drops the old model's default effort; a switch away from one routes the new
+        model to its own provider, as a sub-agent is (nothing of the custom model's
+        endpoint, key or headers is carried)."""
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        fields = {"context_length": 262144, "input_price_per_1M": 0.07, "output_price_per_1M": 0.15}
+        router = {"endpoint": "http://localhost:65534/v1", "api_key": "router-token"}
+        (tmp_path / "MY_MODELS.json").write_text(
+            json.dumps(
+                {
+                    "claude-via-router": {**fields, **router},
+                    "s10s-scout-high": {
+                        **fields, **router, "thinking": "high", "headers": "X-Team: s10s",
+                    },
+                    "s10s-athena": {**fields, **router},
+                }
+            )
+        )
+        agent, tools = _make_agent()
+        agent = _bootstrap_live_model(agent, "claude-old")  # fake-key at localhost:65535
+        set_model = _find_tool(tools, "set_model")
+
+        set_model("claude-via-router")
+
+        assert agent.model.base_url == "http://localhost:65534/v1"
+        assert agent.model.api_key == "router-token"
+
+        set_model("s10s-scout-high")
+
+        assert agent.model.model_name == "s10s-scout-high"
+        assert agent.model.base_url == "http://localhost:65534/v1"
+        assert agent.model.api_key == "router-token"
+        assert agent.model.model_config["extra_headers"] == {"X-Team": "s10s"}
+        assert agent.model.model_config["reasoning_effort"] == "high"
+
+        set_model("s10s-athena")
+
+        assert "reasoning_effort" not in agent.model.model_config
+
+        set_model("gpt-5.5-mini")
+
+        assert agent.model.base_url == "https://api.openai.com/v1"
+        assert agent.model.api_key != "router-token"
+        assert "extra_headers" not in agent.model.model_config
 
     def test_callbacks_preserved(self) -> None:
         agent, tools = _make_agent()

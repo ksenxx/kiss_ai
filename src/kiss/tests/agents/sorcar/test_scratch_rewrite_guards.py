@@ -134,6 +134,32 @@ def test_values_only_the_shell_knows_stay_unresolved(command: str) -> None:
         HEREDOC_UNRESOLVED_VERDICT.format(path=heredoc_targets(command)[0]))
 
 
+def test_an_optimistic_scan_keeps_what_a_list_assigned() -> None:
+    """The gate reads a command as it was meant to run: an assignment or a ``cd``
+    after ``&&`` or ``||`` holds past the ``;`` that ends its list (the 2026-11-03
+    audit's ``cd d && T=tmp/x && a; cp b ../../$T/``); a guard keeps forgetting
+    them, since the list may not have run through.  Builtins that assign a value
+    only the shell knows, and a compound command's body, stay unknown to both."""
+    command = "cd /w && T=tmp/x && tail $T/a; cp $T/a ../../$T/; false || cd /v; cp b $T/c"
+    conservative = [c.words[-1].text for c in simple_commands(command, "/r")]
+    optimistic = [c.words[-1].text for c in simple_commands(command, "/r", optimistic=True)]
+    assert conservative == ["/w", "T=tmp/x", "tmp/x/a", "../../$T/", "false", "/v", "$T/c"]
+    assert optimistic == ["/w", "T=tmp/x", "tmp/x/a", "../../tmp/x/", "false", "/v", "tmp/x/c"]
+    assert [c.cwd for c in simple_commands(command, "/r")][-1] is None
+    assert [c.cwd for c in simple_commands(command, "/r", optimistic=True)][-1] == "/v"
+    for unknown in ("T=tmp/x; read -r T <<< n; cp a $T/b", "if x; then T=tmp/x; fi; cp a $T/b",
+                    "T=tmp/x; for T in n; do :; done; cp a $T/b"):
+        assert simple_commands(unknown, "/r", optimistic=True)[-1].words[-1].text == "$T/b"
+    # $PWD is the directory the scan knows, in both readings, unless the command set it
+    for pwd, last in (("cd /w && S=$PWD/tmp/x && rm -f $S/.cov*", "/w/tmp/x/.cov*"),
+                      ("S=$PWD/tmp/x; rm -f $S/.cov*", "/r/tmp/x/.cov*"),
+                      ("cd $D && rm -f $PWD/x", "$PWD/x"), ("PWD=/p; rm -f $PWD/x", "/p/x"),
+                      ("PWD=$X; rm -f $PWD/x", "$PWD/x")):
+        assert simple_commands(pwd, "/r")[-1].words[-1].text == last, pwd
+        assert simple_commands(pwd, "/r", optimistic=True)[-1].words[-1].text == last, pwd
+    assert simple_commands("rm -f $PWD/x", None)[-1].words[-1].text == "$PWD/x"
+
+
 @pytest.mark.skipif(not host_sed_is_gnu(), reason="GNU sed is the oracle")
 def test_an_unquoted_value_with_a_blank_is_split_as_bash_splits_it(tmp_path: Path) -> None:
     (tmp_path / "notes.md").write_text("one\n")
@@ -236,11 +262,41 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     out = tools.Bash(both, "two files")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     assert (work / "notes.md").read_text() == "one\n"
+    # The here-document need not be the whole command (audit 2026-11-03: a ``cd``
+    # into the scratch dir before it, a check after it): the program is read from
+    # the python command's own here-document, and its relative path resolves
+    # from the directory the ``cd`` left it in.
+    (work / "tmp" / "notes.md").write_text("one\n")
+    around = "cd tmp && " + _REWRITE.format(path="notes.md") + "\ngrep -c uno notes.md"
+    out = tools.Bash(around, "cd before, grep after")
+    assert out.strip() == "1" and (work / "tmp" / "notes.md").read_text() == "uno\n"
+    assert (work / "notes.md").read_text() == "one\n"
+    out = tools.Bash("cd tmp && " + _REWRITE.format(path="../notes.md"), "cd, then tracked")
+    assert out.startswith("REFUSED: the python heredoc did NOT run")
+    assert (work / "notes.md").read_text() == "one\n"
+    # an expanding here-document (unquoted delimiter) with a ``$`` is unknown text
+    expanding = _REWRITE.format(path="tmp/notes.md").replace("<<'EOF'", "<<EOF").replace(
+        "'uno'", "'$uno'") + "\necho done"
+    out = tools.Bash(expanding, "expanding")
+    assert out.startswith("REFUSED: the python heredoc did NOT run")
+    # every python of the command is read (review 2026-11-03): a scratch rewrite
+    # first does not let a tracked rewrite after it run
+    (work / "tmp" / "notes.md").write_text("one\n")
+    two = _REWRITE.format(path="tmp/notes.md") + "\n" + _REWRITE.format(path="notes.md")
+    out = tools.Bash(two, "scratch, then tracked")
+    assert out.startswith("REFUSED: the python heredoc did NOT run")
+    assert (work / "notes.md").read_text() == "one\n"
+    assert (work / "tmp" / "notes.md").read_text() == "one\n"
+    two = _REWRITE.format(path="tmp/notes.md") + "\n" + _REWRITE.format(path="tmp/notes.md")
+    assert "REFUSED" not in tools.Bash(two, "scratch twice")
+    assert (work / "tmp" / "notes.md").read_text() == "uno\n"
 
 
 @pytest.mark.parametrize("program, expected", [
     ("p='a.py'\ns=open(p).read()\nopen(p,'w').write(s.replace('x','y'))", ["a.py"]),
     ("from pathlib import Path\np = Path('tmp/x.py')\np.write_text(p.read_text())", ["tmp/x.py"]),
+    ("import pathlib\np = pathlib.Path('tmp/x.py')\np.write_text(p.read_text())", ["tmp/x.py"]),
+    ("import os\np = os.path.join('tmp', 'x.py')\nopen(p, 'w').write('x')", None),
     ("with open('tmp/a', 'w') as f:\n    f.write('x')\nopen('tmp/b', mode='ab').write(b'')",
      ["tmp/a", "tmp/b"]),
     ("from pathlib import Path\nwith Path('tmp/c').open('r+') as f:\n    f.write('x')", ["tmp/c"]),

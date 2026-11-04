@@ -42,6 +42,7 @@ import datetime
 import ipaddress
 import json
 import os
+import plistlib
 import shutil
 import ssl
 import subprocess
@@ -63,7 +64,7 @@ from kiss.core.file_lock import lock_exclusive
 from kiss.server import tls_trust
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.conftest import IS_WINDOWS, openssl_cli
 
 
 @contextlib.contextmanager
@@ -569,6 +570,44 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         self.assertTrue(server._serves_local_ca)
         server._write_url_file_sync()
         self.assertTrue(json.loads((self.tmp / "remote-url.json").read_text())["localCa"])
+
+    async def test_webclip_profile_download(self) -> None:
+        """``/webclip.mobileconfig`` serves the signed Web Clip of the public URL, else 404."""
+        port = await self._start()
+        server = self.server
+        assert server is not None
+        tls_dir = ws._TLS_DIR
+        assert tls_dir is not None
+        # Bound to 127.0.0.1 with no tunnel, the daemon has no address a phone
+        # could open: nothing to put on a Home Screen.
+        status, headers, body = await asyncio.to_thread(_https_get, port, "/webclip.mobileconfig")
+        self.assertEqual(status, 404)
+        self.assertIn("no address to put on a Home Screen", body.decode())
+
+        server._active_url = "https://clip-test.trycloudflare.com"
+        status, headers, body = await asyncio.to_thread(_https_get, port, "/webclip.mobileconfig")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "application/x-apple-aspen-config")
+        # ``attachment`` would send iOS Safari to the Files app instead of
+        # the profile installer, so no disposition at all.
+        self.assertNotIn("content-disposition", headers)
+        signed = self.tmp / "clip.mobileconfig"
+        signed.write_bytes(body)
+        plain = self.tmp / "clip.plist"
+        verify = await asyncio.to_thread(
+            subprocess.run,
+            [openssl_cli(), "smime", "-verify", "-inform", "der",
+             "-in", str(signed), "-CAfile", str(tls_dir / tls_certs.CA_CERT_FILE),
+             "-out", str(plain)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        self.assertEqual(verify.returncode, 0, verify.stderr)
+        clip = plistlib.loads(plain.read_bytes())["PayloadContent"][0]
+        self.assertEqual(clip["PayloadType"], "com.apple.webClip.managed")
+        self.assertEqual(clip["URL"], "https://clip-test.trycloudflare.com")
+        self.assertEqual(clip["Label"], PRODUCT_NAME)
+        self.assertTrue(clip["FullScreen"])
+        self.assertTrue((tls_dir / "profile-signer.pem").is_file())
 
     async def test_explicit_cert_pair_has_no_ca_download_and_no_reissue(self) -> None:
         cert, key = self.tmp / "c.pem", self.tmp / "k.pem"

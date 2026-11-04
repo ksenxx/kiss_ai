@@ -54,6 +54,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -566,9 +567,10 @@ class RootInstallLockTest(unittest.TestCase):
         # lock would stay held until they exit; nor fd 3 (the terminal the
         # installer saves for the password box), or this installer's
         # stdout would stay open until they exit and ``communicate``
-        # below would hang.
-        python = shutil.which("python3")
-        assert python is not None
+        # below would hang.  The interpreter running the tests, not a
+        # ``python3`` found on PATH: the probe install.sh runs with it
+        # imports ``websockets`` from the project's venv.
+        python = sys.executable
         for name, body in (
             ("uv", STUB_UV),
             ("uname", STUB_UNAME),
