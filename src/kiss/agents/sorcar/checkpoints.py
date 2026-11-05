@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from kiss.agents.sorcar.git_worktree import _REPO_SCOPED_GIT_ENV
 from kiss.core import tool_interrupt
 from kiss.core.processes import popen_process_group, terminate_process_group
 
@@ -74,7 +75,12 @@ def _git(
 
     Input and output are file-name bytes (``os.fsencode``/``os.fsdecode``):
     text mode would read a carriage return in a ``-z`` path as a newline.
-    They pass through temporary files, so the wait for git can look at
+    The repo-scoping variables of the environment (``GIT_DIR``,
+    ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ...) are dropped, as every
+    git runner of :mod:`kiss.agents.sorcar.git_worktree` drops them: a
+    daemon started with them set would otherwise snapshot and restore
+    another checkout than *root*.  They pass through temporary files,
+    so the wait for git can look at
     the Stops every :data:`_POLL_SECONDS` without a pipe filling up:
     the task's *stop_event* or the tool panel's Stop ends git's process
     group at once, not after :data:`GIT_TIMEOUT_SECONDS`, and so does an
@@ -94,7 +100,9 @@ def _git(
         ToolCallInterrupted: When the tool panel's Stop was pressed.
     """
     _raise_if_stopped(stop_event, f"git {args[0]}")
-    env = None if index is None else {**os.environ, "GIT_INDEX_FILE": str(index)}
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     with (tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out,
           tempfile.TemporaryFile() as err):
         given.write(os.fsencode(stdin))
@@ -187,12 +195,14 @@ def snapshot(work_dir: str, stop_event: threading.Event | None = None) -> Snapsh
         CheckpointError: When *work_dir* is not in a git working tree, git
             fails or a Stop ends it.
     """
+    # Only git's record terminator goes: ``rstrip`` would also take the
+    # newline a root named ``project\n`` ends in, naming ``project``.
     git = _git(Path(work_dir), "rev-parse", "--show-toplevel", stop_event=stop_event)
-    root = Path(git.rstrip("\n"))
+    root = Path(git.removesuffix("\n"))
     with tempfile.TemporaryDirectory(prefix="kiss-checkpoint-") as scratch:
         index = Path(scratch) / "index"
         git_path = _git(root, "rev-parse", "--git-path", "index", stop_event=stop_event)
-        real_index = root / git_path.rstrip("\n")
+        real_index = root / git_path.removesuffix("\n")
         if real_index.is_file():
             shutil.copy2(real_index, index)
             _clear_skip_bits(root, index, stop_event)

@@ -301,7 +301,8 @@ def test_extra_result_beyond_the_pending_queue_is_rejected_and_rolled_back() -> 
 
 
 def test_explicit_tool_use_id_wins_but_still_consumes_the_pending_call() -> None:
-    with ScriptedOpenAIServer(_Script([[("c1", "f"), ("c2", "f")]])) as server:
+    script = _Script([[("c1", "f"), ("c2", "f")], [("c3", "f"), ("c4", "f")]])
+    with ScriptedOpenAIServer(script) as server:
         model = _v2(server.base_url)
         _tool_turn(model)
         # FIFO matching would answer c1 first; the explicit ids reverse that.
@@ -312,13 +313,35 @@ def test_explicit_tool_use_id_wins_but_still_consumes_the_pending_call() -> None
             ]
         )
         # Both pending entries were consumed, so the next turn is accepted.
-        model.generate()
+        _tool_turn(model)
         assert _calls_and_outputs(_sent_input(server)) == [
             ("call", "c1", "f"),
             ("call", "c2", "f"),
             ("output", "c2", "second"),
             ("output", "c1", "first"),
         ]
+        # An explicit id consumes ITS pending entry, not the first one of
+        # that name, so a later implicit result answers the other call.
+        restored = _restored(server, model)
+        model.add_function_results_to_conversation_and_return(
+            [("f", {"result": "fourth", "tool_use_id": "c4"})]
+        )
+        model.add_function_results_to_conversation_and_return([("f", {"result": "third"})])
+        model.generate()
+        second_turn = [
+            ("call", "c3", "f"),
+            ("call", "c4", "f"),
+            ("output", "c4", "fourth"),
+            ("output", "c3", "third"),
+        ]
+        assert _calls_and_outputs(_sent_input(server))[-4:] == second_turn
+        # The same through a restored history, whose unanswered calls are
+        # matched without a pending queue.
+        restored.add_function_results_to_conversation_and_return(
+            [("f", {"result": "fourth", "tool_use_id": "c4"}), ("f", {"result": "third"})]
+        )
+        restored.generate()
+        assert _calls_and_outputs(_sent_input(server))[-4:] == second_turn
 
 
 def test_function_call_without_call_id_is_rejected_at_the_transport() -> None:

@@ -395,6 +395,41 @@ def test_second_process_defers_to_a_live_bridge_and_daemon_takes_over() -> None:
         daemon.stop()
 
 
+def test_two_lazy_starts_at_once_publish_exactly_one_bridge() -> None:
+    """Two CLI runs start their bridge together: one publishes, the other defers to it.
+
+    The "is another bridge live?" probe and the publication are one critical
+    section; apart, both starts found no live bridge and both published, and
+    the one whose file lost served a port the extension never reads.
+    """
+    for _ in range(5):
+        bridges = [ChromeBridge(write_config=True) for _ in range(2)]
+        errors: list[ChromeBridgeError | None] = [None, None]
+        gate = threading.Barrier(2)
+
+        def run(index: int) -> None:
+            gate.wait()
+            try:
+                bridges[index].start()
+            except ChromeBridgeError as e:
+                errors[index] = e
+
+        threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        winners = [b for b, e in zip(bridges, errors, strict=True) if e is None]
+        try:
+            assert len(winners) == 1, errors
+            assert _config() == {"port": winners[0].port, "token": winners[0].token}
+            assert f"port {winners[0].port}" in str(next(e for e in errors if e is not None))
+        finally:
+            for b in winners:
+                b.stop()
+        assert not (extension_dir() / CONFIG_FILE_NAME).exists()
+
+
 def test_stale_config_of_a_dead_bridge_is_replaced() -> None:
     dead = ChromeBridge(write_config=True)
     dead.start()

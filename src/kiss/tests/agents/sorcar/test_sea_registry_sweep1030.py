@@ -34,6 +34,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import parsed_sea
 from kiss.core.config import kiss_home
 from kiss.core.locked import locked_call
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
 _SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -50,10 +51,8 @@ TOO_DEEP = "x = " + " + ".join(['"a"'] * 100_000) + "\n"
 @pytest.fixture(autouse=True)
 def _isolated_registry() -> Iterator[None]:
     """Start and end each test with an empty registry and no ``SEAS.md``."""
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _write_sea(folder: Path, name: str, body: str = _SEA) -> Path:

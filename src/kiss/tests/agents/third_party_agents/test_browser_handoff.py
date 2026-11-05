@@ -68,6 +68,7 @@ from kiss.core.browser_handoff import (
 from kiss.tests.agents.third_party_agents.conftest import FAKE_SIGNAL_LINK_CLI
 from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools, wait_until
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
+from kiss.tests.conftest import read_browser_launches as _opened
 
 _FAKE_BROWSER = """#!/usr/bin/env python3
 # Scripted stand-in for the user's browser: records the URLs it is asked
@@ -164,23 +165,16 @@ def browser_tab() -> Any:
         set_browser_tab_opener(None)
 
 
-def _opened(home: Path) -> list[list[str]]:
-    """Return the argv of every browser launch recorded so far."""
-    log = home / "browser-log"
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text().splitlines()]
+def _launches(home: Path, count: int) -> list[list[str]]:
+    """Return the launches once *count* are recorded (bounded wait; the log as is after it).
 
-
-def _lingering_launches(home: Path) -> list[list[str]]:
-    """Return the launches once a lingering opener has recorded one.
-
-    A lingering opener outlives the launcher's grace period, so the launcher
-    returns while the opener may still be about to write its pid file and
-    log line; wait for the record instead of reading the log at once (the
-    pid file is complete by then, so teardown can reap the opener).
+    The launcher returns when its grace period runs out while the opener may
+    still be about to write its pid file and log line: always for a
+    lingering opener, under load for a slow ordinary one.  Wait for the
+    records instead of reading the log at once (the pid file is complete by
+    then, so teardown can reap a lingering opener).
     """
-    assert wait_until(lambda: _opened(home) != [], timeout=10.0), "no launch recorded"
+    wait_until(lambda: len(_opened(home)) >= count, timeout=10.0)
     return _opened(home)
 
 
@@ -223,7 +217,7 @@ def test_opens_url_with_browser_env_and_reports_success(fake_browser: Path) -> N
     """
     url = _unique_url() + "?redirect_uri=http%3A%2F%2Flocalhost%3A8&scope=a%20b&state=Q^W|E"
     assert open_in_default_browser(url) is True
-    assert _opened(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
 
 
 def test_batch_opener_refuses_a_url_with_an_embedded_quote(fake_browser: Path) -> None:
@@ -240,7 +234,7 @@ def test_batch_opener_refuses_a_url_with_an_embedded_quote(fake_browser: Path) -
         assert _opened(fake_browser) == []
     else:
         assert open_in_default_browser(url) is True
-        assert _opened(fake_browser) == [[url]]
+        assert _launches(fake_browser, 1) == [[url]]
 
 
 def test_browser_env_placeholder_and_fallback_list_are_honoured(
@@ -252,7 +246,7 @@ def test_browser_env_placeholder_and_fallback_list_are_honoured(
     url = _unique_url("placeholder")
     assert _launch_commands(url) == [["/no/such/browser", url], [launcher, f"--new-tab={url}"]]
     assert open_in_default_browser(url) is True
-    assert _opened(fake_browser) == [[f"--new-tab={url}"]]
+    assert _launches(fake_browser, 1) == [[f"--new-tab={url}"]]
 
 
 def test_malformed_browser_env_or_url_never_raises(
@@ -290,7 +284,7 @@ def test_concurrent_callers_open_one_tab(
         thread.join(timeout=30)
         assert not thread.is_alive(), "open_in_default_browser did not return"
     assert results == [True, True]
-    assert _lingering_launches(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
 
 
 def test_headless_and_disallowed_schemes_never_launch(
@@ -312,11 +306,11 @@ def test_missing_or_failing_opener_reports_not_opened(
     url = _unique_url("failing")
     (fake_browser / "refuse").touch()
     assert open_in_default_browser(url) is False
-    assert _opened(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
     # A failed attempt is not remembered: the next attempt launches again.
     (fake_browser / "refuse").unlink()
     assert open_in_default_browser(url) is True
-    assert _opened(fake_browser) == [[url], [url]]
+    assert _launches(fake_browser, 2) == [[url], [url]]
     monkeypatch.setenv("BROWSER", str(fake_browser / "does-not-exist"))
     assert open_in_default_browser(_unique_url("missing")) is False
 
@@ -329,7 +323,7 @@ def test_lingering_opener_counts_as_opened(
     monkeypatch.setattr(_browser_handoff, "_LAUNCH_GRACE", 0.3)
     url = _unique_url("linger")
     assert open_in_default_browser(url) is True
-    assert _lingering_launches(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
 
 
 def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:
@@ -337,11 +331,11 @@ def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:
     url = _unique_url("twice")
     assert open_in_default_browser(url) is True
     assert open_in_default_browser(url) is True
-    assert _opened(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
     # A different URL is a different page and opens.
     other = _unique_url("twice")
     assert open_in_default_browser(other) is True
-    assert _opened(fake_browser) == [[url], [other]]
+    assert _launches(fake_browser, 2) == [[url], [other]]
 
 
 def test_default_command_without_browser_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -387,7 +381,7 @@ def test_open_for_user_falls_back_when_the_tab_fails(fake_browser: Path, browser
     other = _unique_url("tab-crashed")
     assert open_for_user(other) == DEFAULT_BROWSER
     assert browser_tab.urls == [url, other]
-    assert _opened(fake_browser) == [[url], [other]]
+    assert _launches(fake_browser, 2) == [[url], [other]]
     # Both fail: nothing is open, and the claim is released so the next
     # attempt for the same page tries the tab again instead of assuming
     # a page that never appeared.
@@ -409,7 +403,7 @@ def test_open_for_user_without_daemon_or_browser(
     set_browser_tab_opener(None)
     url = _unique_url("no-daemon")
     assert open_for_user(url) == DEFAULT_BROWSER
-    assert _opened(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
     monkeypatch.setenv("KISS_HEADLESS", "1")
     assert open_for_user(_unique_url("nothing")) == NOT_OPENED
 
@@ -510,7 +504,7 @@ def test_portal_handoff_opens_and_describes(fake_browser: Path, browser_tab: Any
     set_browser_tab_opener(None)
     url = _unique_url("portal")
     assert portal_handoff(url).startswith(f"{url} has just been opened")
-    assert _opened(fake_browser) == [[url]]
+    assert _launches(fake_browser, 1) == [[url]]
 
 
 # --------------------------------------------------------------------------
@@ -556,7 +550,7 @@ def test_consent_required_opens_verification_page_and_keeps_code(fake_browser: P
     assert "ask_user_question()" in text and uri in text and "OWN browser" in text
     assert "enter the code WDJB-MJHT" in text and "finish_demo_auth()" in text
     assert "built-in browser" in text and "password or 2FA code" in text
-    assert _opened(fake_browser) == [[uri]]
+    assert _launches(fake_browser, 1) == [[uri]]
 
 
 def test_consent_required_headless_still_hands_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,7 +590,7 @@ def test_signal_link_opens_black_on_white_qr_page(
         started = json.loads(tools["authenticate_signal"](signal_cli_path=str(cli)))
         assert started["opened_in"] == "default_browser" and started["browser_opened"] is True
         page = Path(started["qr_page"])
-        assert _opened(fake_browser) == [[page.as_uri()]]
+        assert _launches(fake_browser, 1) == [[page.as_uri()]]
         assert f"The QR page {page} has just been opened" in started["instructions"]
         assert started["qr_text"] in started["instructions"]
     finally:
@@ -623,7 +617,7 @@ def test_whatsapp_qr_handoff_all_outcomes(
     assert opened["qr_page"] == str(page)
     assert "has just been opened" in opened["message"]
     assert "wait_for_whatsapp_pairing()" in opened["message"]
-    assert _opened(fake_browser) == [[page.as_uri()]]
+    assert _launches(fake_browser, 1) == [[page.as_uri()]]
     monkeypatch.setenv("KISS_HEADLESS", "1")
     page = tmp_path / "qr3.html"
     page.write_text("<html></html>")
@@ -663,7 +657,7 @@ def test_google_connect_link_opens_in_default_browser(
     assert started["opened_in"] == "default_browser"
     uri = started["verification_uri"]
     assert uri.startswith("https://connect.composio.dev/link/")
-    assert _opened(fake_browser) == [[uri]]
+    assert _launches(fake_browser, 1) == [[uri]]
     assert uri in started["instructions"] and "OWN browser" in started["instructions"]
     assert "finish_google_calendar_auth()" in started["instructions"]
 
@@ -706,7 +700,7 @@ def test_token_agents_open_their_developer_portals(
     check = auth_tools(telegram)["check_telegram_auth"]()
     assert "@BotFather" in check and "https://t.me/BotFather has just been opened" in check
 
-    assert [launch[0] for launch in _opened(fake_browser)] == [
+    assert [launch[0] for launch in _launches(fake_browser, 2)] == [
         "https://api-dashboard.search.brave.com/",
         "https://t.me/BotFather",
     ]
@@ -721,7 +715,7 @@ def test_device_flow_prerequisite_portals_open(
     twitch = auth_tools(TwitchAgent())["authenticate_twitch"]("")
     assert twitch.startswith("client_id cannot be empty.")
     assert "https://dev.twitch.tv/console/apps has just been opened" in twitch
-    assert len(_opened(fake_browser)) == 1
+    assert len(_launches(fake_browser, 1)) == 1
 
 
 def test_prompts_describe_the_browser_tab_hand_off() -> None:

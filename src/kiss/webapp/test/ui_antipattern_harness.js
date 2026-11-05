@@ -113,7 +113,12 @@ function menuItem(win, label) {
 }
 
 function toast(win, id) {
-  return win.document.querySelector('[data-notification-id="' + id + '"]');
+  // Compared, not put in a selector: an id may carry quotes or a newline.
+  return (
+    all(win, '[data-notification-id]').find(
+      el => el.dataset.notificationId === id,
+    ) || null
+  );
 }
 
 function toastButton(el, label) {

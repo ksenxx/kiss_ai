@@ -132,7 +132,11 @@ async function main() {
       error: 'bar.py exists',
       exists: true,
     });
-    const t = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|' + actions[0].dest.split('/').pop());
+    const t = h.toast(
+      win,
+      'fs-overwrite:' +
+        JSON.stringify(['', actions[0].dest, actions[0].dest.split('/').pop()]),
+    );
     assert.ok(t, 'the exists reply asks in-page');
     assert.strictEqual(
       t.querySelector('.kiss-notification-message').textContent,
@@ -164,7 +168,9 @@ async function main() {
       error: 'x',
       exists: true,
     });
-    const id = 'fs-overwrite:' + first.dest + '|' + first.dest.split('/').pop();
+    const id =
+      'fs-overwrite:' +
+      JSON.stringify(['', first.dest, first.dest.split('/').pop()]);
     h.click(win, h.toastButton(h.toast(win, id), 'Keep existing'));
     assert.strictEqual(h.toast(win, id), null);
     assert.strictEqual(h.ofType(posted, 'fsAction').length, 1);

@@ -1109,7 +1109,9 @@ class _TaskRunnerMixin:
             # The picker's SEA under the dropped slash SEA was loaded
             # already: reuse it rather than run its import again.
             layers = load_layers(
-                cmd, base=None if picked is None else picked[1], loaded=layers,
+                cmd,
+                base=None if picked is None else picked[1],
+                loaded=layers,
             )
         if picked is not None:
             cmd["model"] = _picker_model(layers, picked[1])
@@ -1865,7 +1867,10 @@ class _TaskRunnerMixin:
             previous_task_id: See :meth:`_subscribe_chat_viewers`.
         """
         locked_call(
-            self._state_lock, self._subscribe_launching_tab_locked, task_id, source_tab_id,
+            self._state_lock,
+            self._subscribe_launching_tab_locked,
+            task_id,
+            source_tab_id,
         )
         if is_subagent:
             return
@@ -1898,7 +1903,9 @@ class _TaskRunnerMixin:
         """
         state = agent_state.find_by_tab(tab_id)
         self.printer.subscribe_tab(
-            task_id, tab_id, headless=state is not None and state.frontend_closed,
+            task_id,
+            tab_id,
+            headless=state is not None and state.frontend_closed,
         )
 
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
@@ -2060,7 +2067,8 @@ class _TaskRunnerMixin:
         _model_config = custom_model_config(model) or build_model_config(_vcfg)
         _agent_model_config = (
             framework_flags_over(_raw_model_config, _model_config)
-            if isinstance(_raw_model_config, dict) else None
+            if isinstance(_raw_model_config, dict)
+            else None
         )
         # A run whose effective configuration names an endpoint never
         # needs a vendor key: ``model_info.model`` builds the
@@ -2530,6 +2538,11 @@ class _TaskRunnerMixin:
                         sub_start_ms=sub_start_ms,
                         end_event=task_end_event,
                     )
+                    # The row is final: a stop (or any raise) before
+                    # the next subtask's ``finally`` re-resolves the
+                    # id must find no row to re-persist as stopped,
+                    # as for a run that never allocated one.
+                    task_history_id = None
                 subtask_index += 1
         except BaseException as _outer_exc:
             # Raised outside the per-subtask handlers: in the setup
@@ -2631,12 +2644,17 @@ class _TaskRunnerMixin:
                     except BaseException:
                         logger.debug("Worktree presentation error", exc_info=True)
                 locked_call(self._state_lock, setattr, state, "is_task_active", False)
+                # ``subagent`` tells the pages a dispatched child's end
+                # (its synthetic ``api-…`` tab reaches every remote
+                # page) from the user's own task finishing: only the
+                # latter plays the victory sound.
                 self.printer.broadcast(
                     {
                         **task_end_event,
                         "tabId": tab_id,
                         "startTs": start_ms,
                         "endTs": end_ms,
+                        "subagent": state.is_subagent,
                     }
                 )
                 end_event_broadcast = True
@@ -2685,6 +2703,7 @@ class _TaskRunnerMixin:
                                 "tabId": tab_id,
                                 "startTs": start_ms,
                                 "endTs": int(time.time() * 1000),
+                                "subagent": state.is_subagent,
                             }
                         )
                     except BaseException:

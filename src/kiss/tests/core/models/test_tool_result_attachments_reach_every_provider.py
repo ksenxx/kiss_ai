@@ -358,7 +358,7 @@ def gemini_body_after_tool_result(
         The JSON body the local endpoint received.
     """
     base_url, script = endpoint
-    script.play([chunk([text_part("seen")])])
+    script.play([chunk([text_part("seen")], finish_reason="STOP")])
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     model = GeminiModel(_GEMINI_MODEL, api_key="test-key")
     model.initialize("Show me the screenshot.")

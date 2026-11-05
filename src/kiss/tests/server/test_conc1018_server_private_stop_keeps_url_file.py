@@ -91,8 +91,15 @@ class PrivateStopKeepsUrlFileTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.url_file.read_text(encoding="utf-8"), URL_CONTENT)
 
     async def test_public_daemon_stop_removes_its_own_url_file(self) -> None:
+        # Its own: the file it published, not one another daemon wrote
+        # (a successor's, or here the pre-seeded one it never replaced).
         server = self._server()
         self.assertFalse(server._local_only)
+        await server.stop_async()
+        self.assertTrue(self.url_file.exists(), "a file this daemon never wrote is not its own")
+        server = self._server()
+        await server.start_async()
+        self.assertNotEqual(self.url_file.read_text(encoding="utf-8"), URL_CONTENT)
         await server.stop_async()
         self.assertFalse(self.url_file.exists())
 

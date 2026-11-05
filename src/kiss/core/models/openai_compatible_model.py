@@ -500,6 +500,31 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     return "" if content is None else str(content)
 
 
+def _tool_result_block_media(block: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert the media nested in an Anthropic ``tool_result`` block.
+
+    Anthropic's result writer keeps the images/PDFs a tool produced as
+    ``image`` / ``document`` blocks inside the ``tool_result``; the
+    OpenAI ``role="tool"`` message is text-only, so after a hand-off they
+    travel in a follow-up user message instead.
+
+    Args:
+        block: The Anthropic ``tool_result`` block dict.
+
+    Returns:
+        The OpenAI content parts of its nested media blocks, in order.
+    """
+    content = block.get("content")
+    if not isinstance(content, list):
+        return []
+    parts = [
+        _anthropic_media_block_to_openai_part(nested)
+        for nested in content
+        if isinstance(nested, dict) and nested.get("type") in ("image", "document")
+    ]
+    return [part for part in parts if part is not None]
+
+
 def _merge_tools_prompt_into_content(content: Any, tools_prompt: str, part_type: str) -> Any:
     """Append *tools_prompt* to a user message content of either shape.
 
@@ -1363,7 +1388,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         A message may expand to zero messages (all content filtered out),
         one message (the common case), or several messages (an Anthropic
         user message carrying multiple ``tool_result`` blocks becomes one
-        ``role="tool"`` message per block).
+        ``role="tool"`` message per block, followed by a user message
+        carrying the images/PDFs nested in those results, if any).
 
         Args:
             msg: The conversation message to normalize.
@@ -1426,6 +1452,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 }
                 for b in tool_results
             ]
+            media = [part for b in tool_results for part in _tool_result_block_media(b)]
+            if media:
+                rest = media + [cls._text_part(TOOL_RESULT_ATTACHMENT_NOTE)] + rest
             if rest:
                 msg_copy["content"] = rest
                 converted.append(msg_copy)
@@ -2411,6 +2440,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 cached_tokens = getattr(details, "cached_tokens", 0) or 0
                 cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
                 audio_input_tokens = getattr(details, "audio_tokens", 0) or 0
+            if not cached_tokens:
+                # Together reports the cached prompt tokens of some
+                # (non-reasoning) models flat on ``usage.cached_tokens``,
+                # with no details object; the SDK keeps the extra field.
+                # Read only when the nested count is absent, never added
+                # to it.  (https://docs.together.ai/docs/inference/openai-compatibility)
+                flat_cached = _get_attr_or_key(usage, "cached_tokens")
+                if isinstance(flat_cached, int | float) and not isinstance(flat_cached, bool):
+                    cached_tokens = max(0, int(flat_cached))
             completion_details = getattr(usage, "completion_tokens_details", None)
             if completion_details is not None:
                 audio_output_tokens = getattr(completion_details, "audio_tokens", 0) or 0

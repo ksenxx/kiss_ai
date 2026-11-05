@@ -57,6 +57,7 @@ from kiss.server.sorcar import is_loopback_ip
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
     RemoteAccessServer,
+    _bound_loopback,
     _generate_self_signed_cert,
     _get_local_ips,
 )
@@ -203,6 +204,39 @@ class TestEndpointNamesABoundSocket(_ServerBase):
         ws = await connect_local(server, open_timeout=5.0)
         await _ping(ws)
         await ws.close()
+
+    async def test_os_picked_port_moves_off_a_loopback_port_held_elsewhere(self) -> None:
+        """The OS picks a port free on the LAN address only; when another
+        socket holds ``127.0.0.1`` of it (seen under a loaded Linux run),
+        an ephemeral-port server moves to a port it can share, while a
+        caller-chosen port keeps it and waits for the watchdog."""
+        lan_ips = sorted(ip for ip in _get_local_ips() if not is_loopback_ip(ip) and ":" not in ip)
+        if not lan_ips:
+            self.skipTest("no non-loopback IPv4 address on this host")
+        server = self._make_server(host=lan_ips[0])
+        await server.start_async()
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        held = holder.getsockname()[1]
+        # Put the server where a port-0 bind could land: LAN:held free,
+        # 127.0.0.1:held taken.
+        for listener in (server._ws_loopback_server, server._ws_server):
+            listener.close()
+            await listener.wait_closed()
+        server._ws_loopback_server = None
+        server.port = held
+        server._ws_server = await server._serve_wss(lan_ips[0])
+        await server._bind_loopback_alias_or_repick_port(ephemeral=False)
+        self.assertIsNone(server._ws_loopback_server)
+        self.assertEqual(server.port, held)
+
+        await server._bind_loopback_alias_or_repick_port(ephemeral=True)
+        self.assertIsNotNone(server._ws_loopback_server, "loopback alias must be bound")
+        self.assertNotEqual(server.port, held)
+        self.assertEqual(_bound_loopback(server._ws_loopback_server)[1], server.port)
+        self.assertEqual(server._ws_server.sockets[0].getsockname()[1], server.port)
 
     async def test_stuck_endpoint_lock_fails_startup_and_rolls_back(self) -> None:
         saved = local_endpoint._LOCK_TIMEOUT

@@ -49,7 +49,7 @@ from kiss.core.memoryfield.pages import (
     page_title,
     split_frontmatter,
 )
-from kiss.core.utils import read_bytes_waiting_for_writer, unlink_waiting_for_holders
+from kiss.core.utils import read_bytes_waiting_for_writer
 
 if TYPE_CHECKING:
     import numpy as np
@@ -340,6 +340,25 @@ def _embed_all(embed: Embedder, texts: list[str]) -> list[list[float]]:
     return [embed(text) for text in texts]
 
 
+def _frontmatter_json(frontmatter: dict[str, Any]) -> str:
+    """*frontmatter* as the JSON text stored in a page's row.
+
+    ``default=str`` covers values JSON has no type for (a date), but
+    not a nested mapping's non-string key (``counts: {2026-11-01: 3}``
+    in a hand-edited page) nor a YAML alias cycle.  A value JSON still
+    rejects is stored as its ``str``, as :func:`render_page` would
+    write it, so one odd field never fails the whole memory's sync.
+    """
+    safe = {}
+    for key, value in frontmatter.items():
+        try:
+            json.dumps(value, default=str)
+        except (TypeError, ValueError):
+            value = str(value)
+        safe[key] = value
+    return json.dumps(safe, default=str)
+
+
 @dataclass(frozen=True)
 class SearchHit:
     """One search result.
@@ -495,10 +514,11 @@ class VectorIndex:
         """Create the tables, add missing columns and seed the ``meta`` keys.
 
         Idempotent and safe to race with other processes doing the same.
-        The random ``generation`` identifies this index file, so a deleted
-        and rebuilt index never matches a change token cached from the old
-        file (see :meth:`_rows`) nor the snapshot of a sync started on the
-        old file (see :meth:`_write`).
+        The random ``generation`` identifies this build of the index
+        (:meth:`clear` assigns a new one too), so a cleared or a deleted
+        and rebuilt index never matches a change token cached from the
+        old rows (see :meth:`_rows`) nor the snapshot of a sync started
+        on them (see :meth:`_write`).
         """
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages ("
@@ -603,11 +623,12 @@ class VectorIndex:
         with the column default ``0`` and are matched (or blindly replaced
         by that process) until every writer runs this version.  Both are
         healed by the next sync because the ``sha256`` check is unaffected.
-        The snapshot also records the file's ``generation``: a batch that
-        finds another one (the file was deleted and rebuilt by
-        :meth:`clear` + ``sync`` meanwhile, which restarts the ``revision``
-        counter, so the snapshot's tokens could match the new rows by
-        coincidence) is skipped whole and left to the next sync.
+        The snapshot also records the index's ``generation``: a batch that
+        finds another one (the index was cleared and rebuilt by
+        :meth:`clear` + ``sync`` meanwhile, or the file deleted by hand,
+        which restarts the ``revision`` counter, so the snapshot's tokens
+        could match the new rows by coincidence) is skipped whole and
+        left to the next sync.
 
         Args:
             verify: Hash every page even when its stat key matches (used by
@@ -693,7 +714,7 @@ class VectorIndex:
                 rows.append(
                     (
                         filename,
-                        json.dumps(split_frontmatter(raw)[0], default=str),
+                        _frontmatter_json(split_frontmatter(raw)[0]),
                         mtime,
                         digest,
                         serialize_float32(normalize(vector)),
@@ -936,11 +957,20 @@ class VectorIndex:
             return int(conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0])
 
     def clear(self) -> None:
-        """Delete the index file; the next :meth:`sync` rebuilds it from the pages.
+        """Empty the index in place; the next :meth:`sync` rebuilds it from the pages.
 
-        A concurrent clear of the same file (another thread, or a parallel
-        ``evaluate.py`` run) is tolerated: POSIX reports it as a missing
-        file, Windows as ``PermissionError`` while the file is pending
-        deletion, which :func:`unlink_waiting_for_holders` waits out.
+        The file is never deleted: SQLite names a connection's rollback
+        journal after the database path, so a transaction still open on
+        a deleted file and those of the file rebuilt at that path would
+        share one journal, and the first commit would remove the other's
+        (``disk I/O error``).  Instead the rows are deleted under the
+        write lock, after any transaction in flight, and the index gets
+        a fresh ``generation`` so a sync that snapshotted the old rows
+        writes nothing into the emptied index (see :meth:`_write`).  A
+        concurrent clear (another thread, or a parallel ``evaluate.py``
+        run) just empties the same file again.
         """
-        unlink_waiting_for_holders(self.path)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM pages")
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'generation'", (uuid.uuid4().hex,))

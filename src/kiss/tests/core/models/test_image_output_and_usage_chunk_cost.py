@@ -68,7 +68,10 @@ def _run_gemini_agent(
 ) -> KISSAgent:
     """Run one real non-agentic turn of the image *model* against *endpoint*."""
     base_url, script = endpoint
-    script.play([chunk([text_part("hi")], usage=_image_usage(image_tokens))], after="close")
+    script.play(
+        [chunk([text_part("hi")], usage=_image_usage(image_tokens), finish_reason="STOP")],
+        after="close",
+    )
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     agent = KISSAgent("image-output-cost")
     agent.model = GeminiModel(model, api_key="test-key")

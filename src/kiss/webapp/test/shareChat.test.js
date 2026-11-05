@@ -340,6 +340,75 @@ async function run() {
     );
   });
 
+  await test('2026-11-04 W5 F3: a reply for a chat the tab has left is dropped', () => {
+    // Another surface runs a new chat on a machine in this very tab
+    // while the daemon loads the old chat's tasks: its reply would
+    // splice the new chat's screen into the old chat's page.
+    const wv = makePage();
+    const win = wv.win;
+    const TAB = runSmallTask(wv, 'old-chat-A', 'old-task-A');
+    send(win, {type: 'status', running: false, tabId: TAB});
+    click(win.document.getElementById('share-btn'));
+    const req = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+    assert.strictEqual(req.chatId, 'old-chat-A');
+    send(win, {type: 'tabMachine', machine: 'remote-host', tabId: TAB});
+    send(win, {type: 'setTaskText', text: 'new remote chat', tabId: TAB});
+    send(win, {type: 'clear', chat_id: 'new-chat-B', tabId: TAB});
+    send(win, {
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'printf PRIVATE_NEW_CHAT_B',
+      tabId: TAB,
+      taskId: 'new-task-B',
+      ts: Date.now(),
+    });
+    send(win, {
+      type: 'share_tasks',
+      tabId: TAB,
+      chatId: 'old-chat-A',
+      tasks: [{task: 'list the files', task_id: 'old-task-A', events: []}],
+      truncated: false,
+    });
+    assert.ok(
+      !wv.posted.some(m => m.type === 'shareChat'),
+      'the stale reply exports nothing',
+    );
+    // The button is free again: a click shares the chat now shown.
+    click(win.document.getElementById('share-btn'));
+    const again = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
+    assert.notStrictEqual(again, req, 'Share works again');
+    assert.strictEqual(again.chatId, 'new-chat-B');
+  });
+
+  await test('2026-11-04 W5 F2: a queued follow-up echo does not split the task in two', () => {
+    // The daemon echoes a follow-up typed into the running task with
+    // setTaskText (then prompt): the same task goes on, so the export
+    // holds its persisted transcript once, with the live tail, not a
+    // second "Original task" section.
+    const wv = makePage();
+    const win = wv.win;
+    const TAB = runSmallTask(wv, 'chat-follow', 'task-follow');
+    send(win, {type: 'setTaskText', text: 'also inspect the second file', tabId: TAB});
+    send(win, {type: 'prompt', text: 'also inspect the second file', steer: true, tabId: TAB, taskId: 'task-follow'});
+    send(win, {
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'printf SAME_TASK_TAIL',
+      tabId: TAB,
+      taskId: 'task-follow',
+      ts: Date.now(),
+    });
+    const msg = shareWithTasks(wv, [
+      {task: 'list the files', task_id: 'task-follow', events: [
+        {type: 'tool_call', name: 'Bash', command: 'ls -la', description: 'List files'},
+        {type: 'tool_result', content: 'file-one.txt', tool_name: 'Bash'},
+      ]},
+    ]);
+    const sections = makeSharePage(msg.html).document.querySelectorAll('.share-task');
+    assert.strictEqual(sections.length, 1, 'one task, one section');
+    assert.ok(msg.html.includes('SAME_TASK_TAIL'), 'with the live tail');
+  });
+
   await test('share.js collapses and expands a serialized event panel', () => {
     const wv = makePage();
     runSmallTask(wv, 'chat-4', 'task-4');

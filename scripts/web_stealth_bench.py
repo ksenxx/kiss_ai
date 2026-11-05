@@ -21,7 +21,13 @@ site's policy has relaxed (``OK``).  Anything else on such a page (another
 vendor's block, an AWS WAF page -- the token challenge that never cleared
 or the puzzle -- without a Crossref answer that names the paper, the
 puzzle page unrecognised and returned as content) is a block like
-elsewhere.
+elsewhere.  Pages that rate the network's address the same way but
+have no open-data stand-in (Reddit's 403 "blocked by network security"
+page on every reddit.com host, Stack Overflow's search behind its
+reCAPTCHA puzzle; both recognised and reported to the agent with the way
+out since 3 Nov 2026) are not in the list: recognised or not, they are
+blocks, and the recognition is checked against their recorded markup in
+``test_web_stealth.py`` instead.
 
 Usage::
 

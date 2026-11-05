@@ -11,6 +11,7 @@ management — the same workflow that the daemon performs in
 
 from __future__ import annotations
 
+import json
 import logging
 import platform
 import re
@@ -30,12 +31,14 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _allocate_chat_id,
     _append_chat_event,
+    _current_db_path,
     _load_chat_context,
     _load_task_chain_context,
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
     _task_has_transcript_events,
+    _write_event_batch,
     task_end_ms,
 )
 from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
@@ -665,7 +668,12 @@ class ChatSorcarAgent(SorcarAgent):
         ``followup_suggestion`` event — but only when the task has no
         transcript events yet (the run's ``task_settings`` metadata
         event, persisted before any output, is ignored), so a recording
-        printer's full event stream is never duplicated.
+        printer's full event stream is never duplicated.  The events
+        are written as one batch in one transaction: a Stop landing in
+        the write leaves none of them or all of them, so the retry of
+        the final save (``run``'s cleanup) either synthesizes them again
+        or finds the complete transcript — never a prompt alone, which
+        it would take for a recorded transcript.
 
         Args:
             task_id: Stable ``task_history`` row id for this run.
@@ -682,8 +690,9 @@ class ChatSorcarAgent(SorcarAgent):
         """
         if _task_has_transcript_events(task_id):
             return
+        events: list[dict[str, object]] = []
         if prompt:
-            _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
+            events.append({"type": "prompt", "text": prompt})
         cost, tokens, steps = usage
         event: dict[str, object] = {
             "type": "result",
@@ -699,12 +708,12 @@ class ChatSorcarAgent(SorcarAgent):
             event["summary"] = str(parsed["summary"])
         else:
             event["summary"] = result_summary or ""
-        _append_chat_event(event, task_id=task_id)
+        events.append(event)
         suggestion = str((parsed or {}).get("suggested_next_task") or "").strip()
         if suggestion:
-            _append_chat_event(
-                {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
-            )
+            events.append({"type": "followup_suggestion", "text": suggestion})
+        origin, now = _current_db_path(), time.time()
+        _write_event_batch([(task_id, json.dumps(ev), now, origin) for ev in events])
 
     def _begin_run_usage_epoch(self) -> None:
         """Keep the usage epoch :meth:`run` started at row allocation.

@@ -157,6 +157,27 @@ def _terminal_response_error(status: str, reason: str, message: str) -> KISSErro
     return _terminal_error(reason if status == "incomplete" else "", "max_output_tokens", message)
 
 
+def _pending_index(calls: list[dict[str, str]], func_name: str, call_id: str) -> int | None:
+    """Return the index of the pending call one tool result answers.
+
+    Args:
+        calls: The pending (or unanswered) ``{"name", "call_id"}`` entries.
+        func_name: The name of the function whose result is being added.
+        call_id: The result's explicit ``tool_use_id`` (``""`` when none).
+
+    Returns:
+        The entry carrying *call_id* when one does, else the first entry
+        named *func_name*, else ``None``.
+    """
+    for j, pending in enumerate(calls):
+        if call_id and pending.get("call_id") == call_id:
+            return j
+    for j, pending in enumerate(calls):
+        if pending.get("name") == func_name:
+            return j
+    return None
+
+
 # The request parameters a Responses call accepts, taken from the SDK's own
 # signature (keyword-only, no **kwargs), and the sub-keys its
 # ``stream_options`` declares (the Chat Completions shape differs).
@@ -293,6 +314,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self,
         func_name: str,
         fallback_unanswered: list[dict[str, str]] | None,
+        explicit_call_id: str = "",
     ) -> str:
         """Return the call_id of the pending ``function_call`` named ``func_name``.
 
@@ -301,13 +323,18 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         empty — a conversation restored without its per-turn state — the
         caller passes ``fallback_unanswered``, the conversation's
         unanswered ``function_call`` items, and the match is made there
-        instead.  Either way the matched entry is consumed.
+        instead.  Either way the matched entry is consumed: the one
+        carrying *explicit_call_id* when the result names its call (two
+        same-name calls answered out of order must each consume their
+        own entry), else the first one named ``func_name``.
 
         Args:
             func_name: Name of the function whose result is being added.
             fallback_unanswered: The unanswered function calls to match
                 when the pending queue is empty, or ``None`` when the
                 queue was populated.
+            explicit_call_id: The result's ``tool_use_id``, ``""`` when
+                it carries none.
 
         Returns:
             The model's original ``call_id``.
@@ -317,22 +344,20 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 carries ``func_name``.
         """
         if self._pending_function_calls:
-            for j, pending in enumerate(self._pending_function_calls):
-                if pending.get("name") == func_name:
-                    call_id = self._pending_function_calls.pop(j)["call_id"]
-                    if not call_id:
-                        raise KISSError(
-                            f"Pending function_call for {func_name!r} has empty call_id"
-                        )
-                    return call_id
+            j = _pending_index(self._pending_function_calls, func_name, explicit_call_id)
+            if j is not None:
+                call_id = self._pending_function_calls.pop(j)["call_id"]
+                if not call_id:
+                    raise KISSError(f"Pending function_call for {func_name!r} has empty call_id")
+                return call_id
             pending_names = [p.get("name", "") for p in self._pending_function_calls]
             raise KISSError(
                 f"No pending function_call named {func_name!r}; pending calls are {pending_names!r}"
             )
         if fallback_unanswered is not None:
-            for j, pending in enumerate(fallback_unanswered):
-                if pending.get("name") == func_name:
-                    return fallback_unanswered.pop(j)["call_id"]
+            j = _pending_index(fallback_unanswered, func_name, explicit_call_id)
+            if j is not None:
+                return fallback_unanswered.pop(j)["call_id"]
             if fallback_unanswered:
                 fallback_names = [p.get("name", "") for p in fallback_unanswered]
                 raise KISSError(
@@ -1968,12 +1993,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
         for func_name, result_dict in function_results:
             result_content, attachments = self.tool_result_text_and_attachments(result_dict)
+            explicit_call_id = str(result_dict.get("tool_use_id") or "")
             # The pending call is consumed either way, so the bookkeeping
             # that guards the next turn stays correct even when the caller
             # names the id itself.
-            matched_call_id = self._consume_pending_call_id(func_name, fallback_unanswered)
-            explicit_call_id = result_dict.get("tool_use_id")
-            call_id = str(explicit_call_id) if explicit_call_id else matched_call_id
+            matched_call_id = self._consume_pending_call_id(
+                func_name, fallback_unanswered, explicit_call_id
+            )
+            call_id = explicit_call_id or matched_call_id
             self.conversation.append(
                 {
                     "type": "function_call_output",

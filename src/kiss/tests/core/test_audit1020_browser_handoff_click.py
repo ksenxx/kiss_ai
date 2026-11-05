@@ -18,7 +18,6 @@ and the click are seen waiting on the still-unsettled claim.
 
 from __future__ import annotations
 
-import json
 import sys
 import threading
 import time
@@ -31,6 +30,7 @@ import pytest
 from kiss.core import browser_handoff
 from kiss.core.browser_handoff import open_in_default_browser
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
+from kiss.tests.conftest import read_browser_launches as _launches
 
 # A browser launcher that records its argv, then exits 0 only once the
 # test writes the ``release`` file beside it: the launch is "in flight"
@@ -61,14 +61,6 @@ def gated_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[P
         browser_handoff._recent.clear()
     yield home
     (home / "release").touch()
-
-
-def _launches(home: Path) -> list[list[str]]:
-    """Return the argv of every browser launch recorded so far."""
-    log = home / "browser-log"
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text().splitlines()]
 
 
 def _wait_until(condition: Callable[..., bool], what: str, *args: object) -> None:

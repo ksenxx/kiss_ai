@@ -1367,6 +1367,7 @@ async function main() {
       name: 'lab',
       address: 'https://lab.example.org:8787',
       machinePassword: 'pw',
+      generation: 1,
     };
     eq(posted, [addCmd]);
     // The add is in flight: a repeated Enter sends nothing more.
@@ -1379,13 +1380,15 @@ async function main() {
     // values; the periodic poll keeps it (with the draft); the reply
     // acknowledging the retried add (the machine registered) closes
     // it, while one acknowledging nothing this form sent (another
-    // window's add) leaves it alone.
+    // window's add) leaves it alone.  The daemon echoes the
+    // generation the add was stamped with; the reply is matched on it.
     send(win, {
       type: 'machines',
       machines: MACHINES,
       checkedAt: 2,
       action: 'add',
       error: 'lab: unreachable',
+      generation: 1,
     });
     form = topForm();
     assert.ok(form, 'the form is back at the top');
@@ -1414,12 +1417,24 @@ async function main() {
     posted.length = 0;
     form.querySelector('.sidebar-inline-form-save').click();
     assert.strictEqual(posted[0].name, 'lab2', 'the retry sends the draft');
+    assert.strictEqual(posted[0].generation, 2, 'under a fresh generation');
+    // An echo of a generation this form did not send leaves it open.
     send(win, {
       type: 'machines',
       machines: MACHINES,
       checkedAt: 5,
       action: 'add',
       error: '',
+      generation: 1,
+    });
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    send(win, {
+      type: 'machines',
+      machines: MACHINES,
+      checkedAt: 6,
+      action: 'add',
+      error: '',
+      generation: 2,
     });
     assert.strictEqual(list.querySelectorAll('form').length, 0);
   });
@@ -3314,6 +3329,7 @@ async function main() {
         name: 'lab2',
         address: 'https://lab2:8787',
         machinePassword: 'pw',
+        generation: 1,
         machine: 'gpu-box',
       },
     ]);

@@ -3,7 +3,9 @@
 The old exists-then-unlink raised ``FileNotFoundError`` when another
 thread or process (a parallel ``evaluate.py`` run) removed the file
 between the two calls.  Eight threads released by a barrier hit that
-window in most rounds, so a few rounds pin the fix.
+window in most rounds, so a few rounds pin the fix.  (A clear now
+empties the index in place, under its write lock, rather than
+unlinking the file.)
 """
 
 import sys
@@ -35,7 +37,7 @@ def test_concurrent_clear_never_raises(tmp_path: Path) -> None:
             for thread in threads:
                 thread.join()
             assert errors == []
-            assert not index.path.exists()
+            assert index.count() == 0
     finally:
         sys.setswitchinterval(previous)
     # Clearing an index that was never built is a no-op too.

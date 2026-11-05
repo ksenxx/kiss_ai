@@ -28,6 +28,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
 
 @pytest.fixture(autouse=True)
@@ -37,10 +38,8 @@ def _reset_sea_commands() -> Iterator[None]:
     Also removes the ``SEAS.md`` written into the session-wide
     ``$KISS_HOME`` so it cannot shadow bundled commands for later tests.
     """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _touch_sea(folder: Path, name: str) -> Path:

@@ -475,7 +475,9 @@ function testUnacknowledgedPromptComesBackAsDraft() {
     [[tabId, 'follow-up into a dead socket']],
     'an unacknowledged follow-up is persisted',
   );
-  send(win, {type: 'prompt', text: 'follow-up into a dead socket', tabId});
+  // The daemon marks the echo of a follow-up `steer` (a task's own
+  // prompt panel is a `prompt` too, without it).
+  send(win, {type: 'prompt', steer: true, text: 'follow-up into a dead socket', tabId});
   assert.deepStrictEqual(draftsOf(win, getState), [], 'the echo acknowledges it');
 
   // The next task after this one ended: the tab keeps its old task id,

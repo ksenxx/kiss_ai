@@ -9,9 +9,13 @@
 // * a task start fires exactly one immediate poll (the poll timer's
 //   own first request; syncMetaInfoRunning must not add a second one);
 // * the poll goes quiet when the owner chat's task ends while a content
-//   tab is shown: the owner's `status running:false` is not the active
-//   tab's, yet the page mirrors it onto the shared surface (clock,
-//   subpanel, poll) because the content tab borrows the owner's panel;
+//   tab is shown: on the desktop split layout the listing goes to the
+//   content pane, which slides the task-info panel off screen and
+//   stops the poll (a panel off screen must not run the daemon's paid
+//   update agent); shown again beside the listing, the panel polls the
+//   owner chat's running task until the owner's `status running:false`
+//   clears the shared surface (clock, subpanel) and quiets the still
+//   live poll timer;
 // * a switch from a running chat to an idle one fires no poll for the
 //   idle tab: restoreTab retargets the panel before it applies the
 //   destination's running state, so the poll must consult the POLLED
@@ -34,6 +38,7 @@ const assert = require('assert');
 const {
   makePage,
   send,
+  click,
   stubRaf,
   fakeIntervals,
   fakeMatchMedia,
@@ -139,11 +144,36 @@ function testPollGoesQuietWhenOwnerStopsBehindContentTab() {
     win._testApi.openTabs().some(t => t.isContentTab),
     'the listing opened a content tab',
   );
+  // The content pane slides the task-info panel off screen, and a
+  // panel off screen does not poll: the timer is gone, so a tick here
+  // would prove nothing about the owner's stop.
+  assert.strictEqual(
+    page.pollTimers().length,
+    0,
+    'the panel slid off behind the listing stops the poll',
+  );
+  // The show tab at the chat's right edge brings the panel back beside
+  // the listing: the poll resumes, for the owner chat, and a live tick
+  // asks again while its task runs.
+  click(win, win.document.getElementById('meta-drawer'));
+  assert.strictEqual(
+    page.pollTimers().length,
+    1,
+    'the panel shown again beside the listing polls again',
+  );
+  let count = polls(page).length;
+  page.tickPolls();
+  assert.strictEqual(
+    polls(page).length,
+    count + 1,
+    'a live tick polls the running owner chat',
+  );
+  assert.strictEqual(polls(page)[count].tabId, root, 'for the owner chat');
   // The owner chat's task ends while the content tab is shown.  On the
   // desktop split layout the chat stays the active tab (the listing
   // went to the content pane), so this is the active tab's own status;
   // what matters is that the panel lent to the content view clears
-  // and stops polling with it.
+  // and its still live timer stops polling with it.
   send(win, {type: 'status', running: false, tabId: root});
   assert.ok(
     !win.document.getElementById('meta-info').classList.contains('visible'),
@@ -155,7 +185,8 @@ function testPollGoesQuietWhenOwnerStopsBehindContentTab() {
       .textContent.startsWith('Running'),
     'the clock must stop with the owner task',
   );
-  const count = polls(page).length;
+  count = polls(page).length;
+  assert.strictEqual(page.pollTimers().length, 1, 'the timer is still live');
   page.tickPolls();
   page.tickPolls();
   assert.strictEqual(

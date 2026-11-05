@@ -339,6 +339,24 @@ def rewrite_guard(
         and _PYTHON_WRITE.search(command)
     ):
         python = [c for c in commands if c.reads_heredoc() and c.program().startswith("python")]
+        if not python:
+            # No python reads a here-document: a ``python3 - <<`` in the
+            # body of a here-document a copier copies into files
+            # (``cat`` copying a script into a scratch file,
+            # :func:`_copies_to_files`) is data; one anywhere else (the
+            # body a shell runs, one a copier pipes on to a shell, a
+            # quoted string or an array value the scanner does not read
+            # into) is code it cannot see into and keeps the refusal.
+            # Counted, not cut out of the text: a copy of the text does
+            # not hide the one that runs.
+            copied = sum(
+                len(_PYTHON_HEREDOC.findall(simple.heredoc_body))
+                for simple in commands
+                if simple.heredoc_body is not None and simple.heredoc_body in command
+                and _copies_to_files(simple, commands)
+            )
+            if copied == len(_PYTHON_HEREDOC.findall(command)):
+                return None
         whole = heredoc_text(command)
         # The program each python reads: the here-document that is the
         # whole command, else the text the scanner kept on the node
@@ -658,10 +676,10 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
     (:func:`_segments`), nor is a rewrite that is not the first segment
     after the ``cd`` (an earlier segment may change the file).  A
     command that is one simple command without a here-document, at the
-    top level and not in the background, is the rewrite as it is (a
-    line continuation or a comment line before it is fine then).  The
-    rewrite's redirections must be the ones the conversions model
-    (:func:`_exact_redirections`).
+    top level, not negated and not in the background, is the rewrite as
+    it is (a line continuation or a comment line before it is fine
+    then).  The rewrite's redirections must be the ones the conversions
+    model (:func:`_exact_redirections`).
 
     Args:
         command: The shell command text.
@@ -681,6 +699,7 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
         segments = _segments(command)
         if (
             segments is None
+            or commands[0].negated  # the shell inverts its status: not an Edit's
             or any(operator not in ("", ";") for _, operator in segments)
             or not _exact_redirections(commands[0])
         ):
@@ -1043,6 +1062,7 @@ class _PythonRewrite:
     def statement(self, node: ast.stmt) -> None:
         """Account for one top-level statement; a shape outside the pattern ends the exactness."""
         if isinstance(node, (ast.Import, ast.ImportFrom)):
+            self.imports(node)
             return
         fits = False
         if (
@@ -1058,6 +1078,24 @@ class _PythonRewrite:
         if not fits:
             self.exact = False
             self.note_paths(node)
+
+    def imports(self, node: ast.Import | ast.ImportFrom) -> None:
+        """Account for an import: one rebinding a name the pattern reads ends the exactness.
+
+        A path or text name bound to a module (``import os as p``) no
+        longer holds what it was read as; ``open`` from another module
+        (``from gzip import open``), a ``Path`` that is not
+        ``pathlib``'s, or a ``*`` import (which may bind either) are not
+        the calls the pattern reads.
+        """
+        pathlib = isinstance(node, ast.ImportFrom) and node.module == "pathlib"
+        for alias in node.names:
+            name = (alias.asname or alias.name).partition(".")[0]
+            if (
+                name in self.paths or name == self.text or name in ("open", "*")
+                or (name == "Path" and not (pathlib and alias.name == "Path"))
+            ):
+                self.exact = False
 
     def assignment(self, name: str, value: ast.expr) -> bool:
         """Account for ``name = value``: a path, the text read, or its replacements.
@@ -1208,15 +1246,16 @@ def python_edit(program: str) -> tuple[str | None, list[tuple[str, str, bool]], 
     one or more times, and write it back to the same file
     (``open(p, "w").write(s)``, ``Path(p).write_text(s)``, ``with
     open(p, "w") as f: f.write(s)``), *p* a string literal, possibly
-    through a name assigned once; imports are allowed.  The I/O calls
-    may only carry the ``encoding``/``errors``/``newline`` keywords
-    that keep the bytes as ``Edit`` does (:func:`_exact_text_io`), and
-    a replacement after the write is no part of it.  The path is still
-    returned, when one is found, for a program outside the pattern
-    (``re.sub``, a loop, two files).  The last value says whether the
-    read translates line endings (:func:`_universal_newlines`): the
-    pairs are then exact only for a file holding no ``\\r``
-    (:meth:`MechanicalEdit.edits_for`).
+    through a name assigned once; an import binding no name the
+    pattern reads (:meth:`_PythonRewrite.imports`) is allowed.  The
+    I/O calls may only carry the ``encoding``/``errors``/``newline``
+    keywords that keep the bytes as ``Edit`` does
+    (:func:`_exact_text_io`), and a replacement after the write is no
+    part of it.  The path is still returned, when one is found, for a
+    program outside the pattern (``re.sub``, a loop, two files).  The
+    last value says whether the read translates line endings
+    (:func:`_universal_newlines`): the pairs are then exact only for a
+    file holding no ``\\r`` (:meth:`MechanicalEdit.edits_for`).
 
     Args:
         program: The python source.
@@ -1248,10 +1287,13 @@ def python_written_paths(program: str) -> list[str] | None:
     ``p.write_bytes(...)``, anywhere in the program; *p* is a string
     literal, ``Path(<literal>)`` or a name bound exactly once in the
     whole program, by an assignment.  ``None`` when the program does
-    not parse, writes no file this reading sees, or writes one whose
+    not parse, writes no file this reading sees, writes one whose
     path it builds at run time (an f-string, ``sys.argv``, a name bound
-    twice: assigned again, or also a parameter, loop target or import):
-    it may then write any file, and a guard must assume the worst.
+    twice: assigned again, or also a parameter, loop target or import),
+    or changes its working directory (``os.chdir``, ``os.fchdir``),
+    after which a relative path names a file in a directory the caller
+    resolving the paths does not know: it may then write any file, and
+    a guard must assume the worst.
 
     Args:
         program: The python source.
@@ -1276,6 +1318,8 @@ def python_written_paths(program: str) -> list[str] | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        if ast.unparse(node.func).rpartition(".")[2] in _CHDIR:
+            return None
         target = _write_target(node)
         if target is None:
             continue
@@ -1288,6 +1332,9 @@ def python_written_paths(program: str) -> list[str] | None:
 
 #: A write whose target or mode is not a literal: it may name any file.
 _UNKNOWN = ast.Name("?")
+
+#: The calls that change the working directory (``os.chdir(d)``, a bare ``chdir(d)``).
+_CHDIR = frozenset({"chdir", "fchdir"})
 
 
 def _bound_names(tree: ast.AST) -> Counter[str]:
@@ -1544,6 +1591,11 @@ def mechanical_edit(command: str, cwd: str | None) -> MechanicalEdit | None:
 
 # The commands that copy their input (a here-document) to their outputs verbatim.
 _COPIERS = frozenset({"cat", "tee"})
+# File names that are a process's own descriptors, not files of their own.
+_DESCRIPTOR_ALIASES = ("/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty", "/dev/fd/",
+                       "/proc/self/fd/", "/proc/thread-self/fd/")
+# The redirections that open their operand as a file on the descriptor they name.
+_FILE_OPENERS = frozenset({"<", "<>", ">", ">>", ">|", "&>", "&>>"})
 HEREDOC_VERDICT = (
     "REFUSED: the command did not run: it writes the existing file {path} through a "
     "here-document (an append counts). Use Edit(file_path=\"{path}\", old_string=<the exact "
@@ -1595,6 +1647,79 @@ def _output_files(
             break
         node = receiver(node)
     return writes
+
+
+def _names_a_file(cwd: str | None, word: Word) -> bool:
+    """Return whether *word* names a file of its own in the directory *cwd*.
+
+    The path must be one the scan resolves (:func:`resolve`: literal,
+    normalised, in a known directory) and not a descriptor alias:
+    ``/dev/stdout``, ``/dev//fd/3`` and the like are the command's own
+    descriptors under a file name, a stream, not a sink.
+    """
+    path = resolve(cwd, word)
+    return path is not None and not ("/" + path.lstrip("/")).startswith(_DESCRIPTOR_ALIASES)
+
+
+def _stdout_sink(node: SimpleCommand | Group) -> Word | str:
+    """Return where the standard output of *node* ends once its redirections are applied.
+
+    The redirections are replayed in order over the descriptors they
+    name (the operator's default when unnumbered: ``0`` for ``<``,
+    ``1`` for ``>``), so a duplication (``2>&1``, ``1>&3``, ``1<&3``)
+    copies what its source holds then.  A literal file :class:`Word` is
+    a sink the scan can name; ``"stream"`` is the pipe or standard
+    output the shell gave the command (where ``3>&1 >/dev/null 1>&3``
+    ends again); ``"unknown"`` is anything else: a descriptor alias such
+    as ``/dev/stdout``, a word only the shell knows, a closed descriptor,
+    one nothing opened, a here-document or a here-string, and both
+    standard descriptors after a ``01<&3``, ``11>x`` or ``{name}>x``
+    (bash's descriptor 1, 11 or a new one; sh's default one).
+    """
+    table: dict[str, Word | str] = {"1": "stream", "2": "stream"}
+    for fd, operator, operand in node.redirections:
+        value: Word | str = "unknown"
+        targets: tuple[str, ...] = ("1", "2")
+        if len(fd) <= 1:
+            if operator in ("<&", ">&") and (operand.text.isdigit() or operand.text == "-"):
+                value = table.get(operand.text, "unknown")
+            elif operator in _FILE_OPENERS and _names_a_file(node.cwd, operand):
+                value = operand
+            default = "0" if operator.startswith("<") else "1"
+            targets = ("1", "2") if operator in _BOTH_OPERATORS else (fd or default,)
+        for target in targets:
+            table[target] = value
+    return table["1"]
+
+
+def _copies_to_files(reader: SimpleCommand, commands: list[SimpleCommand]) -> bool:
+    """Return whether *reader* copies its input into files the scan can name, and nowhere else.
+
+    Its output, followed as :func:`_output_files` follows it, must end
+    in files (:func:`_stdout_sink`; ``tee``'s operands too); a shell
+    or interpreter it reaches runs the text, a process substitution
+    (``>(bash)``) or a word only the shell knows may be one, a
+    substitution hands it to another command as a word, and the
+    command's own standard output may be sent anywhere (``exec >``).
+    """
+    node: SimpleCommand | Group | None = reader
+    while node is not None:
+        if isinstance(node, SimpleCommand):
+            program = node.program()
+            if program not in _COPIERS:
+                return False
+            if program == "tee" and not all(
+                    _names_a_file(node.cwd, word)
+                    for word in node.argv()[1:] if word.text[:1] != "-"):
+                return False
+        sink = _stdout_sink(node)
+        if sink != "stream":
+            return isinstance(sink, Word)
+        if isinstance(node.reader, Group):
+            return all(_copies_to_files(member, commands)
+                       for member in _input_readers(node.reader, commands))
+        node = receiver(node)
+    return False
 
 
 def _input_readers(group: Group, commands: list[SimpleCommand]) -> list[SimpleCommand]:

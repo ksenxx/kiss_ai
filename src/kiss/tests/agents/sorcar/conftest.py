@@ -50,10 +50,12 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
-from kiss.agents.sorcar import persistence
+from kiss.agents.sorcar import persistence, sea_commands
+from kiss.core.config import kiss_home
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +73,22 @@ def _reset_persistence_connection_cache() -> Iterator[None]:
     """
     persistence._close_db()
     yield
+
+
+@contextmanager
+def isolated_sea_registry() -> Iterator[None]:
+    """Run the body on an empty SEA registry; drop it and the test's ``SEAS.md`` afterwards.
+
+    The registry fixtures of the SEA-command suites wrap this (``with
+    isolated_sea_registry(): yield``): a ``SEAS.md`` left in the session-wide
+    ``$KISS_HOME`` would redirect bundled commands for later tests.
+    """
+    sea_commands._reset_for_tests()
+    try:
+        yield
+    finally:
+        sea_commands._reset_for_tests()
+        (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 @pytest.hookimpl(wrapper=True)

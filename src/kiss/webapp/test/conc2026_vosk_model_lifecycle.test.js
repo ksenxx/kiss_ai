@@ -46,7 +46,7 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {micBtn, makeVoskWindow} = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
 
@@ -215,25 +215,6 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
       },
     };
   }
-  win.AudioContext = class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      return {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
-    }
-  };
 
   win.__VOICE__ = Object.assign({}, FALLBACK_CFG, options.cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
@@ -245,22 +226,6 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
 // that records postMessage traffic and terminate() calls and lets the
 // test play the worker's side of the protocol.
 // ---------------------------------------------------------------------
-
-function makeVoskWindow() {
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
-    runScripts: 'dangerously',
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  const workers = [];
-  win.Worker = fakeWorkerClass(workers, null);
-  if (typeof win.URL.createObjectURL !== 'function') {
-    win.URL.createObjectURL = () => 'blob:fake-worker-url';
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
-  assert.ok(win.Vosk && win.Vosk.createModel, 'vosk.js must export Vosk');
-  return {win, workers};
-}
 
 /** True when the worker was told to die: DOM terminate() or the vosk
  *  protocol's {action:'terminate'} message (its worker handles that by
@@ -447,7 +412,7 @@ async function main() {
   );
 
   await test('CAND-5: a model that fails to load terminates its spawned worker', async () => {
-    const {win, workers} = makeVoskWindow();
+    const {win, workers} = makeVoskWindow(fakeWorkerClass);
     let rejected = 0;
     const p = win.Vosk.createModel('https://models.example.com/m.tar.gz');
     p.catch(() => {
@@ -473,7 +438,7 @@ async function main() {
   });
 
   await test('CAND-5: every retry frees its own worker — no leak per attempt', async () => {
-    const {win, workers} = makeVoskWindow();
+    const {win, workers} = makeVoskWindow(fakeWorkerClass);
     for (let attempt = 0; attempt < 3; attempt++) {
       let rejected = 0;
       const p = win.Vosk.createModel('https://models.example.com/m.tar.gz');
@@ -498,7 +463,7 @@ async function main() {
     'CAND-6: a Worker that errors before ever posting load is hard-' +
       'terminated and createModel rejects',
     async () => {
-      const {win, workers} = makeVoskWindow();
+      const {win, workers} = makeVoskWindow(fakeWorkerClass);
       let rejection = null;
       const p = win.Vosk.createModel('https://models.example.com/m.tar.gz');
       p.catch(e => {
@@ -544,7 +509,7 @@ async function main() {
   );
 
   await test('CAND-6: every boot-failure retry frees its own worker — no leak', async () => {
-    const {win, workers} = makeVoskWindow();
+    const {win, workers} = makeVoskWindow(fakeWorkerClass);
     for (let attempt = 0; attempt < 3; attempt++) {
       let rejected = 0;
       const p = win.Vosk.createModel('https://models.example.com/m.tar.gz');
@@ -569,7 +534,7 @@ async function main() {
     'CAND-6: a Worker error AFTER a successful load does not kill the ' +
       'live model (the boot listener is one-shot)',
     async () => {
-      const {win, workers} = makeVoskWindow();
+      const {win, workers} = makeVoskWindow(fakeWorkerClass);
       let model = null;
       win.Vosk.createModel('https://models.example.com/m.tar.gz').then(m => {
         model = m;
@@ -592,7 +557,7 @@ async function main() {
     'CAND-5: a successful load resolves with a live model and does not ' +
       'terminate its worker (regression guard)',
     async () => {
-      const {win, workers} = makeVoskWindow();
+      const {win, workers} = makeVoskWindow(fakeWorkerClass);
       let model = null;
       const p = win.Vosk.createModel('https://models.example.com/m.tar.gz');
       p.then(m => {

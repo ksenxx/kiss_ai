@@ -192,38 +192,68 @@ def _make_error_backend(composio) -> GmailChannelBackend:
     return backend
 
 
+_ME = "/gmail/v1/users/me"
+# (tool, arguments, the Gmail request the tool makes and the endpoint rejects).
+# A reply fetches the message it answers before sending, so that fetch is
+# the rejected request.
 _GMAIL_TOOL_ERROR_CASES = [
-    ("get_profile", {}),
-    ("list_messages", {}),
-    ("get_message", {"message_id": "fake-id"}),
-    ("send_email", {"to": "test@example.com", "subject": "Test", "body": "Hello"}),
-    ("reply_to_message", {"message_id": "fake-id", "body": "Reply"}),
-    ("create_draft", {"to": "test@example.com", "subject": "Test", "body": "Draft"}),
-    ("trash_message", {"message_id": "fake-id"}),
-    ("untrash_message", {"message_id": "fake-id"}),
-    ("modify_labels", {"message_id": "fake-id", "add_label_ids": "STARRED"}),
-    ("list_labels", {}),
-    ("create_label", {"name": "TestLabel"}),
-    ("get_attachment", {"message_id": "fake-id", "attachment_id": "att-fake"}),
-    ("get_thread", {"thread_id": "fake-thread"}),
+    ("get_profile", {}, ("GET", f"{_ME}/profile")),
+    ("list_messages", {}, ("GET", f"{_ME}/messages")),
+    ("get_message", {"message_id": "fake-id"}, ("GET", f"{_ME}/messages/fake-id")),
+    (
+        "send_email",
+        {"to": "test@example.com", "subject": "Test", "body": "Hello"},
+        ("POST", f"{_ME}/messages/send"),
+    ),
+    (
+        "reply_to_message",
+        {"message_id": "fake-id", "body": "Reply"},
+        ("GET", f"{_ME}/messages/fake-id"),
+    ),
+    (
+        "create_draft",
+        {"to": "test@example.com", "subject": "Test", "body": "Draft"},
+        ("POST", f"{_ME}/drafts"),
+    ),
+    ("trash_message", {"message_id": "fake-id"}, ("POST", f"{_ME}/messages/fake-id/trash")),
+    ("untrash_message", {"message_id": "fake-id"}, ("POST", f"{_ME}/messages/fake-id/untrash")),
+    (
+        "modify_labels",
+        {"message_id": "fake-id", "add_label_ids": "STARRED"},
+        ("POST", f"{_ME}/messages/fake-id/modify"),
+    ),
+    ("list_labels", {}, ("GET", f"{_ME}/labels")),
+    ("create_label", {"name": "TestLabel"}, ("POST", f"{_ME}/labels")),
+    (
+        "get_attachment",
+        {"message_id": "fake-id", "attachment_id": "att-fake"},
+        ("GET", f"{_ME}/messages/fake-id/attachments/att-fake"),
+    ),
+    ("get_thread", {"thread_id": "fake-thread"}, ("GET", f"{_ME}/threads/fake-thread")),
 ]
 
 
 class TestGmailTools:
     """Tests for GmailChannelBackend tool creation and error handling."""
 
-    @pytest.mark.parametrize("tool_name,kwargs", _GMAIL_TOOL_ERROR_CASES)
+    @pytest.mark.parametrize("tool_name,kwargs,rejected", _GMAIL_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
-        self, gmail_server, tool_name: str, kwargs: dict
+        self, gmail_server, tool_name: str, kwargs: dict, rejected: tuple[str, str]
     ) -> None:
-        """Every Gmail tool returns {ok: false, error: ...} with invalid credentials."""
+        """Every Gmail tool returns {ok: false, error: ...} with invalid credentials.
+
+        The error must be the endpoint's own 401, reached through the tool's
+        one request: a tool refused earlier (Composio, argument validation)
+        also answers ``ok: false`` but proves nothing about the Gmail call.
+        """
         composio, server = gmail_server
         backend = _make_error_backend(composio)
+        server.requests.clear()  # connect()'s own profile call
         fn = next(t for t in backend.get_tool_methods() if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False
-        assert "error" in result
-        assert server.requests, "tool call never reached the local Gmail endpoint"
+        assert "HttpError 401" in result["error"] and "Invalid Credentials" in result["error"]
+        assert [(r["method"], r["path"]) for r in server.requests] == [rejected]
 
 
 class TestGmailAgent:

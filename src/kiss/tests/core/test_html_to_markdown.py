@@ -9,6 +9,8 @@ commit messages.  Each test feeds real HTML and checks the exact
 Markdown so that every element type and escaping rule is exercised.
 """
 
+from markdown_it import MarkdownIt
+
 from kiss.core.html_to_markdown import html_to_markdown
 
 
@@ -157,6 +159,20 @@ class TestInline:
         html = "<p><code>foo_bar</code> <code> spaced `tick` </code><code> </code></p>"
         assert html_to_markdown(html) == "`foo_bar` `` spaced `tick` ``"
 
+    def test_adjacent_code_spans_are_merged_into_one(self) -> None:
+        html = (
+            "<p><code>foo</code><code>bar</code><code>`baz`</code> "
+            "<b><code>x</code></b><code>y</code></p>"
+        )
+        assert html_to_markdown(html) == "`` foobar`baz` `` **`x`**`y`"
+        assert html_to_markdown("<p><code>a</code><b><code>b</code></b></p>") == "`a`**`b`**"
+        html = "<table><tr><td><code>a</code></td><td>yyy<code>b</code></td></tr></table>"
+        assert html_to_markdown(html) == "| `a` | yyy`b` |\n| --- | --- |"
+
+    def test_code_span_keeps_word_separating_spaces(self) -> None:
+        html = "<p>Run<code> git status </code>now, one<code> </code>two.</p>"
+        assert html_to_markdown(html) == "Run `git status` now, one two."
+
     def test_code_inside_pre_is_not_a_span(self) -> None:
         assert html_to_markdown("<pre><code>a `b`</code></pre>") == "```\na `b`\n```"
 
@@ -187,6 +203,85 @@ class TestInline:
     def test_adjacent_emphasis_runs_are_merged(self) -> None:
         html = "<p><b>foo</b><b>bar</b> <b>x</b><i>y</i> <i>p</i><b>q</b> <b>a</b> <b>b</b></p>"
         assert html_to_markdown(html) == "**foobar** **x***y* *p***q** **a** **b**"
+        html = "<p><b>y</b><a href='u'><b>z</b></a></p>"
+        assert html_to_markdown(html) == "**y**[**z**](u)"  # not merged across the link
+
+    def test_nested_same_emphasis_is_marked_once(self) -> None:
+        html = "<p><b>a<strong>b</strong>c</b> <i>d<em>e</em>f</i> <b>g<i>h<b>i</b></i></b></p>"
+        assert html_to_markdown(html) == "**abc** *def* **g*hi***"
+        html = "<p><i><b>a</b><i><b>b</b></i></i></p>"  # the redundant <i> does not split the bold
+        assert html_to_markdown(html) == "_**ab**_"
+
+    def test_emphasis_starting_with_the_other_emphasis_keeps_its_runs_apart(self) -> None:
+        """``***a** b**c***`` lets the intraword ``**`` of ``b**c`` close the italic
+        early (CommonMark's rule of 3); the outer emphasis is written with
+        underscores, which only parse next to whitespace or punctuation, so inside
+        a word the asterisk form stays."""
+        render = MarkdownIt("commonmark").render
+        html = "<p><i><b><i>a</i></b> b<b>c</b></i></p>"
+        assert html_to_markdown(html) == "_**a** b**c**_"
+        assert render(html_to_markdown(html)) == (
+            "<p><em><strong>a</strong> b<strong>c</strong></em></p>\n"
+        )
+        html = "<p><b><i>a</i> b<i>c</i></b> <i><b>x</b></i>, (<b><i>y</i></b>)<b>z</b></p>"
+        assert html_to_markdown(html) == "__*a* b*c*__ _**x**_, (__*y*__)**z**"
+        assert render(html_to_markdown(html)) == (
+            "<p><strong><em>a</em> b<em>c</em></strong> <em><strong>x</strong></em>, "
+            "(<strong><em>y</em></strong>)<strong>z</strong></p>\n"
+        )
+        html = "<p><b>x <i>y</i></b><i>z</i>, <i>p<b>q</b></i><b>r</b>.</p>"  # after a run of three
+        assert html_to_markdown(html) == "**x *y***_z_, *p**q***__r__."
+        assert render(html_to_markdown(html)) == (
+            "<p><strong>x <em>y</em></strong><em>z</em>, "
+            "<em>p<strong>q</strong></em><strong>r</strong>.</p>\n"
+        )
+        html = "<ul><li>w<i><b>a</b></i> <i><b>b</b> c</i>w <b>v</b><i><b>d</b></i></li></ul>"
+        assert html_to_markdown(html) == "- w***a*** ***b** c*w **v**_**d**_"
+        assert render(html_to_markdown(html)) == (
+            "<ul>\n<li>w<em><strong>a</strong></em> <em><strong>b</strong> c</em>w "
+            "<strong>v</strong><em><strong>d</strong></em></li>\n</ul>\n"
+        )
+        html = "<table><tr><td><i><b>a</b></i></td><td><i><b>b</b></i>x</td></tr></table>"
+        assert html_to_markdown(html) == "| _**a**_ | ***b***x |\n| --- | --- |"
+        assert html_to_markdown("<p><i><b>a</b> </i>b</p>") == "_**a**_ b"
+        # Whitespace, punctuation and symbols are the only boundaries: a combining
+        # mark is none, and an anchor that writes no brackets (no href, a label
+        # that is its href, an empty label) puts raw text after the closer.
+        for html, markdown, rendered in (
+            ("a\u0301<i><b>b</b></i>", "a\u0301***b***", "a\u0301<em><strong>b</strong></em>"),
+            ("<i><b>a</b></i>\u0301b", "***a***\u0301b", "<em><strong>a</strong></em>\u0301b"),
+            ("<i><b>a</b></i><a id='t'>x</a>", "***a***x", "<em><strong>a</strong></em>x"),
+            (
+                "<i><b>a</b></i><a href='http://e'>http://e</a>",
+                "***a***http://e",
+                "<em><strong>a</strong></em>http://e",
+            ),
+            (
+                "<i><b>a</b></i><a href='u'></a>, <i><b>c</b></i><a>x<b>y</b></a> "
+                "<b>d</b><a id='t'><b>e</b></a>f",
+                "***a***u, ***c***x**y** **de**f",
+                "<em><strong>a</strong></em>u, <em><strong>c</strong></em>x<strong>y</strong> "
+                "<strong>de</strong>f",
+            ),
+            (
+                "<a href='u'><i><b>a</b></i></a>x <i><b>c</b></i><b>d</b>e "
+                "\u2192<i><b>f</b></i>\u2192",
+                "[_**a**_](u)x _**c**_**d**e \u2192_**f**_\u2192",
+                '<a href="u"><em><strong>a</strong></em></a>x <em><strong>c</strong></em>'
+                "<strong>d</strong>e \u2192<em><strong>f</strong></em>\u2192",
+            ),
+            # Mixed runs next to a symbol: the asterisk form would fuse them.
+            (
+                "<i><b>a</b> b<b>c</b></i>\u2192 \u2192<i><b>a</b> b<b>c</b></i>",
+                "_**a** b**c**_\u2192 \u2192_**a** b**c**_",
+                "<em><strong>a</strong> b<strong>c</strong></em>\u2192 "
+                "\u2192<em><strong>a</strong> b<strong>c</strong></em>",
+            ),
+        ):
+            assert html_to_markdown(f"<p>{html}</p>") == markdown
+            assert render(markdown) == f"<p>{rendered}</p>\n"
+        html = "<blockquote><i><b>a</b>x</i></blockquote><p>y</p>"
+        assert html_to_markdown(html) == "> _**a**x_\n\ny"
 
     def test_escaped_literal_star_is_not_merged_with_emphasis(self) -> None:
         html = "<p>literal *<i>x</i> **<b>y</b></p>"

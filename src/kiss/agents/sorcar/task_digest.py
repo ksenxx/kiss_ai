@@ -580,9 +580,10 @@ def _progress_log_text(task: dict[str, Any]) -> str:
     Replays the task's ``Write`` / ``Edit`` calls of a
     :data:`_PROGRESS_LOG_NAMES` file in order (:func:`_replay`), each
     paired with the result that follows it: a call whose result is an
-    error (raised, or returned as ``Error: ...`` text) wrote nothing.  A
-    relative path is taken from the task's work dir; the log is the file
-    of the newest successful call.
+    error (raised, or returned as ``Error: ...`` text) or that the user
+    stopped (``interrupted``, which says nothing of what it wrote) wrote
+    nothing.  A relative path is taken from the task's work dir; the
+    log is the file of the newest successful call.
     """
     work_dir = str(task.get("work_dir") or "")
     logs: dict[str, str] = {}
@@ -598,7 +599,10 @@ def _progress_log_text(task: dict[str, Any]) -> str:
             ):
                 pending = (os.path.normpath(os.path.join(work_dir, path)), ev)
         elif ev.get("type") == "tool_result":
-            failed = ev.get("is_error") or str(ev.get("content") or "").startswith("Error")
+            failed = (
+                ev.get("is_error") or ev.get("interrupted")
+                or str(ev.get("content") or "").startswith("Error")
+            )
             if pending is not None and not failed:
                 newest = pending[0]
                 logs[newest] = _replay(logs.get(newest, ""), pending[1])

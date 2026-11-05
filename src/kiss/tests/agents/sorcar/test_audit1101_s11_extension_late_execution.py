@@ -42,6 +42,12 @@ _PAGE = b'<!doctype html><title>late page</title><body data-late="0"><p>late pag
 _SHADOW = b'<script nonce="test">let Date = "the page shadows Date";</script>'
 _CSP = "script-src 'nonce-test'; object-src 'none'"
 _INCREMENT = "document.body.dataset.late = String(Number(document.body.dataset.late) + 1)"
+# The timed-out calls' timeout.  The extension's deadline runs a tenth
+# short of it (``ChromeBridge._send``), so its "exceeded" reply has 0.3 s
+# to arrive; 0.12 s (a 1.2 s timeout) was not enough on a loaded Mac.
+# Both stalls below last 4 s, well past the 2.7 s deadline.
+_TIMEOUT = 3.0
+_EXCEEDED = r"command exceeded its 2\.\d+s deadline"
 # Keeps the renderer's main thread busy for 4 s, starting 150 ms from now.
 _BUSY_RENDERER = """() => {
   setTimeout(() => { const end = Date.now() + 4000; while (Date.now() < end) {} }, 150);
@@ -138,9 +144,9 @@ def test_a_command_timed_out_on_a_busy_renderer_never_runs_later(
     chrome.page.evaluate(_BUSY_RENDERER)
     time.sleep(0.4)  # the renderer is busy now
     began = time.monotonic()
-    with pytest.raises(ChromeBridgeError, match=r"command exceeded its 1\.\d+s deadline"):
-        chrome.bridge.call("evaluate", {"tabId": tab_id, "script": _INCREMENT}, timeout=1.2)
-    assert time.monotonic() - began < 3
+    with pytest.raises(ChromeBridgeError, match=_EXCEEDED):
+        chrome.bridge.call("evaluate", {"tabId": tab_id, "script": _INCREMENT}, timeout=_TIMEOUT)
+    assert time.monotonic() - began < _TIMEOUT + 2
     assert chrome.bridge.extension_connected
     time.sleep(5)  # the renderer has recovered and every late stage has had its chance
     assert _late_count(chrome) == "0", "the timed-out command ran after its deadline reply"
@@ -157,9 +163,9 @@ def test_a_command_timed_out_in_the_csp_fallback_never_runs_later(chrome: _Chrom
     assert _late_count(chrome) == "0"
     chrome.page.evaluate(_STALL_ON_CSP_VIOLATION)
     began = time.monotonic()
-    with pytest.raises(ChromeBridgeError, match=r"command exceeded its 1\.\d+s deadline"):
-        chrome.bridge.call("evaluate", {"tabId": tab_id, "script": _INCREMENT}, timeout=1.2)
-    assert time.monotonic() - began < 3
+    with pytest.raises(ChromeBridgeError, match=_EXCEEDED):
+        chrome.bridge.call("evaluate", {"tabId": tab_id, "script": _INCREMENT}, timeout=_TIMEOUT)
+    assert time.monotonic() - began < _TIMEOUT + 2
     assert chrome.bridge.extension_connected
     time.sleep(5)  # the renderer has recovered and the queued evaluation has had its chance
     stage = chrome.page.evaluate("() => document.body.dataset.stage")

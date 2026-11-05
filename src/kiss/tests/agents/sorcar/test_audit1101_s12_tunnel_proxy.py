@@ -8,6 +8,11 @@ stderr (the tunnel's output pipe) open and so kept the tunnel's
 output-reader thread blocked, with no handle left to reach either.
 ssh now runs in a process group of its own and the whole group is
 killed.
+
+``enroll_over_ssh`` had the same gap: its ``subprocess.run`` killed
+ssh alone when the login timed out (or a Stop cut the wait short), so
+a ``ProxyCommand`` of the user's configuration lived on, re-parented.
+Enrollment's ssh is now in a group of its own as well.
 """
 
 from __future__ import annotations
@@ -249,3 +254,32 @@ def test_a_stop_before_the_output_reader_starts_leaves_the_tunnel_reusable(
                 os.kill(child, signal.SIGKILL)
         for thread in _reader_threads():
             thread.join(10.0)
+
+
+@posix_only("a ProxyCommand child process and a signal to its process group")
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="no ssh on this host")
+def test_enrollment_timeout_kills_the_proxy_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enrollment login that times out takes ssh's ``ProxyCommand`` down with ssh."""
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
+    pid_file = tmp_path / "proxy.pid"
+    proxy = tmp_path / "proxy.py"
+    proxy.write_text(PROXY, encoding="utf-8")
+    config = tmp_path / "ssh_config"
+    config.write_text(
+        f"Host *\n    ProxyCommand {sys.executable} {proxy} {pid_file}\n", encoding="utf-8",
+    )
+    monkeypatch.setenv(mach.SSH_CONFIG_ENV, str(config))
+    child = 0
+    try:
+        with pytest.raises(mach.MachineError, match="did not answer in time"):
+            mach.enroll_over_ssh(LOGIN, timeout=2.0)
+        child = _wait_for_pid(pid_file)
+        deadline = time.monotonic() + 10.0
+        while not _gone(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _gone(child), "the ProxyCommand outlived the killed ssh"
+    finally:
+        if child and not _gone(child):
+            os.kill(child, signal.SIGKILL)

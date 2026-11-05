@@ -31,6 +31,9 @@ liveness, creation cut-off).
 
 from __future__ import annotations
 
+import json
+import sys
+import threading
 import time
 from unittest import TestCase
 
@@ -282,3 +285,94 @@ class TestOrphanTaskRecovery(TestCase):
             # Leave no disowned sentinel row behind: the database is
             # shared by every test in this module.
             _set_owner(fresh_id, owner)
+
+    def test_a_live_task_reusing_a_probed_rowid_is_not_rewritten(self) -> None:
+        """A task started on a swept candidate's freed rowid keeps its sentinel.
+
+        The sweep probes owner liveness outside its write transaction.
+        In that gap the user can delete the dead candidate and start a
+        new task: ``task_history`` has no AUTOINCREMENT, so the INSERT
+        reuses the freed rowid, and the newcomer carries the sentinel
+        too.  The transaction's re-check must tell it (different id,
+        newer timestamp) from the probed dead row, or a running task is
+        labelled "process killed" and loses the sentinel the shutdown
+        safety net conditions on.  ``sys.settrace`` is thread-local:
+        it parks only the sweep thread at its first liveness probe.
+        """
+        dead_id = _insert_sentinel_row(
+            "dead candidate", chat_id="recovery-test-chat-10-dead",
+        )
+        _disown(dead_id)
+        db = _persistence._get_db()
+        dead_rowid = db.execute(
+            "SELECT rowid FROM task_history WHERE id = ?", (dead_id,),
+        ).fetchone()[0]
+        cutoff = time.time()
+        parked, resume = threading.Event(), threading.Event()
+        probe = _persistence._owner_is_alive.__code__
+
+        def trace(frame, event, arg):  # type: ignore[no-untyped-def]
+            if frame.f_code is probe and event == "call" and not parked.is_set():
+                parked.set()
+                assert resume.wait(timeout=15)
+            return None
+
+        def sweep() -> None:
+            sys.settrace(trace)
+            try:
+                _persistence._recover_orphaned_tasks(set(), created_before=cutoff)
+            finally:
+                sys.settrace(None)
+                _persistence._close_thread_db()
+
+        thread = threading.Thread(target=sweep, daemon=True)
+        thread.start()
+        assert parked.wait(timeout=15), "the sweep never probed a candidate's owner"
+        assert _persistence._delete_task(dead_id) == 1
+        live_id = _insert_sentinel_row(
+            "started while the sweep probed", chat_id="recovery-test-chat-10-live",
+        )
+        live_rowid = db.execute(
+            "SELECT rowid FROM task_history WHERE id = ?", (live_id,),
+        ).fetchone()[0]
+        resume.set()
+        thread.join(30)
+        assert not thread.is_alive(), "the sweep did not finish"
+        assert live_rowid == dead_rowid, "precondition: SQLite did not reuse the rowid"
+        assert _row_result(live_id) == "Agent Failed Abruptly", (
+            "regression: the sweep rewrote a live task that reused the "
+            "rowid of the dead row it had probed"
+        )
+
+    def test_recovered_end_ts_reaches_the_chat_summary(self) -> None:
+        """The completion time backfilled from the events dates the chat too.
+
+        The sweep reconstructs a killed task's ``end_ts`` from its
+        newest surviving event and refreshes the chat's summary row in
+        the same transaction.  ``chat_summaries.last_finished`` (the
+        history sidebar's completion-time order and filter) must carry
+        that recovered instant, not the 0 the row held while it ran.
+        """
+        chat_id = "recovery-test-chat-9-summary"
+        orphan_id = _insert_sentinel_row("orphan with events", chat_id=chat_id)
+        _disown(orphan_id)
+        _persistence._write_event_batch([(
+            orphan_id,
+            json.dumps({"type": "text", "text": "last activity"}),
+            2000.0,
+            str(_persistence._DB_PATH),
+        )])
+        assert _persistence._recover_orphaned_tasks(set()) >= 1
+        db = _persistence._get_db()
+        end_ts = db.execute(
+            "SELECT end_ts FROM task_history WHERE id = ?", (orphan_id,),
+        ).fetchone()["end_ts"]
+        assert end_ts == 2_000_000, "end_ts was not backfilled from the events"
+        last_finished = db.execute(
+            "SELECT last_finished FROM chat_summaries WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()["last_finished"]
+        assert last_finished == end_ts, (
+            "regression: the chat summary was refreshed before the "
+            "recovered end_ts was written, so last_finished stayed stale"
+        )

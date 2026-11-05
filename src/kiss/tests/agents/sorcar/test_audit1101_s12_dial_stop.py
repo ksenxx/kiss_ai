@@ -8,6 +8,10 @@ as ``_dial`` never returned, the link's ``_ws`` stayed ``None`` and
 ``link.close()`` had nothing to close: the open socket and its
 threads outlived the task, answering the daemon's pings.  The socket
 is now closed on every unsuccessful exit of the handshake.
+
+``local_endpoint.connect`` (every same-machine client, ``daemon_client``
+included) had the same handshake and the same gap: a Stop landing in
+its auth wait left an open, authenticated socket nobody could close.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from typing import Any
 import pytest
 from websockets.sync.client import ClientConnection
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import machines as mach
 from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.remote_daemon import start_remote_daemon
@@ -75,4 +80,44 @@ def test_stop_while_waiting_for_auth_ok_closes_the_socket(
         for ws in sockets:
             ws.close()
         mach.close_links()
+        daemon.stop()
+
+
+def test_stop_while_a_local_client_waits_for_auth_ok_closes_the_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "local"))
+    daemon = start_remote_daemon(tmp_path / "remote", env={"HOME": str(tmp_path)})
+    sockets: list[ClientConnection] = []
+    outcome: dict[str, Any] = {}
+    try:
+        endpoint_file = daemon.home / local_endpoint.LOCAL_ENDPOINT_FILE
+
+        def client() -> None:
+            try:
+                outcome["ws"] = local_endpoint.connect(endpoint_file)
+            except BaseException as exc:
+                outcome["error"] = type(exc).__name__
+
+        def capture_auth_wait(frame_locals: dict[str, Any]) -> bool:
+            if threading.current_thread().name != REQUESTER:
+                return False
+            sockets.append(frame_locals["ws"])
+            return True
+
+        worker = threading.Thread(target=client, name=REQUESTER, daemon=True)
+        with Pause(local_endpoint.recv_auth_reply.__code__, capture_auth_wait) as held:
+            worker.start()
+            assert held.paused.wait(30), "the auth wait was not reached"
+            assert inject_keyboard_interrupt(worker.ident or 0) == 1
+        worker.join(10)
+        assert not worker.is_alive()
+        assert outcome == {"error": "KeyboardInterrupt"}
+        ws = sockets[0]
+        ws.recv_events_thread.join(10)
+        assert ws.state.name == "CLOSED"
+        assert not ws.recv_events_thread.is_alive()
+    finally:
+        for ws in sockets:
+            ws.close()
         daemon.stop()

@@ -660,10 +660,11 @@ class _MergeFlowMixin:
 
         Detects both committed changes on the worktree branch and
         uncommitted changes in the worktree working tree.  When the
-        worktree directory exists, runs ``git diff`` and
-        ``git ls-files --others`` inside it so that uncommitted
-        edits and new files are included.  Falls back to a branch-
-        to-branch diff when the worktree has already been removed.
+        worktree directory exists, runs ``git diff``, ``git diff
+        --cached`` and ``git ls-files --others`` inside it so that
+        uncommitted edits, staged-only edits and new files are
+        included.  Falls back to a branch-to-branch diff when the
+        worktree has already been removed.
 
         An empty list is a VERIFIED clean worktree: callers auto-discard
         on it.  When git cannot make the comparison (a missing object,
@@ -712,6 +713,17 @@ class _MergeFlowMixin:
                 if unique is None:
                     return None
                 files.extend(unique)
+            else:
+                # ``diff <base>`` compares the base with the files on
+                # disk: work that is only in the index (staged, the file
+                # then put back on disk) is invisible to it, and the
+                # worktree would be discarded as clean.
+                staged = _git_paths(
+                    str(wt.wt_dir), "diff", "--cached", "--name-only", "--no-renames", base_ref,
+                )
+                if staged is None:
+                    return None
+                files.extend(staged)
             files.extend(_capture_untracked(str(wt.wt_dir)))
             return sorted(set(files))
         base_ref = self._resolve_base_ref(

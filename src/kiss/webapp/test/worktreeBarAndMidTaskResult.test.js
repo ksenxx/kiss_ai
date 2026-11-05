@@ -250,11 +250,53 @@ function testMidTaskWorktreeResultOnBackgroundTab() {
   console.log('  ok - a hidden tab keeps its mid-task merge outcome');
 }
 
+// 2026-11-04 W5 F4: the result of a worktree action is a one-off
+// broadcast to this connection.  Dropped with the connection, it never
+// comes (the replay carries no decision that is over), so the outage
+// re-arms the bar: a retry gets the daemon's "no pending worktree"
+// answer and the bar goes, visible or parked on a background tab.
+function testLostWorktreeResultRearmsTheBar() {
+  for (const background of [false, true]) {
+    const {win, posted} = makePage();
+    const tabId = win._testApi.getActiveTabId();
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'clear', tabId});
+    send(win, {type: 'status', running: false, tabId});
+    sendWorktreeDone(win, tabId);
+    clickBarButton(win, 'Do nothing');
+    assert.strictEqual(posted.filter(m => m.type === 'worktreeAction').length, 1);
+    assert.ok(barButtons(win).every(b => b.disabled), 'disarmed while in flight');
+    if (background) win._testApi.createNewTab();
+    send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+    send(win, {type: 'daemonStatus', connected: true, reconnecting: true});
+    if (background) win._testApi.switchToTab(tabId);
+    assert.ok(bar(win), 'the bar is still up after the outage');
+    assert.ok(inputHidden(win));
+    assert.ok(
+      barButtons(win).every(b => !b.disabled),
+      'the outage re-arms the bar (' + (background ? 'parked' : 'visible') + ')',
+    );
+    clickBarButton(win, 'Do nothing');
+    assert.strictEqual(posted.filter(m => m.type === 'worktreeAction').length, 2);
+    send(win, {
+      type: 'worktree_result',
+      tabId,
+      success: false,
+      message: 'No pending worktree changes to act on',
+    });
+    assert.strictEqual(bar(win), null, 'the stale bar is dismissed');
+    assert.ok(!inputHidden(win), 'the composer is back');
+    win.close();
+  }
+  console.log('  ok - an outage re-arms a worktree bar whose result it swallowed');
+}
+
 function main() {
   testWorktreeBarHasDoNothing();
   testAutocommitDoneAndClearLeaveWorktreeBarAlone();
   testMidTaskWorktreeEventsRenderWithoutBar();
   testMidTaskWorktreeResultOnBackgroundTab();
+  testLostWorktreeResultRearmsTheBar();
   console.log('worktreeBarAndMidTaskResult.test.js: all tests passed');
 }
 

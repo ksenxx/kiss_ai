@@ -275,6 +275,13 @@ def connect(
             f"The sorcar daemon at {endpoint.url} did not complete the "
             f"local auth handshake: {exc}"
         ) from exc
+    except BaseException:
+        # A Stop's KeyboardInterrupt (a client runs on the task thread):
+        # the socket is nobody's until it is returned, so nothing else
+        # would close it, and its threads would keep answering the
+        # daemon's pings.
+        ws.close()
+        raise
     if not isinstance(reply, dict) or reply.get("type") != "auth_ok" or not reply.get("local"):
         ws.close()
         raise ConnectionError(

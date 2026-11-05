@@ -23,14 +23,21 @@ installed on the machine running the suite.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import os
+import signal
 import sys
+import textwrap
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from kiss.core.models.heif import _CONVERTERS, heif_to_jpeg
-from kiss.tests.conftest import IS_WINDOWS, install_cli_script
+from kiss.core.processes import pid_alive
+from kiss.tests.conftest import IS_WINDOWS, install_cli_script, posix_only
 
 _JPEG_SOI = b"\xff\xd8\xff"
 
@@ -158,3 +165,71 @@ def test_a_converter_that_cannot_be_executed_is_skipped(
     _script(bin_dir / "heif-convert", _writes_then_exits(convert_dst, _TINY_JPEG, 0))
 
     assert heif_to_jpeg(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64) == _TINY_JPEG
+
+
+def _exited(pid: int) -> bool:
+    """Whether *pid* has exited: gone, or a zombie its reaper has not collected yet."""
+    if not pid_alive(pid):
+        return True
+    stat = Path(f"/proc/{pid}/stat")
+    return stat.exists() and stat.read_text().rpartition(")")[2].split()[0] == "Z"
+
+
+@posix_only("the delegate dies with the converter's POSIX process group")
+def test_a_stop_during_conversion_kills_the_converter_and_its_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop that interrupts a running converter takes its delegate process down too.
+
+    A converter may be a wrapper that hands the decoding to a child of
+    its own.  Plain ``subprocess.run`` killed only the wrapper when the
+    task's Stop landed, and the delegate kept running after the task was
+    gone.  The conversion runs in its own process group, which the Stop
+    kills whole.
+    """
+    marker = tmp_path / "delegate.pid"
+    wrapper = textwrap.dedent(
+        f"""
+        import subprocess, time
+        delegate = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        open({str(marker)!r}, "w").write(str(delegate.pid))
+        while True:  # a heartbeat keeps communicate() polling, so the Stop lands at once
+            sys.stderr.write(".")
+            sys.stderr.flush()
+            time.sleep(0.05)
+        """
+    )
+    _fake_converter_dir(tmp_path, {"sips": wrapper}, monkeypatch)
+    outcome: dict[str, object] = {}
+
+    def convert() -> None:
+        try:
+            outcome["result"] = heif_to_jpeg(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=convert, daemon=True, name="stopped-conversion")
+    worker.start()
+    deadline = time.monotonic() + 30
+    while not (marker.exists() and marker.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    delegate_pid = int(marker.read_text())
+    try:
+        assert worker.ident is not None
+        injected = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(worker.ident), ctypes.py_object(KeyboardInterrupt)
+        )
+        assert injected == 1
+        worker.join(timeout=30)
+        assert not worker.is_alive()
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome
+        deadline = time.monotonic() + 10
+        while not _exited(delegate_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _exited(delegate_pid), "the converter's delegate outlived the Stop"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(delegate_pid, signal.SIGKILL)

@@ -102,9 +102,15 @@ async function testFontSize() {
   // The font shorthand: the size is checked, the line height after "/" is not.
   assert.match((await words('.a { font: 12px sans-serif; }'))[0], /Raw font size "12px"/);
   assert.deepStrictEqual(
-    await words('.a { font: oblique 10deg var(--fs-sm)/1.4em var(--theme-font-family); }'),
+    await words('.a { font: oblique 10deg 700 var(--fs-sm)/1.4em var(--theme-font-family); }'),
     [],
   );
+  // Every length unit is a font size, not only the common ones.
+  for (const size of ['1in', '2.54cm', '25.4mm', '4Q', '4dvw', '1lh', '2cqw']) {
+    assert.match((await words(`.a { font-size: ${size}; }`))[0], /Raw font size/, size);
+  }
+  assert.match((await words('.a { font: 1in/1.5 sans-serif; }'))[0], /Raw font size "1in"/);
+  assert.match((await words('.a { --fs-base: 1in; }'))[0], /Raw font size "1in"/);
   console.log('  ok - unit font sizes rejected, --fs-* tokens allowed');
 }
 

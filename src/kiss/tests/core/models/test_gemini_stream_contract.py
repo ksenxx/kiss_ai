@@ -136,6 +136,7 @@ class TestThoughtTextNeverReachesContent:
                     "finish", {"result": "ok"}, thought_signature="c2ln",
                 ),
             ]),
+            chunk([], finish_reason="STOP"),
         ])
         model = _make_model(monkeypatch, base_url, tokens=[])
 

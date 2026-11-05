@@ -248,6 +248,47 @@ class TestSquashMergeFromBaseline:
             status = _git("status", "--porcelain", cwd=repo)
             assert not status.stdout.strip()
 
+    def test_net_change_is_merged_whatever_the_branch_history(self) -> None:
+        """A reverted intermediate edit or a merge commit on the branch merges cleanly.
+
+        Replaying ``baseline..branch`` commit by commit conflicted on an
+        edit the agent later reverted (main had changed the same file)
+        and refused a merge commit outright (``no -m option``); the
+        agent's net change is what gets merged.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp) / "repo")
+            branch = "kiss/wt-test-11"
+            wt_dir = _create_worktree(repo, branch)
+            (wt_dir / "README.md").write_text("# Baseline\n")
+            GitWorktreeOps.commit_all(wt_dir, "baseline")
+            baseline = GitWorktreeOps.head_sha(wt_dir)
+            assert baseline is not None
+            (wt_dir / "README.md").write_text("# Temporary agent edit\n")
+            GitWorktreeOps.commit_all(wt_dir, "temporary change")
+            (wt_dir / "README.md").write_text("# Baseline\n")
+            (wt_dir / "feature.py").write_text("# feature\n")
+            GitWorktreeOps.commit_all(wt_dir, "revert the experiment, finish the feature")
+            topic = Path(tmp) / "topic"
+            _git("worktree", "add", "-b", "topic", str(topic), baseline, cwd=repo)
+            # Not "aux.py": AUX is a reserved device name on Windows, and
+            # reading it there blocks for ever.
+            (topic / "topic_feature.py").write_text("# topic\n")
+            GitWorktreeOps.commit_all(topic, "topic feature")
+            merged = _git("merge", "--no-ff", "-m", "merge topic", "topic", cwd=wt_dir)
+            assert merged.returncode == 0, merged.stderr
+            _git("checkout", "main", cwd=repo)
+            (repo / "README.md").write_text("# Independent main work\n")
+            _git("commit", "-am", "main work", cwd=repo)
+
+            result = GitWorktreeOps.squash_merge_from_baseline(repo, branch, baseline)
+
+            assert result == MergeResult.SUCCESS
+            assert (repo / "feature.py").read_text() == "# feature\n"
+            assert (repo / "topic_feature.py").read_text() == "# topic\n"
+            assert (repo / "README.md").read_text() == "# Independent main work\n"
+            assert _git("status", "--porcelain", "--untracked-files=no", cwd=repo).stdout == ""
+
 
 class TestEndToEndBaselineWorkflow:
     """Full workflow: dirty main tree → worktree → agent edits → merge."""

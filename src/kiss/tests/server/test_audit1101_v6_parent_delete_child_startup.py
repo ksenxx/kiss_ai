@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.persistence import _add_task, _load_history
+import pytest
+
+from kiss.agents.sorcar.persistence import _add_task, _load_history, _task_tree
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
@@ -76,6 +79,37 @@ def _finish_gated(gate: _EntryGate, state: AgentState) -> None:
     if thread is not None:
         thread.join(DEADLINE_S)
         assert not thread.is_alive(), "the worker did not finish"
+
+
+def _delete_gated(
+    server: AgentServer, delete: Callable[[dict[str, Any]], None], cmd: dict[str, Any],
+) -> tuple[_EntryGate, threading.Thread]:
+    """Run ``delete(cmd)`` on a thread parked at ``_delete_history``'s entry."""
+    gate = _EntryGate(server._delete_history.__func__.__code__)  # type: ignore[attr-defined]
+    threading.setprofile(gate)
+    try:
+        thread = threading.Thread(target=delete, args=(cmd,), daemon=True)
+        thread.start()
+        assert gate.entered.wait(DEADLINE_S), "the delete never reached _delete_history"
+    finally:
+        threading.setprofile(None)
+    return gate, thread
+
+
+def _run_help_child(server: AgentServer, tmp_path: Path, parent_id: str, chat_id: str) -> str:
+    """Run a model-free ``/sh help`` sub-task of *parent_id* to its end; its row id."""
+    cmd = {
+        "type": "run", "tabId": "help-child-tab", "prompt": "/sh help", "chatId": chat_id,
+        "parentTaskId": parent_id, "parentTabId": "parent-tab", "workDir": str(tmp_path),
+    }
+    server._cmd_run(cmd)
+    thread = agent_state.agent_states[cmd["_state_key"]].task_thread
+    assert thread is not None
+    thread.join(DEADLINE_S)
+    assert not thread.is_alive(), "the /sh help child did not finish"
+    tree = _task_tree(parent_id)
+    assert len(tree) == 2 and tree[0] == parent_id, tree
+    return tree[1]
 
 
 def _row(task_id: str) -> dict[str, Any] | None:
@@ -152,5 +186,51 @@ def test_delete_chat_is_refused_while_a_child_of_its_task_is_still_starting(
         ]
     finally:
         _finish_gated(gate, state)
+        for s in agent_state.snapshot():
+            agent_state.unregister(s.task_id, s)
+
+
+@pytest.mark.parametrize("what", ["task", "chat"])
+def test_delete_sees_a_sub_task_admitted_after_it_read_the_tree(
+    tmp_path: Path, what: str,
+) -> None:
+    """A child finishes and its own child starts while the delete is under way: refused.
+
+    The delete used to read the task tree before it blocked new
+    admissions, so a grandchild admitted meanwhile (its parent being
+    the child that finished in between, not the root the stale tree
+    named) escaped the liveness check, and the delete then removed
+    the tree persistence recomputed, the running grandchild's rows
+    included.
+    """
+    root_id, chat_id = _add_task("finished root", chat_id="")
+    server, events, lock = _server()
+    if what == "task":
+        delete, cmd = server._cmd_delete_task, {"taskId": root_id}
+    else:
+        delete, cmd = server._cmd_delete_chat, {"chatId": chat_id}
+    gate, deleting = _delete_gated(server, delete, {**cmd, "tabId": "chats", "connId": "c3"})
+    grand: tuple[_EntryGate, AgentState] | None = None
+    try:
+        child_id = _run_help_child(server, tmp_path, root_id, chat_id)
+        grand = _admit_gated(
+            server, _child_cmd(tmp_path, child_id, "grandchild-own-chat", "grandchild-tab"),
+        )
+        assert grand[1].running() and grand[1].parent_task_id == child_id
+        gate.release.set()
+        deleting.join(DEADLINE_S)
+        assert not deleting.is_alive()
+
+        assert _row(root_id) is not None, f"the {what} was deleted under a running grandchild"
+        assert _task_tree(root_id) == [root_id, child_id], "the grandchild's parent was deleted"
+        assert _notices(events, lock) == [
+            f"Cannot delete the {what}: its task is still running. Stop it first.",
+        ]
+        assert server._history_deletes == 0
+    finally:
+        gate.release.set()
+        deleting.join(DEADLINE_S)
+        if grand is not None:
+            _finish_gated(*grand)
         for s in agent_state.snapshot():
             agent_state.unregister(s.task_id, s)

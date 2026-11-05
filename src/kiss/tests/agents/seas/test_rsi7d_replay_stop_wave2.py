@@ -42,6 +42,7 @@ def test_stop_right_after_the_launch_cancels_the_ownerless_replay(
     """The interrupted replay's job is cancelled and its thread ends, not left running."""
     monkeypatch.chdir(tmp_path)
     before = set(agent_dispatch.agent_jobs_of(None))
+    previous_trace = sys.gettrace()  # a coverage or debugger tracer, put back below
     sys.settrace(_stop_after_launch)
     try:
         with pytest.raises(KeyboardInterrupt, match="injected stop"):
@@ -50,7 +51,7 @@ def test_stop_right_after_the_launch_cancels_the_ownerless_replay(
                 "gpt-6-luna", 0.01, 60.0,
             )
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
     jobs = [job for job_id, job in agent_dispatch.agent_jobs_of(None).items()
             if job_id not in before]
     assert len(jobs) == 1, "the replay job was never launched; nothing was tested"

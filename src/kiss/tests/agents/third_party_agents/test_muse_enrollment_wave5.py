@@ -397,23 +397,31 @@ def test_concurrent_enrollments_never_mix_server_and_credential(
     results: dict[str, dict[str, Any]] = {}
     hold_a = _HoldAfterStore()
     a_done = threading.Event()
-    first = threading.Thread(target=_enroll_traced, args=(hold_a, api_server, results, "a", a_done))
+    # Set when B finishes, or when B reaches the config lock before its
+    # own store: from then on nothing B does can interleave with A.
+    b_progress = threading.Event()
+    # Daemon threads: a worker stuck in the product's unbounded config-lock
+    # wait must not keep the interpreter alive once the test has failed.
+    first = threading.Thread(
+        target=_enroll_traced, args=(hold_a, api_server, results, "a", a_done), daemon=True
+    )
+    second = threading.Thread(
+        target=_enroll_traced,
+        args=(_SignalLockBeforeStore(b_progress), other_server, results, "b", b_progress),
+        daemon=True,
+    )
     first.start()
     try:
         assert hold_a.held.wait(30)
-        # Set when B finishes, or when B reaches the config lock before its
-        # own store: from then on nothing B does can interleave with A.
-        b_progress = threading.Event()
-        second = threading.Thread(
-            target=_enroll_traced,
-            args=(_SignalLockBeforeStore(b_progress), other_server, results, "b", b_progress),
-        )
         second.start()
         assert b_progress.wait(30)
     finally:
+        # A failed wait must not leave a worker running behind the test:
+        # release A and join every worker that was started.
         hold_a.release.set()
-    first.join(30)
-    second.join(30)
+        for worker in (first, second):
+            if worker.is_alive():
+                worker.join(30)
     assert a_done.is_set() and not second.is_alive()
     assert results["a"]["ok"] is True and results["b"]["ok"] is True, results
     assert json.loads(mm_config.path.read_text())["port"] == str(other_server.server_address[1])

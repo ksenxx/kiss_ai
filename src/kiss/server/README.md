@@ -319,7 +319,7 @@ not exist is reported as `missing: <path>` and fails the run either way.
 | `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; default: the caller's (`""`, like `None`, is no override — true of every string key). |
 | `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a channel, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `max_budget` | `int \| float` | `maxBudget` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
-| `model_config` | `dict` | `modelConfig` | Model configuration dict passed to the LLM (temperature, ...). `base_url` (with `api_key`) routes every model call of the run, in a tab and headless alike, to that OpenAI-compatible endpoint (a proxy the SEA starts, say); `model` must still name a catalogued model so the calls are priced. `plain_io: true` leaves the framework's own additions out of what the model reads: the system prompt is the SEA's `system_prompt` return alone (no `# Restricted tool profile` or `# Web tools are off` note, no `# MOST IMPORTANT INSTRUCTIONS`, `# Task Settings` or `AGENTS.md` trailer; the memory protocol stays while the run has the memory tools, and a CLI-backed model's text tool catalog stays) and tool results carry no usage line (`Steps: ..., Context: ...`). `coding_gate: false` makes the run no coding run for the finish gate: no verifier, review or unchecked-change stage, whatever its edits (a sync resolving conflicts); the evidence and hedge checks stay. Replaces the caller's `model_config` whole, except that a dict of such framework flags alone is added to the configuration that applies anyway (a settings-panel endpoint stays). |
+| `model_config` | `dict` | `modelConfig` | Model configuration dict passed to the LLM (temperature, ...). `base_url` (with `api_key`) routes every model call of the run, in a tab and headless alike, to that OpenAI-compatible endpoint (a proxy the SEA starts, say); `model` must still name a catalogued model so the calls are priced. `plain_io: true` leaves the framework's own additions out of what the model reads: the system prompt is the SEA's `system_prompt` return alone (no `# Restricted tool profile` or `# Web tools are off` note, no `# MOST IMPORTANT INSTRUCTIONS`, `# Task Settings` or `AGENTS.md` trailer; the memory protocol stays while the run has the memory tools, and a CLI-backed model's text tool catalog stays) and tool results carry no usage line (`Steps: ..., Context: ...`). `coding_gate: false` makes the run no coding run for the finish gate: no verifier or review stage, whatever its edits (a sync resolving conflicts), so its `finish` is not gated at all. Replaces the caller's `model_config` whole, except that a dict of such framework flags alone is added to the configuration that applies anyway (a settings-panel endpoint stays). |
 | `use_web_tools` | `bool` | `useWebTools` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | `classifyTasks` | Let the pre-run classifier decide whether the task is simple (lite prompt) (daemon default: the persisted setting). |
 | `use_memory` | `bool` | `useMemory` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
@@ -1449,7 +1449,24 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   the page the agent is browsing into the Browser tab on every surface
   (the daemon's `BrowserTabService`, passed to the run as
   `live_browser` and forwarded to its sub-agents) so the user can
-  watch and act on it; there is no setting for it.  The toolset
+  watch and act on it; there is no setting for it.  The browser the
+  tab launches is the one `core.default_browser.resolve_browser`
+  picks — `$KISS_BROWSER`, else the machine's default browser when it
+  is Chromium-based, else the first installed Chromium-family
+  browser, else Playwright's bundled Chromium (`ResolvedBrowser`:
+  name, executable, whether it is the default, and a `note` saying
+  why a fallback was taken, which the tab's badge shows on every
+  surface, `openBrowserTab.note`) — and one that is installed but
+  cannot start (a Chrome whose update replaced the launcher but lost
+  the framework it loads, say) is replaced by the bundled Chromium
+  (`BrowserTabService._launch_resolved`), the badge's note naming the
+  browser that failed and why in the lines `launch_failure_summary`
+  keeps of Playwright's message: the headline without the API name
+  in front, the first line of the browser's own stderr (`[err]`, cut
+  at 300 characters) and the `<process did exit ...>` line, rather
+  than the whole command line and call log; a launch that fails
+  outright (the bundled Chromium itself) reaches the client that
+  asked for the tab as a `browserError` with the same summary.  The toolset
   (`WebUseTool.get_tools`, fifteen tools, `sorcar_agent.BROWSER_TOOL_NAMES`)
   is `go_to_url` (a URL, `tab:list` or `tab:N`), `click`, `type_text`,
   `press_key`, `scroll`, `screenshot` (its `file_path`, default
@@ -2162,8 +2179,12 @@ SEA's own `tool_call_hook` need not restate:
   mid-file), so neither the text decoding nor
   the output cap of the container `Bash` touches them.
 - **Read before modify.**  `Edit` and `Write` of an existing file the
-  model has not been shown in this session are refused — except a
-  `Write` under `tmp/` — and a refused `Edit` returns the numbered
+  model has not been shown in this session are refused — except of a
+  scratch file (`useful_tools._is_scratch_path`, under a `tmp`
+  directory inside the work dir or under `$KISS_HOME/cron/work`),
+  which `Write` overwrites and `Edit` edits unread, a note of an
+  earlier session say, the `Edit` result showing the region changed —
+  and a refused `Edit` returns the numbered
   region around `old_string`, after which the file counts as read, so
   the next `Edit` goes through without a separate `Read`.  A `Bash`
   (or `run_commands_parallel`) command whose last `cat`, `sed -n`,
@@ -2317,11 +2338,17 @@ SEA's own `tool_call_hook` need not restate:
   project; the refusal names the main checkout's environment binary to
   run with the worktree's `src/` and `projects/` first on `PYTHONPATH`).
   A `uv run <program> ...` there is not refused but rewritten to that
-  binary and run, every `uv run` of the command, the result prefixed
-  with `Note: the worktree has no environment of its own ... run it so
-  yourself next time: <rewritten command>` (`useful_tools.UV_REWRITTEN_NOTE`;
-  also in `run_commands_parallel`), unless the rewrite is ambiguous: a
-  global option with a value, `--directory x`, would be dropped, or the
+  binary and run, every `uv run` of the command, the result followed
+  by `Note: the worktree has no environment of its own ... run it so
+  yourself next time: <rewritten command>` (`useful_tools.UV_REWRITTEN_NOTE`,
+  after the result and the batching hint, as every note a `Bash`
+  result carries now is, so a reader of the result's head — `Error
+  (exit code N):`, `Error: Command timed out`, a `bash_job` report —
+  parses what it looks for; also in `run_commands_parallel`, after
+  the command's output; not for a `Bash(..., machine=)` job, whose
+  files this host cannot see), unless the rewrite is ambiguous: a
+  global option with a value, `--directory x`, `--with x`, before or
+  after `run` would be dropped, or the
   environment lacks the program, which is refused as above; a shell rewrite of a
   file that the bullet above did not apply as a `Write`/`Edit`: a
   `sed` editing in place (`-i`, `-i.bak`, `-Ei`, `--in-place`) with
@@ -2367,14 +2394,35 @@ SEA's own `tool_call_hook` need not restate:
   command substitutions) the way bash does (where bash versions
   disagree on a `${...}` operand, as bash 3.2, the macOS system
   bash, reads it, so a substitution only that bash would run is
-  still scanned), drops wrapper prefixes
-  with their option values (`sudo -u root`, `env`, `nice`, `timeout
-  -s KILL 5`, `stdbuf`) and reads a Windows drive path (`C:/x`) as
+  still scanned; groups nested past `MAX_NESTING` (100) levels end
+  the scan with the commands found so far), drops wrapper prefixes
+  with their option values (`sudo -u root`, `doas`, `env`, `nice`, `timeout
+  -s KILL 5`, `stdbuf`, `xargs -I {}`) and reads a Windows drive path (`C:/x`) as
   the absolute path Git Bash spells `/c/x`, so a redirect inside a
-  quoted string or a heredoc body is not a write.  The scanner also
+  quoted string or a heredoc body is not a write (the body a
+  here-document hands on is kept on the command reading it,
+  `SimpleCommand.heredoc_body`, as written after a quoted delimiter,
+  after an unquoted one only when it holds no `$` or backtick:
+  `handed_text`).  `pushd DIR` is followed as a `cd`; `pushd -n DIR`
+  stays where it is, and a bare `pushd` or `pushd +N` goes to a
+  directory only the shell knows.  Each simple command records
+  whether it follows `||` (`conditional`), follows `&&` (`after_and`),
+  ends in `&` (`background`) or is negated by `!` (`negated`), for
+  readers that need the command's exit status to mean something
+  (the coding gate's verifier reuse).  The scanner also
   follows a variable the command itself assigns a literal value
-  (`T=tmp/x; cat > $T/f`, `export T=...`, `${T}`; `_Scanner.variables`)
-  into the words after it, in the same scope — not after `||` or `&&`,
+  (`T=tmp/x; cat > $T/f`, `export T=...`, `${T}`; `_Scanner.variables`;
+  `$PWD` is the directory it knows the command runs in, unless the
+  command assigned it)
+  into the words after it, in the same scope — not after `||`, after
+  `&&` only to the rest of the same and-list (`cd d && T=tmp/x && cat
+  > $T/f`), forgotten when the list ends any other way, as is one
+  assigned in a brace group after `&&`, except under the gate's
+  `optimistic` scan, which takes every list to have run through
+  (`simple_commands(..., optimistic=True)`: a `cd` or an assignment
+  after `&&` or `||` holds for the rest of the command, since the gate
+  reads what the agent changed rather than keeping a write from a path
+  that may not have been set);
   not in a compound command that may not run, not `T+=`; a subshell's,
   a pipeline stage's and a backgrounded list's assignments end with
   them (a brace group's included); after a brace group that may not
@@ -2400,8 +2448,9 @@ SEA's own `tool_call_hook` need not restate:
   task instead, when one is running: `Bash` waits on the job started
   last for the sleep's length, then runs the command with that sleep
   replaced by `true` (`sleep 60; tail log` waits, then runs `tail
-  log`), and the result opens with `Waited on job <id> for up to N s
-  instead of sleeping (<status>).`; with no running job, when the
+  log`), and the result ends with `Waited on job <id> for up to N s
+  instead of sleeping (<status>).` (after the output, like every
+  note of a `Bash` result, host or container); with no running job, when the
   sleep paces a `for`/`while`/`until`/`select` loop (taking it out
   would spin the loop) or when the text search (`_without_sleep`)
   does not find the sleep, the command runs as written.  The host
@@ -2839,28 +2888,47 @@ SEA's hooks, so a hook author knows what the model reads:
   and a call the user's Stop interrupted is no evidence.  An `Edit` /
   `Write` under a `tmp` directory inside the work dir
   (`CodingGate.is_scratch`: the progress log, a probe, the verifier)
-  is not observed at all: it changes no work, arms nothing and leaves
-  no unchecked change.  On any run
-  a `finish(success=True)` is refused when a command named in its
-  `evidence` argument (a JSON list of commands, or one string) never
-  ran or last exited non-zero (`EVIDENCE_FIELD_VERDICT`), and, once
-  per run, when its `summary_in_html` says the result was guessed or
-  not verified (`evidence_gate.EvidenceGate`: the refusal quotes the
-  `HEDGE_PHRASES` it found, "educated guess", "unverified", "could not
-  test", "should work", "no answer key", and the phrases that leave a
-  reading open, "if the hidden test", "judgement call", "left open",
-  "remains ambiguous", ..., and asks for a checklist of requirements
-  each with the command that checked it, or a `success=False` that
-  names what is unverified).  The run becomes a *coding run* — the
+  is not observed at all: it changes no work and arms nothing.
+  Nothing in the `finish` call itself is refused: the `evidence`
+  argument (a JSON list of commands, or one string) is shown to the
+  reviewer with the exit code of each command's last run, `not run`
+  for one that never ran (`CodingGate.evidence_report`; a command
+  that never ran, failed, or tests nothing — `echo`, `cat`, the words
+  of the task — proves nothing to it, the `REVIEW_PROMPT` says), and
+  the wording of `summary_in_html` is the reviewer's to judge.  The
+  refusals of earlier gates on the finish call alone — a summary that
+  said the result was guessed or unverified, a file change no shell
+  command checked, an `evidence` command that never ran or failed, a
+  summary the decisions model found leaving a case of the task open —
+  were answered by a
+  rewording far more often than by a check, and the measurement of
+  2026-11-04 (`reports/terminal-bench-4-cost-deep-analysis-2026-11-04.html`)
+  found no pass that depended on them, so they are gone;
+  `evidence_gate` keeps the readers of what a shell command changes
+  (`file_changes`, `writes_files`, `is_scratch_path`) and nothing that
+  refuses.  The run
+  becomes a *coding run* — the
   gate is armed — once an `Edit` / `Write` targets a code, build or
   configuration file (`coding_gate.is_code_file`: `CODE_SUFFIXES`
   from `.py` to `.toml`, `.yaml`, `.json`, `.css`, and
   `CODE_FILE_NAMES` such as `Makefile`, `Dockerfile`,
-  `CMakeLists.txt`), a writing shell command names one
-  (`names_code_file`, read with `evidence_gate.writes_files`, so a
-  `rm`, `mv` or `git checkout` of a code file arms it too), the
+  `CMakeLists.txt`), a shell command changes one
+  (`names_code_file`, read from the files the call changes,
+  `evidence_gate.file_changes`, described with the verifier reuse
+  below, so a
+  `rm`, `mv` or `git checkout` of a code file arms it too, while a
+  command that reads one, `cat install.sh`, names one in text, `git
+  commit -m "rm stale"`, or writes one under a `tmp` directory, `gh api
+  ... > tmp/x/pages.json`, arms nothing), the
   verifier exists, or a sub-task that was not a review ran and the
-  diff since the run's base commit shows a code file changed.  On a
+  diff since the run's base commit shows a code file changed; a run
+  whose `model_config` has `coding_gate: false` (`CodingGate.coding`,
+  a framework flag of `core.models.model.FRAMEWORK_ONLY_CONFIG_KEYS`;
+  `/sync` sets it, since what it changes is the merge of commits made
+  elsewhere and the resolution of their conflicts, which no reviewer
+  of the run's diff can tell from the pulled commits) is never a
+  coding run, whatever it changes, and a `finish` on a run that is no
+  coding run is not gated at all (`finish_verdict` returns `None`).  On a
   coding run a `finish(success=True)` runs its stages at once in
   threads, each recorded as a `gate_stage` event with its duration
   and outcome (`core.event_sink.publish` through the run's printer):
@@ -2870,24 +2938,85 @@ SEA's hooks, so a hook author knows what the model reads:
   under `bash -c` found through `processes.find_bash` — Git for
   Windows keeps `bash.exe` off `PATH` — in the work dir, or in the
   task's container, `VERIFIER_TIMEOUT` 900 s;
-  no verifier means no verdict) and, when a reviewer is set, a review
-  of the diff; then the evidence named, the hedge check (which on a
-  coding run also refuses a file change — an edit outside `tmp/`, or a
-  shell command that writes or deletes files — with no shell command
-  after it, `UNCHECKED_REASON`; a `bash_job(action="wait")` clears
-  the change like a foreground command, since it is where a
-  background test run's outcome is read, `evidence_gate.JOB_WAIT`), a
-  once-per-run check that the summary does not
-  admit a case of the task unhandled (`leaves_a_case_open`, by the
-  decisions model, threshold `OPEN_READING_THRESHOLD`; no decisions
-  model, no verdict) and the review's findings are judged, and every
-  failed stage is refused together (`gate_refusal`) for at most
-  `MAX_GATE_ROUNDS` (3) rounds per run; a verifier that fails or times
+  no verifier means no verdict — unless the agent's own run of it
+  passed and nothing changed since, which is reused instead, the stage
+  recorded as `reused`: a shell command whose exit code 0 was the
+  verifier's (`CodingGate.verifier_decides`, the module function
+  `verifier_decides(command, work_dir, verifier_path)` the coding SEA
+  shares, read from the scanned command: `bash`/`sh
+  ./tmp/<id>/verify.sh`, other than `bash -n`, or the script itself as
+  the command, from the work dir or after a `cd` the scanner follows,
+  `verifier_command`, at the top level of the command, not
+  negated, its output not piped, not after `||`, not in the
+  background, nothing before it that leaves the shell — `exit`,
+  `return`, an `exec` of a program — and everything after it after
+  `&&`, so `bash v.sh && echo ok` counts and `bash v.sh | tail`,
+  `bash v.sh; echo $?` and `bash v.sh || true` do not, since their
+  exit shows nothing about the verifier's) sets `verifier_passed_at`
+  to the change count of the moment and keeps the output; an `Edit` /
+  `Write` of `verify.sh` or a shell command naming it forgets that
+  run, as does any later change of the work — an edit outside `tmp/`,
+  or a shell command that changes files) and, when a reviewer is
+  set, a review of the diff.
+  What a shell command changes, `evidence_gate.file_changes`, is read
+  from its simple commands, `shell_scan.simple_commands(optimistic=True)`:
+  the command as it was meant to run, an assignment or a `cd` after
+  `&&` or `||` holding for the rest of the command, `cd d && T=tmp/x
+  && a; cp b $T/`, rather than the guards' reading, which lets no
+  write through on a path that may not have been set.  A simple
+  command changes the targets of its output redirections, its own and
+  its groups', other than `/dev/*` and scratch files — a path under
+  any `tmp` directory, `_SCRATCH`, resolved in the directory the
+  command runs in when the scanner knows it, so `cd /w/tmp/x && cat >
+  f` is scratch and `tmp/../a.py` is not, a word the shell still
+  expands, `$OUT`, `~/x`, judged as written — and what its program
+  changes, `_program_changes`, a program counting in command position
+  only, wrappers dropped: `cp`, `rsync` and `install` their last
+  operand, for `cp` and `install` the `-t DIR` / `--target-directory
+  DIR` destination instead when given; `tee`, `mv` (its `-t DIR`
+  target as well),
+  `rm`, `rmdir`, `unlink`, `touch`, `mkdir`, `shred`, `truncate` and
+  `patch` every path operand, `patch < fix.diff` with none a change
+  all the same, `dd` its `of=` operands, `chmod`, `chown` and `chgrp`
+  every operand but the first (`WRITING_PROGRAMS`), a call naming
+  scratch files only no change; `sed` with `-i` / `--in-place` in any
+  position, no change when its files — the plain operands after the
+  script, which an `-e` / `-f` option may supply (`_sed_files`) — are
+  all scratch, otherwise listed with every plain operand; `make`,
+  `cmake` and `ninja` (`BUILD_TOOLS`) unless one argument starts with
+  `test` or `check` and every argument does, is an option or has an
+  `=`, `make test`, `make -k check V=1` (`cmake --build . --target
+  test` is a build: its `.` is neither); any program
+  with `--fix`; the writing subcommands of the package tools
+  (`runs_subcommand`, `WRITING_SUBCOMMANDS` — `git checkout`, `pip
+  install`, `uv sync`, `npm ci`, `cargo build` — the tool in command
+  position or as `python -m pip`, `uv pip install` read as `pip
+  install`, and `uv run`'s next plain word put in command position
+  after the options of `UV_VALUED_OPTIONS` take their values, so `uv
+  run pip install x` installs and `uv run pytest` checks); a nested
+  shell's `-c` string, `bash -c "echo x > f"`, read as commands, a
+  shell named as an argument, `echo bash -c ...`, not; `find`'s
+  `-delete` and `-exec` / `-execdir` / `-ok` / `-okdir` the program
+  run on the matches, `{}` standing for the start paths; a
+  here-document is input to the program reading it, not a write).
+  Then the review's findings (or, once the run's review is spent, the
+  summary's answers to its open findings, `unanswered_verdict`) are
+  judged, and every failed stage is refused together
+  (`CodingGate.refusal`, the text of `gate_refusal`, whose header
+  says a later round is refused only while the verifier fails) under
+  one rule, `CodingGate.refusable`: the first refusal buys one round
+  whatever refused it, a later round is refused only when the
+  verifier stage refused at that call, and no round past
+  `MAX_GATE_ROUNDS` (3) per run is refused at all — the pass rate was
+  flat against the number of refused rounds while each round cost a
+  model turn at full context; a verifier that fails or times
   out counts against `MAX_VERIFIER_REFUSALS` (3), past which it is not
-  run again.  Past the round cap the finish goes through with the open
-  verdicts appended to the summary as caveats
+  run again (a passing run of the agent's own is still reused).  A
+  finish with open verdicts that is not refused goes through with them
+  appended to the summary as caveats
   (`deliver_with_findings`, `DELIVERED_CAVEATS`; `UNVERIFIED_CAVEAT`
-  is appended, round cap or not, only when the verifier exists but
+  is appended to a finish that goes through, whatever let it through,
+  only when the verifier exists but
   was skipped because its three refusals were already spent,
   `verifier_skipped`; a missing verifier adds no caveat), recorded as
   a `delivered` stage.
@@ -2902,43 +3031,115 @@ SEA's hooks, so a hook author knows what the model reads:
   has reached `REVIEW_FILE_BYTES` 120,000, so the last file shown may
   push the total past it; files the agent edited in another
   repository's worktree included), runs no commands, answers one
-  `VERDICT:` line and numbered `NOT DONE` findings; an answer without
-  a verdict is retried once without the run's `model_config`
-  overrides, a review that still has none or whose call fails
-  refuses the finish and counts under `MAX_FAILED_REVIEWS` (2), a
-  completed review under `MAX_REVIEWS` (3); reaching either cap stops
-  further review and the finish goes through without one
-  (`review_possible`).  A review runs only when a file changed since
-  the last one (a clean review is cached: a finish that changed
-  nothing is judged on the previous findings, `unanswered_verdict`,
-  which the summary must answer with a change or a quoted command and
-  its output, as the decisions model judges, `answered_findings`;
-  without the decisions model, or when its call fails, every finding
-  counts as answered); a read-only reviewer the agent dispatched
+  `VERDICT:` line and numbered `NOT DONE` findings.  The review is
+  one non-agentic model call (`CodingGate.side_call`) at the
+  provider's default effort — the run's `model_config` without its
+  `reasoning_effort`, `default_effort`, so a `base_url` or `api_key`
+  still applies — with `REVIEW_DEADLINE` (240) seconds to answer: the
+  call runs under a stop event of its own (`call_stop_event`: a
+  watcher thread, `_watch_call`, sets it at the deadline or when the
+  run's own stop event is set, and the model clients end the
+  streaming call on it), a deadline hit becomes the error `no answer
+  within 240 s` while a Stop of the run propagates, and there is no
+  retry; the attempt's spend is charged as it ends, however it ends.
+  A review without a verdict, past the deadline or whose call failed
+  refuses nothing: it keeps the previous findings open and counts
+  under `MAX_FAILED_REVIEWS` (2), a completed review under
+  `MAX_REVIEWS` (1); reaching either cap stops further review
+  (`review_possible`), so the one review reads the whole diff and
+  every later finish of the run is judged on its findings,
+  `unanswered_verdict`, which the summary must answer with a change
+  or a quoted command and its output, as the decisions model judges,
+  `answered_findings`; without the decisions model, or when its call
+  fails, the findings are unjudged — `answered_findings` returns
+  `None` — and the finish is not refused on them, since a refusal
+  must not depend on an optional service, though they stay open.  (A
+  re-review, when `MAX_REVIEWS` allows one, runs only when a file
+  changed since the last review and is shown its previous findings
+  and how the engineer answered them, `REVIEW_PREVIOUS`, to judge
+  those: it reports a new finding only when a sentence of the task
+  requires it and the change since the previous review breaks it, and
+  adds no spelling, input or edge case of its own the task does not
+  name.)  A
+  read-only reviewer the agent dispatched
   itself (`run_agent` / `run_parallel` with `tool_profile="review"`
   or a task that reads as a review) counts as the review once a
-  sub-task of it succeeded and no file changed since.  A
+  sub-task of it succeeded and no file changed since.  Any other
+  local sub-task counts as a change of the work only when the work
+  differs after it: a digest of the tracked diff since the base and
+  of the untracked files' contents (`CodingGate.fingerprint`) is
+  taken at the dispatch and compared when the result, or the
+  `agent_job` report of a job left running, is read (outside git,
+  where none can be taken, the sub-task is a change); a sub-task sent
+  to another machine (`run_agent(machine=...)`) touches no file here
+  and reviews nothing here, so it is neither.  A tool the gate does
+  not model (a SEA's own, an MCP server's: `custom_tools`, the run's
+  `_extra_tools`) may move HEAD — a sync tool that committed and
+  pulled — so after each of its results the gate takes HEAD as its
+  base again (`follow_head`; once a base is recorded, and when `git
+  rev-parse HEAD` answers) unless the run moved HEAD itself
+  (`moved_head`: a `git commit`, `merge`, `pull`, `rebase`,
+  `cherry-pick`, `revert`, `am`, `reset`, `checkout` or `switch` among
+  its shell commands, `HEAD_MOVING`, or the merge of its worktree), whose
+  commits are its work and stay in the diff.  A
   `finish(success=False)` on a coding run runs the verifier too
   (counting no refusal) and appends its outcome to the summary
   (`GIVEUP_NOTE`); the first give-up whose verifier passes is answered
   once with `GIVEUP_RECONSIDER_VERDICT`, the next ends the run.  A
   text-only turn on a coding run (the implicit finish below) is vetoed
   once with a request for an explicit `finish`.  A `commit_and_merge`
-  on a coding run runs the verifier, the unchecked-change check and
-  the review first (the reviewer is told the summary is not written
-  yet, `MERGE_SUMMARY_PLACEHOLDER`, and that the evidence is not named
+  on a coding run runs the verifier and the review first (the
+  reviewer is told the summary is not written yet,
+  `MERGE_SUMMARY_PLACEHOLDER`, and that the evidence is not named
   yet either, `MERGE_EVIDENCE_PLACEHOLDER`, so it judges the diff and
   the verifier and reports neither as a gap), a refusal there counting
-  as a gate round, and a merge asked
-  for again with findings open and nothing changed is refused with
-  them (`MERGE_UNANSWERED_VERDICT`); the gate follows the agent into
-  its worktree (`CodingGate.move`) and back to the checkout at the
-  merge.  A merge that went through resets the round count and drops
+  as a gate round under the same rule (`CodingGate.refusable`: the
+  first merge refusal whatever refused it, a later one only when the
+  verifier failed at that call, none past `MAX_GATE_ROUNDS`), and a
+  merge asked for again with findings open and nothing changed is
+  refused with them (`MERGE_UNANSWERED_VERDICT`); the gate follows the
+  agent into its worktree (`CodingGate.move`) and back to the checkout
+  at the merge.  Every merge refusal ends with `MERGE_CAP_NOTE` ("A
+  merge asked for again goes through with its open findings attached
+  to the result (and to the finish summary) unless your verifier
+  fails, so fix them now."), and the merge the rule does not refuse
+  goes through, so no run ends with its work on a branch nobody
+  merges: recorded as a `delivered` stage with `call:
+  commit_and_merge`, its result ending with the open verdicts
+  (`MERGED_WITH_FINDINGS`, "Merged after N refused rounds with these
+  findings open: ..."), which the finish summary then carries as
+  caveats (`deliver_merge_caveats`, `MERGED_CAVEATS`, a "Merged after
+  N refused merge rounds; findings open at the merge" heading and a
+  list) except those it answers by quoting the command and output
+  that shows the finding wrong, as the decisions model judges — every
+  one without it.  A merge that went through resets the round count and drops
   the open findings (`CodingGate.merged`, called by the agent once the
   repository has no worktree left): the rounds the merge spent and the
   findings its review raised stay with the merge, the finish after it
-  is refused on rounds of its own and reviewed again only when a file
-  changed, so no finding older than the merge ends as its caveat.  A
+  is refused on rounds of its own and, the run's one review spent at
+  the merge, judged on no review, so no finding older than the merge
+  ends as its caveat other than those the merge was let through
+  with.  When the agent first writes its interpretation ledger
+  (`Write` of a file named `LEDGER_NAME`, `ledger.md`, under the
+  scratch directory, `CodingGate.is_scratch`; the system prompt's How
+  to Work rule 1 asks for it), the reviewer model reads the task and
+  the ledger once (`CodingGate.reading_note`: one `side_call` with
+  `READING_PROMPT`, the ledger cut at `REVIEW_ONE_FILE_BYTES`) and
+  names the sentences of the task it would read differently or finds
+  unsettled; the answer is parsed with `numbered_items` unless it is
+  the single line `NONE` (`READING_NONE`) or the call failed, the
+  call is recorded as the `reading` gate stage (`pass`, `fail` with
+  the number of `items`, or `error`, with the model and cost), and the
+  items are appended to the `Write`'s result (`READING_NOTE`: settle
+  each in the ledger before the first edit, by adopting the reading
+  or by keeping yours next to the words of the task that rule the
+  other out) — the agent's guard returns an allowing
+  `Verdict` with that note (`SorcarAgent._guard_tool_call`,
+  `tool_verdict.allow_with_note`; the `KISSAgent.tool_call_guard` may
+  return a `Verdict` as well as a refusal text, and
+  `KISSAgent._tool_call_verdict` passes an allowing one through) when
+  the run has the `Edit` tool, and nothing is refused: a reading only
+  the user can settle is theirs to answer.  A
   sub-agent gets the same gate without a reviewer: its
   caller's gate reviews the whole diff.  A review's model spend is
   charged to the run that asked for it (`_charge_gate_usage`, bound
@@ -3374,7 +3575,18 @@ redundant `openai/`, `anthropic/` or `google/` prefix only when the
 bare name is a known model or the full name is not, so
 `openai/gpt-5-custom` registered in `MY_MODELS.json` is routed and
 priced under that full name rather than as an unknown
-`gpt-5-custom`.
+`gpt-5-custom`; and an entry registered under such a prefixed name
+WITH an endpoint (`openai/gpt-6-astra` for a gateway that uses that
+id) keeps its full name whenever the call routes to an endpoint,
+even though the bare `gpt-6-astra` is a bundled model: the gateway
+receives the id it was registered under and the entry's own prices
+bill the call, hot-added or loaded (`_is_registered_endpoint_model`,
+`_lookup_model_info`).  A generated `-{level}` thinking alias of a
+registered endpoint model (`gpt-6-astra-high` when only
+`gpt-6-astra` is registered) runs against the base's endpoint, key
+and headers (`custom_model_config` resolves the alias to its base
+unless the alias has an entry of its own), since the loader mirrors
+the base's prices onto the alias.
 
 
 ## Complete working example
@@ -3774,8 +3986,8 @@ task count merge with the bare name the `llm_call` events carry.
   (`_publish`; an unchanged list is not re-broadcast to the clients,
   except after a Stop interrupted a broadcast before every subscriber
   had it, when the next rescan broadcasts whatever it finds,
-  `_forget_broadcast`).  Of the 28 bundled SEA folders (the
-  `base/` folder of the base classes is never a command), 26 register
+  `_forget_broadcast`).  Of the 29 bundled SEA folders (the
+  `base/` folder of the base classes is never a command), 27 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events — the log
@@ -3808,7 +4020,7 @@ task count merge with the bare name the `llm_call` events carry.
   and the task and its other children keep running),
   `/autorouter` (runs a task on the cheapest model tier
   that will finish it; its `settings()` fixes the routing session's model to
-  `autorouter_sea.ROUTER_MODEL`, `claude-opus-5-5-max`, with
+  `autorouter_sea.ROUTER_MODEL`, `claude-opus-5-5-medium`, with
   `auto_classify` off and `use_web_tools` and `use_memory` on; the
   candidates of each tier are the ordered `(model, note)` pairs of
   `autorouter_sea.TIERS` (small: `zai-org/GLM-5.3-Flash`,
@@ -3827,16 +4039,24 @@ task count merge with the bare name the `llm_call` events carry.
   the installation-wide ledger `$KISS_HOME/MODEL_DECISIONS.md`, created
   whole once and appended under an exclusive file lock held for that
   one line, so the sub-agents of one run cannot overwrite each other's
-  rows, Windows's seek-then-write emulation of `O_APPEND` included), `/bestrouter` (runs a task on
-  `claude-fable-5-1-max` (`bestrouter_sea.PRIMARY_MODEL`) and has
+  rows, Windows's seek-then-write emulation of `O_APPEND` included), `/bestrouter` (its
+  `settings()` starts every task of the tab on `claude-opus-5-5-medium`
+  (`bestrouter_sea.SIMPLE_MODEL`), which answers simple questions and
+  queries itself; its routing protocol (`SYSTEM_PROMPT`, shared with
+  `orbestrouter` through `routing_prompt(router, simple, primary,
+  review)`) tells the agent to use
+  `claude-fable-5-1-max` (`PRIMARY_MODEL`, a `set_model` call away) for
+  every other task, software development included, and to have
   `gpt-6-astra` (`REVIEW_MODEL`) review it read-only, dispatched
   with a non-blocking `run_agent(model=..., tool_profile="review",
   wait="false")` on at most 75% of the budget and collected with
   `agent_job`), `/orautorouter` and `/orbestrouter`
   (the same two routers with every candidate taken from the OpenRouter vendor:
-  `orautorouter_sea.ROUTER_MODEL` is `openrouter/anthropic/claude-opus-5.5-max`
+  `orautorouter_sea.ROUTER_MODEL` is `openrouter/anthropic/claude-opus-5.5-medium`
   and its `TIERS` hold the `openrouter/...` twins in the autorouter's
-  order, and `openrouter/anthropic/claude-fable-5.1-max` reviewed by
+  order, and `orbestrouter` starts on
+  `openrouter/anthropic/claude-opus-5.5-medium`, works on
+  `openrouter/anthropic/claude-fable-5.1-max` and is reviewed by
   `openrouter/openai/gpt-6-astra`), the hidden
   `coding` SEA (unattended coding in a Docker container, or on a
   remote sandbox through an `exec:<url>` bridge, for benchmark
@@ -3847,23 +4067,45 @@ task count merge with the bare name the `llm_call` events carry.
   with the edit tools now has (`coding_gate.CodingGate`, see
   "Refusals" under "Error handling"; the harness keeps its own,
   container-bound copy of the stages and shares the readers of shell
-  results, `evidence_commands`, `gate_refusal` and the verdict texts
+  results, `evidence_commands`, `gate_refusal`, `verifier_decides`,
+  `call_stop_event`, `default_effort` and the verdict texts
   with it): with the trial config's `finish_gate` on, every
   `finish(success=True)` runs its checks at once in threads and is
-  refused with every failed one together, up to `max_gate_rounds`
-  (3) refused rounds per trial, after which the finish is delivered
-  with the open verdicts appended as caveats (logged as
+  refused with every failed one together under the gate's round rule
+  (inline in `ContainerHarness.finish_verdict`: the first refusal
+  buys one round whatever refused it, a later round is refused only
+  when a script — the verifier, or the independent check when one is
+  configured — refused at that call, and no round past
+  `max_gate_rounds` (3) per trial is refused), the finish otherwise
+  delivered with the open verdicts appended as caveats (logged as
   `delivered_with_findings`, and as `unverified_finish` when the
   checks did not pass).  The checks: the agent's own verifier script
   (`/tmp/kiss-verify.sh` in the container must exist and exit 0
   within `verifier_timeout`, 900 s by default; the script is read once
   for the run and that text is what runs, while the concurrent review
   reads `/tmp/kiss-verify.sh` as it is when the review starts, so the
-  reviewer can see a script edited since), an
+  reviewer can see a script edited since; the agent's own run of it is
+  reused instead when it passed and nothing changed since — the
+  harness counts the changes of the work, `ContainerHarness.changes`,
+  advanced by `track_change` for an `Edit` / `Write` under the workdir
+  (`under_workdir`), a shell command that writes files
+  (`evidence_gate.writes_files`) and a `rollback`, and
+  `record_exit_codes` sets `verifier_passed_at` to the change count
+  at a foreground shell call whose exit 0, read by the gate's
+  `verifier_decides`, was the verifier's — its `turn_commands` are
+  `(name, args, changes)` triples for that —
+  while an edit of the verifier or a shell command naming it makes
+  that run stale; `verifier_verdict` then runs nothing, sets
+  `last_verifier_run` to the script, exit 0 and the note "passed when
+  you ran it; nothing changed since", logs the `verifier` event with
+  `reused: true` and records the stage's `reused` field), an
   independent check written once per trial by the config's
-  `blind_verifier` model (`"same"` for the trial's own model, `"other"`
-  for the strongest configured model of another family,
-  `model_families.other_family_model`) from the task statement alone,
+  `blind_verifier` model (`""`, the harness's default, for none —
+  the launcher's default too, since its verdicts did not predict the
+  hidden tests and it cost a sixth of the run; `"same"` for the
+  trial's own model, `"other"` for the strongest configured model of
+  another family, `model_families.other_family_model`, or a model
+  name, `resolve_side_model`) from the task statement alone,
   without seeing the agent's work (authored with a shell in the
   container, 40 steps and a tenth of the trial's budget, told to keep
   the script within a quarter of `verifier_timeout`; an author whose
@@ -3893,48 +4135,48 @@ task count merge with the bare name the `llm_call` events carry.
   nothing the agent left at the shell's path or in a file stands
   between the copy and the exec; a bridged trial, or a copy that
   failed (logged `shell_copy_failed`), runs the container's shell.
-  Next comes the `evidence` argument of the finish (a JSON list of
-  commands, or one string): each command must have run as a shell
-  command of this trial and exited 0 on its last run (the harness
-  keeps the exit codes its results showed; a never-run or failing
-  command is refused with `EVIDENCE_VERDICT`; an empty field, or a
-  parsed JSON value that is neither a string nor a list, is no
-  evidence and passes, while a non-empty string that is not JSON is
-  taken as one literal command and refused unless exactly that command
-  ran and exited 0; the reviewer is shown what was named with each
-  exit code).  This replaced the string comparison of
-  the summary's quotes against tool output (`coding/quoted_evidence.py`,
-  no longer wired in), which refused many finishes without changing
-  an outcome.  Then the SEA's own `EvidenceGate(track_changes=True)` — the
-  hedge check of the executor's guard (see "Refusals" above) plus a
-  second reason: a file was changed (`Edit`, `Write`, or a shell
-  command that writes, `evidence_gate.writes_files`: redirections,
-  copy/move/patch and in-place editors, `--fix` runs, a `make` /
-  `cmake` / `ninja` whose targets are not all checks, and the writing
-  subcommands of the package tools read word by word,
-  `WRITING_SUBCOMMANDS` — `git checkout`, `pip install`, `uv sync`,
-  `npm ci`, `cargo build` — while `uv run pytest`, `npm test`, `make
-  test` and `git diff` are checks) and no shell
-  command ran since, so nothing verified covers the final state; one
-  refusal per trial, lifted when the verifier passes — a once-per-trial
-  refusal of a summary that the decisions model finds leaving a case
-  of the statement open (`leaves_a_case_open`, threshold 0.7), the
-  open findings of the last review that the summary answers neither
-  with a change nor with a quoted command and its output
-  (`answered_findings`), and a read-only review by the configured
-  `reviewer` model, up to `max_reviews` (3) per trial, a re-review
-  seeing its previous findings and only the files changed since; its
-  `NOT DONE` findings are the refusal, a review without a `VERDICT:`
-  line is retried once without the run's per-model overrides, so at
-  the reviewer's catalog thinking level, and a review that still has
-  none, or whose model call raised (no retry), counts as failed and
-  does not use up a review: the first failed review refuses the
-  finish, a second one (`MAX_FAILED_REVIEWS`, 2) ends the reviewing
-  for the trial and lets the finish through; the `reviewer` setting
-  takes `"same"` and `"other"` like `blind_verifier`, and a review is
-  run only when a file under the workdir changed since the previous
-  one (a finish that changed nothing is judged on that review's
-  findings instead).  A `finish(success=False)` is checked the same
+  The `evidence` argument of the finish (a JSON list of commands, or
+  one string; an empty field, or a parsed JSON value that is neither
+  a string nor a list, is no evidence, and a non-empty string that is
+  not JSON is one literal command) refuses nothing: the reviewer is
+  shown each command named with the exit code of its last run as a
+  shell command of this trial (`evidence_report`, from the exit codes
+  the results showed; `never ran` for one that did not run), and the
+  summary's wording is the reviewer's to judge as well.  (Two earlier
+  gates refused on the finish call itself — the string comparison of
+  the summary's quotes against tool output, `coding/quoted_evidence.py`,
+  no longer wired in, then a refusal of a never-run or failing
+  evidence command, of a summary that said the result was guessed or
+  unverified, of a file change no shell command ran after, and of a
+  summary the decisions model found leaving a case of the statement
+  open; the measurement of 2026-11-04 found those refusals answered
+  by a rewording far more often than by a check and no pass that
+  depended on them.)  The last check is the review: the open findings
+  of the trial's review that the summary answers neither with a
+  change nor with a quoted command and its output
+  (`unanswered_verdict`, as the decisions model judges,
+  `answered_findings`; without the decisions model the findings are
+  unjudged and refuse nothing), or, while the trial's review is
+  still to come, a read-only review by the configured `reviewer`
+  model, `max_reviews` (`MAX_REVIEWS`, 1) per trial — a re-review,
+  when the config allows one, sees its previous findings and only
+  the files changed since — whose `NOT DONE` findings are the
+  refusal.  The review is one model call at the provider's default
+  effort (`review_call`: the trial's model overrides without their
+  `reasoning_effort`, the gate's `default_effort`, since at the
+  highest effort the reviewer thought for a median 399 s, past the
+  prompt cache's life, and its verdicts were no better) with
+  `REVIEW_DEADLINE` (240) seconds to answer, through a stop event of
+  its own that the gate's `call_stop_event` fires at the deadline or
+  on the run's Stop; a review without a `VERDICT:` line, past the
+  deadline, or whose model call raised is logged as failed, refuses
+  nothing, keeps the previous findings open and does not use up a
+  review, and the second failed review (`MAX_FAILED_REVIEWS`, 2) ends
+  the reviewing for the trial.  The `reviewer` setting takes `"same"`
+  and `"other"` like `blind_verifier` (`resolve_side_model`), and a
+  review is run only when a file under the workdir changed since the
+  previous one (a finish that changed nothing is judged on that
+  review's findings instead).  A `finish(success=False)` is checked the same
   way (`giveup_verdict`, logged as `giveup_check`): both verifiers run
   at once without counting a refusal, their outcome is appended to
   the summary next to the agent's verdict (`GIVEUP_NOTE`), a tree
@@ -3954,8 +4196,37 @@ task count merge with the bare name the `llm_call` events carry.
   the recorded digest (an archive replaced or deleted in the container
   restores nothing, as for `rollback`).  With the
   gate on, the first `Edit` or `Write` under the workdir is refused
-  (at most twice) until the agent has written its interpretation
-  ledger, `/tmp/kiss-ledger.md`.  A text-only turn, the implicit
+  (at most twice, `MAX_LEDGER_REFUSALS`) until the agent has written
+  its interpretation ledger, `/tmp/kiss-ledger.md` (`ledger_verdict`),
+  and then, when the config's `reading_check` names a model
+  (`"other"` for the strongest configured model of another family
+  than the trial's, `"same"`, a model name; `""` for none, and none
+  either when `"other"` finds no other family configured, since a
+  reader of the trial's own family shares its reading), until the
+  ledger settles the independent reading of the statement
+  (`reading_verdict`): when the ledger first exists the model reads
+  the statement and the ledger once (`READING_CHECK_PROMPT`, one
+  `review_call`, the ledger cut at `REVIEW_ONE_FILE_BYTES`) and
+  names the sentences it would read differently, parsed with
+  `numbered_items` unless the answer is the single line `NONE`
+  (`READING_NONE`) or the call failed, logged as a `reading_check`
+  event (its spend added to the trial's cost: `SIDE_AGENT_EVENTS`,
+  `review_usage`) and recorded as the `reading` gate stage (`pass`,
+  `fail` with the number of `items`, or `error`); the items refuse the
+  edit with `READING_VERDICT` (adopt the reading, or keep yours and
+  write next to it the words of the statement that rule the other
+  out) until the ledger's text changed since they were raised, at
+  most `MAX_READING_REFUSALS` (2) times, after which they are
+  dropped.  The system prompt names the reading only when a model is
+  configured for it (`READING_NOTE` in the ledger step) and the
+  independent check only when one is (`BLIND_NOTE` in the verifier
+  step, `BLIND_MENTION` in the finish step); the Terminal-Bench
+  launcher (`benchmarks/terminal_bench/harbor_agent.py`, its
+  `SeaOptions`: `reviewer` and `reading_check` default to `other`,
+  `blind_verifier` to `none`, `same` standing for the trial's model
+  and `none` for `""`; `run.py` takes them as `--reviewer`,
+  `--reading-check` and `--blind-verifier`, `harbor_command` passing
+  each as an `--ak` option) follows those defaults.  A text-only turn, the implicit
   finish that consults the hook with no arguments, is vetoed once with
   a request for an explicit `finish`, and a second one ends the run
   (logged as `implicit_finish`); a `finish` delivered once the
@@ -4331,7 +4602,14 @@ task count merge with the bare name the `llm_call` events carry.
   link is never a local client of the machine, whatever token it
   presents, so the machine answers these as it would a browser), the chat header's machine drop-down
   offers it (a machine registered by its address is shown by the host
-  name its daemon reports with every ping), and `run_agent(machine=...)`
+  name its daemon reports with every ping; a focus on the drop-down
+  asks the daemon for a fresh `machines` list, and `renderChatMachine`
+  rebuilds its `<option>`s only when their values or labels differ
+  from what is shown and sets its value only when it differs from the
+  chosen machine, since iOS dismisses a native picker whose options
+  are replaced under it, or keeps showing the old ones, so on a phone
+  the list opened by the first tap after a reload would never show),
+  and `run_agent(machine=...)`
   can run a sub-task on it; with the `https://` form the password may be left out only for a
   daemon that has no remote password set and is reached on a loopback
   port), `/merge`
@@ -4405,6 +4683,18 @@ task count merge with the bare name the `llm_call` events carry.
   (`seas/sync/git_sync.py`: commit, fetch, merge, push, with the round
   retried when the remote moves during the push; a tree with unmerged
   paths left from an earlier merge is refused rather than committed);
+  its `settings()` adds `coding_gate: False` to the run's
+  `model_config`, so the run is no coding run for the finish gate —
+  what it changes is the merge of commits made elsewhere and the
+  resolution of their conflicts, which no reviewer of its diff can
+  tell from the pulled commits — and the gate, to which `git_sync` is a
+  tool it does not model, takes HEAD as its base again after each
+  `git_sync` result (once a base is recorded and while the run has
+  not moved HEAD with a git command of its own); a `model_config` of
+  such framework flags alone
+  is added to the configuration that applies anyway, so a
+  settings-panel endpoint stays (`model.framework_flags_over`, applied
+  by `task_runner`);
   a merge that stops on
   conflicts is left in progress for the agent to resolve with the
   `shell+edit` tools and finish with a second `git_sync` call; its
@@ -4434,6 +4724,18 @@ task count merge with the bare name the `llm_call` events carry.
   machines registered there are not synced in turn; the budget is
   $2 per sync, one for this checkout and two per machine, since a
   sub-task's spend counts in the caller's),
+  `/install` (`seas/install/`, a `WorkerSea` with `tool_profile:
+  "none"` locked, `max_budget: 1.0` and a `timeout` of the one-hour
+  install limit plus ten minutes, whose one tool
+  `install_on_machines(machines="")` reaches every machine registered
+  with `/machine add` by ssh concurrently, finds the clone of the
+  private repository `https://github.com/ksenxx/kiss.git` in the
+  login's home (`~/kiss` first, then any `~/<dir>` holding an
+  `install.sh`, matched by `origin` through `git_sync.repo_key`) and
+  runs `./install.sh --non-interactive` there, reporting per machine
+  ok or FAILED with the last 15 lines of output, the remote-access
+  password redacted; a machine registered by URL is reported as
+  skipped; `/install <name>[,<name>]` installs only those),
   `/sync_history_and_memory` (`seas/sync_history_and_memory/`, a
   `WorkerSea` that brings `$KISS_HOME/history.db` — tasks, events,
   deletion records — and `$KISS_HOME/memories` of this machine and of

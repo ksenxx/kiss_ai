@@ -30,6 +30,7 @@ from pathlib import Path
 
 import kiss.server.web_server as ws
 from kiss.tests.local_ws import LocalReader, LocalWriter
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 _DAY_MS = 24 * 60 * 60 * 1000
@@ -173,6 +174,72 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
             await self._close(writer)
         cache = json.loads(self._cache_path().read_text(encoding="utf-8"))
         self.assertEqual(cache["snoozedLatest"], "2099.1.1")
+
+
+class TestSnoozeOutranksOlderPublications(_SnoozeTestBase):
+    """A publication that read the cache before the snooze must not land after it.
+
+    ``_broadcast_update_available`` reads the snooze cache on a worker
+    thread; a user's "Remind me later" can complete, and be delivered,
+    while that worker is still out.  The older result must then be
+    dropped: delivered, it would resurface the toast the user just
+    dismissed.  The worker is held inside the real cache check
+    (:class:`Pause`); nothing is replaced.  A snooze of an OLDER
+    release on disk makes the check compare versions after reading
+    the cache, which is where it is held.
+    """
+
+    def _hold_cache_check(self) -> Pause:
+        self._write_cache({
+            "snoozeUntilMs": int(time.time() * 1000) + _DAY_MS,
+            "snoozedLatest": "2099.1.0",
+        })
+        return Pause(ws._compare_versions.__code__, lambda loc: loc["b"] == "2099.1.0")
+
+    async def _assert_no_stale_false(self, reader: LocalReader) -> None:
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while (remaining := deadline - asyncio.get_event_loop().time()) > 0:
+            try:
+                ev = await self._wait_for_event(reader, "update_available", timeout=remaining)
+            except TimeoutError:
+                return
+            self.assertTrue(ev.get("snoozed"), "an older publication undid the snooze")
+
+    async def test_global_publication_in_flight_is_dropped_after_a_snooze(self) -> None:
+        reader, writer = await self._connect_local()
+        try:
+            await self._send_ready(writer, "tab-stale-global")
+            await self._wait_for_snoozed(reader, False)
+            with self._hold_cache_check() as pause:
+                old = asyncio.ensure_future(self.server._broadcast_update_available())
+                self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+                await self._snooze(writer, "2099.1.1")
+                await self._wait_for_snoozed(reader, True)
+                pause.release()
+                await asyncio.wait_for(old, 10)
+            await self._assert_no_stale_false(reader)
+        finally:
+            await self._close(writer)
+
+    async def test_catch_up_in_flight_is_dropped_but_does_not_block_others(self) -> None:
+        reader, writer = await self._connect_local()
+        other_reader, other_writer = await self._connect_local()
+        try:
+            await self._send_ready(other_writer, "tab-other-window")
+            await self._wait_for_snoozed(other_reader, False)
+            with self._hold_cache_check() as pause:
+                # This window's ``ready`` catch-up is the older,
+                # connection-only publication held in flight.
+                await self._send_ready(writer, "tab-stale-catch-up")
+                self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+                await self._snooze(other_writer, "2099.1.1")
+                await self._wait_for_snoozed(other_reader, True)
+                await self._wait_for_snoozed(reader, True)
+                pause.release()
+            await self._assert_no_stale_false(reader)
+        finally:
+            await self._close(writer)
+            await self._close(other_writer)
 
 
 class TestSnoozedStateFromCacheFile(_SnoozeTestBase):

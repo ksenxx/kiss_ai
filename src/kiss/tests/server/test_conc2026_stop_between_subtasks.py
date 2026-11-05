@@ -70,7 +70,8 @@ def _persisted(task_id: str) -> tuple[dict[str, Any], list[str]]:
     _persistence._flush_chat_events()
     db = _persistence._get_db()
     row = db.execute(
-        "SELECT result FROM task_history WHERE id = ?", (task_id,),
+        "SELECT result, tokens, cost, steps FROM task_history WHERE id = ?",
+        (task_id,),
     ).fetchone()
     assert row is not None
     loaded = _persistence._load_chat_events_by_task_id(task_id)
@@ -138,16 +139,18 @@ class TestStopBetweenSubtasks(TestCase):
         agent.run = fake_run  # type: ignore[method-assign, assignment]
         worker = threading.Thread(
             target=daemon._run_task,
-            args=({
-                "type": "run",
-                "prompt": "<task>first part</task><task>second part</task>",
-                "tabId": tab_id,
-                "workDir": self.work_dir,
-                "isParallel": False,
-                "useWorktree": False,
-                "autoCommit": False,
-                "_state_key": state.task_id,
-            },),
+            args=(
+                {
+                    "type": "run",
+                    "prompt": "<task>first part</task><task>second part</task>",
+                    "tabId": tab_id,
+                    "workDir": self.work_dir,
+                    "isParallel": False,
+                    "useWorktree": False,
+                    "autoCommit": False,
+                    "_state_key": state.task_id,
+                },
+            ),
             daemon=True,
         )
         state.task_thread = worker
@@ -180,25 +183,169 @@ class TestStopBetweenSubtasks(TestCase):
 
         messages = "\n".join(logs.output)
         self.assertNotIn(
-            "Cleanup interrupted", messages,
-            "BUG: the unacknowledged stop let the watchdog re-inject "
-            "into the end-of-run cleanup",
+            "Cleanup interrupted",
+            messages,
+            "BUG: the unacknowledged stop let the watchdog re-inject into the end-of-run cleanup",
         )
         self.assertIn("Task lifecycle complete", messages)
         self.assertEqual(
-            len(run_calls), 1,
+            len(run_calls),
+            1,
             "the second subtask of a stopped run must never start",
         )
         row, types = _persisted(captured["id"])
         self.assertEqual(
-            row["result"], "Task stopped by user",
+            row["result"],
+            "Task stopped by user",
             "BUG: a run stopped between subtasks was persisted with the "
             "finished subtask's success summary",
         )
         self.assertIn(
-            "task_stopped", types,
+            "task_stopped",
+            types,
             "BUG: the stopped run kept its task_done end event, so "
             "task_failed/auto-commit treated it as a success",
+        )
+        self.assertFalse(state.stop_acknowledged, "flag is per run and reset")
+        self.assertIsNone(state.task_thread)
+
+    def test_stop_after_intermediate_row_persisted_leaves_it_complete(self) -> None:
+        """A Stop before the next subtask allocates its row keeps the finished one.
+
+        Audit V6 (F1): after the intermediate ``_persist_subtask_row``
+        the loop kept ``task_history_id`` on the finished row, so a
+        stop landing in the next subtask's pre-``agent.run`` bookkeeping
+        (its ``_zero_usage_counters``, before the per-subtask ``try``
+        whose ``finally`` would have re-resolved the id) made the outer
+        handler re-persist that completed row as ``Task stopped by
+        user`` with the zeroed tokens, cost and steps.  The worker is
+        parked in the agent's second ``reset_usage`` (polling, so the
+        watchdog's asynchronous interrupt fires right there) while the
+        real Stop is requested.
+        """
+        remote = _make_remote_server()
+        daemon = remote._agent_server
+        tab_id = "between-subtasks-2"
+        agent = ChatSorcarAgent("Sorcar")
+        state = AgentState(
+            f"pre-{tab_id}",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        state.user_answer_queue = queue.Queue()
+        agent_state.register(state)
+        events: list[dict[str, Any]] = []
+        events_lock = threading.Lock()
+        orig_broadcast = daemon.printer.broadcast
+
+        def capture(event: dict[str, Any]) -> None:
+            with events_lock:
+                events.append(dict(event))
+            orig_broadcast(event)
+
+        daemon.printer.broadcast = capture  # type: ignore[method-assign]
+        captured: dict[str, str] = {}
+        parked = threading.Event()
+        release = threading.Event()
+        run_calls: list[str] = []
+        real_reset_usage = agent.reset_usage
+
+        def fake_run(**kwargs: Any) -> str:
+            run_calls.append(kwargs.get("prompt_template", ""))
+            if len(run_calls) > 1:
+                return "summary: subtask two done\nsuccess: true"
+            agent.total_tokens_used = 7
+            agent.budget_used = 0.001
+            agent.step_count = 1
+            agent._chat_id = agent._chat_id or f"between-chat-{tab_id}"
+            task_id, _ = _persistence._add_task(
+                kwargs.get("prompt_template", ""),
+                chat_id=agent._chat_id,
+                extra={
+                    "model": kwargs.get("model_name", ""),
+                    "work_dir": kwargs.get("work_dir", ""),
+                    "version": "test",
+                    "is_parallel": False,
+                    "is_worktree": False,
+                },
+            )
+            agent._last_task_id = task_id
+            captured["id"] = task_id
+            return "summary: subtask one done\nsuccess: true"
+
+        def parking_reset_usage() -> None:
+            real_reset_usage()
+            if captured and not parked.is_set():
+                # The next subtask's reset, after subtask one's row was
+                # persisted: hold the worker here until the stop lands.
+                parked.set()
+                deadline = time.monotonic() + 30
+                while not release.is_set() and time.monotonic() < deadline:
+                    release.wait(0.05)
+
+        agent.run = fake_run  # type: ignore[method-assign, assignment]
+        agent.reset_usage = parking_reset_usage  # type: ignore[method-assign]
+        worker = threading.Thread(
+            target=daemon._run_task,
+            args=(
+                {
+                    "type": "run",
+                    "prompt": "<task>first part</task><task>second part</task>",
+                    "tabId": tab_id,
+                    "workDir": self.work_dir,
+                    "isParallel": False,
+                    "useWorktree": False,
+                    "autoCommit": False,
+                    "_state_key": state.task_id,
+                },
+            ),
+            daemon=True,
+        )
+        state.task_thread = worker
+        with self.assertLogs("kiss.server.task_runner", level="DEBUG") as logs:
+            worker.start()
+            self.assertTrue(parked.wait(timeout=15), "second subtask's reset never ran")
+            before = _persisted(captured["id"])
+            try:
+                daemon._stop_task(tab_id)
+                worker.join(timeout=30)
+            finally:
+                release.set()
+            self.assertFalse(worker.is_alive(), "worker never finished")
+
+        messages = "\n".join(logs.output)
+        self.assertNotIn("Cleanup interrupted", messages)
+        self.assertIn("Task lifecycle complete", messages)
+        self.assertEqual(len(run_calls), 1, "the second subtask of a stopped run never starts")
+        self.assertEqual(
+            before,
+            (
+                {"result": "subtask one done", "tokens": 7, "cost": 0.001, "steps": 1},
+                [
+                    "task_done",
+                ],
+            ),
+        )
+        self.assertEqual(
+            _persisted(captured["id"]),
+            before,
+            "BUG: the stop rewrote the completed, already persisted row",
+        )
+        with events_lock:
+            terminal = [
+                (e["type"], e.get("tabId"), e.get("taskId"), e.get("text"))
+                for e in events
+                if e["type"] in ("result", "task_stopped", "task_done")
+            ]
+        self.assertEqual(
+            terminal,
+            [
+                ("result", tab_id, None, "Task stopped by user"),
+                ("task_stopped", tab_id, None, None),
+            ],
+            "the launcher tab gets the stopped result and end event, unaddressed by row",
         )
         self.assertFalse(state.stop_acknowledged, "flag is per run and reset")
         self.assertIsNone(state.task_thread)

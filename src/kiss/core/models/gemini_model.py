@@ -17,7 +17,7 @@ import httpx
 from google import genai
 from google.genai import types
 
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import ContentFilterError, KISSError, OutputCapError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
@@ -41,6 +41,23 @@ logger = logging.getLogger(__name__)
 # model.  ``GenerateContentConfig`` forbids unknown fields, so this is the
 # authoritative set of ``model_config`` keys that can be forwarded.
 _GEMINI_CONFIG_FIELDS = frozenset(types.GenerateContentConfig.model_fields)
+
+# The candidate ``finishReason`` values of a content filter stop (the
+# ``FinishReason`` enum of the SDK): deterministic for the same request,
+# like a blocked prompt, so the agentic loop fails over to another model
+# family instead of retrying this one.
+_FILTER_FINISH_REASONS = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    }
+)
 
 # The documented dummy thought signature for a function call Gemini never
 # signed.  Gemini 3 and 4 models reject a request that continues a turn
@@ -168,6 +185,15 @@ def _is_thought(part: Any) -> bool:
         ``True`` when the part is flagged ``thought``.
     """
     return getattr(part, "thought", None) is True
+
+
+def _reason_name(reason: Any) -> str:
+    """Return the wire name of a ``FinishReason`` or ``BlockedReason`` (``"SAFETY"``).
+
+    Args:
+        reason: The SDK's enum member (``str(member)`` is ``FinishReason.SAFETY``).
+    """
+    return str(getattr(reason, "value", reason))
 
 
 def _decode_base64(data: str) -> bytes | None:
@@ -692,7 +718,9 @@ class GeminiModel(Model):
                 self._invoke_thinking_callback(is_thought)
             self._invoke_token_callback(part.text)
 
-    def _stream_turn(self, contents: list[types.Content], config: Any) -> tuple[list[Any], Any]:
+    def _stream_turn(
+        self, contents: list[types.Content], config: Any
+    ) -> tuple[list[Any], Any, str | None]:
         """Stream one turn, aborting on a user stop or a stalled connection.
 
         Args:
@@ -700,11 +728,13 @@ class GeminiModel(Model):
             config: The generation config for this turn.
 
         Returns:
-            The streamed parts, and the chunk to bill the turn against —
+            The streamed parts, the chunk to bill the turn against —
             the one carrying ``usage_metadata`` rather than whichever
             chunk happened to come last, since a terminal
             ``finishReason``-only chunk would otherwise report the step
-            as free.  ``None`` when the stream produced nothing at all.
+            as free; ``None`` when the stream produced nothing at all —
+            and the candidate's ``finishReason`` (``"STOP"``,
+            ``"MAX_TOKENS"``), ``None`` for an empty stream.
 
         The stall is bounded at both levels, because neither alone is
         enough:
@@ -724,10 +754,25 @@ class GeminiModel(Model):
                 ``stream_stall_timeout`` seconds.
                 ``KISSAgent._run_agentic_loop`` treats this as retryable
                 and re-asks the model.
+            ContentFilterError: When the prompt was blocked
+                (``promptFeedback.blockReason``) or the candidate ended
+                on a :data:`_FILTER_FINISH_REASONS` stop.
+            KISSError: When the stream delivered chunks but ended before
+                the one carrying the ``finishReason``: a gateway can
+                close a body cleanly before the model is done, and on
+                this API no finish reason means the model has not
+                stopped generating, so the text and the tool calls may
+                be incomplete.  The same plain ``KISSError`` the other
+                transports raise for a stream without its terminal
+                event.  A stream that delivered nothing at all is an
+                empty turn instead (no second request, see
+                ``test_empty_stream_is_an_empty_turn``).
         """
         parts: list[Any] = []
         usage_chunk = None
         last_chunk = None
+        finish_reason: str | None = None
+        block_reason: str | None = None
         stream = _AbortableStream(
             self.client.models.generate_content_stream(
                 model=self.model_name, contents=contents, config=config
@@ -742,6 +787,10 @@ class GeminiModel(Model):
                         # Billed already: kept for take_partial_usage_response
                         # if the stream fails before it ends.
                         usage_chunk = self._rejected_response = chunk
+                    if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason:
+                        block_reason = _reason_name(chunk.prompt_feedback.block_reason)
+                    if chunk.candidates and chunk.candidates[0].finish_reason:
+                        finish_reason = _reason_name(chunk.candidates[0].finish_reason)
                     chunk_parts = self._parts_from_response(chunk)
                     self._stream_parts(chunk_parts)
                     parts.extend(chunk_parts)
@@ -749,8 +798,26 @@ class GeminiModel(Model):
             # The byte-level clock fired first; report it in the same
             # words as the event-level watchdog would have.
             raise stall_error(self._stream_stall_timeout) from e
+        # A refused end leaves the usage seen so far in ``_rejected_response``.
+        if block_reason is not None:
+            raise ContentFilterError(
+                f"Gemini blocked the prompt (block_reason={block_reason}); the same "
+                "request will be blocked again.",
+                stop_reason=block_reason,
+            )
+        if finish_reason is None:
+            if last_chunk is not None:
+                raise KISSError(
+                    "Gemini stream ended without a finish reason, so its text and any "
+                    "tool calls may be incomplete."
+                )
+        elif finish_reason in _FILTER_FINISH_REASONS:
+            raise ContentFilterError(
+                f"Gemini's content filter stopped the response (finish_reason={finish_reason}).",
+                stop_reason=finish_reason,
+            )
         self._rejected_response = None
-        return parts, usage_chunk or last_chunk
+        return parts, usage_chunk or last_chunk, finish_reason
 
     def generate_and_process_with_tools(
         self,
@@ -784,8 +851,20 @@ class GeminiModel(Model):
         chat_messages = self._chat_messages()
         contents = self._convert_conversation_to_gemini_contents(chat_messages)
         config = self._build_config(chat_messages, tools=gemini_tools)
-        all_parts, response = self._stream_turn(contents, config)
+        all_parts, response, finish_reason = self._stream_turn(contents, config)
         content, function_calls = self._parse_parts(all_parts)
+        if finish_reason == "MAX_TOKENS" and gemini_tools and not function_calls:
+            # A tool-bearing turn with no completed call is unusable (a
+            # tool-less caller may still read the cut-off text; a call
+            # arrives whole, so one completed before the cap is kept).
+            # The cut-off request was still billed.
+            self._rejected_response = response
+            raise OutputCapError(
+                f"Model {self.model_name} hit its output-token cap "
+                f'(finish_reason="MAX_TOKENS") before completing a tool call, so '
+                f"its text is incomplete. Raise max_tokens or lower reasoning_effort.",
+                stop_reason="MAX_TOKENS",
+            )
 
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
         if function_calls:

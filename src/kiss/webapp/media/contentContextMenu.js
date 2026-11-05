@@ -78,56 +78,66 @@
    * A focused `<input>`/`<textarea>` keeps its selection in its own value
    * rather than in the document Selection, so those are read through
    * `selectionStart`/`selectionEnd`; otherwise Copy would be dead whenever
-   * the user highlighted text inside a field.
+   * the user highlighted text inside a field.  A `number` / `email` input
+   * has no such offsets (both null), but the document Selection reads
+   * what is selected in it while it holds the focus.
    */
   function selectedText(doc, target) {
     const field = target && isTextField(target) ? target : null;
+    const win = doc.defaultView;
+    const sel =
+      win && typeof win.getSelection === 'function' ? win.getSelection() : null;
     if (field) {
       const start = field.selectionStart;
       const end = field.selectionEnd;
-      if (typeof start === 'number' && typeof end === 'number' && end > start) {
-        return String(field.value || '').slice(start, end);
+      if (typeof start === 'number' && typeof end === 'number') {
+        return end > start ? String(field.value || '').slice(start, end) : '';
       }
-      return '';
+      return sel && doc.activeElement === field ? selectionText(sel) : '';
     }
-    const win = doc.defaultView;
-    if (!win || typeof win.getSelection !== 'function') return '';
-    const sel = win.getSelection();
-    if (!sel) return '';
-    return selectionText(sel);
+    return sel ? selectionText(sel) : '';
   }
 
   /**
-   * Read every range of *sel* as text.
-   *
-   * `Selection.toString()` reports only the first range in some engines, so
-   * a multi-range Select All would otherwise be truncated to its first
-   * fragment the moment the user chose Copy.
+   * The text of *sel* as rendered: what the user sees highlighted and the
+   * native Copy copies.  A Range's `toString()` would serialise the
+   * source instead, so a native Select All followed by Copy would hand
+   * over the page's hidden elements and inline `<script>` text.
    */
   function selectionText(sel) {
-    const parts = [];
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const text = String(sel.getRangeAt(i).toString() || '').trim();
-      if (text) parts.push(text);
-    }
-    return parts.join('\n');
+    return String(sel.toString() || '').trim();
   }
 
-  /** True for nodes whose text must never land in a selection. */
+  /**
+   * True for nodes whose text must never land in a selection: a
+   * `<script>` / `<style>`, the menu's own markup, and an element the
+   * page does not render (`hidden`, display:none), whose text the native
+   * Select All leaves out too.
+   */
   function isHiddenSource(el) {
     const tag = String(el.tagName || '').toLowerCase();
     if (tag === 'script' || tag === 'style') return true;
-    return el.hasAttribute('data-sorcar-ctx');
+    if (el.hasAttribute('data-sorcar-ctx')) return true;
+    const win = el.ownerDocument.defaultView;
+    return !!win && win.getComputedStyle(el).display === 'none';
   }
 
-  /** True when *node* has a `<script>`/`<style>`/menu ancestor. */
+  /**
+   * True when *node* has a `<script>`/`<style>`/menu/unrendered ancestor
+   * below *root*, or is invisible (`visibility` is inherited, so its
+   * parent's computed value is the text's own).
+   */
   function inHiddenSource(node, root) {
     let el = node;
     while (el && el !== root) {
       if (el.nodeType === 1 && isHiddenSource(el)) return true;
       el = el.parentNode;
     }
-    return false;
+    const parent = node.parentNode;
+    const win = node.ownerDocument.defaultView;
+    if (!win || !parent || parent.nodeType !== 1) return false;
+    const visibility = win.getComputedStyle(parent).visibility;
+    return visibility === 'hidden' || visibility === 'collapse';
   }
 
   function copyViaTextarea(doc, text) {
@@ -279,18 +289,20 @@
   /**
    * The text *range* covers now, read text node by text node so a
    * hidden source inserted into it since Select All stays out, as it
-   * would have then.
+   * would have then, and so does text the page has hidden since, by
+   * any ancestor up to the document.
    */
   function rangeText(doc, range) {
     const root = range.commonAncestorContainer;
     if (root.nodeType === 3 /* TEXT_NODE */) {
+      if (inHiddenSource(root, doc)) return '';
       return root.data.slice(range.startOffset, range.endOffset);
     }
     const walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
     let text = '';
     let node = walker.nextNode();
     while (node) {
-      if (range.intersectsNode(node) && !inHiddenSource(node, root)) {
+      if (range.intersectsNode(node) && !inHiddenSource(node, doc)) {
         text += node.data.slice(
           node === range.startContainer ? range.startOffset : 0,
           node === range.endContainer ? range.endOffset : node.length,

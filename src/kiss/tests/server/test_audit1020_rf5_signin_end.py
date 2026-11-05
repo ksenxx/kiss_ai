@@ -142,8 +142,12 @@ class TestCancelBehindAFullPipe(SigninHookCase):
         proc = self.server._server_api.signin._proc
         assert proc is not None and proc.stdin is not None
         fd = proc.stdin.fileno()
-        for _ in range(_pipe_capacity(fd) // signin.PASTE_LIMIT + 2):
-            await self._send(reader, {"type": "signinPaste", "text": "x" * signin.PASTE_LIMIT})
+        # Lines of PIPE_BUF bytes, which the pipe takes whole or not at
+        # all: a longer one is cut short once the pipe is nearly full,
+        # and that ends the login (its stream then holds a fragment).
+        line = "x" * (select.PIPE_BUF - 1)
+        for _ in range(_pipe_capacity(fd) // select.PIPE_BUF + 2):
+            await self._send(reader, {"type": "signinPaste", "text": line})
             refused = await self._landed_signin_events(reader)
             if refused:
                 break

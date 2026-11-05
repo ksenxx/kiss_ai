@@ -366,12 +366,35 @@ function makeBareVoiceWindow(cfg, beforeScript) {
   return win;
 }
 
+/**
+ * A bare jsdom window running only media/vosk.js, its Worker the fake
+ * `workerFactory(workers, null)` returns (`workers` collects the workers
+ * it makes), with a `URL.createObjectURL` where jsdom has none.  Returns
+ * `{win, workers}`.
+ */
+function makeVoskWindow(workerFactory) {
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+    runScripts: 'dangerously',
+    url: 'https://localhost/',
+  });
+  const win = dom.window;
+  const workers = [];
+  win.Worker = workerFactory(workers, null);
+  if (typeof win.URL.createObjectURL !== 'function') {
+    win.URL.createObjectURL = () => 'blob:fake-worker-url';
+  }
+  win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
+  assert.ok(win.Vosk && win.Vosk.createModel, 'vosk.js must export Vosk');
+  return {win, workers};
+}
+
 module.exports = {
   VOICE_CFG,
   voicePageState,
   stubVoiceSurface,
   makeVoicePage,
   makeBareVoiceWindow,
+  makeVoskWindow,
   micBtn,
   settle,
   startMic,

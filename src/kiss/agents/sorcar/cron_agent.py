@@ -1223,6 +1223,41 @@ def _reap_killed_command(proc: subprocess.Popen) -> None:
             proc.wait(timeout=5)
 
 
+#: The longest ``_communicate`` leaves the calling thread inside one
+#: ``communicate`` slice, i.e. how late a Stop can land in its wait.
+_STOP_POLL_SECONDS = 0.1
+
+
+def _communicate(proc: subprocess.Popen, timeout: float) -> tuple[str, str]:
+    """``proc.communicate(timeout=timeout)`` in short slices, so a Stop can land.
+
+    A quiet child leaves one ``communicate`` asleep in its selector for
+    the whole *timeout* (ten minutes by default), and the runner's Stop,
+    an exception injected at the next bytecode boundary of the thread,
+    stays pending until then.  Each slice returns to bytecode; a slice's
+    ``TimeoutExpired`` is retried while the budget lasts (``communicate``
+    keeps the output read so far), the last one is raised as before.
+
+    Args:
+        proc: The running command.
+        timeout: Seconds the command may run.
+
+    Returns:
+        The command's ``(stdout, stderr)``.
+
+    Raises:
+        subprocess.TimeoutExpired: The command outlived *timeout*.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        try:
+            return proc.communicate(timeout=min(_STOP_POLL_SECONDS, max(remaining, 0.0)))
+        except subprocess.TimeoutExpired:
+            if remaining <= _STOP_POLL_SECONDS:
+                raise
+
+
 def _run_command_job(
     job: dict[str, Any], run_dir: Path, timeout: float,
 ) -> tuple[str, str | None]:
@@ -1262,7 +1297,7 @@ def _run_command_job(
         **_popen_kwargs(str(job["command"])),
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = _communicate(proc, timeout)
     except subprocess.TimeoutExpired:
         _kill_command_tree(proc)
         _reap_killed_command(proc)
@@ -1704,15 +1739,14 @@ def seed_default_jobs() -> list[str]:
         return []
     done: list[str] = []
     try:
+        # A damaged store is the user's schedules, not an empty one:
+        # strict, so nothing is seeded into it.  Whether the user's own
+        # job stands under a default's name is decided by ``seed`` under
+        # the store lock, so a job created meanwhile is never doubled.
+        load_jobs(strict=True)
         for spec in pending:
-            # A damaged store is the user's schedules, not an empty one:
-            # strict, so nothing is seeded into it.
-            jobs = load_jobs(strict=True)
-            if any(_current_default_name(str(j.get("name"))) == spec["name"] for j in jobs):
-                done.append(spec["name"])  # the user's own job under that name stands
-                continue
             result = _create_or_ensure(
-                "create",
+                "seed",
                 name=spec["name"],
                 prompt=spec.get("prompt", ""),
                 command=spec.get("command", ""),
@@ -2174,13 +2208,17 @@ def _create_or_ensure(
     The arguments are those of :func:`cron_job`, which documents them
     and the two actions.  Shared with the Schedule subpanel's ``+``
     form (:func:`apply_job_action` ``create``), which needs the result
-    as data rather than YAML.
+    as data rather than YAML, and with :func:`seed_default_jobs`, whose
+    private ``seed`` action is a ``create`` that leaves a job already
+    stored under the default's name (or a former one, see
+    :func:`_current_default_name`) as it is, paused or not: the check
+    runs under the store lock, so a job created meanwhile counts.
 
     Returns:
         ``{"created": <job view>}`` (with a ``note`` when the delivery
         was forced to ``none``), ``{"exists": ...}`` / ``{"resumed": ...}``
-        for ``ensure``, or ``{"error": <text>}`` (a duplicate also
-        carries the ``existing`` job).
+        for ``ensure`` (``exists`` also for ``seed``), or ``{"error":
+        <text>}`` (a duplicate also carries the ``existing`` job).
     """
     if not name or not schedule:
         return {"error": f"{action} requires name and schedule"}
@@ -2250,6 +2288,10 @@ def _create_or_ensure(
         except ValueError as exc:
             return {"error": str(exc)}
         duplicate = _find_duplicate(jobs, job)
+        if action == "seed":
+            for row in jobs:
+                if _current_default_name(str(row.get("name"))) == name:
+                    return {"exists": _job_view(row)}
         if action == "ensure":
             named = [j for j in jobs if j.get("name") == name]
             existing = named[0] if named else duplicate

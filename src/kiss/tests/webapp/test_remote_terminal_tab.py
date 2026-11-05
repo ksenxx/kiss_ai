@@ -315,7 +315,11 @@ def test_exited_shell_is_reported_and_enter_starts_a_new_one(browser, harness):
 def test_dropped_websocket_reattaches_the_same_shell(browser, harness):
     """The daemon closes the page's socket; the page reconnects, sends
     ``ready`` and claims its shell back: a variable set before the drop
-    is still there, and no "new shell" note is printed."""
+    is still there, and no "new shell" note is printed.  A command typed
+    while the page was offline runs once, after the re-attach (sent
+    with the reconnect's batch it reached the daemon ahead of the
+    ``terminalOpen``, from a connection that did not own the shell yet,
+    and was dropped)."""
     context, page = _open_page(browser, harness)
     try:
         _open_terminal(page)
@@ -327,7 +331,16 @@ def test_dropped_websocket_reattaches_the_same_shell(browser, harness):
             for ws in list(server._printer._remote_clients):
                 await ws.close()
 
+        # Offline first, so the reconnect cannot land before the typing.
+        context.set_offline(True)
         harness.run(_drop())
+        page.wait_for_function(
+            "document.getElementById('kiss-server-loading')"
+            ".classList.contains('kiss-server-loading--banner')",
+            timeout=20000,
+        )
+        page.keyboard.type("echo typed-$KEEP\n")
+        context.set_offline(False)
         # The reconnect's ``ready`` re-opens the tab's shell on a new
         # connection; the daemon then has exactly one remote client again.
         deadline = time.time() + 20
@@ -336,9 +349,10 @@ def test_dropped_websocket_reattaches_the_same_shell(browser, harness):
             all(w.state.name == "OPEN" for w in server._printer._remote_clients)
         ):
             time.sleep(0.05)
-        page.wait_for_timeout(1000)
+        _wait_for_output(page, "typed-alive-")
         page.keyboard.type("echo still-$KEEP\n")
         text = _wait_for_output(page, "still-alive-")
+        assert text.count("typed-alive-") == 1, text
         assert "while this page was disconnected" not in text
         assert _sessions(harness) == 1
         _close_active_tab(page)

@@ -71,6 +71,17 @@ class TestPageMediaCacheBust(unittest.TestCase):
         # The runtime theme swap must fetch a versioned dark sheet too.
         dark = "highlight-dark.css"
         self.assertIn(f'"dark": "/media/{dark}?v={_asset_hash(dark)}"', html)
+        # The clips the page plays at runtime (the voice ack, the victory
+        # jingle of a finished task) ride versioned in the voice config
+        # and are precached with the app shell.
+        shell = web_server._app_shell_urls(web_server._brand_css_asset_names())
+        for key, name in (
+            ("ackAudioUrl", "working-on-it.mp3"),
+            ("victoryAudioUrl", "victory.mp3"),
+        ):
+            url = f"/media/{name}?v={_asset_hash(name)}"
+            self.assertIn(f'"{key}": "{url}"', html)
+            self.assertIn(url, shell)
 
     def test_remote_server_serves_cache_busted_media_urls(self) -> None:
         server = RemoteAccessServer(host="127.0.0.1", port=0)
@@ -93,6 +104,22 @@ class TestPageMediaCacheBust(unittest.TestCase):
             response.headers["Cache-Control"],
             "no-cache, no-store, must-revalidate",
         )
+        # The victory jingle is served as audio under its versioned URL.
+        clip = Request(
+            path=f"/media/victory.mp3?v={_asset_hash('victory.mp3')}",
+            headers=Headers(),
+        )
+        clip_response = asyncio.run(
+            server._process_request(cast(ServerConnection, conn), clip),
+        )
+        assert clip_response is not None
+        self.assertEqual(clip_response.status_code, 200)
+        self.assertEqual(clip_response.headers["Content-Type"], "audio/mpeg")
+        self.assertEqual(
+            clip_response.body,
+            (web_server.MEDIA_DIR / "victory.mp3").read_bytes(),
+        )
+        self.assertTrue(clip_response.body.startswith(b"\xff\xfb"), "an mp3 frame")
 
 
 class TestMediaVersionFollowsFileChanges(unittest.TestCase):
