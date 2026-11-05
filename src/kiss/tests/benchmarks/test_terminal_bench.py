@@ -146,15 +146,16 @@ def test_harbor_command_for_kiss_agent_and_oracle(tmp_path: Path) -> None:
     assert cmd[cmd.index("--cpus") + 1] == "limit" and cmd[cmd.index("--memory") + 1] == "limit"
     excluded = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-x"]
     assert excluded == ["terminal-bench/gpu-task", "other/full-name"]
-    # the defaults: highest effort, the trial's model as reviewer and blind
-    # verifier, local Docker
-    assert "reasoning_effort=max" in cmd and "reviewer=same" in cmd
-    assert "blind_verifier=same" in cmd
+    # the defaults: highest effort, a reviewer and a reading check of another
+    # family than the trial's model, no blind verifier, local Docker
+    assert "reasoning_effort=max" in cmd and "reviewer=other" in cmd
+    assert "reading_check=other" in cmd and "blind_verifier=none" in cmd
     assert "-e" not in cmd and "-i" not in cmd
 
     gpu = run.harbor_command(run.build_parser().parse_args([
         "--job-name", "g", "--env", "modal", "-i", "gpu-task", "-i", "org/t",
-        "--effort", "", "--reviewer", "none", "--blind-verifier", "claude-haiku-5"]))
+        "--effort", "", "--reviewer", "none", "--blind-verifier", "claude-haiku-5",
+        "--reading-check", "same"]))
     assert gpu[gpu.index("-e") + 1] == "modal"
     # the Modal environment needs Harbor's ``modal`` extra at the installed version
     assert gpu[:5] == ["uv", "run", "--with", f"harbor[modal]=={run.harbor_version()}", "harbor"]
@@ -162,7 +163,8 @@ def test_harbor_command_for_kiss_agent_and_oracle(tmp_path: Path) -> None:
     assert [gpu[i + 1] for i, a in enumerate(gpu) if a == "-i"] == [
         "terminal-bench/gpu-task", "org/t"]
     assert "reviewer=none" in gpu and not any(a.startswith("reasoning_effort") for a in gpu)
-    assert "blind_verifier=claude-haiku-5" in gpu
+    assert "blind_verifier=claude-haiku-5" in gpu and "reading_check=same" in gpu
+    assert [gpu[i - 1] for i, a in enumerate(gpu) if a.startswith("reading_check=")] == ["--ak"]
 
     oracle_args = run.build_parser().parse_args(["--job-name", "o", "--agent", "oracle"])
     oracle = run.harbor_command(oracle_args)
@@ -320,7 +322,7 @@ def test_harbor_agent_declares_name_version_and_options() -> None:
     agent = harbor_agent.SeaHarborAgent(logs_dir=Path("/tmp/x"), model_name="m",
                                         budget_usd="3", home="/h")
     assert harbor_agent.SeaHarborAgent.name() == "kiss-sorcar"
-    assert agent.version() == harbor_agent.AGENT_VERSION
+    assert agent.version() == harbor_agent.AGENT_VERSION == "2026.11.04"
     assert agent.options.budget_usd == 3.0 and agent.options.home == "/h"
     assert agent.capabilities.skills is True and agent.capabilities.mcp_servers is True
     from harbor.models.task.config import MCPServerConfig  # type: ignore[import-untyped]
@@ -335,15 +337,17 @@ def test_harbor_agent_declares_name_version_and_options() -> None:
     defaults = harbor_agent.SeaHarborAgent(logs_dir=Path("/tmp/x"), model_name="m")
     assert defaults.options.home == str(daemon.DEFAULT_HOME)
     assert defaults.options.finish_gate is True and defaults.options.budget_usd == 100.0
-    assert defaults.options.reviewer == harbor_agent.SAME_MODEL
-    assert defaults.options.blind_verifier == harbor_agent.SAME_MODEL
+    assert defaults.options.reviewer == harbor_agent.OTHER_FAMILY == "other"
+    assert defaults.options.reading_check == harbor_agent.OTHER_FAMILY
+    assert defaults.options.blind_verifier == harbor_agent.NO_REVIEW == "none"
     assert defaults.options.reasoning_effort == ""
     gated_off = harbor_agent.SeaHarborAgent(logs_dir=Path("/tmp/x"), model_name="m",
                                             finish_gate="false", reviewer="none",
-                                            blind_verifier="none", reasoning_effort="max")
+                                            blind_verifier="none", reading_check="none",
+                                            reasoning_effort="max")
     assert gated_off.options.finish_gate is False
     assert gated_off.options.reviewer == "none" and gated_off.options.reasoning_effort == "max"
-    assert gated_off.options.blind_verifier == "none"
+    assert gated_off.options.blind_verifier == "none" and gated_off.options.reading_check == "none"
 
 
 def test_daemon_module_help_runs() -> None:

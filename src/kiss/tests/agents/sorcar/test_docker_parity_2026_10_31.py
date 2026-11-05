@@ -263,7 +263,7 @@ def test_container_read_attaches_images_and_pdfs(env: DockerManager) -> None:
     h = _Harness(env)
     encoded = base64.b64encode(PNG).decode()
     env.Bash(
-        f"printf '%s' {encoded} | base64 -d > /tmp/pic.png && cp /tmp/pic.png /tmp/doc.pdf "
+        f"printf '%s' {encoded} | base64 -d > /tmp/pic.png && printf '%%PDF-1.4\\n' > /tmp/doc.pdf "
         "&& printf 'plain\\n' > /tmp/plain.txt", "files", 30, 500,
     )
     out = h.call("Read", file_path="/tmp/pic.png")

@@ -630,7 +630,10 @@ class _ExecRun:
         past the deadline; the wait for its first sweep is bounded by
         :data:`_KILL_WAIT_S` and sliced so an injected Stop lands.  The
         state is taken through ``locked_call`` so a second injection
-        cannot leak the lock under the worker.
+        cannot leak the lock under the worker.  Safe to repeat: a call
+        cut short by an injection that landed after the mark but before
+        the reaper's start (:meth:`DockerManager._exec` retries it once)
+        installs the reaper the first call did not.
         """
         if not locked_call(self.lock, self._mark_cancelled):
             return
@@ -1125,13 +1128,15 @@ class DockerManager:
             still wins over a known exit code.
         """
         run = _ExecRun(self, container, command)
-        threading.Thread(
-            target=run.run_worker, name=f"docker-exec-worker-{run.token[:8]}", daemon=True,
-        ).start()
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         deadline = time.monotonic() + timeout_seconds
         try:
+            # Started inside the protected region: a Stop landing as
+            # ``start()`` returns must still cancel the worker it started.
+            threading.Thread(
+                target=run.run_worker, name=f"docker-exec-worker-{run.token[:8]}", daemon=True,
+            ).start()
             while not _stop_requested(cancel):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1157,23 +1162,32 @@ class DockerManager:
                 if item is None:
                     break
                 _take_output(item, stdout_parts, stderr_parts, on_text)
+            stopped = _stop_requested(cancel)
+            exit_code = None if stopped or time.monotonic() >= deadline else run.exit_code
+            if exit_code is None:
+                run.cancel()
         except BaseException:
             # An injected Stop (task stop watchdog, tool-panel interrupt)
-            # landed between slices or in the final drain, or the worker
-            # failed mid-stream: the exec must not outlive the call.
-            run.cancel()
+            # landed anywhere from the worker's start to the verdict's
+            # own cancellation, or the worker failed mid-stream: the exec
+            # must not outlive the call.  A second injection (the
+            # watchdog repeats its own after 5 s; a tool-panel Stop can
+            # follow a task Stop) may land inside the cancellation in
+            # turn, after the run is marked cancelled but before its
+            # reaper exists, and the mark alone kills nothing: the
+            # cancellation is retried once, ``_mark_cancelled`` reporting
+            # again whether a reaper is needed.
+            try:
+                run.cancel()
+            except BaseException:
+                run.cancel()
             raise
-        stopped = _stop_requested(cancel)
-        timed_out = time.monotonic() >= deadline
         output = "\n".join(
             part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
         )
-        if stopped or timed_out or run.exit_code is None:
-            run.cancel()
-            if stopped:
-                return -1, "\n".join(filter(None, (output, STOPPED_MESSAGE)))
-            return None, output
-        return run.exit_code, output
+        if stopped:
+            return -1, "\n".join(filter(None, (output, STOPPED_MESSAGE)))
+        return exit_code, output
 
     def _tagged_exec_create(
         self, container_id: str | None, command: str, token: str,

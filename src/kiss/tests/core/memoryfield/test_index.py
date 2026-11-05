@@ -128,7 +128,7 @@ def test_index_sync_is_incremental_and_search_ranks(tmp_path: Path) -> None:
     assert index.search("Finnish DVV", min_score=0.05) == []
 
     index.clear()
-    assert not index.path.exists()
+    assert index.count() == 0
     index.clear()  # idempotent
     assert index.count() == 0
     assert index.sync().added == 2

@@ -574,13 +574,30 @@ def test_browser_dying_at_once_is_a_failure_with_its_stderr(tmp_path: Path) -> N
 
 
 def test_browser_handing_off_to_a_running_instance_is_a_success(tmp_path: Path) -> None:
-    """A browser that exits 0 at once (the URL went to an already-open instance): exit 0."""
+    """A browser that exits 0 at once (the URL went to an already-open instance): exit 0 at once.
+
+    That kiss-app returns when the browser exits rather than after the
+    grace period is checked without a stopwatch (on a loaded machine
+    the test process itself can be held up for seconds, which a
+    stopwatch would charge to kiss-app): a child running the real
+    ``start_detached`` with an hour's grace must be back within 30 s,
+    which it can only be by returning on the browser's exit.
+    """
     log = tmp_path / "browser.log"
     stub = _write_stub_browser(tmp_path / "bin" / "chrome", log, exit_code=0)
-    started = time.monotonic()
     proc = _run(["--url", _LOOPBACK, "--wait", "0"], _env(tmp_path, KISS_APP_BROWSER=str(stub)))
     assert proc.returncode == 0, proc.stderr
-    assert time.monotonic() - started < standalone_app.STARTUP_GRACE_SECS + 1
+    an_hours_grace = (
+        "import subprocess, sys\n"
+        "from kiss.server import standalone_app\n"
+        "standalone_app.STARTUP_GRACE_SECS = 3600\n"
+        "print(standalone_app.start_detached([sys.argv[1]], subprocess.DEVNULL))\n"
+    )
+    early = subprocess.run(  # killed and reaped by ``run`` should it sit out the hour
+        [sys.executable, "-c", an_hours_grace, str(stub)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert (early.returncode, early.stdout) == (0, "True\n"), early.stderr
 
 
 # --- a real browser window --------------------------------------------------

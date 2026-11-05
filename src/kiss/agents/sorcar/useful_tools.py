@@ -441,6 +441,13 @@ def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
 
 #: The ``uv`` subcommands that sync the project environment first.
 _UV_SYNCING = frozenset({"sync", "run", "add", "remove"})
+#: ``uv run`` flags after which the program word names a module of the
+#: environment's Python, and ones that make it no program at all (a script
+#: path, uv's own help or version).
+_UV_MODULE_FLAGS = frozenset({"-m", "--module"})
+_UV_NO_PROGRAM_FLAGS = frozenset({
+    "-s", "--script", "--gui-script", "-h", "--help", "-V", "--version",
+})
 #: Where ``uv [global options] sync|run|add|remove`` starts in a command's text.
 _UV_COMMAND = re.compile(
     r"(?<![\w./-])uv(?:[ \t]+[^ \t;&|\n]+)*?[ \t]+(sync|run|add|remove)(?=[ \t;&|\n]|$)")
@@ -468,24 +475,33 @@ UV_REWRITTEN_NOTE = (
 )
 
 
-def _uv_syncing_command(command: str) -> tuple[list[str], int] | None:
+def _uv_syncing_command(command: str) -> tuple[list[str], int, bool] | None:
     """The first ``uv sync|run|add|remove`` among *command*'s simple commands.
 
     Returns:
-        ``(argv, at)``: the command's words and the index of the
-        subcommand, or ``None`` when no simple command is one (``uv`` in
-        a quoted word or a here-document body is text, not a command).
+        ``(argv, at, wrapped)``: the command's words, the index of the
+        subcommand and whether a wrapper (``timeout 5``, ``command``)
+        precedes ``uv``, or ``None`` when no simple command is one
+        (``uv`` in a quoted word or a here-document body is text, not a
+        command).
     """
     for simple in simple_commands(command, None):
-        argv = [word.text for word in simple.argv()]
+        words = simple.argv()
+        argv = [word.text for word in words]
         at = _after_uv_options(argv, 1) if argv and argv[0] == "uv" else len(argv)
         if at < len(argv) and argv[at] in _UV_SYNCING:
-            return argv, at
+            prefix = simple.words[:len(simple.words) - len(words)]
+            return argv, at, any("=" not in word.text for word in prefix)
     return None
 
 
+def _argvs(command: str) -> list[list[str]]:
+    """Return the words of each simple command of *command*, assignments and wrappers dropped."""
+    return [[word.text for word in simple.argv()] for simple in simple_commands(command, None)]
+
+
 def _uv_run_rewritten(command: str, argv: list[str], at: int, environment: Path,
-                      sources: str) -> str | None:
+                      sources: str, wrapped: bool) -> str | None:
     """*command* with its first ``uv run PROGRAM`` replaced by the environment's binary.
 
     Args:
@@ -494,34 +510,53 @@ def _uv_run_rewritten(command: str, argv: list[str], at: int, environment: Path,
         at: The index of the subcommand in *argv*.
         environment: The main checkout's environment.
         sources: The ``PYTHONPATH=...`` prefix that puts the worktree's sources first.
+        wrapped: Whether a wrapper precedes ``uv``; the prefix then opens
+            with ``env``, which keeps the assignment one after ``timeout 5``.
 
     Returns:
         The rewritten command, or ``None`` when the rewrite is not
         unambiguous: a subcommand other than ``run``, an option with a
         value before or after ``run`` (``--directory x`` changes what
         runs where, ``--with x`` what is installed; flags such as ``-q``
-        are dropped without harm), a program the environment lacks, or a
-        text whose words the scanner's do not match.
+        are dropped without harm), a flag after which the program word
+        names no program of the environment (``--script``, ``--help``;
+        ``-m MODULE`` runs as the environment's Python with ``-m``), a
+        program the environment lacks, or a text in which no occurrence
+        of the command's words rewrites exactly that command (the words
+        inside an earlier quoted argument or here-document are text).
     """
     if argv[at] != "run":
         return None
     index = _after_uv_options(argv, at + 1)
     options = argv[1:at] + argv[at + 1:index]
-    if any(o in UV_VALUED_OPTIONS or "=" in o for o in options):
+    if any(o in UV_VALUED_OPTIONS or "=" in o or o in _UV_NO_PROGRAM_FLAGS for o in options):
         return None
     program = argv[index] if index < len(argv) else ""
-    binary = environment / "bin" / ("python" if program in ("python", "python3") else program)
-    match = _UV_COMMAND.search(command)
-    if not program or not binary.is_file() or match is None:
+    module = any(o in _UV_MODULE_FLAGS for o in options)
+    if module and not re.fullmatch(r"[\w.]+", program):
         return None
-    # The program's word in the text: the (index - at)-th after ``run``.
-    words = list(re.finditer(r"\S+", command[match.end():]))
-    if len(words) <= index - at - 1:
+    binary = environment / "bin" / (
+        "python" if module or program in ("python", "python3") else program)
+    if not program or not binary.is_file():
         return None
-    word = words[index - at - 1]
-    if word.group().strip("'\"") != program:
-        return None
-    return command[:match.start()] + f"{sources} {binary}" + command[match.end() + word.end():]
+    replacement = ("env " if wrapped else "") + f"{sources} {shlex.quote(str(binary))}"
+    run = [str(binary)]
+    if module:
+        replacement += f" -m {program}"
+        run += ["-m", program]
+    before = _argvs(command)
+    position = before.index(argv)
+    expected = before[:position] + [run + argv[index + 1:]] + before[position + 1:]
+    for match in _UV_COMMAND.finditer(command):
+        # The program's word in the text: the (index - at)-th after ``run``.
+        words = list(re.finditer(r"\S+", command[match.end():]))
+        if len(words) <= index - at - 1 or words[index - at - 1].group().strip("'\"") != program:
+            continue
+        end = match.end() + words[index - at - 1].end()
+        rewritten = command[:match.start()] + replacement + command[end:]
+        if _argvs(rewritten) == expected:
+            return rewritten
+    return None
 
 
 def uv_in_worktree(command: str, work_dir: str | None) -> tuple[str | None, str, str]:
@@ -557,11 +592,12 @@ def uv_in_worktree(command: str, work_dir: str | None) -> tuple[str | None, str,
         return None, "", command
     main_repo, wt_root = roots[0]
     environment = Path(main_repo) / ".venv"
-    sources = f"PYTHONPATH={wt_root}/src:{wt_root}/projects"
+    sources = "PYTHONPATH=" + shlex.quote(f"{wt_root}/src:{wt_root}/projects")
+    binaries = shlex.quote(str(environment)) + "/bin"
     original = command
     while (found := _uv_syncing_command(command)) is not None:
-        argv, at = found
-        rewritten = _uv_run_rewritten(command, argv, at, environment, sources)
+        argv, at, wrapped = found
+        rewritten = _uv_run_rewritten(command, argv, at, environment, sources, wrapped)
         if rewritten is None:
             return (
                 f"REFUSED: `uv {argv[at]}` did NOT run: the worktree {wt_root!r} has no "
@@ -569,8 +605,8 @@ def uv_in_worktree(command: str, work_dir: str | None) -> tuple[str | None, str,
                 f"sync from here would build the worktree one or re-point that environment's "
                 f"editable install at the worktree, which is removed when the work is merged.  "
                 f"Run the environment's binaries directly, with the worktree's sources first: "
-                f"{sources} {environment}/bin/<program> ...  (the project check: "
-                f"{sources} {environment}/bin/check --full --fix)."
+                f"{sources} {binaries}/<program> ...  (the project check: "
+                f"{sources} {binaries}/check --full --fix)."
             ), "", original
         command = rewritten
     if command == original:
@@ -1006,6 +1042,100 @@ def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
         return pattern.search(_read_end(log_path, _LOG_SCAN_BYTES)) is not None
     except OSError:
         return False
+
+
+def _match_log_until(log_path: str, pattern: str) -> None:
+    """Return once the job log at *log_path* matches *pattern*, scanning it once a second.
+
+    The body of the matcher's search worker: a pattern that backtracks
+    for minutes (``(a+)+$`` on a long line, the 2026-11-04 audit) holds
+    the GIL for as long in whichever process searches, so the search
+    runs in a child the wait kills at its deadline or a Stop instead of
+    on the task thread.  Nothing in this process can end it meanwhile
+    (no thread gets the GIL back during the search): its supervisor
+    (:data:`_SUPERVISE_LOG_MATCHER`) kills it once the daemon is gone.
+    """
+    compiled = re.compile(pattern)
+    while not _log_matches(Path(log_path), compiled):
+        time.sleep(1.0)
+
+
+# The matcher's supervisor, a ``python -c`` body (light: no kiss import): starts the search
+# worker its arguments name, exits with the worker's status, and kills the worker at end of
+# file on its stdin, a pipe whose only write end the daemon holds (non-inheritable, and the
+# daemon never forks), so the worker dies with the daemon on every platform, however long its
+# search holds the GIL.  Each Stop route ends both at once through the process group.
+_SUPERVISE_LOG_MATCHER = """
+import os, subprocess, sys, threading
+worker = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL)
+def kill_at_eof():  # os.read: sys.stdin's buffer lock would deadlock the exit below
+    try:
+        while os.read(0, 4096):
+            pass
+    finally:
+        worker.kill()
+threading.Thread(target=kill_at_eof, daemon=True).start()
+sys.exit(worker.wait())
+"""
+
+
+def _start_log_matcher(log_path: Path, until: re.Pattern[str]) -> subprocess.Popen:
+    """Start the matcher: a child that exits 0 once the job log at *log_path* matches *until*.
+
+    The child is the supervisor (:data:`_SUPERVISE_LOG_MATCHER`) of the
+    worker that searches (:func:`_match_log_until`), in one process
+    group with it, so :func:`kill_process_tree` ends both; its stdin is
+    a pipe from this process, whose death ends both as well.
+    """
+    search = (
+        "import sys; from kiss.agents.sorcar.useful_tools import _match_log_until; "
+        "_match_log_until(*sys.argv[1:])"
+    )
+    return popen_process_group(
+        [sys.executable, "-c", _SUPERVISE_LOG_MATCHER]
+        + [sys.executable, "-c", search, str(log_path), until.pattern],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _run_log_matcher(
+    log_path: Path,
+    until: re.Pattern[str],
+    done: threading.Event,
+    stops: list[threading.Event],
+    deadline: float,
+    matched: threading.Event,
+) -> None:
+    """Own the matcher child of one wait: start it, set *matched* if it exits 0, end it in time.
+
+    Runs on a daemon thread per wait.  The waiting task thread cannot
+    own the child itself: the runner's Stop lands at any check point of
+    its bytecode, including inside ``Popen`` after the fork and right
+    after :func:`_start_log_matcher` returned, before a handle a
+    ``finally`` could kill is bound (R1 of the 2026-11-04 review).  This
+    thread receives no injection, and *done*, which the wait's
+    ``finally`` sets, exists before the child does.  A Stop landing at
+    that ``finally``'s first statement skips the whole cleanup, *done*
+    included (R2 of the review), so the child is ended as well once one
+    of *stops* fires (the task's stop event and the tool call's
+    interrupt event, thread-local and so captured by the waiting
+    thread) or *deadline* (``time.monotonic``, the wait's own) passes.
+    The child is killed while still unreaped (:func:`kill_process_group`
+    documents the pid-reuse hazard of signalling a reaped leader) and
+    reaped here.
+    """
+    process = _start_log_matcher(log_path, until)
+    try:
+        while process.poll() is None and time.monotonic() < deadline and not done.wait(0.2):
+            if any(stop.is_set() for stop in stops):
+                break
+    finally:
+        if process.poll() is None:
+            kill_process_tree(process)
+        if process.wait() == 0:
+            matched.set()
 
 
 FOREGROUND_SLEEP_MAX_SECONDS = 30
@@ -2183,19 +2313,43 @@ class UsefulTools:
         panel's interrupt event are observed promptly; a tool-panel
         Stop raises :class:`~kiss.core.tool_interrupt.ToolCallInterrupted`
         after the loop, exactly like a foreground :meth:`Bash`.  The
-        log is searched once a second for *until*.
+        log is searched once a second for *until* by a matcher child
+        (:func:`_start_log_matcher`) that exits 0 on a match and is
+        killed when the wait ends, so a pattern that backtracks for
+        minutes cannot hold the task thread past the deadline or a Stop.
+        A helper thread (:func:`_run_log_matcher`) owns that child, is
+        started inside the cleanup region and ends the child on its own
+        at the deadline or either Stop, so a Stop landing anywhere in
+        this frame, the launch and the cleanup included, still ends it.
         """
         deadline = time.monotonic() + timeout_seconds
-        next_scan = 0.0
-        while job.process.poll() is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or _stop_requested(self.stop_event):
-                break
-            if until is not None and time.monotonic() >= next_scan:
-                next_scan = time.monotonic() + 1.0
-                if _log_matches(job.log_path, until):
+        done, matched = threading.Event(), threading.Event()
+        matcher = None
+        if until is not None:
+            stops = [
+                event
+                for event in (self.stop_event, tool_interrupt.current_tool_interrupt_event())
+                if event is not None
+            ]
+            matcher = threading.Thread(
+                target=_run_log_matcher,
+                args=(job.log_path, until, done, stops, deadline, matched),
+                daemon=True,
+            )
+        try:
+            if matcher is not None:
+                matcher.start()
+            while job.process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or _stop_requested(self.stop_event):
                     break
-            time.sleep(min(remaining, 0.2))
+                if matched.is_set():
+                    break
+                time.sleep(min(remaining, 0.2))
+        finally:
+            done.set()
+            if matcher is not None and matcher.is_alive():
+                matcher.join(timeout=5)
         tool_interrupt.raise_if_interrupted()
 
     def _start_stop_monitor(

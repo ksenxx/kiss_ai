@@ -192,17 +192,17 @@ def test_child_task_patch_gate_replays_and_revert(
     )
     commit(root, "add the discover SEA")
     daemon = _DiscoverDaemon(root)
-    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
-    daemon.patch = _lab_patch(
-        root / "tmp" / "lab-root",
-        {REL_SEA: DEMO_SEA, REL_TEST: DEMO_TEST},
-        {REL_SEA: _add_extra, REL_TEST: lambda p: p.write_text(p.read_text() + "\n# extra\n")},
-    )
-    replay_id = persist_task(  # a replay the child dispatched: a sub-task of the child's id
-        "replay", result="success: true\nsummary: ok", success=True, sea="tunedemo_sea",
-        parent_task_id=daemon.child_id, cost=1.25, steps=4,
-    )
-    try:
+    try:  # a failing lab setup must still close the daemon
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+        daemon.patch = _lab_patch(
+            root / "tmp" / "lab-root",
+            {REL_SEA: DEMO_SEA, REL_TEST: DEMO_TEST},
+            {REL_SEA: _add_extra, REL_TEST: lambda p: p.write_text(p.read_text() + "\n# extra\n")},
+        )
+        replay_id = persist_task(  # a replay the child dispatched: a sub-task of the child's id
+            "replay", result="success: true\nsummary: ok", success=True, sea="tunedemo_sea",
+            parent_task_id=daemon.child_id, cost=1.25, steps=4,
+        )
         report = _improve(run_id, heldout_id, rounds=3)
     finally:
         daemon.close()
@@ -284,11 +284,12 @@ def test_folder_relative_patch_and_default_held_out(
     recorded no model is replayed on the default model."""
     run_id = _past_run(root, model="")
     daemon = _DiscoverDaemon(root)
-    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
-    daemon.patch = _lab_patch(
-        root / "tmp" / "lab-flat", {"tunedemo_sea.py": DEMO_SEA}, {"tunedemo_sea.py": _add_extra}
-    )
-    try:
+    try:  # a failing lab setup must still close the daemon
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+        daemon.patch = _lab_patch(
+            root / "tmp" / "lab-flat", {"tunedemo_sea.py": DEMO_SEA},
+            {"tunedemo_sea.py": _add_extra},
+        )
         report = _improve(run_id)
     finally:
         daemon.close()
@@ -441,12 +442,12 @@ def test_created_test_file_held_out_cap_and_an_interrupted_gate(
     run_id = _past_run(root)
     heldout_id = _past_run(root, cost=2.0)
     daemon = _DiscoverDaemon(root)
-    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
-    daemon.patch = _lab_patch(
-        root / "tmp" / "lab-new-test", {REL_SEA: DEMO_SEA},
-        {REL_SEA: _add_extra, REL_TEST: lambda p: p.write_text(DEMO_TEST)},
-    )
-    try:
+    try:  # a failing lab setup must still close the daemon
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+        daemon.patch = _lab_patch(
+            root / "tmp" / "lab-new-test", {REL_SEA: DEMO_SEA},
+            {REL_SEA: _add_extra, REL_TEST: lambda p: p.write_text(DEMO_TEST)},
+        )
         report = _improve(run_id, heldout_id, heldout_budget=12.5)
         assert "error" not in report and report["applied"] == [REL_SEA, REL_TEST], report
         assert (root / REL_TEST).read_text() == DEMO_TEST

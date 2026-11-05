@@ -106,6 +106,8 @@ def format_reports(reports: list[PeerReport], dry_run: bool) -> str:
             f"{report.name} ({report.ssh or 'no ssh'}): "
             + (f"FAILED: {report.error}" if report.error else f"ok in {report.seconds:.1f}s")
         )
+        if report.home:
+            lines.append(f"  KISS home there: {report.home}")
         if report.pulled or report.pushed:
             lines.append(
                 f"  history: pulled {_history(report.pulled)}; pushed {_history(report.pushed)}"

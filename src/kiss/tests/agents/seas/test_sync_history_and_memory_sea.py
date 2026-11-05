@@ -306,6 +306,58 @@ def test_every_machine_ends_up_with_the_union(
         assert report.memory_pulled == {"entries": 0} and report.memory_pushed == {"entries": 0}
 
 
+def test_branded_and_stock_installs_sync_with_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer's KISS home is found: its daemon's, the brand's, the stock ``~/.kiss``, a new one."""
+    box = Sandbox(tmp_path, monkeypatch, "stock", "branded", "fresh", "multi", "odd")
+    remotes = tmp_path / "remotes"
+    make_db(box.db(), {"L1": {}})
+    box.memory().write("local-page", "mine\n")
+    # stock: a stock install, plus a stray memory an older sync left under the brand's name.
+    make_db(box.db("stock"), {"S1": {}})
+    MemoryDir(remotes / "stock" / ".brand" / "memories").write("stray", "old\n")
+    # branded: the same brand as this machine, and a leftover empty stock directory.
+    make_db(remotes / "branded" / ".brand" / "history.db", {"B1": {}})
+    # fresh: has never run anything.
+    (remotes / "fresh" / ".kiss").rmdir()
+    # multi: two daemons of another brand; the registered one (port 8787) owns .other-b,
+    # which beats a stock .kiss holding a history.
+    make_db(box.db("multi"), {"K1": {}})
+    for name, port in ((".other-a", 9999), (".other-b", 8787)):
+        make_db(remotes / "multi" / name / "history.db", {f"M{port}": {}})
+        (remotes / "multi" / name / "sorcar-local.json").write_text(
+            json.dumps({"url": f"ws://127.0.0.1:{port}/ws"})
+        )
+    machines = box.machines("stock", "branded", "fresh")
+    machines.append(Machine("multi", url="https://multi:8787", ssh="me@multi"))
+
+    stock, branded, fresh, multi = PeerSync(
+        machines, home=box.home, home_candidates=(".brand", ".kiss")
+    ).run()
+
+    homes = (stock.home, branded.home, fresh.home, multi.home)
+    assert homes == ("~/.kiss", "~/.brand", "~/.brand", "~/.other-b")
+    assert stock.error == branded.error == fresh.error == multi.error == ""
+    assert tasks_in(remotes / "multi" / ".other-a" / "history.db") == {"M9999": 3}
+    assert tasks_in(box.db("multi")) == {"K1": 3}
+    union = {"L1": 3, "S1": 3, "B1": 3, "M8787": 3}
+    assert tasks_in(remotes / "multi" / ".other-b" / "history.db") == union
+    assert tasks_in(box.db()) == union and tasks_in(box.db("stock")) == union
+    assert tasks_in(remotes / "branded" / ".brand" / "history.db") == union
+    # A machine that never ran a task has no database: its history waits, its memory syncs.
+    assert "database not found" in fresh.pushed["skipped"]
+    assert page_text(MemoryDir(remotes / "fresh" / ".brand" / "memories"), "local-page")
+    assert page_text(box.memory("stock"), "local-page") == "mine\n"
+    assert page_text(box.memory(), "stray") == ""
+    assert page_text(MemoryDir(remotes / "branded" / ".brand" / "memories"), "local-page")
+    assert not (remotes / "branded" / ".kiss" / "memories").exists()
+
+    # A home that is not one directory under $HOME is refused, not guessed at.
+    (odd,) = PeerSync(box.machines("odd"), home=box.home, home_candidates=("a/b",)).run()
+    assert odd.error == "odd (me@odd): unexpected KISS home 'a/b'" and odd.home == ""
+
+
 def test_running_tasks_wait_for_the_next_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -413,6 +465,7 @@ def test_memory_rules_newest_wins_deletions_travel_conflicts_stay(
         memory.write("doomed", "to be deleted\n")
         stamp_page(memory, "doomed", "2020-01-01T00:00:00Z")  # written well before its deletion
         memory.write("tie", "same stamp\n")
+        stamp_page(memory, "tie", "2020-01-01T00:00:00Z")  # two writes may straddle a second
     # Newer on their side; the same stamp on both sides, different text; deleted on ours.
     theirs.write("shared", "v2 from alpha\n")
     stamp_page(theirs, "shared", "2030-01-01T00:00:00Z")
@@ -647,10 +700,10 @@ def test_a_machine_that_cannot_be_reached_does_not_stop_the_others(
 ) -> None:
     """Dead, flaky and url-only machines are reported; the reachable one is synced all the same."""
     box = Sandbox(tmp_path, monkeypatch, "alpha", "dead", "flaky1", "flaky2")
-    # flaky1: the master connection gets through, the probe dies.  flaky2: the
-    # probe gets through too, the history extract dies.
+    # flaky1: the master connection gets through, the home probe dies.  flaky2:
+    # both probes get through too, the history extract dies.
     monkeypatch.setenv("FLAKY_AFTER_flaky1", "1")
-    monkeypatch.setenv("FLAKY_AFTER_flaky2", "2")
+    monkeypatch.setenv("FLAKY_AFTER_flaky2", "3")
     make_db(box.db(), {"L1": {}})
     make_db(box.db("alpha"), {"A1": {}})
     make_db(box.db("flaky1"), {"F1": {}})
@@ -1027,6 +1080,7 @@ def test_format_reports_names_failures_held_back_tasks_conflicts_and_skew() -> N
     good = peer_sync.PeerReport(
         "lab",
         "me@lab",
+        home="~/.brand",
         skew=-2.5,
         seconds=3.21,
         pulled={"tasks_inserted": 1, "events_inserted": 2},
@@ -1048,7 +1102,7 @@ def test_format_reports_names_failures_held_back_tasks_conflicts_and_skew() -> N
     bad = peer_sync.PeerReport("box", "", error="not an ssh machine")
     text = format_reports([good, bad], dry_run=False)
     assert text.splitlines()[0] == "Synced 1 of 2 machine(s)."
-    assert "lab (me@lab): ok in 3.2s" in text
+    assert "lab (me@lab): ok in 3.2s\n  KISS home there: ~/.brand\n" in text
     assert "pushed 0 task(s), 0 event(s), 1 deletion(s), 1 removed" in text
     assert "pulled 2 entry(ies): 1 added, 1 updated, 0 removed, 0 kept, 0 in conflict; " in text
     assert "in conflict; pushed 0 entry(ies)" in text

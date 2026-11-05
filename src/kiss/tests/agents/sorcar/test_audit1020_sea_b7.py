@@ -37,16 +37,14 @@ from kiss.agents.sorcar.sea_apply import apply_run
 from kiss.agents.sorcar.sea_commands import check_sea, evaluate_sea, load_sea, run_picked_hook
 from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.skills import Skill, load_skill_content
-from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
     """Drop the registry state before and after each test, and the test ``SEAS.md``."""
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _write_sea(folder: Path, name: str, source: str) -> Path:

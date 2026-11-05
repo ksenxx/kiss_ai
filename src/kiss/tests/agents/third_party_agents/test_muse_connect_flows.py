@@ -360,12 +360,16 @@ class _AuthHandler(RecordingHandler):
             self._json(self.server.refresh_status, {"error": self.server.refresh_error})
             return
         refresh_token = form.get("refresh_token", "")
-        scope = self.server.refresh_tokens.get(refresh_token)
-        if scope is None or not form.get("client_id") or form.get("client_secret"):
+        if not form.get("client_id") or form.get("client_secret"):
             self._json(400, {"error": "invalid_grant"})
             return
-        if self.server.rotate:
-            del self.server.refresh_tokens[refresh_token]
+        # pop() consumes a rotating token atomically: of two concurrent
+        # redemptions exactly one is granted, the other gets invalid_grant.
+        tokens = self.server.refresh_tokens
+        scope = tokens.pop(refresh_token, None) if self.server.rotate else tokens.get(refresh_token)
+        if scope is None:
+            self._json(400, {"error": "invalid_grant"})
+            return
         self._json(200, self.server.issue(scope))
 
     # ---- protected APIs --------------------------------------------------
@@ -2095,3 +2099,61 @@ def test_pending_codes_tolerates_concurrent_token_redemptions(auth_server: _Auth
         worker.join(timeout=30)
     assert not worker.is_alive() and errors == []
     assert auth_server.devices == {} and auth_server.pending_codes() == []
+
+
+def _redeem_one_use_token(base_url: str, answers: list[Any]) -> None:
+    """Redeem the ``one-use`` refresh token over HTTP; record (status, body) or the error."""
+    form = {"grant_type": "refresh_token", "refresh_token": "one-use", "client_id": "cid"}
+    try:
+        with requests.Session() as session:
+            response = session.post(
+                f"{base_url}/login/oauth/access_token",
+                data=form,
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+        answers.append((response.status_code, response.json()))
+    except requests.RequestException as exc:
+        answers.append(("dropped", str(exc)))
+
+
+def test_concurrent_redemptions_of_a_one_use_refresh_token(auth_server: _AuthServer) -> None:
+    """Two simultaneous refreshes: one grant and one ``invalid_grant``, no dropped connection.
+
+    A trace hook parks each handler thread right after its token lookup
+    until the other has looked up too, so consuming the token is really
+    contended; the loser must be answered rather than crash its handler.
+    """
+    auth_server.expiring = True
+    auth_server.refresh_tokens["one-use"] = "repo"
+    looked_up = threading.Barrier(2, timeout=10)
+
+    def park_after_lookup(frame: Any, event: str, arg: Any) -> Any:
+        if frame.f_code is not _AuthHandler._refresh.__code__:
+            return None
+        if "scope" not in frame.f_locals:
+            return park_after_lookup
+        looked_up.wait()
+        return None
+
+    answers: list[Any] = []
+    workers = [
+        threading.Thread(target=_redeem_one_use_token, args=(auth_server.base_url, answers))
+        for _ in range(2)
+    ]
+    previous = threading.gettrace()
+    threading.settrace(park_after_lookup)
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+    finally:
+        threading.settrace(previous)
+    assert not any(worker.is_alive() for worker in workers)
+    granted = {"access_token": "access-1", "token_type": "bearer", "expires_in": 3600}
+    assert sorted(answers, key=str) == [
+        (200, {**granted, "refresh_token": "refresh-1"}),
+        (400, {"error": "invalid_grant"}),
+    ]
+    assert list(auth_server.refresh_tokens) == ["refresh-1"]

@@ -35,7 +35,8 @@ def run_trial(
         ``model, container, agent_success, cost_usd, tokens, steps, task_id,
         final_text, error, seconds, review_cost_usd, submitted``; ``cost_usd``
         and ``tokens`` include the spend of the gate's side agents (the
-        reviewer, the blind verifier's author:
+        reviewer, the reading check, the blind verifier's author when
+        one is configured:
         :func:`kiss.agents.seas.coding.coding_sea.review_usage`).
         ``agent_success`` is false for a run that ended on a text reply
         instead of a ``finish`` call (a content-filter refusal, a question)

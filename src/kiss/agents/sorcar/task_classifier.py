@@ -798,27 +798,30 @@ def _attempt_decisions_classification(
         Tuple of the verdict (or ``None`` when the tool reported an
         error, the endpoint was unreachable, or the answer did not name
         one of the asked-for kinds) and the attempt's spend in USD and
-        tokens, as the tool priced them from the catalog.
+        tokens as the tool priced them, a charged reply it rejected
+        (an HTTP 2xx without ``answers``) included.
     """
+    spent: list[tuple[float, int]] = []
+
+    def collect(cost: float, tokens: int) -> None:
+        """Keep what the tool attributed to the attempt, answered or rejected."""
+        spent.append((cost, tokens))
+
+    classification: TaskClassification | None = None
     try:
-        decide = make_decide_tool(None, DEFAULT_DECISIONS_MODEL, model_config)
+        decide = make_decide_tool(None, DEFAULT_DECISIONS_MODEL, model_config, collect)
         result = decide(task, _DECISIONS_QUESTIONS_JSON)
         if result.startswith("Error:"):
             logger.warning("Decisions task classification failed: %.300s", result)
-            return None, 0.0, 0
-        parsed = json.loads(result)
-        usage = parsed.get("usage") or {}
-        budget = float(usage.get("cost_usd") or 0.0)
-        tokens = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
-        classification = _verdict_from_decision(parsed.get("answers"))
+        else:
+            classification = _verdict_from_decision(json.loads(result).get("answers"))
+            if classification is None:
+                logger.warning("Decisions task classifier returned no usable kind: %.300s", result)
     except Exception:
         # The classifier is best-effort: nothing here may raise into the
         # agent's launch path, whatever the endpoint or the tool returns.
         logger.warning("Decisions task classification attempt failed", exc_info=True)
-        return None, 0.0, 0
-    if classification is None:
-        logger.warning("Decisions task classifier returned no usable kind: %.300s", result)
-    return classification, budget, tokens
+    return classification, sum(cost for cost, _ in spent), sum(tokens for _, tokens in spent)
 
 
 def _truncate_task(task: str) -> str:

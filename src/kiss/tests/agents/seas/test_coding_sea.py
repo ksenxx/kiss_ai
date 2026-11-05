@@ -449,6 +449,17 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert "byte for byte" not in prompt
     assert "checker" not in prompt.lower()
     assert "no internet" not in prompt.lower()
+    # the independent check and the reading check are mentioned only when a
+    # model is configured for them
+    assert f"up to {coding_sea.MAX_GATE_ROUNDS} rounds" in prompt
+    assert coding_sea.READING_NOTE not in prompt and coding_sea.BLIND_NOTE not in prompt
+    assert coding_sea.BLIND_MENTION not in prompt and "independent check" not in prompt
+    with_blind = harness(blind_verifier="m").system_prompt()
+    assert coding_sea.BLIND_NOTE in with_blind and coding_sea.READING_NOTE not in with_blind
+    assert f"runs your verifier{coding_sea.BLIND_MENTION} and one read-only review" in with_blind
+    with_reading = harness(reading_check="m").system_prompt()
+    assert coding_sea.READING_NOTE in with_reading and coding_sea.BLIND_NOTE not in with_reading
+    assert coding_sea.BLIND_MENTION not in with_reading
     assert plain.settings()["model_config"] is None
     tuned = harness(model_config={"output_config": {"effort": "medium"}})
     assert tuned.settings()["model_config"] == {"output_config": {"effort": "medium"}}

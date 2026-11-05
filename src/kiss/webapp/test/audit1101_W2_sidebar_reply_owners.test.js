@@ -374,6 +374,91 @@ async function main() {
     );
   });
 
+  await test('2026-11-04 W2 F1: a form is locked while its save is in flight', () => {
+    const {win, posted} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    send(win, {type: 'cronJobs', jobs: [job('a')]});
+    const list = byId(win, 'meta-schedule-list');
+    click(win, list.querySelector('.sidebar-item-edit'));
+    let form = list.querySelector('form');
+    form.elements.what.value = 'submitted prompt';
+    submit(win, form);
+    assert.strictEqual(ofType(posted, 'cronAction').pop().what, 'submitted prompt');
+    // Typed into a live field meanwhile, the newer text would never be
+    // sent, and the success closing the form would discard it.
+    for (const field of form.querySelectorAll('[name]'))
+      assert.ok(field.disabled, field.name + ' is locked while saving');
+    assert.ok(form.querySelector('.sidebar-confirm-no').disabled === false);
+    // The poll's rebuild keeps the form locked; a refusal unlocks it
+    // with the submitted values.
+    send(win, {type: 'cronJobs', jobs: [job('a')]});
+    form = list.querySelector('form');
+    assert.ok(form.elements.what.disabled, 'still locked after a poll');
+    send(win, {type: 'cronJobs', jobs: [job('a')], action: 'update', jobId: 'a', error: 'refused'});
+    form = list.querySelector('form');
+    assert.ok(!form.elements.what.disabled, 'a refusal unlocks the fields');
+    assert.ok(!saveBtn(form).disabled);
+    assert.strictEqual(form.elements.what.value, 'submitted prompt');
+    // The same for the add forms, and a disconnect unlocks them too.
+    for (const [kind, type] of [['schedule', 'cronJobs'], ['machines', 'machines']]) {
+      if (kind === 'machines') setupMachines(win);
+      click(win, byId(win, 'meta-' + kind + '-add'));
+      const add = byId(win, 'meta-' + kind + '-list').querySelector('form');
+      add.elements.name.value = 'n';
+      if (kind === 'schedule') {
+        add.elements.schedule.value = 'every 1h';
+        add.elements.what.value = 'w';
+      } else add.elements.address.value = 'https://n:8787';
+      submit(win, add);
+      for (const field of add.querySelectorAll('[name]'))
+        assert.ok(field.disabled, kind + ' add: ' + field.name + ' is locked');
+      send(win, {type, jobs: [job('a')], machines: []});
+      const rebuilt = byId(win, 'meta-' + kind + '-list').querySelector('form');
+      assert.ok(rebuilt.elements.name.disabled, kind + ' add: locked after a poll');
+      send(win, {type: 'daemonStatus', connected: false});
+      assert.ok(!rebuilt.elements.name.disabled, kind + ' add: a disconnect unlocks');
+      assert.ok(!saveBtn(rebuilt).disabled);
+      send(win, {type: 'daemonStatus', connected: true});
+      cancel(win, rebuilt);
+    }
+  });
+
+  await test('2026-11-04 W2 F2: unnamed machine adds are answered by their generation', () => {
+    const {win, posted} = makePage();
+    send(win, {type: 'daemonStatus', connected: true});
+    setupMachines(win);
+    const list = byId(win, 'meta-machines-list');
+    for (const host of ['slow', 'quick']) {
+      click(win, byId(win, 'meta-machines-add'));
+      const form = list.querySelector('form');
+      form.elements.address.value = 'https://' + host + '.example:8787';
+      submit(win, form);
+      if (host === 'slow') cancel(win, form);
+    }
+    const reqs = ofType(posted, 'machineAction');
+    assert.deepStrictEqual(reqs.map(r => r.name), ['', '']);
+    assert.ok(reqs[0].generation > 0 && reqs[1].generation > reqs[0].generation);
+    // The daemon adds the two hosts in parallel (one lock per host)
+    // and echoes each add's generation: quick's refusal comes first
+    // and re-arms the form that sent it, with its draft.
+    send(win, {type: 'machines', action: 'add', name: '', generation: reqs[1].generation, machines: [], error: 'quick refused'});
+    let form = list.querySelector('form');
+    assert.ok(form, 'the quick form is still open');
+    assert.strictEqual(form.elements.address.value, 'https://quick.example:8787');
+    assert.ok(!saveBtn(form).disabled, "quick's refusal re-arms its Save");
+    // slow's late success answers the cancelled form: quick's stays.
+    send(win, {type: 'machines', action: 'add', name: '', generation: reqs[0].generation, machines: [{name: 'slow.example', status: 'reachable'}], error: ''});
+    form = list.querySelector('form');
+    assert.ok(form, "slow's success leaves the quick form open");
+    assert.strictEqual(form.elements.address.value, 'https://quick.example:8787');
+    assert.ok(!saveBtn(form).disabled);
+    // A reply without a generation (a forwarded machine's) still
+    // answers by name.
+    submit(win, form);
+    send(win, {type: 'machines', action: 'add', name: '', machines: [], error: ''});
+    assert.strictEqual(list.querySelector('form'), null);
+  });
+
   await test('F1: a reply to a save the panels dropped (machine change) resolves nothing', () => {
     const {win, posted} = makePage();
     send(win, {type: 'daemonStatus', connected: true});

@@ -135,9 +135,9 @@ SETTING_DOCS: dict[str, str] = {
                     "while the run has the memory tools, and a CLI-backed model's text tool "
                     "catalog stays) and tool results carry no usage line (`Steps: ..., "
                     "Context: ...`). `coding_gate: false` makes the run no coding run for "
-                    "the finish gate: no verifier, review or unchecked-change stage, whatever "
-                    "its edits (a sync resolving conflicts); the evidence and hedge checks "
-                    "stay. Replaces the caller's `model_config` whole, except that a dict "
+                    "the finish gate: no verifier or review stage, whatever its edits (a sync "
+                    "resolving conflicts), so its `finish` is not gated at all. Replaces the "
+                    "caller's `model_config` whole, except that a dict "
                     "of such framework flags alone is added to the configuration that "
                     "applies anyway (a settings-panel endpoint stays).",
     "use_web_tools": "Give the run the browser tools (daemon default: on).",

@@ -24,13 +24,15 @@ LLM/coding-assistant indexing") and verified live:
   keep every embedded page verbatim. `uv run sea docs` rewrites
   `docs/sea-commands.md` but not this file, and five embedded copies have
   already drifted: in `sea-commands.md` the `/bestrouter` and
-  `/orbestrouter` rows still say "through run_parallel" where the page now
-  says "through a non-blocking run_agent" (and name the routers' primary
-  models without the effort suffix: the page says `claude-fable-5-1-max`
-  and `openrouter/anthropic/claude-fable-5.1-max`, as `bestrouter_sea.py`
-  and `orbestrouter_sea.py` do, the copy `claude-fable-5-1` and
-  `openrouter/anthropic/claude-fable-5.1`; the `/sync` row, rewritten in
-  the same window, is identical in both),
+  `/orbestrouter` rows still say "Runs every task on" a primary model
+  named without its effort suffix (`claude-fable-5-1`,
+  `openrouter/anthropic/claude-fable-5.1`) "through run_parallel", where
+  the page now says the routers answer simple questions on
+  `claude-opus-5-5-medium` / `openrouter/anthropic/claude-opus-5.5-medium`
+  and run every other task on `claude-fable-5-1-max` /
+  `openrouter/anthropic/claude-fable-5.1-max`, as `bestrouter_sea.py` and
+  `orbestrouter_sea.py` do, "through a non-blocking run_agent" (the `/sync`
+  row, rewritten in the same window, is identical in both),
   the `/discover`, `/devtools` and
   `/sync_history_and_memory` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA

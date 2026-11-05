@@ -25,15 +25,21 @@ is not safe against it, whoever calls it).
 from __future__ import annotations
 
 import ctypes
+import os
+import signal
 import subprocess
 import sys
+import textwrap
 import threading
+import time
+from pathlib import Path
 from types import FrameType
 from typing import Any
 
 from kiss.core import processes
 from kiss.core.models import model as model_module
 from kiss.core.models.model import _CLIProcess
+from kiss.tests.conftest import posix_only
 
 _set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
 _set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
@@ -97,3 +103,68 @@ def test_an_interrupt_at_any_call_after_the_spawn_kills_the_child() -> None:
                 pipe.close()
     assert k > 1, "the constructor made no call after the spawn"
     assert leaked == []
+
+
+# A child whose grandchild, in its own session, inherits stdout and so
+# keeps the pipe open after the child's group is killed; the marker file
+# names the grandchild once it exists.
+_PIPE_HOLDER_CHILD = textwrap.dedent(
+    """
+    import pathlib, subprocess, sys, time
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    pathlib.Path(sys.argv[1]).write_text(str(grandchild.pid))
+    time.sleep(60)
+    """
+)
+
+
+@posix_only("the grandchild outlives the child's group in its own POSIX session")
+def test_a_stop_inside_the_stdout_reader_start_does_not_hang_cleanup(tmp_path: Path) -> None:
+    """A Stop landing in the stdout reader's ``start()`` leaves a live reader on its pipe.
+
+    The reader is live from the spawn inside ``Thread.start()`` on, so a
+    Stop delivered before ``start()`` returned used to reach
+    ``_abort_start`` with the reader unrecorded: the pipe looked
+    ownerless and was closed on the task thread, which blocks on the
+    buffer lock the reader holds inside ``read(2)`` for as long as a
+    grandchild keeps stdout open.  Cleanup must instead leave that pipe
+    to the reader, as ``close()`` does, and let the Stop through.
+    """
+    marker = tmp_path / "grandchild.pid"
+    child = [sys.executable, "-c", _PIPE_HOLDER_CHILD, str(marker)]
+    outcome: dict[str, BaseException] = {}
+
+    def stop_as_the_reader_start_returns(frame: FrameType, event: str, arg: Any) -> Any:
+        """Raise the Stop as the first ``Thread.start()`` after the spawn is about to return."""
+        if event == "return" and frame.f_code is threading.Thread.start.__code__:
+            sys.settrace(None)
+            deadline = time.monotonic() + 30
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists(), "the child never started its grandchild"
+            raise KeyboardInterrupt("Stop inside the stdout reader's start()")
+        return stop_as_the_reader_start_returns
+
+    def construct() -> None:
+        sys.settrace(stop_as_the_reader_start_returns)
+        try:
+            _CLIProcess(child, "probe", 60)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            sys.settrace(None)
+
+    worker = threading.Thread(target=construct, daemon=True, name="interrupted-constructor")
+    worker.start()
+    worker.join(timeout=30)
+    returned_while_the_grandchild_held_stdout = not worker.is_alive()
+    # Killing the grandchild sends the reader EOF, which also frees a cleanup
+    # stuck on the pipe, so a failing run leaks neither process nor thread.
+    os.kill(int(marker.read_text()), signal.SIGKILL)
+    worker.join(timeout=30)
+    assert not worker.is_alive()
+    assert returned_while_the_grandchild_held_stdout, "cleanup blocked closing the held pipe"
+    assert isinstance(outcome.get("error"), KeyboardInterrupt)

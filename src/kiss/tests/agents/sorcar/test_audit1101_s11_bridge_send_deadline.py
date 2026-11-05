@@ -38,7 +38,11 @@ import pytest
 from websockets.frames import OP_TEXT, Frame
 
 from kiss.agents.sorcar.chrome_bridge import ChromeBridge, ChromeBridgeError
-from kiss.tests.agents.sorcar.test_chrome_bridge import ExtensionPeer, _call_in_thread
+from kiss.tests.agents.sorcar.test_chrome_bridge import (
+    ExtensionPeer,
+    _call_in_thread,
+    _eventually,
+)
 
 _BUFFER_BYTES = 4096
 _PAYLOAD = "x" * (8 * 1024 * 1024)
@@ -173,6 +177,33 @@ def test_a_peer_that_never_answers_does_not_hold_the_caller_for_the_close_handsh
         assert bridge.call("list_tabs", timeout=5) == "answered"
     finally:
         fresh.close()
+
+
+def test_replacing_a_peer_that_ignores_the_close_handshake_does_not_stall_the_new_one(
+    bridge: ChromeBridge,
+) -> None:
+    """A newer extension connection replaces a wedged one and answers at once.
+
+    Closing the replaced connection waits websockets' 10 s ``close_timeout``
+    for a close frame this peer never sends; run on the new connection's
+    reader thread, that wait left the healthy peer's replies undispatched,
+    so a short command timed out and dropped the healthy connection too.
+    """
+    stuck = _StuckPeer(bridge)
+    fresh = None
+    try:
+        assert bridge.wait_for_extension(5)
+        replaced = bridge._conn
+        fresh = ExtensionPeer(bridge.port, bridge.token, responder=_answer)
+        assert _eventually(lambda: bridge._conn is not None and bridge._conn is not replaced)
+        started = time.monotonic()
+        assert bridge.call("list_tabs", timeout=5) == "answered"
+        assert time.monotonic() - started < 3
+        assert bridge.extension_connected  # the healthy connection was kept
+    finally:
+        stuck.close()
+        if fresh is not None:
+            fresh.close()
 
 
 def test_a_command_written_in_time_keeps_its_connection_past_the_deadline(

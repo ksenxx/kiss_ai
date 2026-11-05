@@ -292,6 +292,7 @@ class RemoteTab(MachineStream):
         kind = msg.get("type")
         parent = str(msg.get("parent_tab_id") or "")
         sub_tab = str(msg.get("tab_id") or "")
+        addressed = str(msg.get("tabId") or "")  # the frame's tab, "" for a global frame
         replay_id = str(msg.get("replayId") or "")
         to: list[str] | None = []  # [] = every client, [conn] = that one, None = nobody
         adopt = ""
@@ -363,9 +364,15 @@ class RemoteTab(MachineStream):
             self._owner.adopt(self, adopt)  # takes the owner's lock: outside ours
         # Delivered under the lock retirement takes: a retired stream
         # delivers nothing more (the sends themselves are scheduled, not
-        # awaited, so nothing blocks here).
+        # awaited, so nothing blocks here), nor does a tab that left the
+        # stream meanwhile (a sub-agent tab a local chat was resumed
+        # into, :meth:`RemoteTabs._detach`) get the frame found eligible
+        # for it before: it would land in the chat the tab shows now,
+        # or, a ``subagentDone``, close the tab that shows it.
         with self.lock:
-            if self.retired:
+            if self.retired or (addressed and addressed not in self.tab_ids):
+                return
+            if kind == "subagentDone" and not self._owns_sub_tab(sub_tab):
                 return
             if spawn:
                 self._owner.deliver("", spawn)
@@ -375,7 +382,7 @@ class RemoteTab(MachineStream):
                 # A frame without a tab (``new_tab``, ``subagentDone``)
                 # is global, as the daemon's own broadcast of it is: a
                 # peer that only addressed other tabs still gets it.
-                self._owner.deliver(str(msg.get("tabId") or ""), text)
+                self._owner.deliver(addressed, text)
         if learnt:
             # After the frame: closing the chat's other tab can wait on
             # its socket's close handshake, the run's output must not.
@@ -674,7 +681,11 @@ class RemoteTabs:
         connecting for it stands down.  A bound tab's stream is retired
         and returned with the sub-agent tabs it leaves behind, for
         :meth:`_end_stream` outside the lock; a sub-agent tab just
-        leaves its stream (``(None, [])``, as for a tab without one).
+        leaves its stream (``(None, [])``, as for a tab without one),
+        with the task it was derived from: the stream must not claim
+        the tab again (:meth:`RemoteTab._owns_sub_tab`), or the
+        sub-agent's later ``subagentDone`` would close it on every
+        surface while it shows something else (a local chat).
         """
         if tab_id in self._connecting:
             self._unbinds[tab_id] = self._unbinds.get(tab_id, 0) + 1
@@ -686,6 +697,8 @@ class RemoteTabs:
         del self._tabs[tab_id]
         with tab.lock:
             tab.tab_ids.discard(tab_id)
+            tab.task_ids.discard(_sub_task_id(tab_id))
+            tab.announced.pop(_sub_task_id(tab_id), None)
         return None, []
 
     def _end_stream(self, tab: RemoteTab, tab_ids: list[str]) -> None:

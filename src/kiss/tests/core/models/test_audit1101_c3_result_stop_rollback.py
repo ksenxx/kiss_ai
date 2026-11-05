@@ -91,8 +91,10 @@ def _stop_after_pending_pop(model: OpenAICompatibleModel2) -> None:
     """Submit both results with a Stop landing right after the first call is popped."""
     inner = OpenAICompatibleModel2._add_function_results_inner
     lines, start = inspect.getsourcelines(inner)
+    # The first append of the loop body is the call's output, the
+    # statement right after the pending pop.
     stop_line = start + next(
-        i for i, line in enumerate(lines) if 'result_dict.get("tool_use_id")' in line
+        i for i, line in enumerate(lines) if "self.conversation.append(" in line
     )
     fired = False
 

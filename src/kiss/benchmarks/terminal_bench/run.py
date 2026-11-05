@@ -33,9 +33,12 @@ bridge (:mod:`kiss.benchmarks.terminal_bench.exec_bridge_server`)::
 
 ``--effort max`` sends the model's highest reasoning effort with every request
 (the leaderboard entries run at ``xhigh`` or ``max``); ``--reviewer`` names the
-model of the finish gate's read-only reviews (``same`` for the trial's model,
-``none`` to skip them) and ``--blind-verifier`` the model that writes the gate's
-independent check from the task statement alone (same values).
+model of the finish gate's one read-only review (``other`` for the strongest
+configured model of another family than the trial's, ``same`` for the trial's
+model, ``none`` to skip it), ``--reading-check`` the model that reads the task
+statement against the agent's interpretation ledger before its first edit (same
+values) and ``--blind-verifier`` the model that writes the gate's independent
+check from the task statement alone (same values; off by default).
 """
 
 from __future__ import annotations
@@ -82,7 +85,8 @@ def harbor_command(args: argparse.Namespace) -> list[str]:
     if args.agent == KISS_AGENT:
         cmd += ["-m", args.model, "--ak", f"budget_usd={args.budget_usd}",
                 "--ak", f"home={args.home}", "--ak", f"reviewer={args.reviewer}",
-                "--ak", f"blind_verifier={args.blind_verifier}"]
+                "--ak", f"blind_verifier={args.blind_verifier}",
+                "--ak", f"reading_check={args.reading_check}"]
         if args.effort:
             cmd += ["--ak", f"reasoning_effort={args.effort}"]
     if args.env:
@@ -121,12 +125,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--effort", default="max",
                         help="reasoning effort of every model request (Claude: low..max; "
                              "'' for the level of the model's catalog entry)")
-    parser.add_argument("--reviewer", default="same",
-                        help="model of the finish gate's read-only reviews: 'same' (the "
+    parser.add_argument("--reviewer", default="other",
+                        help="model of the finish gate's one read-only review: 'other' (the "
+                             "strongest configured model of another family), 'same' (the "
                              "trial's model), a model name, or 'none'")
-    parser.add_argument("--blind-verifier", default="same",
+    parser.add_argument("--reading-check", default="other",
+                        help="model that reads the task statement against the agent's "
+                             "interpretation ledger before its first edit: 'other', 'same', "
+                             "a model name, or 'none'")
+    parser.add_argument("--blind-verifier", default="none",
                         help="model that writes the gate's independent check from the task "
-                             "statement alone: 'same', a model name, or 'none'")
+                             "statement alone: 'none', 'same', 'other', or a model name")
     return parser
 
 

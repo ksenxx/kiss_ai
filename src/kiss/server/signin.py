@@ -46,17 +46,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+import selectors
 import signal
+import struct
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+
+if sys.platform != "win32":
+    import fcntl
+    import termios
 
 from kiss.core.config import kiss_home
 from kiss.core.locked import locked_call
 from kiss.core.processes import (
+    IS_WINDOWS,
     kill_process_group,
     popen_process_group,
     run_process_group,
@@ -80,6 +88,10 @@ shows after the TTL."""
 
 HOOK_END_TIMEOUT = 2.0
 """Seconds a replaced or cancelled ``login`` hook gets to exit on SIGTERM before SIGKILL."""
+
+HOOK_EXIT_POLL = 0.2
+"""Seconds between the relay's checks, while its stdout is silent, that the ``login`` hook
+is still running (:func:`_hook_lines`)."""
 
 PASTE_LIMIT = 4096
 """Characters of a paste handed to the hook: enough for any redirect URL, less than a pipe holds."""
@@ -111,6 +123,53 @@ def _parse(line: str) -> dict[str, Any]:
     except ValueError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _unread_bytes(fd: int) -> int:
+    """How many bytes the pipe read through *fd* holds that have not been read yet."""
+    return int(struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0])
+
+
+def _hook_lines(proc: subprocess.Popen[str]) -> Iterator[str]:
+    """The lines of *proc*'s stdout, until EOF or, once *proc* has exited, what it held then.
+
+    EOF alone cannot bound the read: a helper the hook started with its
+    stdout inherited (a browser opener, say) keeps the pipe's write end
+    open for as long as it lives, which may be long after the hook
+    printed its last line and exited.  So each wait for the pipe lasts
+    at most :data:`HOOK_EXIT_POLL` seconds, the hook's exit is checked
+    between waits, and at the exit exactly the bytes the pipe holds
+    then (everything the hook wrote is among them) are read: a helper
+    that keeps writing cannot keep the read going either.  The helper
+    is left alone: it may be the user's browser.
+    """
+    assert proc.stdout is not None
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch (readiness APIs reject pipes)
+        yield from proc.stdout
+        return
+    fd = proc.stdout.fileno()
+    pending = b""
+    unread = None  # bytes the pipe held at the hook's exit that are still to read
+    with selectors.DefaultSelector() as ready:
+        ready.register(fd, selectors.EVENT_READ)
+        while unread is None or unread > 0:
+            if unread is None:
+                if proc.poll() is not None:
+                    unread = _unread_bytes(fd)
+                    continue
+                if not ready.select(HOOK_EXIT_POLL):
+                    continue
+            chunk = os.read(fd, 65536 if unread is None else min(unread, 65536))
+            if not chunk:
+                break
+            if unread is not None:
+                unread -= len(chunk)
+            lines = (pending + chunk).split(b"\n")
+            pending = lines.pop()
+            for line in lines:
+                yield line.decode("utf-8", errors="replace")
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
 
 
 _status_lock = threading.RLock()
@@ -279,7 +338,11 @@ class SigninLogin:
 
         Returns:
             ``False`` when no login is running (or the hook closed its
-            stdin, or is not reading it), so the window can say so.
+            stdin, or is not reading it), so the window can say so.  A
+            paste that a nearly full pipe took only in part ends the
+            login: only a write of at most ``PIPE_BUF`` bytes is all or
+            nothing, and the part written, with no newline, would be
+            glued to the next paste the hook reads.
         """
         with self._lock:
             proc = self._proc
@@ -290,7 +353,10 @@ class SigninLogin:
                 written = os.write(proc.stdin.fileno(), data)
             except (OSError, ValueError):  # the pipe is full, closed or gone
                 return False
-        return written == len(data)
+            if written < len(data):  # cut short: the stream now holds a line fragment
+                self._end_locked()
+                return False
+        return True
 
     def cancel(self) -> None:
         """End the running login, if any; its relay thread then stays silent.
@@ -355,16 +421,19 @@ class SigninLogin:
         the same way: a retry that started between the check and the
         send would otherwise see the old failure reported after its own
         URL.  A sign-in that succeeded is announced through the status
-        lock (:func:`_signed_in`), outside this one.
+        lock (:func:`_signed_in`), outside this one.  The lines are read
+        until the hook's exit (:func:`_hook_lines`), so a helper that
+        outlives it with its stdout cannot hold up the result.
         """
         assert proc.stdout is not None
-        first = _parse(proc.stdout.readline())
+        lines = _hook_lines(proc)
+        first = _parse(next(lines, ""))
         url = first.get("url")
         with self._lock:
             if url and self._proc is proc:
                 reply({"type": "signinUrl", "provider": provider, "url": str(url)}, False)
         last = first
-        for line in proc.stdout:
+        for line in lines:
             if line.strip():
                 last = _parse(line)
         proc.wait()

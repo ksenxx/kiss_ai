@@ -1127,7 +1127,7 @@ class TestGeminiConvertOncePerRequest:
         base_url, script = next(endpoint)
         try:
             monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
-            script.play([gemini_chunk([text_part("done")])])
+            script.play([gemini_chunk([text_part("done")], finish_reason="STOP")])
             model = _ConversionCountingGemini("gemini-rr-area-b", api_key="k")
             model.initialize("placeholder")
             model.conversation = [dict(m) for m in self._CONVERSATION]

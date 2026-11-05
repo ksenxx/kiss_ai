@@ -424,6 +424,37 @@ function runTests() {
     }
   }
 
+  // 2026-11-04 W1 F1: a failure of the Apple click still in transit when
+  // the Google button is clicked belongs to the ended attempt: it must
+  // not close the new blank tab or hide Google's page when it arrives.
+  {
+    const {win, posted, tabs} = signinPage();
+    try {
+      send(win, SIGNIN);
+      buttons(win)[1].click();
+      buttons(win)[0].click();
+      assert.strictEqual(sent(posted, 'signinLogin').length, 2);
+      send(win, {type: 'signinError', provider: 'apple', error: 'stale'});
+      assert.ok(!tabs[1].closed, "the newer click's tab stays open");
+      assert.ok(
+        !note(win).classList.contains('signin-modal-error'),
+        'the replaced attempt has no failure to report',
+      );
+      send(win, {
+        type: 'signinUrl',
+        provider: 'google',
+        url: 'https://accounts.example/g',
+      });
+      assert.strictEqual(tabs[1].navigatedTo, 'https://accounts.example/g');
+      assert.strictEqual(pasteRow(win).style.display, '', 'paste row shown');
+      // The live attempt's own failure is still reported.
+      send(win, {type: 'signinError', provider: 'google', error: 'denied'});
+      assert.strictEqual(note(win).textContent, 'Sign-in failed: denied');
+    } finally {
+      win.close();
+    }
+  }
+
   console.log('signinWindow.test.js passed');
 }
 

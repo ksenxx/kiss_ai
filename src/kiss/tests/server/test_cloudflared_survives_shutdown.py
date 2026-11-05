@@ -29,18 +29,27 @@ tests enforce that property in two layers:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import IsolatedAsyncioTestCase
 
+import kiss.server.web_server as ws_mod
 from kiss.core.processes import pid_alive
-from kiss.server.web_server import RemoteAccessServer
+from kiss.core.user_config import CONFIG_PATH, save_config
+from kiss.server.web_server import RemoteAccessServer, _save_url_file
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.pause import Pause
 
 
 class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
@@ -237,6 +246,131 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
             if needle in line:
                 return True
         return False
+
+
+_FAKE_CLOUDFLARED = (
+    f"#!{sys.executable}\n"
+    "import sys, time\n"
+    "sys.stderr.write('INF Registered tunnel connection\\n')\n"
+    "sys.stderr.flush()\n"
+    "time.sleep(300)\n"
+)
+
+
+class TestCancelledAsyncStartupStopsItsTunnel(IsolatedAsyncioTestCase):
+    """The embedder path is the opposite of ``start()``: a cancelled ``start_async``
+    must not leave the ``cloudflared`` it spawned running with no listener and no
+    watchdog, since nothing will ever adopt or supervise it.  A real named-tunnel
+    stand-in on ``PATH``; the startup is held inside the real URL-file write
+    (:class:`Pause`) so the cancel lands after the spawn.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-cancel-start-"))
+        fake = self.tmp / "cloudflared"
+        fake.write_text(_FAKE_CLOUDFLARED)
+        fake.chmod(0o755)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.tmp}{os.pathsep}{self._old_path}"
+        self._orig_pidfile = ws_mod._CLOUDFLARED_PIDFILE
+        ws_mod._CLOUDFLARED_PIDFILE = self.tmp / "cloudflared.pid"
+        self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+        save_config({"remote_password": "cancel-start-only"})
+
+    async def asyncTearDown(self) -> None:
+        os.environ["PATH"] = self._old_path
+        ws_mod._CLOUDFLARED_PIDFILE = self._orig_pidfile
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        else:
+            CONFIG_PATH.unlink(missing_ok=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @posix_only("the fake cloudflared is a script")
+    async def test_cancelled_start_async_terminates_the_spawned_tunnel(self) -> None:
+        url_file = self.tmp / "remote-url.json"
+        server = RemoteAccessServer(
+            host="127.0.0.1", port=0, use_tunnel=True, scheduler=False,
+            tunnel_token="fake-token", tunnel_url="https://cancel.example.invalid",
+            work_dir=str(self.tmp), url_file=url_file,
+            local_endpoint_file=self.tmp / "local.json",
+        )
+        proc = None
+        try:
+            with Pause(_save_url_file.__code__, lambda loc: loc["url_file"] == url_file) as pause:
+                setup = asyncio.ensure_future(server.start_async())
+                self.assertTrue(await asyncio.to_thread(pause.paused.wait, 60))
+                proc = server._tunnel_proc
+                assert proc is not None
+                self.assertIsNone(proc.poll(), "the stand-in tunnel is up before the cancel")
+                setup.cancel()
+                # The rollback waits for the held write to finish.
+                pause.release()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(setup, 30)
+            self.assertIsNone(server._ws_server)
+            self.assertIsNotNone(
+                await asyncio.to_thread(_wait_exit, proc, 5),
+                "the cancelled startup leaked its spawned cloudflared",
+            )
+            self.assertTrue(server._tunnel_stopped, "a late spawn would install its child")
+            self.assertFalse(url_file.exists(), "the URL file advertises a closed listener")
+        finally:
+            await server.stop_async()
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    async def test_cancelled_start_async_cannot_publish_the_url_file_after_its_rollback(
+        self,
+    ) -> None:
+        """A URL writer the startup queued but that is not at its lock yet when the cancel
+        lands finds publication closed afterwards: the rollback's removal found no file,
+        and the writer must not advertise the closed listener once released.
+        """
+        url_file = self.tmp / "remote-url.json"
+        server = RemoteAccessServer(
+            host="127.0.0.1", port=0, scheduler=False, work_dir=str(self.tmp),
+            url_file=url_file, local_endpoint_file=self.tmp / "local.json",
+        )
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        try:
+            with Pause(
+                RemoteAccessServer._write_url_file_sync.__code__,
+                lambda loc: loc["self"] is server,
+            ) as pause:
+                setup = asyncio.ensure_future(server.start_async())
+                self.assertTrue(await asyncio.to_thread(pause.paused.wait, 60))
+                setup.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(setup, 30)
+                self.assertIsNone(server._ws_server)
+                self.assertFalse(url_file.exists())
+                # The other worker is kept busy, so the sentinel queued
+                # after the release runs on the writer's worker: when it
+                # has run, the writer is done.
+                gate = threading.Event()
+                busy = loop.run_in_executor(None, gate.wait)
+                pause.release()
+                await loop.run_in_executor(None, _nothing)
+                gate.set()
+                await busy
+            self.assertFalse(url_file.exists(), "the released writer published the closed listener")
+        finally:
+            await server.stop_async()
+
+
+def _nothing() -> None:
+    """Executor sentinel: runs once a worker is free."""
+
+
+def _wait_exit(proc: subprocess.Popen[str], timeout: float) -> int | None:
+    """Return *proc*'s exit status, ``None`` when it is still running after *timeout* s."""
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 class TestStderrDrainShim(unittest.TestCase):

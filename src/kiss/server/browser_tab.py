@@ -914,11 +914,14 @@ class BrowserTabService:
 
         A context the service closed itself was taken out of ``_context``
         before its close, so its event is stale: acting on it would tear
-        down the browser launched since.
+        down the browser launched since.  The check is made again under
+        the lock (:meth:`_teardown`): the close of the last tab, which
+        the same exit fires first, tears the browser down ahead of this,
+        and a reopen queued between the two launches a new one.
         """
         if context is self._context:
             logger.warning("browser tab: the browser exited on its own; closing every tab")
-            self._schedule(self._teardown(announce=True))
+            self._schedule(self._teardown(announce=True, context=context))
 
     async def _on_page_closed(self, rec: _PageRecord) -> None:
         with self._lock:
@@ -945,10 +948,11 @@ class BrowserTabService:
             if not self._pages:
                 await self._teardown_locked(announce=False)
 
-    async def _teardown(self, announce: bool) -> None:
-        """Close the browser and forget every page."""
+    async def _teardown(self, announce: bool, context: BrowserContext | None = None) -> None:
+        """Close the browser and forget every page; given *context*, only while it is current."""
         async with self._launch_lock:
-            await self._teardown_locked(announce)
+            if context is None or context is self._context:
+                await self._teardown_locked(announce)
 
     async def _teardown_locked(self, announce: bool) -> None:
         """Close the browser and forget every page (caller holds ``_launch_lock``).

@@ -217,6 +217,28 @@ def test_replay_recovers_a_snapshot_left_by_a_crashed_replayer(
     assert _journal_residue(kiss_home) == []
 
 
+def test_append_after_a_torn_tail_keeps_the_new_event(kiss_home: Path) -> None:
+    """A record appended after a torn last line must survive the replay.
+
+    A process killed mid-append leaves the sidecar ending in a partial
+    record with no newline.  The next append must not fuse its own,
+    complete record onto that fragment: the replay skips the malformed
+    line and then deletes the consumed snapshot, so only the torn
+    record may be lost, never the one journalled correctly after it.
+    """
+    task_id, _chat = persistence._add_task("torn tail task")
+    sidecar = Path(persistence._failed_events_path(str(persistence._DB_PATH)))
+    sidecar.write_text('{"task_id":"partial', encoding="utf-8")
+
+    persistence._journal_failed_events(
+        [_journalled_event(task_id, "journalled after the torn tail")], 4,
+    )
+    persistence._replay_failed_events()
+
+    assert _event_texts(task_id) == ["journalled after the torn tail"]
+    assert _journal_residue(kiss_home) == []
+
+
 def test_nothing_is_lost_while_the_database_keeps_refusing_writes(
     kiss_home: Path,
 ) -> None:

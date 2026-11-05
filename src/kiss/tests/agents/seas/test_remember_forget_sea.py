@@ -200,9 +200,13 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
     """A task reading AGENTS.md while it is rewritten gets the old or the new text.
 
     The reader repeats the exact ``perform_task`` read while a writer
-    adds and removes a transient rule 200 times; every snapshot must
-    still contain the standing instruction (an in-place truncating write
-    would show empty snapshots).  On Windows this also exercises the
+    adds and removes a transient rule 200 times.  The reader announces
+    each round before the writer starts it, takes at least one snapshot
+    per round and keeps sampling until the round's writes are done: that
+    guarantees the sample count, not that a snapshot overlaps a given
+    write (the scheduler decides that); every snapshot must still
+    contain the standing instruction (an in-place truncating write would
+    show empty snapshots).  On Windows this also exercises the
     sharing-violation handling on both sides: the writer's replace must
     wait out the reader's open handle and the reader's open must wait
     out the in-flight rename.
@@ -210,23 +214,30 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
     path = _fresh_agents_md
     standing = "- Always preserve this standing instruction"
     remember_sea.remember_instruction(standing)
-    start = Barrier(2, timeout=30)
-    done = Event()
+    rounds = 200
+    ready = [Event() for _ in range(rounds)]  # ``ready[i]``: the reader reached round i
+    written = [Event() for _ in range(rounds)]  # ``written[i]``: round i's writes are done
 
     def write() -> None:
-        start.wait()
         try:
-            for i in range(200):
+            for i in range(rounds):
+                assert ready[i].wait(timeout=30), f"the reader never reached round {i}"
                 agents_md.add_instruction(f"Transient {i}")
                 agents_md.remove_instruction(f"Transient {i}")
+                written[i].set()
         finally:
-            done.set()  # a writer failure must not leave the reader spinning
+            for event in written:  # a writer failure must not leave the reader spinning
+                event.set()
 
     def read() -> list[str]:
-        start.wait()
         snapshots = []
-        while not done.is_set():
-            snapshots.append(read_bytes_waiting_for_writer(path).decode("utf-8", errors="replace"))
+        for i in range(rounds):
+            ready[i].set()
+            while True:  # at least one snapshot per round, then as many as the round lasts
+                text = read_bytes_waiting_for_writer(path).decode("utf-8", errors="replace")
+                snapshots.append(text)
+                if written[i].is_set():
+                    break
         return snapshots
 
     pool = ThreadPoolExecutor(max_workers=2)
@@ -235,9 +246,10 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
         snapshots = pool.submit(read).result(timeout=120)
         writer.result(timeout=120)
     finally:
-        done.set()  # a blocked writer must not leave the reader spinning past interpreter exit
+        for event in ready + written:  # a stuck worker must not block its peer past exit
+            event.set()
         pool.shutdown(wait=False, cancel_futures=True)
-    assert len(snapshots) > 100, len(snapshots)
+    assert len(snapshots) >= rounds, len(snapshots)
     bad = [s for s in snapshots if standing not in s]
     assert bad == [], f"{len(bad)} partial snapshots, e.g. {bad[0]!r}"
     assert path.read_text() == f"# User instructions\n\n{standing}\n"

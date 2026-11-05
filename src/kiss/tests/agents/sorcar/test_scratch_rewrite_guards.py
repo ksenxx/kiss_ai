@@ -71,6 +71,10 @@ def _created(tmp_path: Path, command: str) -> set[str]:
     # as do another variable's array value, read's valued options and a subshell
     ("T=tmp/x; Y=(a b); read -p 'a' -n 1 X <<< y; (T=z); mkdir -p $T; cat > $T/f " + _BODY,
      "tmp/x/f"),
+    # an assignment before a command is the command's alone; one in the
+    # substitution of an array value ends with the substitution
+    ("T=tmp/x; T=other cat /dev/null; mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
+    ("T=tmp/x; Y=($(T=other; echo $T)); mkdir -p $T; cat > $T/f " + _BODY, "tmp/x/f"),
 ])
 def test_assigned_variables_resolve_to_the_file_bash_writes(
     tmp_path: Path, command: str, expected: str,
@@ -105,6 +109,13 @@ def target_cwd(command: str) -> str | None:
     "T=tmp/x; declare T=notes.md; cat > $T/f " + _BODY,
     "T=tmp/x; for T in notes.md; do :; done; cat > $T/f " + _BODY,
     "T=tmp/x; (( T = 1 )); cat > $T/f " + _BODY,
+    "T=tmp/x; : $((T = 1)); cat > $T/f " + _BODY,
+    "T=tmp/x; T=0; echo \"$(( T++ ))\"; cat > $T/f " + _BODY,
+    # an assignment before a special builtin, or before a wrapper running no
+    # command, holds in sh (the host tool's shell) and not in bash
+    "T=tmp/x; T=notes.md export X=y; cat > $T/f " + _BODY,
+    "T=tmp/x; T=notes.md :; cat > $T/f " + _BODY,
+    "T=tmp/x; T=notes.md exec 3>&1; cat > $T/f " + _BODY,
     "T=tmp/x; eval 'T=notes.md'; cat > $T/f " + _BODY,
     "T=tmp/x; . tmp/env.sh; cat > $T/f " + _BODY,
     # the variable a builtin fills when no operand names one (bash's REPLY, MAPFILE)
@@ -184,6 +195,17 @@ def test_guards_follow_an_assigned_variable_to_the_file() -> None:
         return path == "/w/notes.md"
     verdict = heredoc_guard("F=notes.md; cat > $F " + _BODY, "/w", guarded)
     assert verdict == HEREDOC_VERDICT.format(path="/w/notes.md")
+    # a descriptor bash opens by name (``{fd}>``; sh: the word ``{fd}`` and
+    # ``>``) truncates the file too, and the here-document a ``{fd}<<`` opens
+    # is sh's standard input (review 2026-11-04 follow-up 2 F1)
+    assert heredoc_guard("F=notes.md; cat {fd}>$F " + _BODY, "/w", guarded) == verdict
+    assert heredoc_guard("tee notes.md {fd}<<'EOF' > /dev/null\nbody\nEOF\n", "/w",
+                         guarded) == verdict
+    # ...and before the command word it is no program of its own (bash runs
+    # ``tee``; sh would run ``{fd}``): the guard holds under both readings
+    assert heredoc_guard("{fd}>tmp/log tee notes.md <<'EOF' > /dev/null\nbody\nEOF\n", "/w",
+                         guarded) == verdict
+    assert _program("tee", "env {fd}>tmp/log tee notes.md").argv()[0].text == "tee"
     # a reassignment that ends with its pipeline or its backgrounded list
     assert heredoc_guard("F=notes.md; { F=tmp/n; } | cat; cat > $F " + _BODY, "/w",
                          guarded) == verdict
@@ -222,6 +244,17 @@ def test_multiline_sed_runs_on_a_scratch_file_only(work: Path) -> None:
     out = tools.Bash("sed -i 's/one/&\\ntwo/' notes.md", "tracked")
     assert out.startswith("REFUSED: the `sed -i` call did NOT run") and (
         (work / "notes.md").read_text() == "one\n")
+    # A ``{name}>`` or ``11>`` before a redirection names a descriptor to bash
+    # and is a word (here: a sed operand, the file named so) to sh: the guard
+    # holds under both readings (review 2026-11-04 follow-up 2 F1).
+    for brace in ("{fd}", "11"):
+        (work / brace).write_text("one\n")
+        out = tools.Bash(f"sed -i 's/one/&\\ntwo/' tmp/notes.md {brace}>tmp/log", "operand")
+        assert out.startswith("REFUSED: the `sed -i` call did NOT run"), out
+        assert (work / brace).read_text() == "one\n"
+    out = tools.Bash("{fd}>tmp/log sed -i 's/one/&\\ntwo/' notes.md", "before the command")
+    assert out.startswith("REFUSED: the `sed -i` call did NOT run"), out
+    assert (work / "notes.md").read_text() == "one\n"
     # The file need not have been shown: a one-substitution sed on a scratch
     # file is applied as the Edit it stands for, unread.
     out = tools.Bash("sed -i 's/three/3/' tmp/notes.md", "mechanical")
@@ -290,6 +323,16 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     two = _REWRITE.format(path="tmp/notes.md") + "\n" + _REWRITE.format(path="tmp/notes.md")
     assert "REFUSED" not in tools.Bash(two, "scratch twice")
     assert (work / "tmp" / "notes.md").read_text() == "uno\n"
+    # A program changing its directory (audit 2026-11-04 S5 F10) writes a relative
+    # path in a directory the scanner's cwd does not name: here the tracked file
+    # above the scratch one the ``cd`` would resolve ``notes.md`` to.  Refused.
+    (work / "tmp" / "notes.md").write_text("one\n")
+    moved = _REWRITE.format(path="notes.md").replace(
+        "import re\n", "import re, os\nos.chdir('..')\n")
+    out = tools.Bash("cd tmp && " + moved, "cd, then chdir back")
+    assert out.startswith("REFUSED: the python heredoc did NOT run")
+    assert (work / "notes.md").read_text() == "one\n"
+    assert (work / "tmp" / "notes.md").read_text() == "one\n"
 
 
 @pytest.mark.parametrize("program, expected", [
@@ -310,6 +353,10 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     ("p = 'tmp/out'\ndef rewrite(p):\n    open(p, 'w').write('x')\nrewrite('notes.md')", None),
     ("p = 'tmp/out'\nfor p in ['notes.md']:\n    open(p, 'w').write('x')", None),
     ("p = 'tmp/out'\nimport p\nopen(p, 'w').write('x')", None),
+    # a directory change: a relative path then names a file this reading cannot place
+    ("import os\nos.chdir('..')\nopen('tmp/out', 'w').write('x')", None),
+    ("from os import chdir\nchdir('..')\np = 'tmp/out'\nopen(p, 'w').write('x')", None),
+    ("import os\nos.fchdir(3)\nopen('tmp/out', 'w').write('x')", None),
     # the keyword forms of open()
     ("open('tmp/a', 'w').write('x')\nopen(file='notes.md', mode='w').write('y')",
      ["tmp/a", "notes.md"]),
@@ -322,6 +369,79 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
 ])
 def test_python_written_paths(program: str, expected: list[str] | None) -> None:
     assert python_written_paths(program) == expected
+
+
+def test_a_heredoc_copying_python_rewrite_text_is_data(work: Path) -> None:
+    # The body a ``cat`` copies into a scratch script is data, not a python
+    # heredoc the command runs (audit 2026-11-04 S5 F13): the copy runs...
+    tools = UsefulTools(work_dir=str(work))
+    script = _REWRITE.format(path="notes.md").replace(
+        "re.sub(r'one', 'uno', s)", "s.replace('one', 'uno')")
+    command = "mkdir -p tmp/doc && cat > tmp/doc/probe.sh <<'DOC'\n" + script + "\nDOC"
+    assert rewrite_guard(command, str(work), lambda path: True) is None
+    out = tools.Bash(command, "copy a script")
+    assert "REFUSED" not in out and (work / "tmp" / "doc" / "probe.sh").read_text() == (
+        script + "\n")
+    assert (work / "notes.md").read_text() == "one\n"
+    # ...while the same text outside a here-document body (a quoted string the
+    # scanner does not read into) keeps the refusal.
+    quoted = "bash -c '" + script.replace("<<'EOF'", "<<EOF") + "'"
+    assert rewrite_guard(quoted, str(work), lambda path: True) is not None
+    assert tools.Bash(quoted, "quoted").startswith("REFUSED: the python heredoc did NOT run")
+    assert (work / "notes.md").read_text() == "one\n"
+    # ...and so does the body of a here-document a shell runs (review 2026-11-04
+    # sorcar-a R3): that text is code, not a copy, even when a copy has it too;
+    # a copier forwarding its body to a shell (review 2026-11-04 sorcar R1) is
+    # no copy either.
+    for nested in ("bash <<'SH'\n" + script + "\nSH", command + "\nsh <<'SH'\n" + script + "\nSH",
+                   "cat <<'SH' | bash\n" + script + "\nSH",
+                   "tee <<'SH' | bash\n" + script + "\nSH",
+                   # the pipe under a descriptor's file name, or saved and restored
+                   "cat <<'SH' > /dev/stdout | bash\n" + script + "\nSH",
+                   "cat <<'SH' 3>&1 > /dev/null 1>&3 | bash\n" + script + "\nSH",
+                   # ...restored by the input form of the duplication, or the alias
+                   # under another spelling (review 2026-11-04 follow-up F1, F2)
+                   "cat <<'SH' 3>&1 > /dev/null 1<&3 | bash\n" + script + "\nSH",
+                   "cat <<'SH' > /dev//stdout | bash\n" + script + "\nSH"):
+        assert rewrite_guard(nested, str(work), lambda path: True) is not None
+        assert tools.Bash(nested, "nested").startswith("REFUSED: the python heredoc did NOT run")
+        assert (work / "notes.md").read_text() == "one\n"
+    # A copy is one whose output ends in files the scan can name: not a process
+    # substitution, a substitution's word, a group running the text, a pipeline
+    # going on past a ``tee``, the command's own output (``exec >`` may send it
+    # anywhere) or a descriptor under a file name; the redirections apply in
+    # order, so a file one that a later duplication undoes is no sink, and one
+    # that ends the stream anywhere along the way is a copy.
+    body = "\n" + script + "\nSH"
+    for sink in ("cat <<'SH' > >(bash)", "eval \"$(cat <<'SH'" + body + "\n)\"",
+                 "cat <<'SH' | { bash; }", "cat <<'SH' | tee tmp/doc/x.sh | bash",
+                 "cat <<'SH' | tee >(bash) > /dev/null", "cat <<'SH'", "tee tmp/doc/x.sh <<'SH'",
+                 "cat <<'SH' > \"$OUT\"", "cat <<'SH' > /dev/stdout | bash",
+                 "cat <<'SH' > /dev/fd/1 | bash", "cat <<'SH' | tee /dev/stderr > /dev/null",
+                 "cat <<'SH' 3>&1 > /dev/null 1>&3 | bash", "cat <<'SH' > /dev/null 1>&3 | bash",
+                 "cat <<'SH' > /dev/null >&- | bash", "cat <<'SH' > tmp/doc/x.sh >&2 | bash",
+                 # every spelling of the alias, a read-write reopening of the
+                 # saved pipe, a descriptor bash opens by name (stdout stays the
+                 # pipe), a directory only the shell knows
+                 "cat <<'SH' > /dev/./stdout | bash", "cat <<'SH' > //dev/stdout | bash",
+                 "cd /dev && cat <<'SH' > stdout | bash",
+                 "cat <<'SH' 3>&1 > /dev/null 1<>/dev/fd/3 | bash",
+                 "cat <<'SH' > /dev/null 1<&3 3>&1 | bash",
+                 "cat <<'SH' {fd}>tmp/doc/x.sh | bash", "cd $D && cat <<'SH' > x.sh | bash",
+                 # a descriptor spelled ``01`` or ``11`` is a word and an unnumbered
+                 # redirection to sh (review 2026-11-04 follow-up 2 F2)
+                 "tee <<'SH' 3>&1 > /dev/null 01>&3 | bash",
+                 "tee <<'SH' 3>&1 > /dev/null 11>&3 | bash",
+                 "cat <<'SH' > tmp/doc/x.sh 11>&3 | bash",
+                 "tee <<'SH' 3>&1 > /dev/null 01<&3 | bash",
+                 "tee <<'SH' 3>&1 > /dev/null 01<>/dev/fd/3 | bash"):
+        assert rewrite_guard(sink + body, str(work), lambda path: True) is not None, sink
+    for sink in ("cat <<'SH' | tee tmp/doc/x.sh > /dev/null", "{ cat <<'SH'; } > tmp/doc/x.sh",
+                 "cat <<'SH' | { cat > tmp/doc/x.sh; }", "T=tmp/doc; cat > $T/x.sh <<'SH'",
+                 "cat <<'SH' 3>&1 > /dev/null | bash", "cat <<'SH' 2>&1 > tmp/doc/x.sh | bash",
+                 "cat <<'SH' > /dev/null 2>&1 | bash", "cat <<'SH' &> tmp/doc/x.sh | bash",
+                 "cat <<'SH' 1<>tmp/doc/x.sh | bash", "cat <<'SH' 2<&1 > tmp/doc/x.sh | bash"):
+        assert rewrite_guard(sink + body, str(work), lambda path: True) is None, sink
 
 
 def test_heredoc_copies_through_a_variable_reach_scratch_files(work: Path) -> None:

@@ -293,6 +293,11 @@ class ToolBridge:
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="kiss-mcp-bridge", daemon=True
         )
+        # A Stop that landed in :meth:`_close`, re-raised once it is done, and
+        # the bounded wait's deadline: on the instance so that they survive
+        # a step's retry (see :meth:`_close`).
+        self._forced_stop: KeyboardInterrupt | None = None
+        self._stop_deadline: float | None = None
 
     @property
     def port(self) -> int:
@@ -385,24 +390,30 @@ class ToolBridge:
         what keeps it from running a tool after the block.
 
         A Stop (an injected ``KeyboardInterrupt``) landing while the
-        listener shuts down or the refusal is set must still interrupt
-        and await the calls already executing, or a long tool would keep
-        working on its daemon thread after the run returned.  A
-        ``finally`` is not enough: the exception lands at any bytecode,
-        inside the ``finally`` too, and skips the rest of it.  So each
-        step is retried until it completes (all three are idempotent)
-        and the exception is handed to the wait, which bounds it and
-        re-raises it at the end.
+        listener shuts down, the refusal is set or the wait begins must
+        still interrupt and await the calls already executing, or a
+        long tool would keep working on its daemon thread after the run
+        returned.  A ``finally`` is not enough: the exception lands at
+        any bytecode, inside the ``finally`` too, and skips the rest of
+        it.  So each step is retried until it completes (all four are
+        idempotent: the wait keeps its deadline on the instance) and the
+        exception, which makes the wait a bounded one, is re-raised once
+        every step is done.
         """
-        steps = [self._stop_listener, self._server.server_close, self._refuse_new_calls]
-        forced_stop: KeyboardInterrupt | None = None
+        steps = [
+            self._stop_listener,
+            self._server.server_close,
+            self._refuse_new_calls,
+            self._wait_for_calls,
+        ]
         while steps:
             try:
                 steps[0]()
                 del steps[0]
             except KeyboardInterrupt as e:
-                forced_stop = e
-        self._wait_for_calls(forced_stop)
+                self._forced_stop = e
+        if self._forced_stop is not None:
+            raise self._forced_stop
 
     def _stop_listener(self) -> None:
         if _spawned(self._thread):
@@ -412,7 +423,7 @@ class ToolBridge:
     def _refuse_new_calls(self) -> None:
         locked_call(self._server.state_lock, self._server.refuse_new_calls)
 
-    def _wait_for_calls(self, forced_stop: KeyboardInterrupt | None = None) -> None:
+    def _wait_for_calls(self) -> None:
         """Wait for the calls still executing; a Stop interrupts them and bounds the wait.
 
         Without a Stop the wait is open-ended: the tool's work (a file
@@ -432,34 +443,29 @@ class ToolBridge:
 
         A ``KeyboardInterrupt`` raised in this thread meanwhile (the
         daemon's forced Stop, injected a second after the stop event;
-        a Ctrl+C) is a Stop too, as is *forced_stop*, one that landed
-        earlier in :meth:`_close`: it is held until the bounded wait
-        ends and then re-raised, so it cannot cut the wait short and
-        leave an interrupted tool working after the run has returned.
+        a Ctrl+C) is a Stop too: :meth:`_close` holds it as
+        ``_forced_stop`` and retries the wait, now a bounded one, so it
+        cannot cut the wait short and leave an interrupted tool working
+        after the run has returned.
         """
-        deadline: float | None = None
         while True:
-            try:
-                running = locked_call(self._server.state_lock, self._server.running_handlers)
-                if not running:
+            running = locked_call(self._server.state_lock, self._server.running_handlers)
+            if not running:
+                break
+            if self._stop_deadline is None and (
+                self._forced_stop is not None or stop_signal.stop_requested()
+            ):
+                self._stop_deadline = time.monotonic() + STOP_WAIT_SECONDS
+            if self._stop_deadline is not None:
+                for ident, _thread in running:  # idempotent on an interrupted call
+                    tool_interrupt.interrupt_tool_call(ident)
+                if time.monotonic() >= self._stop_deadline:
+                    logger.warning(
+                        "KISS MCP bridge: %d tool call(s) still running after the Stop; abandoned",
+                        len(running),
+                    )
                     break
-                if deadline is None and (forced_stop is not None or stop_signal.stop_requested()):
-                    deadline = time.monotonic() + STOP_WAIT_SECONDS
-                if deadline is not None:
-                    for ident, _thread in running:  # idempotent on an interrupted call
-                        tool_interrupt.interrupt_tool_call(ident)
-                    if time.monotonic() >= deadline:
-                        logger.warning(
-                            "KISS MCP bridge: %d tool call(s) still running after the Stop; "
-                            "abandoned",
-                            len(running),
-                        )
-                        break
-                running[0][1].join(0.1)
-            except KeyboardInterrupt as e:
-                forced_stop = e
-        if forced_stop is not None:
-            raise forced_stop
+            running[0][1].join(0.1)
 
 
 def _spawned(thread: threading.Thread) -> bool:

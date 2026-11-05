@@ -45,6 +45,7 @@ body runs.
 import atexit
 import contextlib
 import functools
+import json
 import os
 import random
 import shutil
@@ -669,6 +670,14 @@ def install_cli_script(script: Path, source: str) -> Path:
     shim = script.with_name(script.name + ".cmd")
     shim.write_text(f'@"{sys.executable}" "%~dp0{script.name}" %*\n', encoding="utf-8")
     return shim
+
+
+def read_browser_launches(home: Path) -> list[list[str]]:
+    """Return the argv of every launch the fake browser in *home* recorded (none: [])."""
+    log = home / "browser-log"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text().splitlines()]
 
 
 _FAKE_CLOUDFLARED_WRAPPER = """\

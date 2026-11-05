@@ -45,6 +45,7 @@ from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _SHARE_TASKS_MAX_REPLY_BYTES,
     RemoteAccessServer,
+    _share_subagent_entries,
 )
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -537,6 +538,42 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         self.assertEqual(
             [t["task_id"] for t in event["tasks"]], [newest]
         )
+
+    def test_subagent_transcripts_are_loaded_one_child_at_a_time(self) -> None:
+        # The budget check must run BEFORE the next sibling's transcript
+        # is read: a parent with four 256 KiB sub-agents and a 1 KiB
+        # budget overflows at the first child, so the other three must
+        # never be SELECTed (the same rule the task loader applies).
+        # A child with a live recording is not read from disk at all.
+        parent = self._seed("chat-lazy", "parent task", "ls")
+        children = [
+            self._seed("chat-lazy", f"child {i}", "x" * (256 * 1024))
+            for i in range(4)
+        ]
+        for child in children:
+            th._save_task_extra({"parent_task_id": parent}, task_id=child)
+        selects: list[str] = []
+        db = th._get_db()
+        db.set_trace_callback(
+            lambda sql: selects.append(sql) if "FROM events WHERE task_id" in sql else None,
+        )
+        try:
+            entries, used, overflowed = _share_subagent_entries(
+                parent, 1024, lambda task_id: [],
+            )
+            self.assertEqual((entries, overflowed), ([], True))
+            self.assertGreater(used, 1024)
+            self.assertEqual(len(selects), 1, "only the rejected first child was read")
+            selects.clear()
+            live = {children[0]: [{"type": "tool_call", "name": "Bash", "command": "live"}]}
+            entries, _used, overflowed = _share_subagent_entries(
+                parent, 600 * 1024, lambda task_id: live.get(task_id, []),
+            )
+        finally:
+            db.set_trace_callback(None)
+        self.assertEqual([e["task_id"] for e in entries], children[:3])
+        self.assertTrue(overflowed)
+        self.assertEqual(len(selects), 3, "the live child is not read from disk")
 
     def test_unknown_chat_id_yields_no_tasks(self) -> None:
         event = self._tasks(chatId="never-seen", tabId="tab-1")

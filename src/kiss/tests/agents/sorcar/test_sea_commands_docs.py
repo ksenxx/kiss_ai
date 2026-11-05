@@ -24,6 +24,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 from kiss.tests.conftest import IS_WINDOWS
 
 _REPO = Path(__file__).resolve().parents[5]
@@ -39,10 +40,8 @@ def _reset_sea_commands() -> Iterator[None]:
     lands in the session-wide ``$KISS_HOME``, so remove it here or it
     shadows bundled commands for later tests in the same process.
     """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 @pytest.fixture

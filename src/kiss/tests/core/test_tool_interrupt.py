@@ -29,6 +29,7 @@ import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import tool_interrupt
+from kiss.core.base import collecting_trajectories
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
@@ -272,6 +273,56 @@ class TestAgentToolInterrupt:
         assert not thread.is_alive()
         assert "error" not in outcome, f"agent failed: {outcome.get('error')!r}"
         assert _first_line(outcome["result"]) == USER_INTERRUPTED_MESSAGE
+
+    def test_a_stop_on_the_enclosing_panel_ends_an_inline_helper_agent(
+        self, scripted_model: str
+    ) -> None:
+        """A tool runs a helper ``KISSAgent.run`` on its own thread (the merge-conflict
+        resolver under ``commit_and_merge``).  A Stop accepted on the tool's panel
+        reaches the helper's running tool; it must end the helper too — no further
+        model request, no result — and the enclosing call ends as interrupted."""
+        _ScriptedModelHandler.first_call = {"name": "nested_wait", "arguments": "{}"}
+        accepted: list[bool] = []
+        helper = KISSAgent("inline helper")
+
+        def nested_wait() -> str:
+            """Click the enclosing panel's Stop, then wait as a blocking tool does."""
+            call = tool_interrupt.current_tool_call()
+            assert call is not None and call.parent is not None
+            enclosing = call.parent
+            accepted.append(
+                interrupt_tool_call(enclosing.thread_ident, enclosing.name, enclosing.call_id)
+            )
+            # Interrupted at the first slice; the bound only keeps a failure finite.
+            tool_interrupt.wait_interruptible(threading.Event(), 5.0)
+            return "nested_wait completed"
+
+        def enclosing() -> str:
+            """Run the helper inline, as commit_and_merge's conflict resolver does."""
+            helper.run(
+                _MODEL,
+                "Run the tool.",
+                tools=[nested_wait],
+                max_steps=4,
+                model_config={"base_url": scripted_model, "api_key": "local"},
+                verbose=False,
+            )
+            return "enclosing completed"
+
+        with collecting_trajectories(save=False):
+            agent = KISSAgent("enclosing agent")
+            agent.function_map = {"enclosing": enclosing}
+            _, result, blocked = agent._guarded_execute_tool(
+                {"name": "enclosing", "arguments": {}}
+            )
+        assert accepted == [True] and blocked is None
+        assert result == USER_INTERRUPTED_MESSAGE, "the accepted Stop must end the enclosing call"
+        assert len(_ScriptedModelHandler.requests) == 1, "a model request after the Stop"
+        # The helper's interrupted call is still in its trajectory.
+        assert ("user", f"[nested_wait]: {USER_INTERRUPTED_MESSAGE}") in [
+            (m["role"], m["content"]) for m in helper.messages
+        ]
+        assert running_tool_name(threading.get_ident()) is None
 
     def test_interrupted_bash_kills_the_process_promptly(
         self, scripted_model: str,

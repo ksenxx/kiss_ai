@@ -191,3 +191,26 @@ def test_a_keyboard_interrupt_during_the_listener_shutdown_still_bounds_the_wait
     assert task.interrupted_at is not None
     assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at, "the tool kept working"
     assert task.interrupted_at - injected_at < STOP_WAIT_SECONDS + 1, "the wait was open-ended"
+
+
+def test_a_keyboard_interrupt_at_the_entry_of_the_wait_still_bounds_the_wait() -> None:
+    """A Ctrl+C landing as the block's exit enters the wait for the running tool (the
+    listener already stopped, new calls already refused) is held like one landing inside
+    the wait: the tool is interrupted and the exit returns once it ended, within
+    STOP_WAIT_SECONDS, instead of at once with the tool still working on its thread."""
+    tool = _PatientTool()
+    task = _TaskThread(tool, request_stop=False)
+    entry = Pause(ToolBridge._wait_for_calls.__code__, lambda loc: True)
+    with entry:
+        task.start()
+        assert task.in_block.wait(10)
+        assert entry.paused.wait(10), "the block's exit never reached the wait"
+        injected_at = time.monotonic()
+        assert inject_async_exception(task.ident or 0, KeyboardInterrupt) == 1
+        entry.release()
+        task.join(STOP_WAIT_SECONDS + 10)
+
+    assert task.interrupted_at is not None
+    assert task.bridge is not None and task.bridge.calls_in_flight == 0, "the call was left"
+    assert tool.ended_at and tool.ended_at[0] <= task.interrupted_at, "the tool kept working"
+    assert task.interrupted_at - injected_at < STOP_WAIT_SECONDS + 1, "the wait was open-ended"

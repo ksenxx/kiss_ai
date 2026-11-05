@@ -533,8 +533,15 @@ def test_undivided_work_reports_every_overlap_and_ignores_shared_instructions() 
     # a directory both tasks name is no overlap when each names its own file under it
     assert undivided_work(["tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/a.js",
                            "tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/b.js"]) == ""
-    # one task on the whole directory, the other on a file in it: an overlap
+    # one task on the whole directory, the other on a file in it: an overlap,
+    # whether or not the second task repeats the directory (audit 2026-11-04)
     assert undivided_work(["refactor src/x/", "fix src/x/b.py in src/x/"]) == (
+        "tasks 1 and 2 of the fan-out both name src/x/")
+    assert undivided_work(["refactor src/x/", "fix src/x/b.py"]) == (
+        "tasks 1 and 2 of the fan-out both name src/x/")
+    assert undivided_work(["refactor src/x/", "refactor src/x/nested/"]) == (
         "tasks 1 and 2 of the fan-out both name src/x/")
     assert undivided_work(["refactor src/x/", "refactor src/x/"]) == (
         "tasks 1 and 2 of the fan-out both name src/x/")
+    # ...while files of their own under a directory only one task names are disjoint
+    assert undivided_work(["fix src/x/a.py in src/x/", "fix src/x/b.py"]) == ""

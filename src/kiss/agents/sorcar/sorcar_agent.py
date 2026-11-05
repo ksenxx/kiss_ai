@@ -59,7 +59,7 @@ from kiss.agents.sorcar.git_worktree import (
     inside_kiss_worktree,
     repo_lock,
 )
-from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.persistence import _load_last_model, _record_gate_charge
 from kiss.agents.sorcar.relentless_agent import (
     _OFFSET_PUBLISH_LOCK,
     RelentlessAgent,
@@ -102,7 +102,7 @@ from kiss.core.models.model_info import (
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.models.openai_compatible_model import _model_thinking_level
 from kiss.core.printer import Printer
-from kiss.core.tool_verdict import Verdict
+from kiss.core.tool_verdict import Verdict, allow_with_note
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -1055,6 +1055,29 @@ def _attribute_sub_usage(
             logger.debug("usage offset publish failed", exc_info=True)
 
 
+def _append_late_usage_events(updated: list[tuple[str, int, float, int]]) -> None:
+    """Persist a ``usage_info`` with each row's new totals, so a replay shows a late charge.
+
+    Args:
+        updated: The finished rows a late charge updated, as
+            :func:`~kiss.agents.sorcar.persistence._add_late_task_usage`
+            returns them: ``(id, tokens, cost, steps)``.
+    """
+    from kiss.agents.sorcar.persistence import _append_chat_event
+
+    for row_id, row_tokens, row_cost, row_steps in updated:
+        _append_chat_event({
+            "type": "usage_info",
+            "text": "",
+            "taskId": row_id,
+            "total_tokens": row_tokens,
+            "cost": f"${row_cost:.4f}",
+            "cost_usd": row_cost,
+            "total_steps": row_steps,
+            "ts": int(time.time() * 1000),
+        }, task_id=row_id)
+
+
 def _first_cleanup_error(
     first: BaseException | None, step: str, exc: BaseException,
 ) -> BaseException:
@@ -1873,6 +1896,19 @@ class SorcarAgent(RelentlessAgent):
             previous_name = old_model.model_name
             target.switch_model(new_model, model_name)
             self.model_name = model_name
+            # The next session's executor (a continuation, the summarizer)
+            # is built from ``self.model_config`` (``_executor_model_config``),
+            # so it keeps the routing computed above — the endpoint, key
+            # and headers, which the factory strips from the adapter's own
+            # ``model_config`` — rather than sending the new name to the
+            # launch endpoint.  The executor's per-session defaults
+            # (``work_dir``, the first session's ``system_instruction``)
+            # are not frozen in unless the launch config set them.
+            launch_config = self.model_config or {}
+            self.model_config = {
+                key: value for key, value in new_config.items()
+                if key in launch_config or key not in ("work_dir", "system_instruction")
+            }
             self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
@@ -2877,20 +2913,27 @@ class SorcarAgent(RelentlessAgent):
         """Every worktree pending merge/discard, in creation order."""
         return list(self._wts.values())
 
+    # Each derived property reads ONE ``_wt`` snapshot: the task thread
+    # removes the entry (a merge, a discard) while a server thread reads
+    # the property, so a second lookup for the value could find ``None``.
+
     @property
     def _repo_root(self) -> Path | None:
         """Git repo root path, or ``None`` if not in a repo."""
-        return self._wt.repo_root if self._wt else None
+        wt = self._wt
+        return wt.repo_root if wt is not None else None
 
     @property
     def _wt_branch(self) -> str | None:
         """Branch name of the current/pending worktree task."""
-        return self._wt.branch if self._wt else None
+        wt = self._wt
+        return wt.branch if wt is not None else None
 
     @property
     def _original_branch(self) -> str | None:
         """The branch the user was on when the task started."""
-        return self._wt.original_branch if self._wt else None
+        wt = self._wt
+        return wt.original_branch if wt is not None else None
 
     @property
     def _wt_pending(self) -> bool:
@@ -2900,7 +2943,8 @@ class SorcarAgent(RelentlessAgent):
     @property
     def _wt_dir(self) -> Path | None:
         """Worktree directory path."""
-        return self._wt.wt_dir if self._wt else None
+        wt = self._wt
+        return wt.wt_dir if wt is not None else None
 
     @property
     def _wt_work_dir(self) -> Path | None:
@@ -2910,7 +2954,8 @@ class SorcarAgent(RelentlessAgent):
         root; differs from ``wt_dir`` when the task was launched from a
         subdirectory of the repo.
         """
-        return None if self._wt is None else self._wt_work_dir_of(self._wt)
+        wt = self._wt
+        return None if wt is None else self._wt_work_dir_of(wt)
 
     # ------------------------------------------------------------------
     # Tools
@@ -4224,7 +4269,7 @@ class SorcarAgent(RelentlessAgent):
             d_budget: USD to add.
             d_tokens: Tokens to add.
         """
-        from kiss.agents.sorcar.persistence import _add_late_task_usage, _append_chat_event
+        from kiss.agents.sorcar.persistence import _add_late_task_usage
 
         task_id = _persisted_task_id(self)
         if not task_id or (d_budget <= 0 and d_tokens <= 0):
@@ -4242,17 +4287,7 @@ class SorcarAgent(RelentlessAgent):
         except Exception:
             logger.warning("Could not add commit-message spend to task %s", task_id, exc_info=True)
             return
-        for row_id, row_tokens, row_cost, row_steps in updated:
-            _append_chat_event({
-                "type": "usage_info",
-                "text": "",
-                "taskId": row_id,
-                "total_tokens": row_tokens,
-                "cost": f"${row_cost:.4f}",
-                "cost_usd": row_cost,
-                "total_steps": row_steps,
-                "ts": int(time.time() * 1000),
-            }, task_id=row_id)
+        _append_late_usage_events(updated)
         if updated and printer is not None and hasattr(printer, "broadcast"):
             printer.broadcast({"type": "tasks_updated"})
 
@@ -4454,6 +4489,7 @@ class SorcarAgent(RelentlessAgent):
         # reusable agent began its next task.
         charge = functools.partial(
             self._charge_gate_usage, epoch=self._usage_epoch(), task_id=_persisted_task_id(self),
+            model=reviewer or "",
         )
         return CodingGate(self._gate_shell, self.work_dir or os.getcwd(), self._scratch_dir(),
                           reviewer, charge, model_config=self.model_config,
@@ -4471,7 +4507,7 @@ class SorcarAgent(RelentlessAgent):
         return run_on_host(command, self.work_dir or os.getcwd(), timeout)
 
     def _charge_gate_usage(self, budget: float, tokens: int, steps: int, key: str, *,
-                           epoch: Any = None, task_id: str = "") -> None:
+                           epoch: Any = None, task_id: str = "", model: str = "") -> None:
         """Attribute a gate review attempt's model spend to the run that asked for it.
 
         A run with a persisted row and a server printer is charged
@@ -4483,20 +4519,26 @@ class SorcarAgent(RelentlessAgent):
         finished (a review a Stop left running, charged after the final
         save) it is added to the row and its finished ancestors with a
         persisted ``usage_info``, so the history and the Spend panel
-        show it.  Without a row or that printer the spend goes to the
-        ledger epoch directly.
+        show it.  A run with a row but no such printer (a CLI run)
+        gets the same row-or-ledger policy from
+        :meth:`_charge_persisted_usage`.  Without a row the spend goes
+        to the ledger epoch directly.
 
         The gate charges an attempt again, with the same *key*, when a
         stop ends it (``CodingGate.review_verdict``: the attempt's
         ``finally`` and then the ``except BaseException`` that lets the
         stop propagate), so a key counts once: the ledger deduplicates
-        its own records by key, and the bridge, which has no key, is
-        given each key once (:attr:`_gate_charges_taken`, marked before
-        the charge, so no interleaving bills a key twice).  A charge the
-        bridge could not make (a database error, which it logs and never
-        raises) is not retried, as for every other late charge: the key
-        is consumed either way, so a stop's second charge never doubles a
-        first one that did land.
+        its own records by key, and the row charges, which have no key,
+        are given each key once (:attr:`_gate_charges_taken`, marked
+        before the charge, so no interleaving bills a key twice).  A
+        charge that could not be made (a database error, which is logged
+        and never raised) is not retried, as for every other late
+        charge: the key is consumed either way, so a stop's second
+        charge never doubles a first one that did land.  The reviewer
+        emits no ``llm_call``, so a row charge also records its *model*,
+        spend and tokens under the row
+        (:func:`~kiss.agents.sorcar.persistence._record_gate_charge`)
+        for the Spend panel's split by model, however the review ends.
 
         Args:
             budget: The attempt's spend in USD.
@@ -4506,15 +4548,70 @@ class SorcarAgent(RelentlessAgent):
             epoch: The run's ledger epoch, captured when the gate was
                 built (:meth:`_new_coding_gate`); ``None`` for the current one.
             task_id: The run's persisted row id captured then, or ``""``.
+            model: The reviewer model the attempt ran on, or ``""``.
         """
-        charge = getattr(self.printer, "charge_task_usage", None)
-        if task_id and callable(charge):
+        if task_id:
             if key in self._gate_charges_taken:
                 return
             self._gate_charges_taken.add(key)
-            charge(self, task_id, budget, tokens, steps, epoch=epoch)
+            charge = getattr(self.printer, "charge_task_usage", None)
+            if callable(charge):
+                charge(self, task_id, budget, tokens, steps, epoch=epoch)
+            else:
+                self._charge_persisted_usage(task_id, budget, tokens, steps, epoch, key)
+            if model and budget > 0:
+                try:
+                    _record_gate_charge(task_id, model, budget, tokens, key)
+                except Exception:
+                    logger.warning("gate review spend of %s not filed under %s", task_id,
+                                   model, exc_info=True)
             return
         _attribute_sub_usage(self, budget, tokens, steps, epoch=epoch, key=key)
+
+    def _charge_persisted_usage(self, task_id: str, budget: float, tokens: int, steps: int,
+                                epoch: Any, key: str) -> None:
+        """Add late spend to the finished row *task_id*, else bank it on the ledger (no daemon).
+
+        The daemon's late-charge policy
+        (:func:`~kiss.server.task_update.charge_side_channel_usage`) for
+        a run with a persisted row but no server printer (a CLI run),
+        held under ``TASK_USAGE_LOCK`` as there: the row's final save
+        takes that lock too, so the save cannot land between the row
+        check and the bank and leave the spend in a ledger nothing reads
+        again.  A finished row gets the spend added, with its finished
+        ancestors, each with a persisted ``usage_info`` carrying its new
+        totals; an unfinished row (or none) leaves the spend on the
+        ledger epoch *epoch*, which the final save reads.  A running
+        ancestor's live agent is out of reach without the daemon's
+        registry, so its share stays on the finished rows.  A failure is
+        logged, never raised, as the daemon's bridge does.
+
+        Args:
+            task_id: The run's persisted row id.
+            budget: USD spent.
+            tokens: Tokens spent.
+            steps: Model calls made.
+            epoch: The run's ledger epoch, or ``None`` for the current one.
+            key: The attempt's ledger key (see :meth:`_charge_gate_usage`).
+        """
+        from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
+
+        try:
+            locked_call(TASK_USAGE_LOCK, self._charge_persisted_usage_locked,
+                        task_id, budget, tokens, steps, epoch, key)
+        except Exception:
+            logger.warning("late spend of task %s not charged", task_id, exc_info=True)
+
+    def _charge_persisted_usage_locked(self, task_id: str, budget: float, tokens: int,
+                                       steps: int, epoch: Any, key: str) -> None:
+        """The charge of :meth:`_charge_persisted_usage` (``TASK_USAGE_LOCK`` held)."""
+        from kiss.agents.sorcar.persistence import _add_late_task_usage
+
+        updated, _running = _add_late_task_usage(task_id, tokens, budget, steps)
+        if not updated:
+            _attribute_sub_usage(self, budget, tokens, steps, epoch=epoch, key=key)
+            return
+        _append_late_usage_events(updated)
 
     def _gate_tool_result(self, name: str, args: dict[str, Any], result: str,
                           refused: bool) -> None:
@@ -4537,16 +4634,15 @@ class SorcarAgent(RelentlessAgent):
     def _guard_evidence(self, name: str, args: dict[str, Any]) -> str | None:
         """Evidence guardrail: a ``finish`` must be backed by checks, not claims.
 
-        The :class:`CodingGate` refuses a success whose summary says the
-        result was guessed or not verified or names evidence that did not
-        pass and, once the run changed code, one that fails the agent's
-        own verifier, follows an unchecked edit, admits a case unhandled
-        or fails the review; a give-up whose verifier passes is questioned
-        once.  A ``commit_and_merge`` of a run that changed code is gated
-        the same way on the verifier, the unchecked-change check and the
-        review, while the worktree is still there to fix the work in.  A
-        run without the edit tools (a read-only reviewer) reports rather
-        than claims work, so its ``finish`` is not gated.
+        Once the run changed code, the :class:`CodingGate` refuses a
+        success that fails the agent's own verifier or the review (one
+        refused round; then only a failing verifier refuses again); a
+        give-up whose verifier passes is questioned once.  A
+        ``commit_and_merge`` of a run that changed code is gated the same
+        way on the verifier and the review, while the worktree is still
+        there to fix the work in.  A run without the edit tools (a
+        read-only reviewer) reports rather than claims work, so its
+        ``finish`` is not gated.
 
         Args:
             name: The tool being called.
@@ -4568,20 +4664,31 @@ class SorcarAgent(RelentlessAgent):
             logger.exception("coding gate: the finish check failed; the finish goes through")
             return None
 
-    def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
+    def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | Verdict | None:
         """The run's tool-call guard: every reason a call is rejected, first one wins.
 
         The gate observes every call first, a refused one included: the
         turn's results are paired with its calls by position, and a
-        refused edit is redone after the refusal anyway.
+        refused edit is redone after the refusal anyway.  A call nothing
+        rejects may still get a note on its result: the gate's
+        independent reading of the task when the agent writes its ledger
+        (:meth:`~kiss.agents.sorcar.coding_gate.CodingGate.reading_note`).
         """
         self._coding_gate.observe(name, args)
-        return (
+        refusal = (
             self._block_finish_when_user_message_pending(name, args)
             or self._block_finish_with_live_jobs(name, args)
             or self._guard_worktree(name, args)
             or self._guard_evidence(name, args)
         )
+        if refusal is not None or "Edit" not in self._run_tool_names:
+            return refusal
+        try:
+            note = self._coding_gate.reading_note(name, args, self.task_description)
+        except Exception:
+            logger.exception("coding gate: the reading check failed; the call goes through")
+            return None
+        return allow_with_note(note) if note else None
 
 
 def _budget_arg(text: str) -> float:

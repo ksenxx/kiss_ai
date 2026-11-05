@@ -26,6 +26,7 @@ from typing import Any
 
 from kiss.agents.sorcar import task_digest
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event, _flush_chat_events
+from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 
 _LOG_HEADER = "== Progress log written by the task (newest entries) ==\n"
 
@@ -138,6 +139,15 @@ def test_the_newest_successful_write_names_the_text_the_log_must_hold(tmp_path: 
         ),
         {"type": "tool_call", "name": "Write", "path": str(log), "content": "# lost\n"},
         {"type": "tool_result", "content": "interrupted", "is_error": True},
+        # A Write and an Edit the user stopped, as the executor records them
+        # (no error, ``interrupted``): neither says what the file holds.
+        {"type": "tool_call", "name": "Write", "path": str(log), "content": "# stopped\n"},
+        {"type": "tool_result", "content": USER_INTERRUPTED_MESSAGE, "is_error": False,
+         "interrupted": True, "tool_name": "Write"},
+        {"type": "tool_call", "name": "Edit", "path": str(log), "old_string": "- step 2\n",
+         "new_string": "- step 2\n- stopped\n"},
+        {"type": "tool_result", "content": USER_INTERRUPTED_MESSAGE, "is_error": False,
+         "interrupted": True, "tool_name": "Edit"},
         {"type": "tool_call", "name": "Read", "path": str(log)},
         {"type": "tool_result", "content": body},
     ]

@@ -200,6 +200,16 @@ function runPanel() {
   ]);
   assert.deepStrictEqual(texts(doc)[0], 'Mine one, by Enter');
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  send(win, {
+    type: 'tricksData',
+    tricks: [
+      'Mine one, by Enter',
+      'Mine two, edited',
+      'Bundled alpha',
+      'Bundled beta',
+    ],
+    userCount: 2,
+  });
 
   // --- Shift+Enter breaks a line instead of saving
   click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
@@ -342,16 +352,15 @@ function runPanel() {
     text: 'Line one\nLine two',
     newText: '変換中',
   });
-  send(win, {
-    type: 'tricksData',
-    tricks: [
-      'Line one\nLine two',
-      'Mine two, edited',
-      'Bundled alpha',
-      'Bundled beta',
-    ],
-    userCount: 2,
-  });
+  // The daemon answers each edit in order (the two-line one, then the
+  // composed one); another window then puts the two-line text back.
+  for (const first of ['Line one\nLine two', '変換中', 'Line one\nLine two']) {
+    send(win, {
+      type: 'tricksData',
+      tricks: [first, 'Mine two, edited', 'Bundled alpha', 'Bundled beta'],
+      userCount: 2,
+    });
+  }
   assert.strictEqual(editsPosted(posted).length, 4);
 
   // --- opening a second editor closes the first (one at a time)
@@ -405,6 +414,68 @@ function runPanel() {
     [1, 1, 0, 0],
   );
 
+  // --- 2026-11-04 W6 F2: a rejected edit whose new text is nowhere
+  // else (a line starting with "## ", say) keeps the draft: the editor
+  // reopens on the promptlet with the refused text and the reason.
+  click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
+  input(win, editor(doc, rows(doc)[1]), 'Unique draft\n## Context\nmore');
+  click(win, rows(doc)[1].querySelector('.tricks-edit-save'));
+  send(win, {
+    type: 'error',
+    text: "Promptlet must not contain a line starting with '## '",
+    connId: 'c1',
+  });
+  send(win, {
+    type: 'tricksData',
+    tricks: [
+      'Line one\nLine two',
+      'Mine two, edited',
+      'Bundled alpha',
+      'Bundled beta',
+    ],
+    userCount: 2,
+    connId: 'c1',
+  });
+  assert.strictEqual(
+    list.querySelectorAll('.tricks-edit-input').length,
+    1,
+    'the editor reopens',
+  );
+  assert.ok(rows(doc)[1].classList.contains('editing'));
+  ta = editor(doc, rows(doc)[1]);
+  assert.strictEqual(ta.value, 'Unique draft\n## Context\nmore', 'the draft');
+  assert.strictEqual(doc.activeElement, ta);
+  const note = rows(doc)[1].querySelector('.config-field-note-error');
+  assert.ok(
+    note && note.textContent.includes("line starting with '## '"),
+    'with the reason',
+  );
+  // Saved again, the edit names the stored text; a success closes it.
+  input(win, ta, 'Unique draft, fixed');
+  key(win, ta, 'Enter');
+  assert.deepStrictEqual(editsPosted(posted).at(-1), {
+    type: 'editTrick',
+    text: 'Mine two, edited',
+    newText: 'Unique draft, fixed',
+  });
+  send(win, {
+    type: 'tricksData',
+    tricks: [
+      'Line one\nLine two',
+      'Unique draft, fixed',
+      'Bundled alpha',
+      'Bundled beta',
+    ],
+    userCount: 2,
+  });
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  assert.deepStrictEqual(texts(doc), [
+    'Line one\nLine two',
+    'Unique draft, fixed',
+    'Bundled alpha',
+    'Bundled beta',
+  ]);
+
   // --- a list change from elsewhere closes an open editor: its index
   // could now point at another promptlet
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
@@ -442,7 +513,7 @@ function runPanel() {
     rows(doc)[0].querySelectorAll('.sidebar-item-edit').length,
     1,
   );
-  assert.strictEqual(editsPosted(posted).length, 5, 'closing posts no edit');
+  assert.strictEqual(editsPosted(posted).length, 7, 'closing posts no edit');
 
   // --- a filtered list edits the right promptlet (index into the full list)
   send(win, {
@@ -470,6 +541,196 @@ function runPanel() {
   click(win, rows(doc)[2]);
   assert.strictEqual(composer.value, 'Bundled alpha');
   assert.ok(!panel.classList.contains('open'));
+
+  // --- 2026-11-04 R4: two edits in flight, answered in order.  The
+  // daemon refuses both: the first draft reopens its editor, and the
+  // second refusal neither closes that editor nor loses its own draft,
+  // which takes the editor once the first is done with it.
+  const onDisk = ['Mine A', 'Mine B2', 'Bundled alpha'];
+  send(win, {type: 'tricksData', tricks: onDisk.slice(), userCount: 2});
+  doc.getElementById('tricks-btn').click();
+  const drafts = ['Draft A\n## Context\nA', 'Draft B\n## Context\nB'];
+  for (let i = 0; i < 2; i++) {
+    click(win, rows(doc)[i].querySelector('.sidebar-item-edit'));
+    input(win, editor(doc, rows(doc)[i]), drafts[i]);
+    click(win, rows(doc)[i].querySelector('.tricks-edit-save'));
+  }
+  assert.deepStrictEqual(
+    editsPosted(posted)
+      .slice(-2)
+      .map(e => [e.text, e.newText]),
+    [
+      ['Mine A', drafts[0]],
+      ['Mine B2', drafts[1]],
+    ],
+  );
+  const refusal = {
+    type: 'error',
+    text: "Promptlet must not contain a line starting with '## '",
+    connId: 'c1',
+  };
+  send(win, refusal);
+  send(win, {
+    type: 'tricksData',
+    tricks: onDisk.slice(),
+    userCount: 2,
+    connId: 'c1',
+  });
+  assert.ok(rows(doc)[0].classList.contains('editing'), "A's editor reopens");
+  assert.strictEqual(editor(doc, rows(doc)[0]).value, drafts[0]);
+  send(win, refusal);
+  send(win, {
+    type: 'tricksData',
+    tricks: onDisk.slice(),
+    userCount: 2,
+    connId: 'c1',
+  });
+  assert.ok(
+    rows(doc)[0].classList.contains('editing'),
+    "A's editor is still open",
+  );
+  assert.strictEqual(
+    editor(doc, rows(doc)[0]).value,
+    drafts[0],
+    "A's draft survives B's refusal",
+  );
+  assert.strictEqual(
+    list.querySelectorAll('.tricks-edit-input').length,
+    1,
+    'one editor',
+  );
+  // A success list for another edit, from any window, leaves the
+  // editor on its unchanged row alone.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B2', 'Bundled gamma'],
+    userCount: 2,
+  });
+  assert.strictEqual(
+    editor(doc, rows(doc)[0]).value,
+    drafts[0],
+    'the editor outlives an unrelated change',
+  );
+  // A done with (cancelled): B's draft takes the editor, with its reason.
+  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  assert.ok(rows(doc)[1].classList.contains('editing'), "B's editor reopens");
+  assert.strictEqual(
+    editor(doc, rows(doc)[1]).value,
+    drafts[1],
+    "B's draft, intact",
+  );
+  assert.ok(
+    rows(doc)[1]
+      .querySelector('.config-field-note-error')
+      .textContent.includes("'## '"),
+    "with B's reason",
+  );
+  assert.strictEqual(doc.activeElement, editor(doc, rows(doc)[1]));
+  // The promptlet it edits replaced from elsewhere: the editor closes.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B5', 'Bundled gamma'],
+    userCount: 2,
+  });
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+
+  // --- the same row saved twice before the daemon answers (the second
+  // edit is of the text the first one shows), both refused: the first
+  // draft reopens its editor on the stored promptlet; the second waits
+  // intact (no input holds it: the single-line Add box would strip its
+  // newlines) and takes that editor once the first is done with it --
+  // cancelled, or saved and accepted, the row reading the accepted
+  // text then.
+  const stored = ['Mine A', 'Mine B5', 'Bundled gamma'];
+  const same = ['Same A\n## Context\nA', 'Same B\n## Context\nB'];
+  const values = () =>
+    Array.from(doc.querySelectorAll('textarea, input')).map(el => el.value);
+  const refuse = (tricks, userCount = 2, error = refusal) => {
+    send(win, error);
+    send(win, {type: 'tricksData', tricks, userCount, connId: 'c1'});
+  };
+  function saveRowTwiceRefused() {
+    for (const draft of same) {
+      click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
+      input(win, editor(doc, rows(doc)[0]), draft);
+      click(win, rows(doc)[0].querySelector('.tricks-edit-save'));
+    }
+    assert.deepStrictEqual(
+      editsPosted(posted)
+        .slice(-2)
+        .map(e => [e.text, e.newText]),
+      [
+        [stored[0], same[0]],
+        [same[0], same[1]],
+      ],
+    );
+    refuse(stored.slice());
+    refuse(stored.slice());
+    assert.ok(rows(doc)[0].classList.contains('editing'), "A's editor reopens");
+    assert.strictEqual(editor(doc, rows(doc)[0]).value, same[0], 'with A');
+    assert.ok(
+      !values().some(v => v.includes('Same B')),
+      'B waits: no input holds it, intact or mangled',
+    );
+  }
+  saveRowTwiceRefused();
+  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
+  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
+  assert.strictEqual(doc.activeElement, editor(doc, rows(doc)[0]));
+  assert.ok(
+    rows(doc)[0]
+      .querySelector('.config-field-note-error')
+      .textContent.includes("'## '"),
+    "with B's reason",
+  );
+  key(win, editor(doc, rows(doc)[0]), 'Escape');
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  // A fixed and accepted instead: B's editor reopens on the row that
+  // reads the accepted text now.
+  saveRowTwiceRefused();
+  input(win, editor(doc, rows(doc)[0]), 'Same A, fixed');
+  key(win, editor(doc, rows(doc)[0]), 'Enter');
+  assert.deepStrictEqual(editsPosted(posted).at(-1), {
+    type: 'editTrick',
+    text: 'Mine A',
+    newText: 'Same A, fixed',
+  });
+  stored[0] = 'Same A, fixed';
+  send(win, {type: 'tricksData', tricks: stored.slice(), userCount: 2});
+  assert.ok(rows(doc)[0].classList.contains('editing'), "B's editor reopens");
+  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
+  key(win, editor(doc, rows(doc)[0]), 'Escape');
+
+  // --- a refused draft whose promptlet is gone meanwhile: a one-line
+  // draft goes to the empty Add box with its reason; a multi-line one
+  // (the box would strip its newlines) waits for the promptlet to be
+  // back, and reopens its editor then.
+  const addBox = doc.getElementById('tricks-add-input');
+  click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
+  input(win, editor(doc, rows(doc)[1]), same[1]);
+  key(win, editor(doc, rows(doc)[1]), 'Enter');
+  refuse(['Same A, fixed', 'Bundled gamma'], 1);
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+  assert.strictEqual(addBox.value, '', 'the Add box is no place for it');
+  click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
+  input(win, editor(doc, rows(doc)[0]), 'One line');
+  key(win, editor(doc, rows(doc)[0]), 'Enter');
+  const taken = {type: 'error', text: 'That promptlet is taken', connId: 'c1'};
+  refuse(['Bundled gamma'], 0, taken);
+  assert.strictEqual(addBox.value, 'One line', 'in the Add box');
+  assert.strictEqual(
+    doc.getElementById('tricks-add-error').textContent,
+    taken.text,
+    'with its reason',
+  );
+  send(win, {type: 'tricksData', tricks: stored.slice(1), userCount: 1});
+  assert.ok(
+    rows(doc)[0].classList.contains('editing'),
+    'the promptlet is back',
+  );
+  assert.strictEqual(editor(doc, rows(doc)[0]).value, same[1], 'B, intact');
+  key(win, editor(doc, rows(doc)[0]), 'Escape');
 
   // A page loaded without the count global shows no pencils:
   // tricksPanelCopyDelete.test.js (its bare page).

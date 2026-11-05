@@ -36,6 +36,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state, sorcar
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
@@ -63,10 +64,8 @@ def _reset_registry() -> Iterator[None]:
     session-wide ``$KISS_HOME`` so it cannot shadow bundled commands
     for later tests in the same process.
     """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _seed_seas_md(folder: Path, name: str, body: str = "# stub\n") -> Path:

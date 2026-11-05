@@ -63,6 +63,23 @@ def test_substitutions_inside_parameter_expansions_are_scanned() -> None:
     assert sleep_guard('echo "${S2_UNSET:-$(sleep 1)}"') is None
 
 
+def test_a_heredoc_delimiter_is_not_expanded() -> None:
+    """The shell removes quotes from a delimiter but expands nothing in it (merge review
+    2026-11-04): a substitution in it is text of the delimiter, not a command of the line,
+    and an arithmetic assignment in it does not happen."""
+    for delimiter in ("$(echo EOF)", '"$(echo EOF)"', "`echo EOF`", "$((i=5))", "${i:-$(date)}"):
+        command = f"i=1; cat <<{delimiter} > tmp/x\nbody\n{delimiter.strip(chr(34))}\necho $i"
+        assert _programs(command) == ["", "cat", "echo"], delimiter  # the assignment, no date
+        cat, echo = simple_commands(command, "/w")[1:]
+        assert cat.heredoc_body == "body\n" and [w.text for w in cat.outputs] == ["tmp/x"]
+        assert cat.redirections[0][2].text == delimiter.strip('"')
+        assert [w.text for w in echo.argv()] == ["echo", "1"], delimiter
+    # ...while the body after an unquoted delimiter is expanded, and scanned
+    assert _programs("cat <<EOF\n$(date)\nEOF") == ["cat", "date"]
+    assert sleep_guard("cat <<$(sleep 60)\nbody\n$(sleep 60)") is None
+    assert sleep_guard("cat <<EOF\n$(sleep 60)\nEOF") is not None
+
+
 def test_the_end_of_a_parameter_expansion_is_found_as_bash_finds_it() -> None:
     # A ``}`` in quotes or escaped does not end it; a nested ``${`` closes with its own brace;
     # a bare ``{`` does not nest.  The words after the expansion are read as words.  Bash 4.2

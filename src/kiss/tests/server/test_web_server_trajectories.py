@@ -12,6 +12,7 @@ JSON the standalone :mod:`kiss.viz_trajectory.server` produces.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import shutil
 import tempfile
@@ -59,20 +60,30 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
 
     async def _http_get(self, path: str) -> tuple[int, str]:
+        status, body, _headers = await self._fetch(path)
+        return status, body
+
+    async def _fetch(
+        self, path: str, headers: dict[str, str] | None = None,
+    ) -> tuple[int, str, dict[str, str]]:
+        """GET *path* with *headers*; return the status, body and reply headers."""
         import urllib.error
         import urllib.request
 
         url = f"https://127.0.0.1:{self.port}{path}"
         ctx = no_verify_ssl()
 
-        def _fetch() -> tuple[int, str]:
+        def _get() -> tuple[int, str, dict[str, str]]:
             try:
-                resp = urllib.request.urlopen(url, timeout=5, context=ctx)
-                return resp.status, resp.read().decode()
+                resp = urllib.request.urlopen(
+                    urllib.request.Request(url, headers=headers or {}),
+                    timeout=5, context=ctx,
+                )
+                return resp.status, resp.read().decode(), dict(resp.headers)
             except urllib.error.HTTPError as e:
-                return e.code, e.read().decode() if e.fp else ""
+                return e.code, e.read().decode() if e.fp else "", dict(e.headers)
 
-        return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        return await asyncio.get_event_loop().run_in_executor(None, _get)
 
     async def test_trajectories_page_served_with_slash(self) -> None:
         """GET /trajectories/ returns the visualizer HTML page."""
@@ -117,3 +128,60 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
         """A job name containing path-traversal characters is rejected (400)."""
         status, _ = await self._http_get("/api/jobs/..%2Fetc/trajectories")
         self.assertEqual(status, 400)
+
+    async def test_api_asks_a_relayed_visitor_for_the_remote_password(self) -> None:
+        """The JSON data needs the password from everyone but this machine.
+
+        A tunnel visitor reaches the daemon from loopback with a
+        forwarded client IP; the WebSocket handshake would ask it for
+        the password, so the trajectory endpoints must too (an HTTP
+        Basic challenge the browser answers with a prompt).  A browser
+        or program on this machine is served as before.
+        """
+        save_config({"remote_password": "traj-secret"})
+        visitor = {"Cf-Connecting-Ip": "203.0.113.41"}
+        job_path = "/api/jobs/job_2024_01_01_00_00_00_1/trajectories"
+        for path in ("/api/jobs", job_path):
+            status, body, headers = await self._fetch(path, visitor)
+            self.assertEqual(status, 401, path)
+            self.assertNotIn("job_2024", body)
+            self.assertIn("Basic", headers.get("WWW-Authenticate", ""))
+        wrong = {**visitor, "Authorization": "Basic " + _basic("wrong")}
+        status, body, _ = await self._fetch(job_path, wrong)
+        self.assertEqual(status, 401)
+        self.assertNotIn("Agent A", body)
+        right = {**visitor, "Authorization": "Basic " + _basic("traj-secret")}
+        for path, expected in (("/api/jobs", "job_2024"), (job_path, "Agent A")):
+            status, body, _ = await self._fetch(path, right)
+            self.assertEqual((status, expected in body), (200, True), path)
+        status, body = await self._http_get(job_path)
+        self.assertEqual((status, "Agent A" in body), (200, True), "direct loopback")
+        # Remote access turned off: the old password opens nothing.
+        save_config({"remote_password": ""})
+        status, body, _ = await self._fetch(job_path, right)
+        self.assertEqual((status, "Agent A" in body), (403, False))
+
+    async def test_api_password_guesses_share_the_handshake_lockout(self) -> None:
+        """Wrong passwords lock the visitor's IP out; bare requests do not count."""
+        save_config({"remote_password": "traj-secret"})
+        visitor = {"X-Forwarded-For": "198.51.100.7"}
+        right = {**visitor, "Authorization": "Basic " + _basic("traj-secret")}
+        for _ in range(web_server._AUTH_FAIL_MAX):
+            status, _body, _ = await self._fetch("/api/jobs", visitor)
+            self.assertEqual(status, 401)
+        status, _body, _ = await self._fetch("/api/jobs", right)
+        self.assertEqual(status, 200, "credential-less page loads never lock anyone out")
+        wrong = {**visitor, "Authorization": "Basic " + _basic("nope")}
+        for _ in range(web_server._AUTH_FAIL_MAX):
+            status, _body, _ = await self._fetch("/api/jobs", wrong)
+            self.assertEqual(status, 401)
+        status, body, headers = await self._fetch("/api/jobs", right)
+        self.assertEqual((status, "job_2024" in body), (429, False))
+        self.assertGreater(int(headers.get("Retry-After", "0")), 0)
+        status, _body = await self._http_get("/api/jobs")
+        self.assertEqual(status, 200, "the lockout is per visitor IP")
+
+
+def _basic(password: str) -> str:
+    """The ``Authorization: Basic`` credential a browser sends for *password*."""
+    return base64.b64encode(f"trajectories:{password}".encode()).decode()

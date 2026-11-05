@@ -136,6 +136,21 @@ def test_prompt_queued_during_admission_is_not_filed_under_the_previous_task(
         # Deferred to the run that consumes the prompt, not stamped stale.
         assert state.unattributed_prompt_echoes == ["steer NEW task"]
         assert _persisted_prompt_texts(old_id) == []
+
+        # ``/ask`` takes the side channel only once the run has its own
+        # row; in this window it is a steering message like any other
+        # (the old task gets neither the echo nor an ``ask_answer``).
+        server._cmd_append_user_message({"tabId": "carry-tab", "prompt": "/ask help"})
+
+        with lock:
+            stamped = [
+                (e["type"], e.get("taskId", ""))
+                for e in events if e.get("type") in ("prompt", "ask_answer")
+            ]
+        assert stamped == [("prompt", ""), ("prompt", "")], f"stale stamp: {stamped}"
+        assert state.pending_user_messages == ["steer NEW task", "/ask help"]
+        assert state.unattributed_prompt_echoes == ["steer NEW task", "/ask help"]
+        assert _persisted_prompt_texts(old_id) == []
     finally:
         _finish_gated(gate, state)
         for s in agent_state.snapshot():

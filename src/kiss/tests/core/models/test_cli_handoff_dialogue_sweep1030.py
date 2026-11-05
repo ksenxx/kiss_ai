@@ -123,3 +123,35 @@ def test_calls_the_text_already_records_are_not_repeated(cli_model: CLITextModel
         f"[Assistant]: {served_call}\n\n"
         "[Tool Result]: print(1)"
     )
+
+
+def test_a_call_the_text_only_names_is_still_rendered(cli_model: CLITextModel) -> None:
+    """Prose naming the tool, or a same-name call with other arguments, records no call."""
+    text_call = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
+    cli_model.conversation = [
+        {"role": "user", "content": "Read the report"},
+        {
+            "role": "assistant",
+            "content": "I will use Bash(...) to inspect the report.",
+            "tool_calls": [_chat_call("Bash", '{"command": "cat report.txt"}')],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "20% growth"},
+        {
+            "role": "assistant",
+            "content": text_call,
+            "tool_calls": [
+                _chat_call("Bash", '{"command": "ls"}'),
+                _chat_call("Bash", '{"command": "cat a.py"}'),
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "a.py"},
+    ]
+    assert cli_model._build_prompt() == (
+        "[User]: Read the report\n\n"
+        "[Assistant]: I will use Bash(...) to inspect the report.\n"
+        '[Tool Call] Bash({"command": "cat report.txt"})\n\n'
+        "[Tool Result]: 20% growth\n\n"
+        f"[Assistant]: {text_call}\n"
+        '[Tool Call] Bash({"command": "cat a.py"})\n\n'
+        "[Tool Result]: a.py"
+    )

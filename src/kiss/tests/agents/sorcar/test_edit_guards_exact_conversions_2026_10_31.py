@@ -212,6 +212,38 @@ def test_python_replacement_after_the_write_is_not_converted(tmp_path: Path) -> 
     assert _python(tmp_path, program) == "y = 1\nr = 2\n"
 
 
+def test_python_import_rebinding_a_name_is_not_converted(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    # An import binding the path or text name, or ``open``, makes python fail
+    # before or at the write (audit 2026-11-04 S5 F11): the file never holds the
+    # Edit's text, so no conversion; the path is still named.
+    source = tmp_path / "a.py"
+    for program in (
+        "p = 'a.py'\nimport os as p\ns = open(p).read()\ns = s.replace('x', 'y')\n"
+        "open(p, 'w').write(s)\n",
+        _READ + "s = s.replace('x', 'y')\nimport os.path as s\n" + _WRITE,
+        "from gzip import open\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+        "from os import *\n" + _READ + "s = s.replace('x', 'y')\n" + _WRITE,
+    ):
+        source.write_text("x = 1\n")
+        run = subprocess.run(["bash", "-c", f"python3 - <<'EOF'\n{program}EOF"], cwd=tmp_path,
+                             check=False, capture_output=True)
+        assert run.returncode != 0 and source.read_text() != "y = 1\n", program
+        assert python_edit(program) == ("a.py", [], False), program
+        assert mechanical_edit(f"python3 - <<'EOF'\n{program}EOF", str(tmp_path)) is None, program
+    tools.Read(str(source))
+    out = tools.Bash("python3 - <<'EOF'\np = 'a.py'\nimport os as p\ns = open(p).read()\n"
+                     "s = s.replace('x', 'y')\nopen(p, 'w').write(s)\nEOF", "rebound")
+    assert out.startswith("REFUSED: the python heredoc did NOT run") and "a.py" in out
+    assert source.read_text() == "x = 1\n"
+    # An import binding another name, ``pathlib``'s ``Path`` included, is part of the pattern.
+    program = ("import re\nfrom pathlib import Path\np = Path('a.py')\ns = p.read_text()\n"
+               "s = s.replace('x', 'y')\np.write_text(s)\n")
+    assert python_edit(program) == ("a.py", [("x", "y", True)], True)
+    assert _python(tmp_path, program) == "y = 1\n"
+
+
 # --- 4. python I/O keywords ---------------------------------------------------
 
 
@@ -466,6 +498,8 @@ REFUSED = (
     "cat > f.txt <<'EOF' && cp f.txt g.txt \\\n\nbody\nEOF",  # a continued line
     "X=1 cat > f.txt <<'EOF' && cp f.txt g.txt\nbody\nEOF",
     "> f.txt <<'EOF'\nbody\nEOF",  # no program
+    f"! {_SED} app/a.py",  # negated: the shell inverts its status (audit 2026-11-04 S5 F12)
+    f"! {_SED} app/a.py; cp app/a.py app/b.py",
     "cat > 'f>>x' <<'EOF'\nbody\nEOF",
     "# nothing",
     f"{_SED} app/a.py && cat <<'EOF' > app/b.py\nbody\nEOF",
@@ -562,3 +596,14 @@ def test_compound_shapes_outside_the_grammar_are_not_converted(tmp_path: Path) -
     assert heredoc_copy(command, None) is None
     copy = heredoc_copy(command, "/w")
     assert copy is not None and copy.cwd == "/w/app"
+
+
+@needs_gnu_sed
+def test_a_negated_sed_runs_as_written_with_its_status(tools: UsefulTools, tmp_path: Path) -> None:
+    # ``! sed -i`` is not applied as an Edit reporting success (audit 2026-11-04 S5
+    # F12): it runs as written, and the result is the status the shell inverts.
+    target = tmp_path / "f.txt"
+    target.write_text("old\n")
+    tools.Read(str(target))
+    out = tools.Bash("! sed -i 's/old/new/' f.txt", "negated")
+    assert out.startswith("Error (exit code 1)") and target.read_text() == "new\n"

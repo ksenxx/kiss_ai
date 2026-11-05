@@ -70,7 +70,9 @@ class _ScriptedAgent(ChatSorcarAgent):
         )
 
 
-def _task_done_event(tmp_path: Path, tab_id: str, prompt: str) -> dict[str, Any]:
+def _task_done_event(
+    tmp_path: Path, tab_id: str, prompt: str, parent_task_id: str = "",
+) -> dict[str, Any]:
     models = get_available_models()
     if not models:
         pytest.skip("no models configured in this environment")
@@ -86,6 +88,7 @@ def _task_done_event(tmp_path: Path, tab_id: str, prompt: str) -> dict[str, Any]
             "workDir": str(tmp_path),
             "model": models[0],
             "_state_key": state.task_id,
+            "parentTaskId": parent_task_id,
         })
     finally:
         with agent_state.STATE_LOCK:
@@ -106,6 +109,15 @@ def test_failed_finish_marks_task_done_unsuccessful(tmp_path: Path) -> None:
 def test_successful_finish_marks_task_done_successful(tmp_path: Path) -> None:
     ev = _task_done_event(tmp_path, "tdv-ok-tab", "tdv all good")
     assert ev["success"] is True
+    assert ev["subagent"] is False
+
+
+def test_dispatched_subagent_task_done_is_marked(tmp_path: Path) -> None:
+    """A ``run_agent`` child's end says so: its synthetic ``api-…`` tab
+    reaches every remote page, which must not play the victory sound."""
+    parent_id, _ = _add_task("tdv parent", chat_id="")
+    ev = _task_done_event(tmp_path, "api-tdv-child", "tdv child", str(parent_id))
+    assert ev["subagent"] is True
 
 
 def test_unparsable_result_carries_no_verdict(tmp_path: Path) -> None:

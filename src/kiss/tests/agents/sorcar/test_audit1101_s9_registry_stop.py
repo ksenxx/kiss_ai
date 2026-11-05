@@ -33,15 +33,14 @@ import pytest
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
 from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
     """Isolate the registry state and the session-wide ``SEAS.md`` per test."""
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def test_a_stopped_publication_is_repeated_by_the_next_rescan(tmp_path: Path) -> None:

@@ -39,6 +39,8 @@ from functools import partial
 from types import CodeType, FrameType
 from typing import Any
 
+import pytest
+
 from kiss.core.processes import (
     CappedOutput,
     _capped_timeout,
@@ -176,4 +178,54 @@ def test_stop_at_the_timeout_acquire_leaves_the_guard_free() -> None:
         assert lock_is_free(out._guard), "the Stop leaked the guard the reader and timer need"
     finally:
         kill_process_tree(proc)
+        proc.wait(10)
+
+
+def _wait_in_pipe_select(worker: threading.Thread) -> subprocess.Popen[bytes]:
+    """Wait until *worker* is in ``_read_some``'s readiness wait; the child it is reading."""
+    deadline = time.monotonic() + 30
+    while True:
+        frame = sys._current_frames().get(worker.ident or 0)
+        caller = frame.f_back if frame is not None else None
+        if frame is not None and frame.f_code.co_name == "select" and caller is not None:
+            if caller.f_code.co_name == "_read_some":
+                proc = _stack_local(frame, "proc")
+                assert isinstance(proc, subprocess.Popen)
+                return proc
+        assert time.monotonic() < deadline, "the worker never waited on the child's pipe"
+        time.sleep(0.001)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the pipe wait is a readiness wait on POSIX")
+def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child() -> None:
+    """A Stop landing while the task thread waits on a silent child's pipe is acted on promptly.
+
+    An injected exception is raised between bytecodes, never inside the
+    blocking ``epoll``/``kqueue`` wait: a single wait for the whole
+    remaining timeout kept the Stop pending — and the child running —
+    until the child spoke or the command's timeout (five minutes for a
+    staged diff) ran out.
+    """
+    raised: list[BaseException] = []
+
+    def body() -> None:
+        try:
+            run_capped(_py("import time; time.sleep(60)"), limit=1000, timeout=60)
+        except BaseException as exc:  # the injected Stop is the expected outcome
+            raised.append(exc)
+
+    worker = threading.Thread(target=body, daemon=True)
+    worker.start()
+    proc = _wait_in_pipe_select(worker)
+    try:
+        assert inject(worker) == 1
+        worker.join(5)
+        assert not worker.is_alive(), "the Stop sat behind the pipe wait"
+        assert isinstance(raised[0], KeyboardInterrupt)
+        # The child sleeps for a minute: an exit status now means the
+        # except handler killed and reaped it.
+        assert proc.returncode is not None
+    finally:
+        kill_process_tree(proc)  # pipe EOF releases a wait the Stop could not
+        worker.join(10)
         proc.wait(10)

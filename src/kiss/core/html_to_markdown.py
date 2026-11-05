@@ -17,6 +17,8 @@ well in all of those places, using only the stdlib
 from __future__ import annotations
 
 import re
+import string
+import unicodedata
 from html.parser import HTMLParser
 
 # Subtrees whose tags and text are dropped whole.  Only container tags:
@@ -75,6 +77,23 @@ def _link_destination(href: str) -> str:
     return href
 
 
+def _is_boundary(char: str) -> bool:
+    """Whether an underscore emphasis may open after or close before *char*.
+
+    CommonMark's flanking rules let an underscore run open only after, and
+    close only before, whitespace or punctuation (``""`` stands for the ends
+    of the text); next to a letter, digit or combining mark it is literal.
+    Symbols (``→``, ``€``) are punctuation since CommonMark 0.31, which
+    markdown-it, the renderer of the webapp and of VS Code, follows: next
+    to them the underscore form is the one that keeps mixed emphasis
+    (``_**a** b**c**_→``) apart, the asterisk form fuses its runs.
+    """
+    if not char or char in "\t\n\f\r" or char in string.punctuation:
+        return True
+    category = unicodedata.category(char)
+    return category == "Zs" or category.startswith(("P", "S"))
+
+
 class _ListState:
     """Rendering state of one open ``<ul>``/``<ol>``."""
 
@@ -129,6 +148,8 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         self._pre: list[str] | None = None
         self._lists: list[_ListState] = []
         self._inline: list[tuple[str, int, str | None]] = []
+        self._last_code: tuple[int, int, str] | None = None  # (start, end, text) of last span
+        self._underscores: list[tuple[int, int, int]] = []  # (open, close, width), undecided
         self._quotes: list[int] = []
         self._tables: list[list[list[str]]] = []
         self._row: list[str] | None = None
@@ -163,6 +184,30 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
             text = text.replace("\n", "\n" + indent).replace(indent + "\n", "\n")
         self.text += text
         self._marker_end = -1
+        self._settle_underscores()
+
+    def _settle_underscores(self) -> None:
+        """Turn an underscore emphasis :meth:`_wrap_since` wrote back to asterisks
+        when the text continues its word: there, underscores are literal.
+
+        The character after the closing run decides (:func:`_is_boundary`)
+        once it is final: an inline element that opens right there may still
+        write its own markers first (``[``, a backtick, ``**``) or nothing at
+        all (``<a>`` without an href), so the run waits until it has closed.
+        """
+        pending = []
+        for run in self._underscores:
+            opening, closing, width = run
+            end = closing + width
+            if len(self.text) <= end or self._opens_at(end):
+                pending.append(run)
+            elif not _is_boundary(self.text[end]):
+                stars = "*" * width
+                self.text = (
+                    f"{self.text[:opening]}{stars}{self.text[opening + width : closing]}"
+                    f"{stars}{self.text[end:]}"
+                )
+        self._underscores = pending
 
     def _emit_marker(self, marker: str) -> None:
         """Append a heading / list marker that must not be followed by a line break."""
@@ -190,7 +235,18 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         ``<b> bold </b>`` becomes `` **bold** `` rather than the
         invalid ``** bold **``; an empty inner text drops the markers.
         Two adjacent runs of the same emphasis (``<b>a</b><b>b</b>``)
-        are merged into one so no ``****`` delimiter run is produced.
+        are merged into one so no ``****`` delimiter run is produced,
+        unless an open ancestor (``<b>a</b><a><b>b</b></a>``) starts between
+        them: its markers must not land inside the merged run.
+        An emphasis whose text starts with the other emphasis
+        (``<i><b>a</b> b<b>c</b></i>``) would open with a ``***`` run, which
+        CommonMark lets an intraword run inside close early
+        (``***a** b**c***``), and one opening right after such a run of three
+        (``<b>x <i>y</i></b><i>z</i>``) would make it a run of four, which the
+        rule of 3 keeps from closing; both are written with underscores,
+        ``_**a** b**c**_``, where they parse: after whitespace or punctuation,
+        and before it, which the text that follows decides
+        (:meth:`_settle_underscores`).
         """
         inner = self.text[pos:]
         core = inner.strip()
@@ -199,12 +255,25 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         head = self.text[:pos]
         lead = inner[: len(inner) - len(inner.lstrip())]
         trail = inner[len(inner.rstrip()):]
+        # A run this wrap encloses or directly precedes is decided by the wrap.
+        self._underscores = [run for run in self._underscores if pos > run[1] + run[2]]
         if (
             not lead and before == after and head.endswith(after)
             and not head[: -len(after)].endswith(("*", "\\"))
+            and not self._opens_at(pos)
         ):
             head = head[: -len(after)]
             before = ""
+        elif (
+            before == after
+            and (core.startswith("*") or (head + lead).endswith("***"))
+            and _is_boundary((head + lead)[-1:])
+            and not (head + lead).endswith("_")
+        ):
+            before = after = "_" * len(after)
+            if not trail:
+                opening = len(head) + len(lead)
+                self._underscores.append((opening, opening + len(before) + len(core), len(before)))
         self.text = f"{head}{lead}{before}{core}{after}{trail}"
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -340,12 +409,12 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
             if self._inline[index][0] != tag:
                 continue
             _, pos, href = self._inline[index]
+            redundant = self._redundant(index)
             dropped = self._inline[index:]
             del self._inline[index:]
             self._code_depth -= sum(1 for entry in dropped if entry[0] == "code")
             if tag == "code":
-                core = self.text[pos:].strip()
-                self.text = self.text[:pos] + (_code_span(core) if core else "")
+                self._end_code(pos)
             elif self._code_depth:
                 return  # emphasis and links have no meaning inside code
             elif tag == "a":
@@ -354,12 +423,59 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
                     self.text = self.text[:pos] + _escape_inline(href)
                 elif href and inner != href:
                     self._wrap_since(pos, "[", f"]({_link_destination(href)})")
+                self._settle_underscores()
             else:
                 marker = _INLINE_MARKERS[tag]
-                self._wrap_since(pos, marker, marker)
+                if not redundant:
+                    self._wrap_since(pos, marker, marker)
                 if tag == "summary":
                     self._newline(2)
             return
+
+    def _redundant(self, index: int) -> bool:
+        """Whether an entry below *index* on the inline stack already supplies its emphasis.
+
+        Such an entry writes no markers of its own: ``<b>a<b>b</b>c</b>`` is
+        ``**abc**``, not ``**a**b**c**``, which would un-bold ``b``.
+        """
+        marker = _INLINE_MARKERS.get(self._inline[index][0])
+        return marker is not None and any(
+            _INLINE_MARKERS.get(entry[0]) == marker for entry in self._inline[:index]
+        )
+
+    def _opens_at(self, pos: int) -> bool:
+        """Whether an open inline element that writes markers of its own starts at *pos*.
+
+        Adjacent code spans or emphasis runs do not merge across it: the merge
+        would move its start inside the merged text (``<b>y</b><a><b>z</b></a>``).
+        An anchor without an href writes nothing, and a redundant emphasis
+        writes nothing either (:meth:`_redundant`).
+        """
+        return any(
+            entry[1] == pos and entry != ("a", pos, None) and not self._redundant(index)
+            for index, entry in enumerate(self._inline)
+        )
+
+    def _end_code(self, pos: int) -> None:
+        """Replace the text appended since *pos* with a code span.
+
+        Surrounding whitespace stays outside the span, as in :meth:`_wrap_since`,
+        and an all-whitespace element keeps separating the words around it.  A
+        span that directly follows the previous one (``<code>a</code><code>b</code>``)
+        is merged into it, since ``` `a``b` ``` would render as one span ``a``b``.
+        """
+        inner = self.text[pos:]
+        core = inner.strip()
+        if not core:
+            return
+        lead = inner[: len(inner) - len(inner.lstrip())]
+        trail = inner[len(inner.rstrip()):]
+        last = self._last_code
+        if last and last[1] == pos and not lead and not self._opens_at(pos):
+            pos, core = last[0], last[2] + core
+        span = _code_span(core)
+        self.text = f"{self.text[:pos]}{lead}{span}{trail}"
+        self._last_code = (pos + len(lead), pos + len(lead) + len(span), core)
 
     def _end_blockquote(self) -> None:
         """Prefix everything since the matching ``<blockquote>`` with ``> ``."""
@@ -372,6 +488,7 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         if pos and not self.text[:pos].endswith("\n"):
             quoted[0] = quoted[0].removeprefix(indent)  # continues a list marker line
         self.text = self.text[:pos] + "\n".join(quoted)
+        self._underscores = []  # a newline follows every pending run (those inside moved)
         self._newline(2)
 
     def _end_table_tag(self, tag: str) -> None:
@@ -391,6 +508,8 @@ class _HtmlToMarkdownParser(SkippingHTMLParser):
         if self._row is not None and self._cell_start >= 0:
             cell = " ".join(self.text[self._cell_start:].split())
             self.text = self.text[: self._cell_start]
+            self._last_code = None
+            self._underscores = []
             self._marker_end = self._cell_marker_end
             self._row.append(cell.replace("|", "\\|"))
             self._cell_start = -1

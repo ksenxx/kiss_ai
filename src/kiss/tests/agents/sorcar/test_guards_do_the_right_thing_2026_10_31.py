@@ -27,6 +27,7 @@ itself writes.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import threading
 import time
@@ -722,18 +723,45 @@ def test_uv_run_in_a_worktree_runs_as_the_shared_environments_binary(tmp_path: P
          f"UV_PROJECT_ENVIRONMENT=../../.venv {sources} {repo}/.venv/bin/python -c 'print(1)'"),
         # global flags before the subcommand are dropped from the rewrite
         ("uv -q --offline run pytest -q a.py", f"{sources} {repo}/.venv/bin/pytest -q a.py"),
+        # 2026-11-04 audit S5 F2: the words of a quoted argument are text, the
+        # command after them is the one rewritten
+        ("printf '%s\\n' 'uv run python --version'; uv run python -c 'print(19)'",
+         f"printf '%s\\n' 'uv run python --version'; {sources} {repo}/.venv/bin/python -c "
+         "'print(19)'"),
+        # F3: after a wrapper the assignment needs ``env`` to be one
+        ("command uv run python -c 'print(23)'",
+         f"command env {sources} {repo}/.venv/bin/python -c 'print(23)'"),
+        ("timeout 2 uv run python -c 'print(23)'",
+         f"timeout 2 env {sources} {repo}/.venv/bin/python -c 'print(23)'"),
+        # F4: ``-m`` runs a module of the environment's Python, not a binary of its name
+        ("uv run -m pytest --version", f"{sources} {repo}/.venv/bin/python -m pytest --version"),
+        ("uv run -q --module pytest -q a.py",
+         f"{sources} {repo}/.venv/bin/python -m pytest -q a.py"),
     ):
         assert uv_in_worktree(command, str(worktree)) == (
             None, UV_REWRITTEN_NOTE.format(command=expected), expected)
+    assert tools.Bash("timeout 2 uv run python -c 'print(23)'", "wrapped").startswith(
+        f"ran {repo}/.venv/bin/python -c print(23)\n")
+    # F3: paths with spaces are quoted (the rewrite runs through the real shell)
+    spaced = tmp_path / "repo with spaces"
+    (spaced / ".kiss-worktrees" / "kiss_wt-2-def").mkdir(parents=True)
+    shutil.copytree(repo / ".venv", spaced / ".venv")
+    spaced_wt = spaced / ".kiss-worktrees" / "kiss_wt-2-def"
+    assert UsefulTools(work_dir=str(spaced_wt)).Bash("uv run python -c 'print(29)'", "spaced") == (
+        f"ran {spaced}/.venv/bin/python -c print(29)\n" + UV_REWRITTEN_NOTE.format(
+            command=f"PYTHONPATH='{spaced_wt}/src:{spaced_wt}/projects' "
+                    f"'{spaced}/.venv/bin/python' -c 'print(29)'"))
     # a program the environment lacks, the sync itself, an option whose value
-    # (``--directory .``, before or after ``run``) a rewrite would drop, and a uv
-    # run next to one of those: refused as a whole, nothing rewritten
+    # (``--directory .``, before or after ``run``) a rewrite would drop, a flag
+    # that changes what the program word means (F4), and a uv run next to one
+    # of those: refused as a whole, nothing rewritten
     for command in ("uv run nosuchtool --x", "uv sync", "echo x && uv add requests",
                     "uv --directory . run check --full --fix", "uv --project=. sync",
                     "uv --color never -q run pytest", "uv run pytest -q && uv sync",
                     "uv run --directory /tmp python -c 'import os; print(os.getcwd())'",
                     "uv run --project . python3 -c 1", "uv run -p 3.12 pytest -q",
-                    "uv run --with=rich python -c 1"):
+                    "uv run --with=rich python -c 1", "uv run --script check",
+                    "uv run -m 'os;rm' -c 1", "uv run --help pytest"):
         verdict, note, unchanged = uv_in_worktree(command, str(worktree))
         assert verdict is not None and "bin/check --full" in verdict, command
         assert (note, unchanged) == ("", command)

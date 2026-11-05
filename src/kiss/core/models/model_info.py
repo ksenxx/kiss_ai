@@ -396,12 +396,14 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     A name that resolves to a catalog model (exactly, through a harbor
     prefix such as ``openai/gpt-6.1-sol``, or as a ``bedrock/<id>``
     profile of a ``claude-*`` entry; the one rule of
-    :func:`_lookup_model_info`) copies THAT model's context length and
-    prices, cache prices included and scaled by a Bedrock profile's
-    premium (see :func:`bedrock_price_factor`) — seeding the generic
-    :data:`_CUSTOM_MODEL_DEFAULTS` over e.g. ``gpt-5.6-sol`` would
-    replace its real 500K context and per-token prices with 128K and
-    $0, silently breaking budget accounting for the bundled model.
+    :func:`_lookup_model_info`) copies THAT model's context length,
+    ``thinking`` level and prices, cache prices included and scaled by a
+    Bedrock profile's premium (see :func:`bedrock_price_factor`) —
+    seeding the generic :data:`_CUSTOM_MODEL_DEFAULTS` over e.g.
+    ``gpt-5.6-sol`` would replace its real 500K context and per-token
+    prices with 128K and $0, silently breaking budget accounting for
+    the bundled model, and a row without the level would stop
+    requesting the model's reasoning effort after the next start.
     """
     info = _lookup_model_info(name)
     if info is None:
@@ -409,7 +411,7 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     # Every per-million price, audio and image output included: the
     # loader replaces the catalog entry with this one, so a dropped
     # field would bill audio/image tokens at the text rates.
-    entry: dict[str, Any] = {"context_length": info.context_length}
+    entry: dict[str, Any] = {"context_length": info.context_length, "thinking": info.thinking}
     entry.update({field: getattr(info, field) for field in _PER_1M_PRICE_FIELDS})
     if info.prompt_tiers:
         entry["prompt_tiers"] = [
@@ -553,8 +555,17 @@ def custom_model_config(model_name: str) -> dict[str, Any] | None:
     consults it for the selected model before falling back to the
     global custom-endpoint config.
 
+    A generated ``-{level}`` thinking alias without an entry of its own
+    (``gpt-6-astra-high`` when only ``gpt-6-astra`` is registered) runs
+    against its BASE's endpoint: the alias is billed at the base's prices
+    (:func:`_sync_alias_transport_flags` mirrors them onto it), so it must
+    call the endpoint those prices belong to, not the default provider
+    at the catalog's rates.  An alias the user registered explicitly is
+    looked up by its own name only (explicit wins).
+
     Args:
-        model_name: The model name to look up (the exact JSON key).
+        model_name: The model name to look up (the exact JSON key, or a
+            generated thinking alias of one).
 
     Returns:
         The ``model_config`` dict, or ``None`` when the name has no
@@ -562,9 +573,15 @@ def custom_model_config(model_name: str) -> dict[str, Any] | None:
     """
     from kiss.core.user_config import _parse_custom_headers
 
-    entry = _read_my_models().get(model_name)
+    my_models = _read_my_models()
+    entry = my_models.get(model_name)
     if entry is None:
-        return None
+        base = _strip_thinking_alias(model_name)
+        if base == model_name:
+            return None
+        entry = my_models.get(base)
+        if entry is None:
+            return None
     endpoint = _entry_str(entry, "endpoint")
     if not endpoint:
         return None
@@ -934,13 +951,25 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
     user_entries = _read_my_models()
     built: dict[str, ModelInfo] = {}
     for name in list(user_entries):
-        alias_of = (raw.get(name) or {}).get("alias_of")
+        # The catalog value is validated only when built below: a user
+        # entry may shadow a malformed one (a list, a string), which must
+        # not abort the import that a valid user entry would rescue.
+        catalog_entry = raw.get(name)
+        if not isinstance(catalog_entry, dict):
+            catalog_entry = {}
+        alias_of = catalog_entry.get("alias_of")
         if alias_of and not user_entries[name].get("alias_of"):
             # An override of a generated thinking alias (``gpt-5.6-sol-xhigh``
-            # with its own endpoint) stays an alias: its endpoint knows the
-            # base model id only (see :func:`_strip_thinking_alias`), and the
-            # settings panel writes the override without the marker.
-            user_entries[name] = {**user_entries[name], "alias_of": alias_of}
+            # with its own endpoint) stays an alias at the alias's level: its
+            # endpoint knows the base model id only (see
+            # :func:`_strip_thinking_alias`), and the settings panel writes
+            # the override without the marker (older panels also without the
+            # ``thinking`` level).
+            user_entries[name] = {
+                "thinking": catalog_entry.get("thinking"),
+                **user_entries[name],
+                "alias_of": alias_of,
+            }
         try:
             built[name] = _build_model_info_entry(user_entries[name])
         except (KeyError, TypeError, ValueError):
@@ -2180,7 +2209,11 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     custom model saved later would otherwise be unknown to the running
     daemon (no pricing, no context length) until a restart.  Bundled
     entries are never shadowed this way; a registry edit of a bundled
-    name takes effect on the next start, as before.
+    name takes effect on the next start, as before.  A prefixed name
+    registered under itself (``openai/gpt-6-astra`` for a gateway that
+    uses that id) is priced by its own entry, hot-added or loaded, not
+    by the bundled entry of its stripped form, as the :func:`model`
+    factory keeps that name for the adapter that bills under it.
 
     Args:
         model_name: Name of the model (with or without provider prefix).
@@ -2193,27 +2226,48 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
         return info
     bare = bedrock_catalog_name(model_name) or _strip_provider_prefix(model_name)
     info = MODEL_INFO.get(bare)
-    if info is None:
+    if info is None or bare != model_name:
         my_models = _read_my_models()
         key = model_name if model_name in my_models else bare
-        entry = my_models.get(key)
-        if entry is None:
+        entry = my_models.get(key) if info is None or key == model_name else None
+        if entry is not None:
+            try:
+                built: ModelInfo | None = _build_model_info_entry(entry)
+            except (KeyError, TypeError, ValueError):
+                built = None
+            if built is not None:
+                # Same normalization the import-time catalog gets, so a
+                # hot-added custom model bills cache hits at the
+                # provider's discount instead of the full input price
+                # until the next restart.
+                _normalize_entry(key, built)
+                if key == model_name:
+                    # An entry registered under the name itself holds the
+                    # prices that name pays (a seeded ``bedrock/`` entry is
+                    # scaled already).
+                    return built
+                info = built
+        if info is None:
             return None
-        try:
-            info = _build_model_info_entry(entry)
-        except (KeyError, TypeError, ValueError):
-            return None
-        # Same normalization the import-time catalog gets, so a hot-added
-        # custom model bills cache hits at the provider's discount instead
-        # of the full input price until the next restart.
-        _normalize_entry(key, info)
-        if key == model_name:
-            # An entry registered under the name itself holds the prices
-            # that name pays (a seeded ``bedrock/`` entry is scaled already).
-            return info
     # Resolved through the ``claude-*`` key: a geographic or in-region
     # Bedrock profile pays Bedrock's premium over that entry.
     return _scaled_prices(info, bedrock_price_factor(model_name))
+
+
+def _is_registered_endpoint_model(model_name: str) -> bool:
+    """Return whether *model_name* is EXACTLY a ``MY_MODELS.json`` model with an endpoint.
+
+    Read live (as :func:`_lookup_model_info` reads the registry), so a
+    model added after the daemon started counts.
+
+    Args:
+        model_name: The full name as passed to the :func:`model` factory.
+
+    Returns:
+        ``True`` when the registry holds that key with an ``endpoint``.
+    """
+    entry = _read_my_models().get(model_name)
+    return entry is not None and bool(_entry_str(entry, "endpoint"))
 
 
 def _wants_responses_api(info: ModelInfo | None, model_config: dict[str, Any] | None) -> bool:
@@ -2346,7 +2400,21 @@ def model(
         KISSError: If the model name is not recognized.
     """
     bare = _strip_provider_prefix(model_name)
-    if bare != model_name and (is_known_model(bare) or not is_known_model(model_name)):
+    if (
+        bare != model_name
+        and not (
+            model_config
+            and model_config.get("base_url")
+            and _is_registered_endpoint_model(model_name)
+        )
+        and (is_known_model(bare) or not is_known_model(model_name))
+    ):
+        # A harbor-style ``openai/gpt-6-astra`` is the bundled
+        # ``gpt-6-astra`` — unless that exact name is a ``MY_MODELS.json``
+        # model with its own endpoint and the call routes to an endpoint:
+        # then the name is the id that gateway expects and the entry's
+        # prices are what it charges, so neither is replaced by the
+        # bundled entry's.
         model_name = bare
     info = _lookup_model_info(model_name)
     if info is not None and info.is_decisions_supported:

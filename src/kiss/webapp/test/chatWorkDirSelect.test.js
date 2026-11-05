@@ -338,6 +338,37 @@ function testRemotePickIsCheckedThenAdopted() {
   assert.strictEqual(currentDir(win), '/home/u/newest');
 }
 
+// 2026-11-04 W3 F2: a recorded directory is picked as it is named, a
+// trailing space included: the pick is a path, not free-form input.
+function testPickedDirectoryKeepsItsTrailingSpace() {
+  const {win, posted} = makePage();
+  send(win, {
+    type: 'configData',
+    config: {
+      work_dir: '/work/ws',
+      recent_work_dirs: [
+        {path: '/home/u/project', ts: NOW - 30},
+        {path: '/home/u/project ', ts: NOW - 60},
+      ],
+    },
+  });
+  pick(win, '/home/u/project ');
+  const listDirs = msgs(posted, 'listDir');
+  assert.strictEqual(listDirs.length, 1);
+  assert.strictEqual(listDirs[0].path, '/home/u/project ', 'checked as named');
+  send(win, {
+    type: 'dirListing',
+    token: listDirs[0].token,
+    path: '/home/u/project ',
+    root: '/home/u/project ',
+    entries: [],
+  });
+  const sets = msgs(posted, 'setWorkDir');
+  assert.strictEqual(sets.length, 1);
+  assert.strictEqual(sets[0].workDir, '/home/u/project ', 'adopted as named');
+  assert.strictEqual(currentDir(win), '/home/u/project ');
+}
+
 function testRemoteRootIsRefused() {
   const {win, posted} = makePage();
   send(win, {
@@ -753,6 +784,10 @@ const tests = [
   [
     'two refusals in one millisecond are two toasts',
     testTwoRefusalsInOneMillisecondAreTwoToasts,
+  ],
+  [
+    'a picked directory keeps its trailing space',
+    testPickedDirectoryKeepsItsTrailingSpace,
   ],
 ];
 

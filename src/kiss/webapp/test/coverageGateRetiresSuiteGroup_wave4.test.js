@@ -45,9 +45,13 @@ if (process.platform !== 'linux') {
   process.exit(0);
 }
 
-// Long enough for the suite to start node, spawn its worker and write
-// its pid files on a loaded host.
+// The gate arms its timeout when it starts the guard, before the suite
+// has started node, spawned its worker and written its pid files (the
+// copy's constant is the only knob, so it cannot be armed once the suite
+// is ready): a run the suite did not start within it is repeated with
+// twice the timeout, up to MAX_TIMEOUT_MS, as `runTimedOutGate` does.
 const SHORT_TIMEOUT_MS = 2000;
+const MAX_TIMEOUT_MS = 16000;
 // Far longer than the helper needs to kill the gate mid-run.
 const LONG_TIMEOUT_MS = 60000;
 
@@ -110,10 +114,10 @@ for name in names.split(","):
 print(json.dumps({"status": status, "fates": fates}))
 `;
 
-/** A suite that records its own pid, starts a `sleep` worker with stdio
- * 'ignore' (left in the suite's process group), records the worker's
- * pid, then hangs or exits 0. */
-function suiteSource(pidDir, hangs) {
+/** A suite that, `startDelayMs` after node started it, records its own
+ * pid, starts a `sleep` worker with stdio 'ignore' (left in the suite's
+ * process group), records the worker's pid, then hangs or exits 0. */
+function suiteSource(pidDir, hangs, startDelayMs) {
   return [
     "'use strict';",
     "const {spawn} = require('child_process');",
@@ -124,6 +128,8 @@ function suiteSource(pidDir, hangs) {
     "  fs.writeFileSync(file + '.tmp', String(pid));",
     "  fs.renameSync(file + '.tmp', file);",
     '}',
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ' +
+      `${startDelayMs});`,
     "record('suite', process.pid);",
     "const worker = spawn('sleep', ['300'], {stdio: 'ignore'});",
     "record('worker', worker.pid);",
@@ -134,11 +140,12 @@ function suiteSource(pidDir, hangs) {
 
 /**
  * Copy coverage_gate.js into a scratch directory with CHILD_TIMEOUT_MS
- * set to `timeoutMs`, add a suite (hanging or not) and a gate script that
- * runs it, run the gate under the subreaper helper in `mode`, and return
- * `{status, fates, out}` with the fates of the processes in `names`.
+ * set to `timeoutMs`, add a suite (hanging or not, started `startDelayMs`
+ * late) and a gate script that runs it, run the gate under the subreaper
+ * helper in `mode`, and return `{status, fates, out}` with the fates of
+ * the processes in `names`.
  */
-function runGate(timeoutMs, hangs, mode, names) {
+function runGate(timeoutMs, hangs, mode, names, startDelayMs = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-wave4-'));
   const pidDir = path.join(dir, 'pids');
   fs.mkdirSync(pidDir);
@@ -155,7 +162,7 @@ function runGate(timeoutMs, hangs, mode, names) {
     );
     fs.writeFileSync(
       path.join(dir, 'suite.test.js'),
-      suiteSource(pidDir, hangs),
+      suiteSource(pidDir, hangs, startDelayMs),
     );
     fs.writeFileSync(
       path.join(dir, 'gate.js'),
@@ -193,13 +200,32 @@ function runGate(timeoutMs, hangs, mode, names) {
   }
 }
 
+/**
+ * `runGate` on a hanging suite that starts `startDelayMs` late, with
+ * `timeoutMs` doubled (up to MAX_TIMEOUT_MS) and the run repeated while
+ * the helper found no pid file: the suite had not started within the
+ * timeout, which says nothing about what the gate killed.  Adds the
+ * `timeoutMs` of the run returned.
+ */
+function runTimedOutGate(timeoutMs, startDelayMs) {
+  for (;;) {
+    const res = runGate(
+      timeoutMs,
+      true,
+      'run',
+      ['suite', 'worker'],
+      startDelayMs,
+    );
+    const started = !Object.values(res.fates).includes('no pid file');
+    if (started || timeoutMs >= MAX_TIMEOUT_MS) return {...res, timeoutMs};
+    timeoutMs *= 2;
+  }
+}
+
 function testATimedOutSuiteTakesItsWorkerWithIt() {
-  const {status, fates, out} = runGate(SHORT_TIMEOUT_MS, true, 'run', [
-    'suite',
-    'worker',
-  ]);
+  const {status, fates, out, timeoutMs} = runTimedOutGate(SHORT_TIMEOUT_MS, 0);
   assert.ok(
-    out.includes(`did not exit within ${SHORT_TIMEOUT_MS / 1000}s, killed`),
+    out.includes(`did not exit within ${timeoutMs / 1000}s, killed`),
     `the gate's own timeout killed its hung suite\n${out}`,
   );
   assert.strictEqual(status, 1, `the timed-out gate fails\n${out}`);
@@ -209,6 +235,24 @@ function testATimedOutSuiteTakesItsWorkerWithIt() {
     `the gate killed the suite's whole group at its timeout\n${out}`,
   );
   console.log('ok - a standalone gate kills a timed-out suite with its worker');
+}
+
+function testASuiteSlowToStartIsJudgedOnceStarted() {
+  // A host too loaded for the suite to start within the timeout: the
+  // gate times out before the suite recorded a pid, and the run is
+  // repeated with a timeout the suite does start within.
+  const {fates, out, timeoutMs} = runTimedOutGate(500, 700);
+  assert.ok(timeoutMs > 500, `the run without pid files was repeated\n${out}`);
+  assert.ok(
+    out.includes(`did not exit within ${timeoutMs / 1000}s, killed`),
+    `the gate's own timeout killed its hung suite\n${out}`,
+  );
+  assert.deepStrictEqual(
+    fates,
+    {suite: 'signal 9', worker: 'signal 9'},
+    `the gate killed the suite's whole group at its timeout\n${out}`,
+  );
+  console.log('ok - a suite slow to start is judged once it started');
 }
 
 function testAPassingSuiteLeavesNoWorkerBehind() {
@@ -243,6 +287,7 @@ function testKillingTheGateKillsTheSuiteGroup() {
 }
 
 testATimedOutSuiteTakesItsWorkerWithIt();
+testASuiteSlowToStartIsJudgedOnceStarted();
 testAPassingSuiteLeavesNoWorkerBehind();
 testKillingTheGateKillsTheSuiteGroup();
 console.log('coverageGateRetiresSuiteGroup_wave4: all tests passed');

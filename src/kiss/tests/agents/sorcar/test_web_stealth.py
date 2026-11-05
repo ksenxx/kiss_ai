@@ -56,7 +56,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
 
@@ -195,7 +195,13 @@ class _Handler(BaseHTTPRequestHandler):
     interstitial first and the puzzle afterwards, as a fresh profile gets
     them; ``/malformed-script`` is content with a script ``src`` that is
     not a URL; ``/headers`` echoes the request's ``User-Agent`` and
-    ``Sec-CH-UA`` headers as JSON.
+    ``Sec-CH-UA`` headers as JSON; ``/reddit-block`` and
+    ``/reddit-old-block`` are Reddit's two network-policy pages (HTTP
+    403); ``/so-nocaptcha?pass=1|0`` is Stack Overflow's "Human
+    verification" page with reCAPTCHA's two frames (served by the test's
+    route on www.google.com), whose tick either submits the page to
+    ``/so-nocaptcha-done`` or opens the puzzle; ``/links?to=P`` is a page
+    with a link to *P* and a search form submitting to *P*.
     """
 
     challenge_hits: dict[str, int] = {}
@@ -251,14 +257,16 @@ class _Handler(BaseHTTPRequestHandler):
             # Cloudflare's interactive managed challenge: the widget iframe
             # (served by the test's route on challenges.cloudflare.com)
             # tells the page when its box is ticked; the page then loads
-            # the content, as the real challenge reloads it.
+            # the content (``?then=`` another page), as the real challenge
+            # reloads it.
+            then = parse_qs(urlparse(self.path).query).get("then", ["/turnstile-done"])[0]
             headers["cf-mitigated"] = "challenge"
             body = (
                 "<title>Just a moment...</title><body><h2>Performing security "
                 "verification</h2><iframe src='https://challenges.cloudflare.com/"
                 "cdn-cgi/challenge-platform/turnstile/widget' style='width:300px;"
                 "height:65px;border:0'></iframe><script>addEventListener('message',"
-                " e => { if (e.data === 'ticked') location.href = '/turnstile-done'; })"
+                f" e => {{ if (e.data === 'ticked') location.href = {json.dumps(then)}; }})"
                 "</script></body>"
             )
         elif path == "/turnstile-done":
@@ -290,6 +298,23 @@ class _Handler(BaseHTTPRequestHandler):
             body = (
                 "<title>Real content</title><script src='https://[broken/challenge.js'>"
                 "</script><body><h1>Welcome</h1></body>"
+            )
+        elif path == "/reddit-block":
+            status = 403
+            body = _REDDIT_BLOCK_PAGE
+        elif path == "/reddit-old-block":
+            status = 403
+            body = _REDDIT_OLD_BLOCK_PAGE
+        elif path == "/so-nocaptcha":
+            query = parse_qs(urlparse(self.path).query)
+            body = _SO_NOCAPTCHA_PAGE.replace("PASS", query.get("pass", ["0"])[0])
+        elif path == "/so-nocaptcha-done":
+            body = "<title>Real content</title><body><h1>Welcome</h1></body>"
+        elif path == "/links":
+            to = parse_qs(urlparse(self.path).query).get("to", ["/inert"])[0]
+            body = (
+                f"<title>links</title><body><a id=go href='{to}'>go</a>"
+                f"<form action='{to}'><input name=q aria-label='query'></form></body>"
             )
         elif path == "/headers":
             echo = {
@@ -335,6 +360,64 @@ that you are not a bot, which helps to protect your account and prevent spam.</p
 <select id="lang"><option>English</option><option>Deutsch</option></select>
 <button class="amzn-captcha-lang-apply">Apply</button></div></div></div>
 <script>window.begins = 0</script></body></html>"""
+
+
+# Reddit's two block pages as www.reddit.com and old.reddit.com served
+# them from this network on 3 Nov 2026 (HTTP 403, markup trimmed).
+_REDDIT_BLOCK_PAGE = """<!DOCTYPE html><html><head><title></title></head><body>
+<img alt="" src="data:,"><p>You've been blocked by network security.</p>
+<p>To continue, log in to your Reddit account or use your developer token</p>
+<p>If you think you've been blocked by mistake, file a ticket below and we'll look into it.</p>
+<a href="https://www.reddit.com/login/">Log in</a>
+<a href="https://support.reddithelp.com/hc/en-us/requests/new">File a ticket</a></body></html>"""
+_REDDIT_OLD_BLOCK_PAGE = """<!DOCTYPE html><html><head><title>Blocked</title></head><body>
+<h1>whoa there, pardner!</h1><p>Your request has been blocked due to a network policy.</p>
+<p>Try logging in or creating an account <a href="https://www.reddit.com/login/">here</a>
+to get back to browsing.</p><p>If you're running a script or application, please register
+or sign in with your developer credentials here.</p>
+<p>When contacting us, please include your Reddit account along with the following code:</p>
+<p>01a1a14b-773e-77dc-8fc5-cfeabf8ec3e3</p></body></html>"""
+
+# Stack Overflow's "Human verification" page (``/nocaptcha?s=<id>``, 3 Nov
+# 2026, markup trimmed): its wording, reCAPTCHA v2's anchor frame (the
+# box) and challenge frame (the puzzle, in a wrapper kept hidden until the
+# box's verdict calls for it), and the page's own reaction to the box:
+# ``#nocaptcha-form`` submits itself (PASS=1) or the puzzle opens (PASS=0).
+_SO_NOCAPTCHA_PAGE = """<!DOCTYPE html><html><head>
+<title>Human verification - Stack Overflow</title></head>
+<body><header>Skip to main content About Products Log in Sign up</header>
+<div id="mainbar"><h1>Human verification</h1>
+<p>Are you a human being? We apologize for the confusion, but we can't quite tell if you're a
+person or a script. Please don't take this personally. Bots and scripts can be remarkably
+lifelike these days!</p><p>Check the CAPTCHA box, and we'll be out of your way.</p>
+<form method="post" action="/so-nocaptcha" id="nocaptcha-form"><div id="no-captcha-here">
+<div style="width: 304px; height: 78px"><iframe title="reCAPTCHA" width="304" height="78"
+role="presentation" src="https://www.google.com/recaptcha/api2/anchor?k=6Lc5test&hl=en"></iframe>
+</div></div></form></div>
+<div id="puzzle" style="visibility: hidden; position: absolute; top: 0; left: 0">
+<div style="width: 400px; height: 580px"><iframe title="recaptcha challenge expires in two
+minutes" src="https://www.google.com/recaptcha/api2/bframe?hl=en&k=6Lc5test" width="400"
+height="580"></iframe></div></div>
+<script>window.ticks = 0; addEventListener('message', e => { if (e.data !== 'ticked') return;
+window.ticks++; if (PASS) location.href = '/so-nocaptcha-done';
+else document.getElementById('puzzle').style.visibility = 'visible'; })</script>
+</body></html>"""
+# reCAPTCHA's anchor frame: the "I'm not a robot" box (a 28 px span with
+# the checkbox role, as Google renders it); its tick is reported to the
+# page, as the real widget's callback is.
+_RECAPTCHA_ANCHOR = (
+    "<body style='margin:0;padding:12px;font:14px sans-serif'><span id='recaptcha-anchor'"
+    " role='checkbox' aria-checked='false' tabindex='0' style='display:inline-block;"
+    "width:28px;height:28px;border:2px solid #c1c1c1;vertical-align:middle'"
+    " onclick=\"this.setAttribute('aria-checked', 'true'); parent.postMessage('ticked', '*')\">"
+    "</span> I'm not a robot</body>"
+)
+
+
+def _serve_recaptcha_frames(route) -> None:
+    """Answer www.google.com/recaptcha requests: the box in the anchor frame, an empty puzzle."""
+    body = _RECAPTCHA_ANCHOR if "/anchor" in route.request.url else "<body></body>"
+    route.fulfill(status=200, content_type="text/html", body=body)
 
 
 _TURNSTILE_WIDGET = (
@@ -1286,6 +1369,152 @@ def test_aws_waf_puzzle_after_token_challenge_gets_the_puzzles_short_wait(tool, 
     assert 4.5 <= elapsed < 10, elapsed
 
 
+def test_stack_overflow_captcha_box_is_ticked_and_the_page_passes(tool, server):
+    """Stack Overflow's "Human verification" page: its reCAPTCHA box is ticked once, like Turnstile.
+
+    The search endpoint redirected a research task to this page on
+    3 Nov 2026 and the tool handed its tree over as content.  On a
+    network Google rates well the tick is the whole check: the page
+    submits itself and the content follows, with no note.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://www.google.com/recaptcha/**", _serve_recaptcha_frames)
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(f"{server}/so-nocaptcha?pass=1&t={time.time_ns()}")
+        elapsed = time.monotonic() - start
+    finally:
+        tool._context.unroute("https://www.google.com/recaptcha/**")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert elapsed < 12, elapsed
+    assert web_stealth.widget_presses(web_stealth.STACK_OVERFLOW_CAPTCHA) == 1
+
+
+def test_recaptcha_box_is_ticked_after_a_turnstile_box_cleared_into_it(tool, server):
+    """Each page's widget gets its own tick: Turnstile's press is not charged to reCAPTCHA's.
+
+    Stack Overflow sits behind Cloudflare, so a search can meet the
+    managed challenge first and its "Human verification" page next.
+    Both boxes allow one press; the count restarts when the page gives
+    way to another vendor's, or the second box would never be ticked.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://challenges.cloudflare.com/**", _serve_turnstile_widget)
+    tool._context.route("https://www.google.com/recaptcha/**", _serve_recaptcha_frames)
+    then = quote(f"/so-nocaptcha?pass=1&t={time.time_ns()}", safe="")
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(f"{server}/turnstile?then={then}")
+        elapsed = time.monotonic() - start
+    finally:
+        tool._context.unroute("https://www.google.com/recaptcha/**")
+        tool._context.unroute("https://challenges.cloudflare.com/**")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert elapsed < 2 * 12 + 10, elapsed
+
+
+def test_stack_overflow_captcha_puzzle_ends_the_wait(tool, server):
+    """A tick answered with the picture puzzle is reported at once, with the way out.
+
+    From this machine's address the real box opens the puzzle within
+    2 s of the tick and nothing clears it (checked 3 Nov 2026), so the
+    wait ends when the puzzle shows rather than running the 12 s down;
+    the box is not ticked again and the note names the puzzle and the
+    ``site:stackoverflow.com`` search that finds the same questions.
+    """
+    tool.go_to_url(f"{server}/inert")
+    tool._context.route("https://www.google.com/recaptcha/**", _serve_recaptcha_frames)
+    try:
+        start = time.monotonic()
+        tree = tool.go_to_url(f"{server}/so-nocaptcha?pass=0&t={time.time_ns()}")
+        elapsed = time.monotonic() - start
+        ticks = _main(tool, "window.ticks")
+        puzzle = tool._puzzle_open(web_stealth.STACK_OVERFLOW_CAPTCHA)
+    finally:
+        tool._context.unroute("https://www.google.com/recaptcha/**")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: 127.0.0.1:"), first
+    assert "(Stack Overflow 'Human verification' CAPTCHA) that did not clear within" in first
+    assert "picture puzzle" in first and "site:stackoverflow.com" in first
+    assert "show_browser()" in first
+    assert "Page: Human verification - Stack Overflow" in tree
+    assert ticks == 1 and puzzle is True
+    # The 1.2 s a person takes to read the box, the tick, one poll -- not 12 s.
+    assert 1 <= elapsed < 8, elapsed
+    assert tool._puzzle_open(web_stealth.CLOUDFLARE_CHALLENGE) is False
+
+
+@pytest.mark.parametrize(
+    ("path", "wording"),
+    [
+        ("/reddit-block", "You've been blocked by network security"),
+        ("/reddit-old-block", "pardner"),
+    ],
+)
+def test_reddit_block_page_is_reported_without_a_wait(tool, server, path, wording):
+    """Reddit's 403 pages (www and old.reddit.com) are reported at once: no wait clears them.
+
+    Reddit refuses this network's address for visitors who are not
+    logged in, on every host (checked 3 Nov 2026: www, old, the
+    ``.json`` API); the note says so, names the login way out, and the
+    page's own tree follows -- not "did not clear within 0s".
+    """
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}{path}")
+    elapsed = time.monotonic() - start
+    first = tree.splitlines()[0]
+    assert first.startswith("Note: 127.0.0.1:") and "(Reddit network-policy block)" in first, first
+    assert "did not clear" not in first
+    assert "log in to Reddit" in first and "old.reddit.com" in first and "show_browser()" in first
+    assert wording in tree
+    assert elapsed < 4, elapsed
+    assert web_stealth.challenge_wait_secs(web_stealth.REDDIT_BLOCK) == 0
+    assert web_stealth.widget_presses(web_stealth.REDDIT_BLOCK) == 0
+
+
+def test_click_waits_out_a_challenge_like_go_to_url(tool, server):
+    """A click that lands on an interstitial waits it out instead of returning it.
+
+    On 3 Nov 2026 a click on a search result returned Cloudflare's
+    "Just a moment..." page after 3 s: only ``go_to_url`` settled
+    challenges.  Here the link leads to a challenge that clears on its
+    third request.
+    """
+    tree = tool.go_to_url(f"{server}/links?to=/challenge/{time.time_ns()}")
+    match = re.search(r"\[(\d+)\] link \"go\"", tree)
+    assert match, tree[:300]
+    start = time.monotonic()
+    tree = tool.click(int(match.group(1)))
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert time.monotonic() - start < 12
+
+
+def test_typed_submission_and_enter_report_a_block_like_go_to_url(tool, server):
+    """A search typed with Enter, or Enter on a focused link, reports the block it lands on."""
+    tree = tool.go_to_url(f"{server}/links?to=/reddit-block")
+    match = re.search(r"\[(\d+)\] textbox \"query\"", tree)
+    assert match, tree[:300]
+    tree = tool.type_text(int(match.group(1)), "mobileconfig", press_enter=True)
+    first = tree.splitlines()[0]
+    assert first.startswith("Note:") and "(Reddit network-policy block)" in first, first
+    assert "You've been blocked by network security" in tree
+
+    tool.go_to_url(f"{server}/links?to=/reddit-block")
+    tool._page.focus("#go")
+    tree = tool.press_key("Enter")
+    first = tree.splitlines()[0]
+    assert first.startswith("Note:") and "(Reddit network-policy block)" in first, first
+    # A key that navigates nowhere leaves the block page showing: it is
+    # reported again, at once (Reddit's page gets no wait).
+    start = time.monotonic()
+    tree = tool.press_key("ArrowDown")
+    assert time.monotonic() - start < 3
+    assert tree.splitlines()[0].startswith("Note:") and "Reddit" in tree.splitlines()[0]
+
+
 def test_semanticscholar_puzzle_is_answered_from_crossref(tool, server):
     """A semanticscholar page kept behind the AWS WAF puzzle is looked up on Crossref.
 
@@ -1584,6 +1813,14 @@ def test_bench_verdict_tells_expected_puzzles_from_other_blocks(tool, server):
     assert bench.verdict(tool, content, result).startswith("BLOCKED(None) unrecognised page")
     assert bench.verdict(tool, f"{server}/other", result) == "OK"
     assert bench.verdict(tool, content, "Error navigating: boom").startswith("ERROR ")
+    # A recognised block that no fallback answers (Reddit's page) is a
+    # block, recognised or not: no page of that kind is in the list.
+    blocked = f"{server}/reddit-block"
+    result = tool.go_to_url(blocked)
+    assert bench.verdict(tool, blocked, result).startswith(
+        "BLOCKED(Reddit network-policy block) Note: 127.0.0.1:"
+    )
+    assert not any("reddit.com" in url or "stackoverflow.com/search" in url for url in bench.URLS)
 
 
 # What the live Cloudflare attempts give the challenge to clear.  The
@@ -1686,9 +1923,59 @@ def test_challenge_vendor_recognises_each_vendor():
          "prevent spam.\n\nBegin\nSelect language"): "AWS WAF CAPTCHA puzzle",
         ("Human Verification", "Our identity verification product"): None,
         ("AWS WAF CAPTCHA docs", "the page says 'Let's confirm you are human' and shows"): None,
+        # Stack Overflow's "Human verification" page (3 Nov 2026) by its title
+        # and its instruction, on any Stack Exchange site; not a question with
+        # that title, nor a meta post quoting the page.
+        ("Human verification - Stack Overflow",
+         "Skip to main content\nAbout\n...\nHuman verification\n\nAre you a human being? We "
+         "apologize for the confusion, but we can't quite tell if you're a person or a "
+         "script.\n\nCheck the CAPTCHA box, and we'll be out of your way."):
+            "Stack Overflow 'Human verification' CAPTCHA",
+        ("Human verification - Software Engineering Stack Exchange",
+         "Check the CAPTCHA box, and we'll be out of your way."):
+            "Stack Overflow 'Human verification' CAPTCHA",
+        ("Human verification - Super User", "Check the CAPTCHA box"):
+            "Stack Overflow 'Human verification' CAPTCHA",
+        ("Human verification - Stack Overflow", "How do I verify a human in my app? Ask Question"):
+            None,
+        ("Why does the site show 'Human verification'? - Meta Stack Exchange",
+         "The page says: Are you a human being? ... Check the CAPTCHA box, and we'll be out "
+         "of your way."): None,
+        # Reddit's two block pages (3 Nov 2026): the sentence opens the page,
+        # which articles about the error never do.
+        ("", "You've been blocked by network security.\nTo continue, log in to your Reddit "
+             "account or use your developer token\n\nIf you think you've been blocked by "
+             "mistake, file a ticket below and we'll look into it.\nLog in\nFile a ticket"):
+            "Reddit network-policy block",
+        ("", "You\u2019ve been blocked by network security. To continue, log in"):
+            "Reddit network-policy block",
+        ("Blocked", "whoa there, pardner!\n\nYour request has been blocked due to a network "
+                    "policy.\n\nTry logging in or creating an account here"):
+            "Reddit network-policy block",
+        ("Blocked", "A short story about a goalkeeper"): None,
+        ("Reddit blocked by network security? Here's why - VoidMob",
+         "Reddit's \"You've been blocked by network security\" page means Reddit has blocked "
+         "the request coming from your connection. To continue, log in to your Reddit account"):
+            None,
+        ("", "Menu\nYou've been blocked by network security"): None,
     }
     for (title, body), expected in cases.items():
         assert web_stealth.challenge_vendor(title, body) == expected, (title, body)
+
+
+def test_block_advice_names_the_way_out():
+    """The note's advice is the vendor's own for pages that rate the address, generic otherwise."""
+    reddit = web_stealth.block_advice(web_stealth.REDDIT_BLOCK)
+    assert "log in to Reddit" in reddit and "old.reddit.com" in reddit and ".json" in reddit
+    so = web_stealth.block_advice(web_stealth.STACK_OVERFLOW_CAPTCHA)
+    assert "picture puzzle" in so and "site:stackoverflow.com" in so
+    for vendor in ("Akamai block", web_stealth.CLOUDFLARE_CHALLENGE, web_stealth.AWS_WAF_CAPTCHA):
+        assert web_stealth.block_advice(vendor) == (
+            "Call show_browser() so the user can complete the check, or use another source "
+            "for the same information."
+        )
+    for advice in (reddit, so):
+        assert "show_browser()" in advice
 
 
 def test_challenge_vendor_knows_aws_waf_pages_by_their_scripts():
