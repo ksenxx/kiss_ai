@@ -34,6 +34,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands, sea_settings
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 from kiss.tests.conftest import is_root, posix_only
 
 
@@ -45,10 +46,8 @@ def _reset_sea_commands() -> Iterator[None]:
     ``$KISS_HOME``; a leftover file would redirect ``/merge`` (and any
     other bundled command) for every later test in the same process.
     """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _touch_sea(folder: Path, name: str) -> Path:

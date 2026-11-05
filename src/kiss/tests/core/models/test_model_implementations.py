@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import (
@@ -28,6 +30,7 @@ from kiss.tests.conftest import (
     requires_gemini_api_key,
     requires_openai_api_key,
 )
+from kiss.tests.core import local_anthropic_server as anthropic_server
 
 
 def _mi_for_test(
@@ -502,6 +505,59 @@ class TestAnthropicCacheControl:
         assert "cache_control" not in kwargs["tools"][-1]
         msg = m.conversation[0]
         assert isinstance(msg["content"], str)
+
+
+def write_essay(content: str) -> str:
+    """Save an essay.
+
+    Args:
+        content: The full essay text.
+    """
+    return f"saved {len(content)} chars"
+
+
+@requires_anthropic_api_key
+@pytest.mark.timeout(180)
+def test_large_tool_argument_streams_within_stall_timeout() -> None:
+    """A long tool argument must not leave the stream silent past the stall watchdog.
+
+    Without fine-grained tool streaming the API buffers the whole parameter
+    (about 20 s for this essay on Haiku), so a 6 s ``stream_stall_timeout``
+    aborts the call.  The nightly index run died the same way at 180 s
+    while writing its ~78 KB ``finish`` summary: a live probe of
+    ``claude-fable-5-1`` with that request shape went silent for 420 s
+    on an 82 KB ``finish`` argument, while the fixed adapter returned a
+    78 KB one in 395 s under the default 180 s stall timeout.
+    """
+    m = model("claude-haiku-4-5", model_config={"stream_stall_timeout": 6.0})
+    m.initialize("Write a 1500-word essay about rivers and save it with write_essay.")
+    calls, _, _ = m.generate_and_process_with_tools({"write_essay": write_essay})
+    assert calls[0]["name"] == "write_essay"
+    assert len(calls[0]["arguments"]["content"]) > 4000
+
+
+def test_malformed_streamed_tool_json_is_retried_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fine-grained tool streaming may send invalid JSON; the SDK's partial
+    parser would silently drop the bad trailing value and run ``finish``
+    with a truncated argument.  The step must be retried instead."""
+    bad = anthropic_server.tool_use_message("finish", {}, 100, "toolu_bad")
+    bad["raw_json"] = '{"result": "<p>half</p>", "is_continue": tru'
+    good = anthropic_server.tool_use_message("finish", {"result": "<p>ok</p>"}, 100, "toolu_ok")
+    with anthropic_server.serve([bad, good]) as (url, requests):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        result = KISSAgent("malformed-tool-json").run(
+            model_name=anthropic_server.MODEL,
+            prompt_template="Finish now.",
+            tools=[],
+            max_steps=3,
+            max_budget=50.0,
+            verbose=False,
+        )
+    assert "<p>ok</p>" in result
+    assert sum(1 for r in requests if r.get("stream")) == 2
 
 
 if __name__ == "__main__":

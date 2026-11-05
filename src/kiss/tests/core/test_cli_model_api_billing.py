@@ -23,6 +23,7 @@ Run with::
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ import pytest
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import codex_model
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model_info import calculate_cost
@@ -351,15 +353,21 @@ def _modifier_turn(
 
 
 @pytest.mark.parametrize(
-    ("first", "second", "factor"),
+    ("first", "second", "factors"),
     [
-        ({"inference_geo": "us"}, {"inference_geo": "us"}, 1.1),
-        ({"speed": "fast"}, {"speed": "fast"}, 2.0),
-        ({"speed": "fast", "inference_geo": "us"}, {"speed": "fast", "inference_geo": "us"}, 2.2),
-        ({"speed": "standard", "inference_geo": "global"}, {}, 1.0),
-        # Messages disagree: the priced value wins, never the cheaper one.
-        ({"speed": "standard"}, {"speed": "fast"}, 2.0),
-        ({"inference_geo": "us"}, {"inference_geo": "global"}, 1.1),
+        ({"inference_geo": "us"}, {"inference_geo": "us"}, (1.1, 1.1)),
+        ({"speed": "fast"}, {"speed": "fast"}, (2.0, 2.0)),
+        (
+            {"speed": "fast", "inference_geo": "us"},
+            {"speed": "fast", "inference_geo": "us"},
+            (2.2, 2.2),
+        ),
+        ({"speed": "standard", "inference_geo": "global"}, {}, (1.0, 1.0)),
+        # Messages disagree (fast mode fell back to standard speed AND
+        # standard pricing at its rate limit): each message is priced at
+        # the speed it was served at.
+        ({"speed": "standard"}, {"speed": "fast"}, (1.0, 2.0)),
+        ({"inference_geo": "us"}, {"inference_geo": "global"}, (1.1, 1.0)),
     ],
 )
 def test_cc_api_key_turn_is_scaled_by_the_speed_and_geo_the_messages_report(
@@ -368,30 +376,48 @@ def test_cc_api_key_turn_is_scaled_by_the_speed_and_geo_the_messages_report(
     monkeypatch: pytest.MonkeyPatch,
     first: dict[str, str],
     second: dict[str, str],
-    factor: float,
+    factors: tuple[float, float],
 ) -> None:
     """Fast mode (2x) and US-only inference (1.1x) are reported per API
     message in ``usage``; the CLI's ``result`` sums only the counters, so
-    the modifiers seen in the stream must still price the whole turn
+    the modifiers seen in the stream must still price the turn, each
+    message at the modifiers its own usage reports
     (https://platform.claude.com/docs/en/build-with-claude/fast-mode,
-    https://platform.claude.com/docs/en/manage-claude/data-residency)."""
+    https://code.claude.com/docs/en/fast-mode#handle-rate-limits,
+    https://platform.claude.com/docs/en/manage-claude/data-residency).
+    The counters the ``result`` holds beyond the messages (the cache
+    tokens of this fixture) bill at the turn's merged modifiers, where
+    the priced value wins."""
     monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
     fake_claude.write_text(json.dumps(_modifier_turn(first, second, _CLAUDE_USAGE)))
     agent = _run_agent("cc/opus", tmp_path)
-    expected = calculate_cost("claude-opus-5-5", *_CLAUDE_COUNTS, single_request=False) * factor
+    cost = calculate_cost
+    expected = (
+        cost("claude-opus-5-5", 600, 300) * factors[0]
+        + cost("claude-opus-5-5", 400, 200) * factors[1]
+        + cost("claude-opus-5-5", 0, 0, 2000, 300, 100, single_request=False) * max(factors)
+    )
     assert agent.budget_used == pytest.approx(expected)
 
 
-def test_cc_result_usage_modifiers_outrank_the_stream(
+def test_cc_result_usage_modifiers_fill_in_what_the_stream_did_not_report(
     fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ``result`` whose usage already names the modifiers is priced from
-    them (a CLI that reports them itself is not second-guessed)."""
+    """A ``result`` whose usage names the modifiers names the LAST message's
+    (the CLI's usage reducer sums the counters and copies ``speed`` /
+    ``inference_geo`` from the newest message): they price a message that
+    reported none of its own, never outrank one that did, and price the
+    counters the result holds beyond the messages."""
     monkeypatch.setattr(DEFAULT_CONFIG, "claude_code_use_subscription", False)
     usage = {**_CLAUDE_USAGE, "speed": "standard", "inference_geo": "global"}
     fake_claude.write_text(json.dumps(_modifier_turn({"speed": "fast"}, {}, usage)))
     agent = _run_agent("cc/opus", tmp_path)
-    expected = calculate_cost("claude-opus-5-5", *_CLAUDE_COUNTS, single_request=False)
+    cost = calculate_cost
+    expected = (
+        cost("claude-opus-5-5", 600, 300) * 2.0
+        + cost("claude-opus-5-5", 400, 200)
+        + cost("claude-opus-5-5", 0, 0, 2000, 300, 100, single_request=False)
+    )
     assert agent.budget_used == pytest.approx(expected)
 
 
@@ -680,25 +706,227 @@ def test_codex_usage_of_a_turn_that_fails_after_completing_is_billed_once(
     assert agent.budget_used == pytest.approx(calculate_cost("gpt-5.5", *_CODEX_COUNTS))
 
 
-def test_codex_api_key_turn_on_the_cli_default_model_warns_once_and_stays_free(
+def test_codex_api_key_turn_on_an_unresolved_cli_default_model_warns_once_and_stays_free(
     fake_codex: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``codex/default`` names no catalog model: the spend cannot be priced,
-    so it stays at the catalog's $0 with one warning per model instance."""
+    """``codex/default`` whose default model the CLI did not report cannot
+    be priced: it stays at the catalog's $0 with one warning per model
+    instance."""
     monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    monkeypatch.setattr(codex_model, "codex_default_model", lambda env: None)
     fake_codex.write_text(json.dumps(_codex_turn()))
     model = CodexModel("codex/default", {"work_dir": str(tmp_path), "timeout": 30})
     model.conversation = [{"role": "user", "content": TASK}]
     with caplog.at_level(logging.WARNING, logger="kiss.core.models.codex_model"):
         for _ in range(2):
             _text, response = model.generate()
+            assert "priced_model" not in response
             assert model.extract_cost_from_response(response) is None
     warnings = [r for r in caplog.records if "no price for 'default'" in r.getMessage()]
     assert len(warnings) == 1
     assert model.extract_cost_from_response("not a dict") is None
+
+
+def _no_resolver(env: dict[str, str]) -> str | None:
+    """A ``codex_default_model`` that must not run."""
+    raise AssertionError("a subscription turn resolved the default model")
+
+
+def test_codex_api_key_turn_on_the_cli_default_model_is_billed_at_that_model(
+    fake_codex: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``codex/default`` runs the CLI's default model, which the app server
+    reports: an API-billed turn costs what that model costs, a turn cut
+    after ``turn.completed`` too, and a subscription turn never asks."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", False)
+    asked: list[dict[str, str]] = []
+
+    def resolve_default(env: dict[str, str], timeout: float = 15.0) -> str:
+        asked.append(env)
+        return "gpt-5.5"
+
+    monkeypatch.setattr(codex_model, "codex_default_model", resolve_default)
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    expected = calculate_cost("gpt-5.5", *_CODEX_COUNTS)
+    assert expected > 0
+    assert _run_agent("codex/default", tmp_path).budget_used == pytest.approx(expected)
+    assert asked and asked[0]["CODEX_API_KEY"] == "sk-openai-test"
+
+    fake_codex.write_text(json.dumps([*_codex_turn(), {"type": "exit", "code": 1}]))
+    model = CodexModel("codex/default", {"work_dir": str(tmp_path), "timeout": 30})
+    model.conversation = [{"role": "user", "content": TASK}]
+    with pytest.raises(KISSError):
+        model.generate()
+    partial = model.take_partial_usage_response()
+    assert partial["priced_model"] == "gpt-5.5"
+    assert model.extract_cost_from_response(partial) == pytest.approx(expected)
+
+    monkeypatch.setattr(DEFAULT_CONFIG, "codex_use_subscription", True)
+    monkeypatch.setattr(codex_model, "codex_default_model", _no_resolver)
+    fake_codex.write_text(json.dumps(_codex_turn()))
+    assert _run_agent("codex/default", tmp_path).budget_used == 0.0
+
+
+# A stand-in ``codex app-server``: records its pid, then answers the
+# JSON-RPC lines on stdin as *mode* says until stdin closes.
+_FAKE_APP_SERVER = """#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+pathlib.Path({pid_path!r}).write_text(str(os.getpid()))
+mode = {mode!r}
+if mode == "exit":
+    sys.exit(1)
+if mode == "close-stdin":
+    sys.stdin.readline()
+    os.close(0)  # before answering: the client's next write breaks the pipe
+    print(json.dumps({{"id": 1, "result": {{}}}}), flush=True)
+    time.sleep(60)
+for line in sys.stdin:
+    rpc_id = json.loads(line).get("id")
+    if mode == "hang" or rpc_id is None:
+        continue
+    if mode == "garbage":
+        print("not json", flush=True)
+        print(json.dumps({{"id": rpc_id, "result": "nope"}}), flush=True)
+    elif rpc_id == 1:
+        print("WARN noise on stdout", flush=True)
+        print(json.dumps({{"method": "configWarning", "params": {{}}}}), flush=True)
+        print(json.dumps({{"id": 1, "result": {{"userAgent": "fake"}}}}), flush=True)
+    else:
+        data = [{{"id": "gpt-6-astra", "isDefault": False}}]
+        if mode == "ok":
+            data.append({{"id": "gpt-6.1-sol", "isDefault": True}})
+        print(json.dumps({{"id": rpc_id, "result": {{"data": data}}}}), flush=True)
+"""
+
+
+def _install_app_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> Path:
+    """Put a fake ``codex app-server`` in *mode* first on PATH; return its pid file.
+
+    Every mode is written to the same path, so the resolver's cache
+    (keyed by the CLI path) sees one CLI whose behaviour changed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    pid_path = tmp_path / f"app-server-{mode}.pid"
+    install_cli_script(
+        bin_dir / "codex", _FAKE_APP_SERVER.format(pid_path=str(pid_path), mode=mode)
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return pid_path
+
+
+def _assert_reaped(pid_path: Path) -> None:
+    """The fake server whose pid *pid_path* holds is gone (killed and reaped)."""
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+
+
+def test_codex_default_model_asks_the_app_server_and_caches_the_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver skips notifications and noise, returns the ``isDefault``
+    model, kills the server, and reuses the answer per ``CODEX_HOME``."""
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    pid_path = _install_app_server(tmp_path, monkeypatch, "ok")
+    env = {**os.environ, "CODEX_HOME": str(tmp_path / "home-a")}
+    assert codex_model.codex_default_model(env) == "gpt-6.1-sol"
+    _assert_reaped(pid_path)
+
+    hang_pid_path = _install_app_server(tmp_path, monkeypatch, "hang")
+    assert codex_model.codex_default_model(env, timeout=0.5) == "gpt-6.1-sol", "cached"
+    assert not hang_pid_path.exists()
+    # Another CODEX_HOME is another cache entry: the hanging server is
+    # asked, and the resolver gives up at the deadline.
+    started = time.monotonic()
+    assert codex_model.codex_default_model({**env, "CODEX_HOME": "b"}, timeout=0.5) is None
+    assert time.monotonic() - started < 10
+    _assert_reaped(hang_pid_path)
+
+
+@pytest.mark.parametrize("mode", ["hang", "garbage", "no-default", "exit", "close-stdin"])
+def test_codex_default_model_is_none_when_the_app_server_does_not_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A server that hangs, answers garbage, flags no default, dies, or
+    stops reading before the second request (a broken pipe) yields
+    ``None`` within the timeout, and the server is killed.  The failure
+    is cached (briefly): a fixed server is not asked again yet."""
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    pid_path = _install_app_server(tmp_path, monkeypatch, mode)
+    env = {**os.environ}
+    started = time.monotonic()
+    assert codex_model.codex_default_model(env, timeout=1.0) is None
+    assert time.monotonic() - started < 10
+    _assert_reaped(pid_path)
+    ok_pid_path = _install_app_server(tmp_path, monkeypatch, "ok")
+    assert codex_model.codex_default_model(env) is None, "failure cached"
+    assert not ok_pid_path.exists()
+
+
+def test_codex_default_model_deadline_holds_against_a_notification_backlog() -> None:
+    """Queued notifications are not read past the deadline, and a reply
+    that is only reached after it is not accepted."""
+    import queue
+
+    lines: queue.Queue[str | None] = queue.Queue()
+    for _ in range(100_000):
+        lines.put('{"method": "notification"}')
+    lines.put('{"id": 2, "result": {"data": []}}')
+    started = time.monotonic()
+    assert codex_model._await_rpc_result(lines, 2, started + 0.001) is None
+    assert lines.qsize() > 90_000, "stopped reading at the deadline"
+    assert codex_model._await_rpc_result(lines, 2, started - 1) is None
+
+
+def test_codex_default_model_late_failure_keeps_a_concurrent_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two turns miss the cache together; the one that resolves the
+    default caches it, and the other's later failure does not replace it."""
+    import threading
+
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    monkeypatch.setattr(codex_model, "find_codex_executable", lambda: "/fake/codex")
+    release = threading.Event()
+    calls: list[str] = []
+
+    def query(path: str, env: dict[str, str], timeout: float) -> str | None:
+        if not calls:
+            calls.append("slow")
+            release.wait(10)
+            return None
+        calls.append("fast")
+        return "gpt-6.1-sol"
+
+    monkeypatch.setattr(codex_model, "_query_default_model", query)
+    results: list[str | None] = []
+    slow = threading.Thread(target=lambda: results.append(codex_model.codex_default_model({})))
+    slow.start()
+    while not calls:
+        time.sleep(0.01)
+    assert codex_model.codex_default_model({}) == "gpt-6.1-sol"
+    release.set()
+    slow.join(10)
+    assert results == ["gpt-6.1-sol"], "the late failure returns the cached answer"
+    assert codex_model.codex_default_model({}) == "gpt-6.1-sol"
+    assert calls == ["slow", "fast"], "served from the cache"
+
+
+def test_codex_default_model_is_none_without_a_runnable_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``codex`` anywhere, or one that cannot be executed: ``None``."""
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    monkeypatch.setattr(codex_model, "_UI_CANDIDATE_PATHS", ())
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert codex_model.codex_default_model(dict(os.environ)) is None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    install_cli_script(bin_dir / "codex", "#!/nonexistent/interpreter\n")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert codex_model.codex_default_model(dict(os.environ)) is None
 
 
 # --- Cost audit 2026-10-20 ----------------------------------------------

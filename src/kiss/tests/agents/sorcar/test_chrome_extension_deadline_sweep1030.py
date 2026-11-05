@@ -39,6 +39,7 @@ import pytest
 from patchright.sync_api import Page, sync_playwright
 
 from kiss.agents.sorcar.chrome_bridge import ChromeBridge, ChromeBridgeError, extension_dir
+from kiss.tests.conftest import goto_retrying_network_change
 
 _PAGE = b"<!doctype html><title>deadline page</title><p>deadline page</p>"
 
@@ -114,7 +115,7 @@ def chrome(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Chrome]:
                 )
                 try:
                     page = context.new_page()
-                    page.goto(url)
+                    goto_retrying_network_change(page, url)
                     assert bridge.wait_for_extension(30), "the extension never connected"
                     tabs = bridge.call("list_tabs", timeout=10)
                     tab_id = next(tab["id"] for tab in tabs if tab["url"] == url)

@@ -2175,7 +2175,22 @@ class WebUseTool:
             The checkbox's bounding box in main-frame viewport pixels, or
             ``None`` while no widget, or only its spinner, is showing.
         """
-        frame = next((f for f in self._page.frames if "challenges.cloudflare.com" in f.url), None)
+        return self._frame_checkbox("challenges.cloudflare.com")
+
+    def _frame_checkbox(self, frame_url_part: str) -> dict[str, float] | None:
+        """Return the box of the checkbox in the widget frame whose URL contains *frame_url_part*.
+
+        Args:
+            frame_url_part: What tells the widget's frame apart:
+                ``challenges.cloudflare.com`` for Turnstile,
+                ``/recaptcha/api2/anchor`` for reCAPTCHA v2's "I'm not a
+                robot" box.
+
+        Returns:
+            The checkbox's bounding box in main-frame viewport pixels, or
+            ``None`` while no such frame, or only its spinner, is showing.
+        """
+        frame = next((f for f in self._page.frames if frame_url_part in f.url), None)
         if frame is None:
             return None
         try:
@@ -2208,8 +2223,12 @@ class WebUseTool:
             The box to press, in main-frame viewport pixels, or ``None``
             when the page shows nothing to press.
         """
-        if vendor == web_stealth.CLOUDFLARE_CHALLENGE:
-            box = self._turnstile_checkbox()
+        if vendor in (web_stealth.CLOUDFLARE_CHALLENGE, web_stealth.STACK_OVERFLOW_CAPTCHA):
+            box = (
+                self._turnstile_checkbox()
+                if vendor == web_stealth.CLOUDFLARE_CHALLENGE
+                else self._frame_checkbox("/recaptcha/api2/anchor")
+            )
             if box is None:
                 return None
             side = min(box["width"], box["height"])
@@ -2222,6 +2241,26 @@ class WebUseTool:
             with self._input_hang_watchdog():
                 return web_stealth.press_and_hold_box(self._page, boxes[0])
         return None
+
+    def _puzzle_open(self, vendor: str) -> bool:
+        """Whether *vendor*'s page has opened a puzzle that only a person solves.
+
+        Stack Overflow's reCAPTCHA box, once ticked, either passes (the
+        page submits itself) or opens a picture puzzle
+        (:data:`web_stealth.RECAPTCHA_PUZZLE_OPEN_JS`); waiting on the
+        puzzle helps nobody, so the challenge wait ends when it shows.
+
+        Args:
+            vendor: The label :meth:`_challenge_vendor` returned.
+
+        Returns:
+            ``True`` when the puzzle is showing; ``False`` for every other
+            page and vendor.
+        """
+        if vendor != web_stealth.STACK_OVERFLOW_CAPTCHA:
+            return False
+        (shown,) = self._read_page(self._page, web_stealth.RECAPTCHA_PUZZLE_OPEN_JS)
+        return bool(shown)
 
     def _press_at(self, box: dict[str, float], hold_secs: float) -> None:
         """Press the element *box* like a person and keep it down for *hold_secs*.
@@ -2266,19 +2305,22 @@ class WebUseTool:
         would press (:meth:`_challenge_widget`) when one shows; an
         interstitial that gives way to another vendor's page (AWS WAF's
         token challenge, then its CAPTCHA puzzle) gets that page's own,
-        possibly shorter, wait from then on.  A Google
-        "unusual traffic" page is not waited on: it rates the network's
-        IP, not the browser, so the same query is opened on Bing; a
-        semanticscholar.org page kept behind AWS WAF's puzzle (the same
-        kind of rating) is looked up on Crossref instead
-        (:func:`web_stealth.content_fallback`).  The
-        interstitial is recognised by what the page shows
+        possibly shorter, wait from then on, and a widget that answers
+        the press with a puzzle (:meth:`_puzzle_open`) ends the wait.  A
+        Google "unusual traffic" page is not waited on: it rates the
+        network's IP, not the browser, so the same query is opened on
+        Bing; a semanticscholar.org page kept behind AWS WAF's puzzle (the
+        same kind of rating) is looked up on Crossref instead
+        (:func:`web_stealth.content_fallback`); Reddit's static block page
+        gets no wait either (:func:`web_stealth.challenge_wait_secs`).
+        The interstitial is recognised by what the page shows
         (:func:`web_stealth.challenge_vendor`), which is also what tells
         when it has cleared.
 
         Returns:
             ``""`` when the page is content, otherwise a ``Note:`` line
-            for the agent explaining what blocked the page.
+            for the agent explaining what blocked the page and the way
+            out (:func:`web_stealth.block_advice`).
         """
         vendor = self._challenge_vendor()
         if vendor is None:
@@ -2322,6 +2364,14 @@ class WebUseTool:
                 # gets its own wait from now, never more than was left.
                 wait_secs = web_stealth.challenge_wait_secs(vendor)
                 deadline = min(deadline, time.monotonic() + wait_secs)
+                # ... and its own widget: the presses spent on the previous
+                # page's box (Turnstile's, cleared into Stack Overflow's
+                # reCAPTCHA page) are not this page's.
+                presses = 0
+                box_seen_at = None
+            if vendor is not None and self._puzzle_open(vendor):
+                logger.info("the widget on %s opened a puzzle", self._page.url)
+                break
         if vendor is None:
             self._wait_for_stable()
             return ""
@@ -2389,11 +2439,43 @@ class WebUseTool:
                     f"page, call show_browser() and then go_to_url('{puzzle_url}') so the "
                     "user can complete the check."
                 )
-        return (
-            f"Note: {host} answered with a bot-protection page ({vendor}) that did not "
-            f"clear within {waited}. Call show_browser() so the user "
-            "can complete the check, or use another source for the same information."
+        # A page no wait clears (Reddit's) is not said to have been waited on.
+        stayed = (
+            f" that did not clear within {waited}"
+            if web_stealth.challenge_wait_secs(vendor) > 0
+            else ""
         )
+        return (
+            f"Note: {host} answered with a bot-protection page ({vendor}){stayed}. "
+            f"{web_stealth.block_advice(vendor)}"
+        )
+
+    def _settled_tree(self) -> str:
+        """The page's tree after a navigation, behind the ``Note:`` of a block that stayed.
+
+        Every action that can land on a new document (``go_to_url``, a
+        click on a link or a search result, a typed submission, a key
+        press) goes through here, so an interstitial met on the way is
+        waited out or reported the same way whichever action met it.
+        """
+        notice = self._settle_challenge()
+        tree = self._get_ax_tree()
+        return f"{notice}\n\n{tree}" if notice else tree
+
+    def _adopt_new_tab(self, pages_before: int) -> None:
+        """Switch to the tab the last action opened, if it opened one.
+
+        A click on, or Enter over, a ``target="_blank"`` link (or a form
+        submitting to one) opens a new tab; the agent's attention moves
+        there, as a person's would, and so does the challenge handling.
+
+        Args:
+            pages_before: How many tabs the context had before the action.
+        """
+        pages = self._context.pages
+        if len(pages) > pages_before:
+            self._adopt_page(pages[-1])
+            self._wait_for_stable()
 
     def _user_sees_page(self) -> bool:
         """Whether the user can see the page: the Browser tab, a window, their own Chrome."""
@@ -2526,14 +2608,14 @@ class WebUseTool:
                 idx = int(url[4:])
                 if 0 <= idx < len(pages):
                     self._adopt_page(pages[idx])
-                    return self._get_ax_tree()
+                    # The tab may show an interstitial nothing settled yet
+                    # (a popup the page opened, the user's own tab).
+                    return self._settled_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
             self._goto_retrying_network_change(url)
             self._wait_for_stable()
-            notice = self._settle_challenge()
-            tree = self._get_ax_tree()
-            return f"{notice}\n\n{tree}" if notice else tree
+            return self._settled_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"
@@ -2587,11 +2669,8 @@ class WebUseTool:
             self._human_click(locator)
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
-            pages = self._context.pages
-            if len(pages) > pages_before:
-                self._adopt_page(pages[-1])
-                self._wait_for_stable()
-            return self._get_ax_tree()
+            self._adopt_new_tab(pages_before)
+            return self._settled_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error clicking element {element_id}: {e}"
@@ -2613,6 +2692,7 @@ class WebUseTool:
         try:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
+            pages_before = len(self._context.pages)
             self._human_click(locator)
             # Typing spends up to 115 ms per character (260 ms per space)
             # legitimately, so the deadline scales with the text.
@@ -2630,6 +2710,8 @@ class WebUseTool:
             if press_enter:
                 self._page.wait_for_timeout(500)
                 self._wait_for_stable()
+                self._adopt_new_tab(pages_before)
+                return self._settled_tree()
             return self._get_ax_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -2649,10 +2731,14 @@ class WebUseTool:
             return err
         try:
             self._require_responsive_renderer()
+            pages_before = len(self._context.pages)
             with self._input_hang_watchdog():
                 self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
-            return self._get_ax_tree()
+            # Enter on a focused link or form submits: the key may have
+            # navigated (or opened a tab), and onto an interstitial.
+            self._adopt_new_tab(pages_before)
+            return self._settled_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error pressing key '{key}': {e}"

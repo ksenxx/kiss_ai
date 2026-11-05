@@ -280,9 +280,10 @@ class ChromeBridge:
         into :func:`extension_dir` and the bound port and token written
         next to them -- unless the file already names a bridge that still
         answers (another KISS process, normally the daemon) and *takeover*
-        is False: then nothing is bound and the caller is told which
-        process owns the extension, since Chrome keeps one connection and
-        a rewritten file would only strand it once that process exits.
+        is False: then the socket is closed again and the caller is told
+        which process owns the extension, since Chrome keeps one
+        connection and a rewritten file would only strand it once that
+        process exits.
 
         Args:
             takeover: Publish this server even over a live one (the daemon,
@@ -294,16 +295,8 @@ class ChromeBridge:
                 thread cannot start, or another process's bridge owns
                 the config file.
         """
-        if self._write_config and not takeover:
-            other = _live_bridge_port(extension_dir() / CONFIG_FILE_NAME)
-            if other is not None:
-                raise ChromeBridgeError(
-                    f"another KISS process already serves the Chrome bridge on port {other} "
-                    "(normally the kiss-web daemon, which the extension stays connected to); "
-                    "run this task through that process"
-                )
         try:
-            self._server = serve(
+            server = serve(
                 self._handle,
                 "127.0.0.1",
                 self._port,
@@ -311,24 +304,58 @@ class ChromeBridge:
             )
         except OSError as e:
             raise ChromeBridgeError(f"cannot listen on 127.0.0.1:{self._port}: {e}") from e
-        self._port = self._server.socket.getsockname()[1]
-        if self._write_config:
-            try:
-                _write_config(install_extension() / CONFIG_FILE_NAME, self._port, self._token)
-            except OSError as e:  # an unwritable KISS_HOME, or the config lock stuck
-                self._server.shutdown()
-                self._server = None
-                raise ChromeBridgeError(
-                    f"cannot publish the bridge in {extension_dir()}: {e}"
-                ) from e
+        self._server = server
+        self._port = server.socket.getsockname()[1]
         try:
-            threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        except RuntimeError as e:  # thread exhaustion
-            # Close the socket nobody would serve and withdraw the config
-            # that points the extension at it.
-            self.stop()
-            raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
+            if self._write_config:
+                self._publish(server, takeover)
+            else:
+                _serve(server)
+        except ChromeBridgeError:
+            server.shutdown()  # the socket nobody would serve; nothing was published
+            self._server = None
+            raise
         logger.info("chrome bridge listening on 127.0.0.1:%d", self._port)
+
+    def _publish(self, server: Server, takeover: bool) -> None:
+        """Serve *server* and write bridge-config.json, unless a live bridge owns the file.
+
+        The probe for another process's bridge, the server thread's start
+        and the write are one critical section under the config lock: two
+        processes starting together would otherwise both find no live
+        bridge and both publish, and the one whose file lost would serve a
+        port no extension ever reads.  The thread starts before the write,
+        so the next starter's probe (which needs this server's challenge
+        frame) finds it answering.  The staged copy of the file has mode
+        600 from the start (the token must never sit in a world-readable
+        file), and the lock keeps a predecessor's
+        :func:`_remove_config_if_owned` from unlinking the file between
+        its ownership check and its unlink.
+
+        Raises:
+            ChromeBridgeError: another process's bridge owns the file and
+                *takeover* is False; the extension files or the config
+                file cannot be written; the lock stays held past
+                :data:`_CONFIG_LOCK_TIMEOUT_SECS`; the thread cannot start.
+        """
+        config = extension_dir() / CONFIG_FILE_NAME
+        try:
+            with _config_lock(config):
+                if not takeover:
+                    other = _live_bridge_port(config)
+                    if other is not None:
+                        raise ChromeBridgeError(
+                            f"another KISS process already serves the Chrome bridge on port "
+                            f"{other} (normally the kiss-web daemon, which the extension stays "
+                            "connected to); run this task through that process"
+                        )
+                install_extension()
+                _serve(server)
+                atomic_write_text(
+                    config, json.dumps({"port": self._port, "token": self._token}), mode=0o600
+                )
+        except OSError as e:  # an unwritable KISS_HOME, or the config lock stuck
+            raise ChromeBridgeError(f"cannot publish the bridge in {extension_dir()}: {e}") from e
 
     def stop(self) -> None:
         """Stop the server, close the live connection, fail in-flight commands.
@@ -506,10 +533,12 @@ class ChromeBridge:
                 old, self._conn = self._conn, conn
                 self._connected.set()
             if old is not None:  # a second Chrome profile connected: keep the newest
-                try:
-                    old.ws.close(4002, "replaced by a newer connection")
-                except Exception:  # noqa: BLE001 - already gone
-                    logger.debug("Exception caught", exc_info=True)
+                # Closed off this thread: the close waits up to websockets'
+                # close_timeout (10 s) for the old peer's close frame, and a
+                # wedged old peer would hold this connection's reads (below)
+                # for that long, so a short command on the healthy new
+                # connection would time out and drop it.
+                threading.Thread(target=_close_replaced, args=(old.ws,), daemon=True).start()
             logger.info("chrome bridge extension connected")
             while True:
                 self._on_message(conn, json.loads(ws.recv()))
@@ -552,6 +581,20 @@ class ChromeBridge:
         for fut in locked_call(conn.pending_lock, take_pending):
             if not fut.done():
                 fut.set_exception(ChromeBridgeError(reason))
+
+
+def _close_replaced(ws: ServerConnection) -> None:
+    """Close the extension connection *ws* with code 4002, which keeps that profile down.
+
+    The extension stays away on 4002 (it was replaced by another Chrome
+    profile); any other close code makes it reconnect, and the two
+    profiles would replace each other forever.  Its own handler thread is
+    woken by the close and drops the connection as a disconnect.
+    """
+    try:
+        ws.close(4002, "replaced by a newer connection")
+    except Exception:  # noqa: BLE001 - already gone
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _cut_socket(sock: socket.socket, cut: threading.Event) -> None:
@@ -598,20 +641,16 @@ def _config_lock(config: Path) -> AbstractContextManager[bool]:
     return exclusive_file_lock(lock, timeout=_CONFIG_LOCK_TIMEOUT_SECS)
 
 
-def _write_config(config: Path, port: int, token: str) -> None:
-    """Write the connection file the extension fetches at startup (mode 600).
-
-    The staged copy has mode 600 from the start (the token must never
-    sit in a world-readable file), and the write holds the config lock,
-    so a predecessor's :func:`_remove_config_if_owned` cannot unlink
-    this file between its ownership check and its unlink.
+def _serve(server: Server) -> None:
+    """Start the thread that serves *server*'s bound socket.
 
     Raises:
-        OSError: when the file cannot be written; ``TimeoutError`` when
-            the lock stays held past :data:`_CONFIG_LOCK_TIMEOUT_SECS`.
+        ChromeBridgeError: the thread cannot start (thread exhaustion).
     """
-    with _config_lock(config):
-        atomic_write_text(config, json.dumps({"port": port, "token": token}), mode=0o600)
+    try:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    except RuntimeError as e:
+        raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
 
 
 def _remove_config_if_owned(config: Path, token: str) -> None:

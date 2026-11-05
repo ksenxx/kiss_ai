@@ -462,6 +462,10 @@ def run_process_group(
 #: timeout watchdog killed its process group.
 PIPE_GIVE_UP_SECONDS = 5.0
 
+# Longest single wait on a child's pipe, so that a Stop injected into
+# the waiting thread is raised within this long (see _read_some).
+_STOP_POLL_SECONDS = 0.1
+
 
 class CappedOutput:
     """Result of :func:`run_capped`.
@@ -595,9 +599,14 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
     has passed even when output is ready.  The wait uses the
     platform's readiness API (``epoll``/``kqueue``), not ``select``,
     whose ``FD_SETSIZE`` limit rejects a pipe numbered 1024 or higher
-    in a daemon with that many sockets and files open.  On Windows the
-    watchdog's Job Object kills every descendant, so a plain read
-    cannot be held open there (and readiness APIs do not work on pipes).
+    in a daemon with that many sockets and files open.  It is taken in
+    slices of :data:`_STOP_POLL_SECONDS`: a Stop is an exception
+    injected into the task thread (see :func:`run_capped`), raised
+    between bytecodes and never inside the blocking wait, so one wait
+    for the whole remaining time would hold it, and the child, back
+    that long.  On Windows the watchdog's Job Object kills every
+    descendant, so a plain read cannot be held open there (and
+    readiness APIs do not work on pipes).
 
     Args:
         stream: The child's stdout or stderr pipe.
@@ -615,8 +624,10 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
     if remaining > 0:
         with selectors.DefaultSelector() as ready:
             ready.register(stream, selectors.EVENT_READ)
-            if ready.select(remaining):
-                return os.read(stream.fileno(), limit)
+            while remaining > 0:
+                if ready.select(min(remaining, _STOP_POLL_SECONDS)):
+                    return os.read(stream.fileno(), limit)
+                remaining = give_up - time.monotonic()
     logger.warning(
         "child pipe still open %ss after the kill; giving up", PIPE_GIVE_UP_SECONDS,
     )

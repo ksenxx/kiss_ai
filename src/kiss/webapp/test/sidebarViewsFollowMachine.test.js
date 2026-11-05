@@ -41,6 +41,7 @@ const {
   showSection,
   menuItem,
   rightClick,
+  toast: toastById,
 } = require('./ui_antipattern_harness');
 
 const openWindows = [];
@@ -558,8 +559,11 @@ async function testAnActionKeepsTheMachineItWasPickedOn() {
   });
   pickMachine(win, '');
   posted.length = 0;
-  const clash = win.document.querySelector(
-    '[data-notification-id="fs-overwrite:/srv/proj/pkg|main.py"]',
+  // Keyed by the machine too: the same path on this machine is
+  // another file, with a question of its own.
+  const clash = toastById(
+    win,
+    'fs-overwrite:' + JSON.stringify(['gpu-box', '/srv/proj/pkg', 'main.py']),
   );
   assert.ok(clash, 'the overwrite question is up');
   click(

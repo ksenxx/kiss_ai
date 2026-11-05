@@ -22,6 +22,8 @@
 //   view.opened(ev)         -> a terminalOpened reply (new or re-attached)
 //   view.exit(code)         -> the shell ended (terminalExit)
 //   view.error(text)        -> the shell could not start (terminalError)
+//   view.disconnected()     -> the WebSocket dropped: keystrokes wait for
+//                              the re-attach
 //   view.reconnect()        -> the WebSocket came back: re-attach the shell
 //   view.retheme()          -> the page theme changed
 //   view.dispose()          -> drop the terminal (the daemon is told
@@ -178,6 +180,13 @@
     // Set while an Enter on an ended shell asks for a new one, so the
     // fresh shell's terminalOpened is not reported as a lost session.
     let restarting = false;
+    // Set while the WebSocket is down: keystrokes typed meanwhile wait
+    // in heldInput until terminalOpened says the daemon re-attached the
+    // shell to the new connection.  Sent before that they would reach
+    // the daemon ahead of the reconnect's terminalOpen, from a
+    // connection that does not own the shell yet, and be dropped.
+    let detached = false;
+    let heldInput = [];
     let lastSize = {cols: 0, rows: 0};
 
     function note(text, colour) {
@@ -259,8 +268,9 @@
           term.attachCustomKeyEventHandler(keyHandler);
           fit.fit();
           term.onData(data => {
-            if (!view.exited)
-              send({type: 'terminalInput', tab_id: tabId, data: data});
+            if (view.exited) return;
+            if (detached) heldInput.push(data);
+            else send({type: 'terminalInput', tab_id: tabId, data: data});
           });
           term.onResize(size => {
             if (size.cols === lastSize.cols && size.rows === lastSize.rows)
@@ -327,7 +337,10 @@
     };
 
     view.opened = function (ev) {
-      if (hadShell && !ev.attached && !restarting) {
+      // A fresh shell in place of one this page had: what was typed for
+      // the old one is not run in the new one.
+      const replaced = hadShell && !ev.attached;
+      if (replaced && !restarting) {
         note(
           'The shell ended while this page was disconnected; a new one started.',
         );
@@ -335,6 +348,13 @@
       hadShell = true;
       restarting = false;
       view.exited = false;
+      detached = false;
+      const held = heldInput;
+      heldInput = [];
+      if (replaced) return;
+      held.forEach(data =>
+        send({type: 'terminalInput', tab_id: tabId, data: data}),
+      );
     };
 
     view.exit = function (code) {
@@ -352,6 +372,10 @@
       restarting = false;
       view.exited = true;
       note(text, RED);
+    };
+
+    view.disconnected = function () {
+      detached = true;
     };
 
     view.reconnect = function () {

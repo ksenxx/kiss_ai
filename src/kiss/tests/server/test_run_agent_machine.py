@@ -42,12 +42,15 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
+
+import pytest
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_ENV
@@ -400,6 +403,67 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
                 break
             await asyncio.sleep(0.25)
         self.assertEqual(remote._tabs, {})
+
+    async def test_late_spend_on_the_machine_reaches_the_caller_on_the_next_refresh(self) -> None:
+        """The fold is recorded; spend the box adds to the row later is charged once.
+
+        Audit 2026-11-03 A3-1/A3-2.  The late charge runs the box's own
+        ``_add_late_task_usage`` on its database, as an ``/ask`` answer
+        finishing after the sub-agent does: its walk stops at the
+        caller, which has no row there.
+        """
+        from kiss.agents.sorcar import persistence as th
+        from kiss.server import task_update
+
+        tab = "tab-late-spend"
+        seen, _child = await self._delegate(tab)
+        caller = next(
+            m for m in seen if m["type"] == "task_settings" and m.get("tabId") == tab
+        )
+        parent_id = caller["settings"]["task_id"]
+        with sqlite3.connect(self.remote.home / "history.db") as db:
+            child_id, child_cost = db.execute("SELECT id, cost FROM task_history").fetchone()
+
+        def parent_row() -> tuple[float, int]:
+            row = th._get_db().execute(
+                "SELECT cost, end_ts FROM task_history WHERE id = ?", (parent_id,),
+            ).fetchone()
+            return float(row[0]), int(row[1] or 0)
+
+        for _ in range(80):
+            if parent_row()[1]:
+                break
+            await asyncio.sleep(0.25)
+        folded = parent_row()[0]
+        self.assertGreater(child_cost, 0)
+        self.assertGreaterEqual(folded, child_cost)
+        record = th._get_db().execute(
+            "SELECT task_id, machine, model, cost FROM remote_subtasks WHERE parent_task_id = ?",
+            (parent_id,),
+        ).fetchone()
+        self.assertEqual(tuple(record), (child_id, "box", self.model, pytest.approx(child_cost)))
+        env = dict(os.environ, KISS_HOME=str(self.remote.home))
+        env["PYTHONPATH"] = os.pathsep.join(
+            os.path.abspath(p) for p in env.get("PYTHONPATH", "").split(os.pathsep) if p
+        )
+        await asyncio.to_thread(subprocess.run, [
+            sys.executable, "-c",
+            "import sys; from kiss.agents.sorcar.persistence import _add_late_task_usage; "
+            "assert _add_late_task_usage(sys.argv[1], 25, 0.25, 1)[1] == ''",
+            child_id,
+        ], env=env, check=True)
+
+        async def refresh() -> None:
+            await self._ask({"type": "getHistory"}, "history")
+            for _ in range(80):
+                if not task_update._remote_sync_lock.locked():
+                    return
+                await asyncio.sleep(0.25)
+
+        await refresh()
+        self.assertAlmostEqual(parent_row()[0], folded + 0.25, places=9)
+        await refresh()  # the same totals again: nothing more
+        self.assertAlmostEqual(parent_row()[0], folded + 0.25, places=9)
 
     async def test_a_top_level_api_run_on_a_machine_is_a_published_tab(self) -> None:
         """``daemon_client.run(machine=...)`` from outside a task: a top-level remote tab."""

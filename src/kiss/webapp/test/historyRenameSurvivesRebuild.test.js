@@ -13,7 +13,13 @@
 // Runs with: node test/historyRenameSurvivesRebuild.test.js
 
 const assert = require('assert');
-const {send, ofType, settle: tick} = require('./simplify2_harness');
+const {
+  send,
+  ofType,
+  settle: tick,
+  captureTimers,
+  fireCapturedTimers,
+} = require('./simplify2_harness');
 const {
   sendHistory,
   makeRow,
@@ -125,10 +131,65 @@ async function testSameRowsKeepTheBox() {
   console.log('  ok - a refresh with the same rows keeps the box');
 }
 
+// 2026-11-04 W6 F3: a retyped title shields the header only for a
+// bounded time.  Renamed to A here and to B on another surface before
+// either refetch read the database, no refresh ever carries A: after
+// the bound the overlay expires, by a refresh of its own, and the
+// daemon's title (B, then any later one) shows.
+async function testConcurrentRenameOverlayExpires() {
+  const {win, posted} = makePage();
+  let now = 1_700_000_000_000;
+  win.Date.now = () => now;
+  sendHistory(win, posted, [
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Fix the login bug'}),
+  ]);
+  win.document.querySelector('#history-list .history-chat-rename').click();
+  const input = title(win, 'A').querySelector('input');
+  input.value = 'First surface title';
+  key(win, input, 'Enter');
+  await tick();
+  assert.strictEqual(title(win, 'A').textContent, 'First surface title');
+  // The other surface's rename won: every refresh carries its title.
+  const timers = captureTimers(win);
+  for (let i = 0; i < 2; i++) {
+    send(win, {type: 'tasks_updated'});
+    sendHistory(win, posted, [
+      makeRow({id: 'A', task_id: 1, chat_summary: 'Second surface title'}),
+    ]);
+    await tick();
+  }
+  assert.strictEqual(
+    title(win, 'A').textContent,
+    'First surface title',
+    'the overlay shields the header while the save is on its way',
+  );
+  // Past the bound, the overlay expires and asks for a refresh itself
+  // (the timer it armed fires, its due time having come).
+  const asked = ofType(posted, 'getHistory').length;
+  now += 11000;
+  fireCapturedTimers(win, timers);
+  await tick();
+  assert.ok(ofType(posted, 'getHistory').length > asked, 'the expiry refreshes');
+  sendHistory(win, posted, [
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Second surface title'}),
+  ]);
+  await tick();
+  assert.strictEqual(title(win, 'A').textContent, 'Second surface title');
+  send(win, {type: 'tasks_updated'});
+  sendHistory(win, posted, [
+    makeRow({id: 'A', task_id: 1, chat_summary: 'Later authoritative title'}),
+  ]);
+  await tick();
+  assert.strictEqual(title(win, 'A').textContent, 'Later authoritative title');
+  win.close();
+  console.log('  ok - a concurrent rename overlay expires');
+}
+
 async function main() {
   await testRenameBoxSurvivesChangedRows();
   await testEscapeLandsTheParkedPage();
   await testSameRowsKeepTheBox();
+  await testConcurrentRenameOverlayExpires();
   console.log('historyRenameSurvivesRebuild: all passed');
 }
 

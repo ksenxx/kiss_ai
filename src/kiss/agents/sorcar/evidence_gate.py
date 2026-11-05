@@ -3,25 +3,15 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Evidence gate: a ``finish(success=True)`` must be backed by a check, not a claim.
+"""What a shell command changes: the file-change reader of the coding gate.
 
-An unattended agent claims success far more often than a check agrees:
-its own summary says "educated guess, no answer key" and then calls
-``finish(success=True)``, and a refused finish is usually re-issued at
-once with nothing checked in between.  The gate refuses such a finish
-once, with the concrete reason, so the model spends one more round on
-evidence instead of on a claim.  A second ``finish`` always passes: the
-agent is never trapped.
-
-Two reasons are mechanical enough to check from the tool calls alone:
-
-* the summary hedges (:data:`HEDGE_PHRASES`): it says the result was
-  guessed, untested or unverified while ``success=True`` says it was;
-* a file was changed (``Edit``, ``Write`` or a shell command that changes
-  files, :func:`file_changes`) and no shell command ran after the last
-  change, so whatever was verified was verified before the final edit.
-
-What a shell command changes is read from its simple commands
+The coding gate (:mod:`kiss.agents.sorcar.coding_gate`) and the
+containerised coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`) need
+to know when the agent's work changed: to arm the gate on a code file a
+shell command wrote, to count the changes between the agent's own passing
+run of its verifier and a finish (that run is reused when nothing changed),
+and to re-review only after a change.  What a shell command changes is
+read from its simple commands
 (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`), the way the
 shell reads them: a program such as ``rm`` or ``cp`` counts in command
 position only (``cat install.sh`` and ``git commit -m "rm stale"`` run
@@ -29,10 +19,11 @@ nothing of the kind), a here-document is input to the program that
 reads it, and a file under a ``tmp`` directory is the run's scratch
 (a saved probe output, a copied log), not a change of the work.
 
-The interactive Sorcar agent (:meth:`SorcarAgent._guard_tool_call`) applies
-the first reason to every run with the edit tools; the containerised coding
-SEA applies both (``track_changes=True``), since an unattended trial has no
-one else to notice an unchecked final edit.
+The module once also refused a ``finish`` whose summary hedged or that
+followed an edit no command checked.  Those refusals were answered by a
+rewording of the summary far more often than by a check, and the
+measurement of 2026-11-04 found no pass that depended on them, so the
+gate no longer refuses on the summary's wording.
 """
 
 from __future__ import annotations
@@ -44,37 +35,6 @@ import re
 from typing import Any
 
 from kiss.agents.sorcar.shell_scan import UV_VALUED_OPTIONS, SimpleCommand, Word, simple_commands
-
-#: Phrases that deny verification; a summary containing one contradicts ``success=True``.
-HEDGE_PHRASES: tuple[str, ...] = (
-    "educated guess", "my guess", "best guess", "guessed", "guesswork",
-    "unverified", "could not verify", "couldn't verify", "did not verify",
-    "didn't verify", "unable to verify", "cannot verify", "can't verify",
-    "untested", "not tested", "did not test", "didn't test", "could not test", "couldn't test",
-    "unable to test", "cannot confirm", "can't confirm", "could not confirm", "not confirmed",
-    "unable to confirm", "should work", "probably works", "likely works", "no answer key",
-    "no reference output", "no reference solution", "no ground truth",
-    # A reading of the task left open at the end: a summary that conditions the
-    # result on an unseen checker names the requirement it did not settle.
-    "if the grader", "if the hidden test", "if the checker", "judgement call",
-    "judgment call", "could cost points", "may cost points", "might cost points",
-    "if instead the task", "if the task instead", "if they instead", "open question",
-    "left open", "remains ambiguous", "still ambiguous",
-)
-
-#: What a summary cites rather than says, left out of the hedge search: code
-#: (``<code>``, ``<pre>``, ``<kbd>``, ``<samp>`` elements and backtick spans)
-#: and quoted text (straight, HTML-escaped or curly quotes; a single-quoted
-#: string opens after a blank or a bracket, so an apostrophe does not).  A
-#: UI label ("Not Verified"), a command, or the gate's own wording quoted
-#: back is not the agent's claim about its work.
-_CITED = re.compile(
-    r"<(code|pre|kbd|samp)\b[^>]*>.*?</\1\s*>"
-    r"|`[^`\n]*`"
-    r'|"[^"\n]*"|&quot;.*?&quot;|“[^”\n]*”|‘[^’\n]*’'
-    r"|(?<![\w'])'[^'\n]*'(?!\w)",
-    re.IGNORECASE | re.DOTALL,
-)
 
 #: Programs that change the files their operands name, with the operands
 #: they change: ``last`` (the destination of a copy), ``all`` (every path
@@ -105,9 +65,9 @@ BUILD_TOOLS = frozenset({"make", "cmake", "ninja"})
 _CHECK_TARGET = re.compile(r"(?:test|check)\b")
 #: The option that fixes files in place (``ruff check --fix``, ``check --full --fix``).
 _FIX_OPTION = re.compile(r"--fix\b")
-#: The shells whose ``-c`` (``-lc``, ``-ec``) argument is shell text.
+#: The shells whose ``-c`` (``-lc``, ``-ec``, ``-ce``) argument is shell text.
 SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
-_COMMAND_OPTION = re.compile(r"-\w*c")
+_COMMAND_OPTION = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")
 #: ``find``'s actions that run a command on each file found.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: A path under a ``tmp`` directory: the scratch directory of the run (``tmp/x``,
@@ -148,39 +108,6 @@ _OUTER_TOOLS = frozenset(tool for tool, _ in _LAUNCHERS | frozenset(_NESTED_TOOL
 EDIT_TOOLS = frozenset({"Edit", "Write"})
 #: Tool names that run shell commands.
 SHELL_TOOLS = frozenset({"Bash", "run_commands_parallel"})
-#: The ``bash_job`` action that reads a background command's outcome.
-JOB_WAIT = "wait"
-
-#: The refusal; ``{reasons}`` is the numbered list of what is missing.
-EVIDENCE_VERDICT = (
-    "Not finished: finish(success=True) claims every requirement is met and verified, "
-    "but:\n{reasons}\n"
-    "Fix this, then call finish again: verify each requirement with a command run now, "
-    "from a fresh shell, and put in summary_in_html a checklist of the requirements with "
-    "the command that checked each and its result. If something cannot be verified, "
-    "finish with success=False and say exactly what is unverified."
-)
-HEDGE_REASON = (
-    "the summary itself says the result is unverified ({phrases}); a guess is not a "
-    "verified result"
-)
-UNCHECKED_REASON = (
-    "files were changed after the last shell command, so nothing that was verified "
-    "covers the final state of the work"
-)
-
-
-def hedges_in(text: str) -> list[str]:
-    """The :data:`HEDGE_PHRASES` found in *text* (case-insensitive), in catalogue order.
-
-    Code and quoted text (:data:`_CITED`) are not searched: a summary
-    that quotes a label or a command does not thereby hedge.
-
-    Args:
-        text: The summary to search.
-    """
-    lowered = _CITED.sub(" ", text).lower()
-    return [phrase for phrase in HEDGE_PHRASES if phrase in lowered]
 
 
 def is_scratch_path(path: str) -> bool:
@@ -487,71 +414,3 @@ def writes_files(args: dict[str, Any]) -> bool:
         args: The tool call's arguments (``command`` or a JSON list ``commands``).
     """
     return bool(file_changes(args))
-
-
-class EvidenceGate:
-    """Tracks whether a check followed the last change; refuses one unsupported finish.
-
-    Call :meth:`observe` for every tool call that runs and :meth:`verdict` for
-    every ``finish``; the first ``finish(success=True)`` whose summary hedges or
-    that follows an unchecked change is refused with the reason, later ones pass.
-    """
-
-    def __init__(self, track_changes: bool = False) -> None:
-        """Create a gate.
-
-        Args:
-            track_changes: Also refuse a finish that follows a file change no
-                shell command checked (:data:`UNCHECKED_REASON`).
-        """
-        self.track_changes = track_changes
-        self.used = False
-        #: A file changed and no shell command ran since.
-        self.unchecked_change = False
-
-    def observe(self, name: str, args: dict[str, Any]) -> None:
-        """Record a tool call that is about to run.
-
-        Args:
-            name: The tool name.
-            args: Its arguments.
-        """
-        if name in EDIT_TOOLS:
-            self.unchecked_change = True
-        elif name in SHELL_TOOLS:
-            self.unchecked_change = writes_files(args)
-        elif name == "bash_job" and str(args.get("action", "tail")).strip().lower() == JOB_WAIT:
-            # The outcome of a background check (a test suite, a build) is
-            # read here, as a foreground shell command's would be.
-            self.unchecked_change = False
-
-    def reasons(self, args: dict[str, Any]) -> list[str]:
-        """The reasons a ``finish`` with *args* is unsupported (empty when it is not).
-
-        Args:
-            args: The ``finish`` call's arguments.
-        """
-        if str(args.get("success")).lower() != "true":
-            return []
-        found = hedges_in(str(args.get("summary_in_html", "")))
-        reasons = []
-        if found:
-            reasons.append(HEDGE_REASON.format(phrases=", ".join(f'"{p}"' for p in found)))
-        if self.track_changes and self.unchecked_change:
-            reasons.append(UNCHECKED_REASON)
-        return reasons
-
-    def verdict(self, args: dict[str, Any]) -> str | None:
-        """The refusal text for a ``finish`` call, or ``None`` to let it through.
-
-        Args:
-            args: The ``finish`` call's arguments.
-        """
-        if self.used:
-            return None
-        reasons = self.reasons(args)
-        if not reasons:
-            return None
-        self.used = True
-        numbered = "\n".join(f"{i}. {reason}" for i, reason in enumerate(reasons, 1))
-        return EVIDENCE_VERDICT.format(reasons=numbered)

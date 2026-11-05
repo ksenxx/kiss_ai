@@ -232,6 +232,32 @@ class TestFreshInterpreterCatalogSelection:
         assert "broken/model" not in names
         assert "claude-fable-5" in names
 
+    def test_valid_my_models_override_rescues_a_schema_invalid_catalog_entry(
+        self, tmp_path: Path
+    ) -> None:
+        # A MY_MODELS.json entry replaces the selected catalog's entry of
+        # the same name, so a broken catalog value under that name (here
+        # a list, not a table) must neither abort the import nor force
+        # the fallback: the rest of the selected catalog stays in use.
+        fields = {"context_length": 1000, "input_price_per_1M": 1.0, "output_price_per_1M": 2.0}
+        invalid = tmp_path / "schema-invalid.json"
+        invalid.write_text(
+            json.dumps({"custom/only-model": fields, "gpt-5.6-sol-xhigh": [1]}),
+            encoding="utf-8",
+        )
+        kiss_home = tmp_path / "kiss-home"
+        kiss_home.mkdir()
+        (kiss_home / "MY_MODELS.json").write_text(
+            json.dumps({"gpt-5.6-sol-xhigh": {**fields, "endpoint": "http://127.0.0.1:1/v1"}}),
+            encoding="utf-8",
+        )
+        names = _fresh_interpreter_model_names(
+            {"KISS_MODEL_INFO_PATH": str(invalid), "KISS_HOME": str(kiss_home)},
+            home=tmp_path,
+        )
+        assert {"custom/only-model", "gpt-5.6-sol-xhigh"} <= names
+        assert "claude-fable-5" not in names
+
     def test_dev_checkout_ignores_a_user_copy_in_kiss_home(
         self, tmp_path: Path
     ) -> None:

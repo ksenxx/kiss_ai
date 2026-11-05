@@ -177,6 +177,64 @@ def test_anthropic_tool_result_includes_image_block(temp_dir):
             assert "<<KISS_BINARY_ATTACHMENT" not in b["text"]
 
 
+def test_anthropic_tool_result_labels_a_webp_named_png_by_its_header(temp_dir):
+    """A ``.png`` holding WebP bytes reaches Anthropic as ``image/webp``.
+
+    Terminal-Bench's layout-config-recreation tasks ship such files; the
+    API rejects a block whose ``media_type`` contradicts the bytes.
+    """
+    from kiss.core.models.anthropic_model import AnthropicModel
+
+    webp = b"RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00\x2f\x00\x00\x00\x00\x07\xd0\xff\xfe\x07"
+    path = temp_dir / "component_0.png"
+    path.write_bytes(webp)
+    read_output = UsefulTools().Read(str(path))
+    assert "as image/png" in read_output  # the label the extension gives
+
+    plain, attachments = parse_binary_attachments(read_output)
+    assert [a.mime_type for a in attachments] == ["image/webp"]
+    assert attachments[0].data == webp
+
+    model = AnthropicModel("claude-sonnet-4-5", api_key="sk-test")
+    model.conversation = [
+        {"role": "user", "content": "read it"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_webp",
+                    "name": "Read",
+                    "input": {"file_path": str(path)},
+                }
+            ],
+        },
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+    image_block = next(
+        b for b in model.conversation[-1]["content"][0]["content"] if b["type"] == "image"
+    )
+    assert image_block["source"]["media_type"] == "image/webp"
+    assert base64.b64decode(image_block["source"]["data"]) == webp
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01", "image/jpeg"),
+        (b"GIF89a\x01\x00\x01\x00\x80\x00\x00", "image/gif"),
+    ],
+)
+def test_read_labels_a_misnamed_image_by_its_header(temp_dir, header, expected):
+    """A JPEG or GIF saved under a ``.png`` name is attached with its real type."""
+    path = temp_dir / "misnamed.png"
+    path.write_bytes(header)
+    _, attachments = parse_binary_attachments(UsefulTools().Read(str(path)))
+    assert [a.mime_type for a in attachments] == [expected]
+
+
 def test_anthropic_tool_result_pdf_becomes_document_block(temp_dir):
     """PDFs flow through as ``document`` blocks, not ``image`` blocks."""
     from kiss.core.models.anthropic_model import AnthropicModel

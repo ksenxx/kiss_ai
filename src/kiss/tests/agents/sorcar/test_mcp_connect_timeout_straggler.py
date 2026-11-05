@@ -29,6 +29,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -36,6 +37,7 @@ import pytest
 
 from kiss.agents.sorcar import mcp_servers
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
+from kiss.core import tool_interrupt
 from kiss.core.processes import pid_alive as _pid_alive
 
 
@@ -106,6 +108,67 @@ def test_connect_timeout_straggler_killed_on_shutdown(
             "silent MCP child survived manager.shutdown() — the "
             "timed-out connection's task leaked out of disconnect_all"
         )
+    finally:
+        manager.shutdown()
+        if child_pid and _pid_alive(child_pid):
+            _force_kill(child_pid)
+
+
+def _connect_recording(
+    manager: MCPManager, config: MCPServerConfig, errors: list[BaseException],
+) -> None:
+    """Thread body: ``connect`` and record what it raised."""
+    try:
+        manager.connect(config)
+    except BaseException as exc:  # noqa: BLE001 — the thread records any outcome
+        errors.append(exc)
+
+
+@pytest.mark.slow
+def test_stopped_connect_waiter_leaves_the_handshake_its_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent child whose connect() waiter was stopped still dies at the deadline.
+
+    CONNECT_TIMEOUT was enforced by the waiting ``connect()`` alone: a
+    Stop injected into that thread took the only deadline with it, and
+    the silent child sat in the pool for ever, unready and so never
+    evicted, its task never cancelled.  The handshake now carries its
+    own deadline on the manager loop.
+    """
+    monkeypatch.setattr(mcp_servers, "CONNECT_TIMEOUT", 1.0)
+    pidfile = tmp_path / "child.pid"
+    config = _spawn_silent_config(pidfile, "silent-stopped-waiter")
+    manager = MCPManager(max_connections=1)
+    child_pid = 0
+    errors: list[BaseException] = []
+    try:
+        waiter = threading.Thread(target=_connect_recording, args=(manager, config, errors))
+        waiter.start()
+        child_pid = _read_child_pid(pidfile)
+        assert waiter.ident is not None
+        tool_interrupt.inject_async_exception(waiter.ident, KeyboardInterrupt)
+        waiter.join(10)
+        assert not waiter.is_alive() and isinstance(errors[0], KeyboardInterrupt), errors
+        grace = mcp_servers._CONNECT_STRAGGLER_GRACE_S
+        assert _wait_pid_dead(child_pid, 1.0 + grace + 15.0), (
+            "silent MCP child survived its stopped connect() waiter — the "
+            "handshake had no deadline of its own"
+        )
+        conn = manager._connections[mcp_servers._connection_key(config)]
+        assert conn.finished.wait(10) and conn.error and conn.session is None
+        # The failed record is evictable again: a healthy connection takes
+        # its place under the pool cap instead of joining it above the cap.
+        # A real server's start (importing FastMCP) can take well over the
+        # 1 s used for the silent one on a loaded machine.
+        monkeypatch.setattr(mcp_servers, "CONNECT_TIMEOUT", 60.0)
+        healthy = MCPServerConfig(
+            name="healthy", transport="stdio", command=sys.executable,
+            args=("-c", "from mcp.server.fastmcp import FastMCP; FastMCP('healthy').run()"),
+        )
+        good = manager.connect(healthy)
+        assert good.session is not None, good.error
+        assert list(manager._connections.values()) == [good]
     finally:
         manager.shutdown()
         if child_pid and _pid_alive(child_pid):

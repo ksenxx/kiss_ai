@@ -482,7 +482,10 @@ def _git_common_dir(repo: Path) -> Path | None:
     result = _git("rev-parse", "--git-common-dir", cwd=repo)
     if result.returncode != 0:  # pragma: no cover — not a git repo
         return None
-    git_common = Path(result.stdout.strip())
+    # Only git's record terminator goes: ``strip()`` would turn a separate
+    # git dir named ``metadata `` (``git init --separate-git-dir``) into
+    # its neighbour ``metadata``.
+    git_common = Path(result.stdout.removesuffix("\n"))
     if not git_common.is_absolute():  # pragma: no branch
         git_common = (repo / git_common).resolve()
     return git_common
@@ -514,7 +517,8 @@ def _git(
     kernel's single-argument limit; ``ValueError`` for a NUL byte in
     an argument) is likewise returned as a failed ``CompletedProcess``
     (returncode 1) instead of raising.  Output is decoded by
-    :func:`_git_text`: the paths of a ``-z`` command byte for byte.
+    :func:`_git_text`: the paths of a ``-z`` or ``rev-parse`` command
+    byte for byte.
 
     An exception raised while waiting (the runner's Stop delivers
     ``KeyboardInterrupt`` to the task thread at any bytecode) stops git
@@ -538,7 +542,7 @@ def _git(
     cmd, full_env = _git_command(args, cwd)
     if env:
         full_env.update(env)
-    nul_separated = "-z" in args
+    verbatim = "-z" in args or args[:1] == ("rev-parse",)
     # Before git starts: text that cannot be encoded (a lone surrogate)
     # or a Stop landing here must not leave git waiting for its stdin.
     given = None if input is None else input.encode("utf-8", "surrogateescape")
@@ -556,7 +560,7 @@ def _git(
     try:
         out, err = proc.communicate(input=given, timeout=_GIT_TIMEOUT_SECONDS)
         return subprocess.CompletedProcess(
-            cmd, proc.returncode, _git_text(out, nul_separated), _git_text(err, nul_separated),
+            cmd, proc.returncode, _git_text(out, verbatim), _git_text(err, verbatim),
         )
     except subprocess.TimeoutExpired:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
@@ -572,8 +576,8 @@ def _git(
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=124,
-            stdout=_git_text(out, nul_separated),
-            stderr=_git_text(err, nul_separated)
+            stdout=_git_text(out, verbatim),
+            stderr=_git_text(err, verbatim)
             or f"git {args[0] if args else ''} timed out"
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
@@ -586,16 +590,18 @@ def _git(
         raise
 
 
-def _git_text(data: bytes, nul_separated: bool) -> str:
+def _git_text(data: bytes, verbatim: bool) -> str:
     """Return git output *data* as text: UTF-8, other bytes as surrogate escapes.
 
     Line ends are translated as text mode would (``\\r\\n`` and ``\\r`` to
-    ``\\n``), except in the output of a *nul_separated* (``-z``)
-    command: it lists paths verbatim, and a carriage return in one is
-    part of the name (translated, ``a\\rb.txt`` would name ``a\\nb.txt``).
+    ``\\n``), except in *verbatim* output: that of a ``-z`` command,
+    which lists paths NUL-terminated, and of ``rev-parse``, whose
+    ``--show-toplevel`` / ``--git-common-dir`` print a path followed by
+    one newline.  A carriage return in such a path is part of the name
+    (translated, ``a\\rb`` would name the neighbour ``a\\nb``).
     """
     text = data.decode("utf-8", "surrogateescape")
-    return text if nul_separated else text.replace("\r\n", "\n").replace("\r", "\n")
+    return text if verbatim else text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _git_stdout_head(
@@ -1344,9 +1350,11 @@ class GitWorktreeOps:
         Returns:
             ``(True, "")`` on success, ``(False, stderr)`` on failure.
             The stderr string describes why the checkout failed (e.g.
-            dirty working tree, missing branch).
+            dirty working tree, missing branch, an ignored file where
+            *branch* tracks one: ``--no-overwrite-ignore`` keeps git
+            from silently replacing it).
         """
-        result = _git("checkout", branch, cwd=repo)
+        result = _git("checkout", "--no-overwrite-ignore", branch, cwd=repo)
         if result.returncode == 0:
             return (True, "")
         return (False, result.stderr.strip())
@@ -1576,6 +1584,8 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
         """
+        if GitWorktreeOps._refused_for_ignored_files(repo, branch, None):
+            return MergeResult.CONFLICT
         before = GitWorktreeOps.status_porcelain(repo)
         try:
             result = _git("merge", "--squash", branch, cwd=repo)
@@ -2821,6 +2831,92 @@ class GitWorktreeOps:
         return sha if result.returncode == 0 and sha else None
 
     @staticmethod
+    def ignored_collisions(repo: Path, branch: str, baseline: str | None) -> list[str]:
+        """Return the paths merging *branch* into HEAD would write over ignored files.
+
+        The dirty-tree check and ``stash --include-untracked`` that
+        precede a merge leave ignored files where they are, and both
+        ``merge --squash`` and ``cherry-pick`` silently overwrite an
+        ignored file at a path the branch starts tracking (or delete an
+        ignored directory in the way of an incoming file, or an ignored
+        file in the way of an incoming directory): a user's
+        never-committed ``.env`` was replaced by the example one a task
+        added, with no stash or git object to recover it from.  The
+        main tree is clean when a merge runs, so whatever is on disk at
+        a path HEAD does not track is ignored (an untracked file would
+        have been stashed); git refuses to overwrite an untracked one
+        anyway, so refusing up front loses nothing either way.  What is
+        in the way is what git does not track at or under the path
+        (``ls-files --others``): a tracked file the branch replaces with
+        a directory, or a directory of tracked files it replaces with a
+        file, is git's to merge.  A rename onto the path is the addition
+        it is (``--no-renames``), not the move git would report.
+
+        Args:
+            repo: Git repo root path, checked out on the merge target.
+            branch: The worktree branch to merge.
+            baseline: The worktree's baseline commit SHA (only the
+                branch's changes since it are applied), or ``None``
+                for a legacy worktree (its changes since the merge
+                base).
+
+        Returns:
+            The repository-relative paths the merge would create that
+            something on disk is in the way of; empty when none.
+        """
+        incoming = GitWorktreeOps._diff_name_only(
+            repo, "--no-renames", "--diff-filter=A", "HEAD", branch)
+        applied = set(GitWorktreeOps._diff_name_only(
+            repo, "--no-renames", f"{baseline or 'HEAD'}...{branch}"))
+        # What is on disk where each incoming path, or a leading component
+        # of it that is not a directory, goes.
+        in_the_way: dict[str, str] = {}
+        for path in incoming:
+            if path not in applied:
+                continue
+            parts = path.split("/")
+            for depth in range(1, len(parts) + 1):
+                p = repo.joinpath(*parts[:depth])
+                if os.path.lexists(p) and (
+                    depth == len(parts) or os.path.islink(p) or not p.is_dir()
+                ):
+                    in_the_way[path] = "/".join(parts[:depth])
+                    break
+        if not in_the_way:
+            return []
+        # What git does not track under the top-level directory of each:
+        # a directory it does not look into (a wholly untracked one, a
+        # nested repository) is one entry ending in "/" that covers
+        # whatever of ours lies below it.
+        result = _git(
+            "--literal-pathspecs", "ls-files", "--others", "--directory",
+            "--no-empty-directory", "-z", "--",
+            *sorted({blocker.split("/", 1)[0] for blocker in in_the_way.values()}), cwd=repo,
+        )
+        if result.returncode != 0:
+            return list(in_the_way)
+        others = [f for f in result.stdout.split("\0") if f]
+        return [
+            path for path, blocker in in_the_way.items()
+            if any(
+                f == blocker or f.startswith(blocker + "/")
+                or (f.endswith("/") and blocker.startswith(f))
+                for f in others
+            )
+        ]
+
+    @staticmethod
+    def _refused_for_ignored_files(repo: Path, branch: str, baseline: str | None) -> bool:
+        """Log and tell whether merging *branch* must not run (:meth:`ignored_collisions`)."""
+        collisions = GitWorktreeOps.ignored_collisions(repo, branch, baseline)
+        if collisions:
+            logger.warning(
+                "merge of %s refused: it would overwrite files git ignores in %s: %s "
+                "(move them away, then retry)", branch, repo, ", ".join(collisions),
+            )
+        return bool(collisions)
+
+    @staticmethod
     def _theirs_option(repo: Path, baseline: str) -> list[str]:
         """Return ``["-X", "theirs"]`` when it is safe for a merge from *baseline*.
 
@@ -2886,12 +2982,18 @@ class GitWorktreeOps:
     ) -> MergeResult:
         """Squash-merge only the agent's changes (after baseline) into HEAD.
 
-        Uses ``git cherry-pick --no-commit`` to replay each commit
-        after *baseline* onto the current HEAD.  Cherry-pick performs
-        a proper three-way merge per commit (using the commit's parent
-        as the merge base), so it handles cases where the user's dirty
-        state (captured in the baseline) diverges from the committed
-        HEAD content.
+        Applies the agent's net change (``baseline..branch``) as ONE
+        ``git cherry-pick --no-commit`` of a synthetic commit holding
+        the branch's tree with *baseline* as parent (see
+        :meth:`_squashed_commit`): a three-way merge with *baseline* as
+        the base, so it handles cases where the user's dirty state
+        (captured in the baseline) diverges from the committed HEAD
+        content.  Replaying the branch's commits one by one instead
+        conflicted on an intermediate edit the agent later reverted
+        (when main had changed the same lines meanwhile) and refused a
+        merge commit on the branch outright (``no -m option``), so a
+        clean net change never merged and an orphan with such a
+        history was retried on every reclaim pass.
 
         **The ``-X theirs`` strategy option is added precisely when —
         and only when — ``HEAD == baseline^``** (i.e. main has not
@@ -2901,8 +3003,8 @@ class GitWorktreeOps:
 
         - ``_do_merge`` stashes the user's dirty edits on main before
           this call, so main HEAD == ``baseline^`` (clean).  But the
-          baseline commit captured the user's dirty state — so for the
-          first cherry-picked commit the 3-way merge sees:
+          baseline commit captured the user's dirty state — so the
+          3-way merge sees:
 
               base   = baseline                  (user dirty edits)
               ours   = main HEAD == baseline^    (no dirty edits)
@@ -2955,11 +3057,16 @@ class GitWorktreeOps:
         count = log_result.stdout.strip()
         if count == "0":
             return MergeResult.SUCCESS
+        if GitWorktreeOps._refused_for_ignored_files(repo, branch, baseline):
+            return MergeResult.CONFLICT
+        squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
+        if squashed is None:
+            return MergeResult.CONFLICT
 
         cherry_pick_args = [
             "cherry-pick", "--no-commit",
             *GitWorktreeOps._theirs_option(repo, baseline),
-            f"{baseline}..{branch}",
+            squashed,
         ]
         before = GitWorktreeOps.status_porcelain(repo)
         try:
@@ -3053,6 +3160,33 @@ class GitWorktreeOps:
         _git("reset", "--hard", "HEAD", cwd=repo)
 
     @staticmethod
+    def _squashed_commit(repo: Path, branch: str, baseline: str) -> str | None:
+        """Return a synthetic commit holding *branch*'s tree with *baseline* as parent.
+
+        Cherry-picking it applies the agent's net change
+        (``baseline..branch``) as one three-way merge, whatever the
+        branch's history (see :meth:`squash_merge_from_baseline`).
+        The commit is referenced by nothing and is garbage-collected
+        in due course.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch.
+            baseline: The worktree's baseline commit SHA.
+
+        Returns:
+            The commit's SHA, or ``None`` when ``commit-tree`` failed.
+        """
+        squashed = _git(
+            "commit-tree", f"{branch}^{{tree}}", "-p", baseline,
+            "-m", f"kiss: squashed {branch}", cwd=repo,
+        )
+        if squashed.returncode != 0:
+            logger.warning("commit-tree for %s failed: %s", branch, squashed.stderr.strip())
+            return None
+        return squashed.stdout.strip()
+
+    @staticmethod
     def begin_conflicted_merge(
         repo: Path, branch: str, baseline: str | None, before: str,
     ) -> list[str] | None:
@@ -3084,22 +3218,20 @@ class GitWorktreeOps:
             The repository-relative paths left unmerged (the resolver's
             work list); an empty list when the merge applied cleanly
             and is staged; ``None`` when git failed for a reason other
-            than conflicts, in which case the tree has been restored.
+            than conflicts (or the merge would overwrite ignored files,
+            see :meth:`ignored_collisions`), in which case the tree has
+            been restored.
         """
+        if GitWorktreeOps._refused_for_ignored_files(repo, branch, baseline):
+            return None
         if baseline:
-            squashed = _git(
-                "commit-tree", f"{branch}^{{tree}}", "-p", baseline,
-                "-m", f"kiss: squashed {branch}", cwd=repo,
-            )
-            if squashed.returncode != 0:
-                logger.warning(
-                    "commit-tree for %s failed: %s", branch, squashed.stderr.strip(),
-                )
+            squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
+            if squashed is None:
                 return None
             args = [
                 "cherry-pick", "--no-commit",
                 *GitWorktreeOps._theirs_option(repo, baseline),
-                squashed.stdout.strip(),
+                squashed,
             ]
         else:
             args = ["merge", "--squash", branch]

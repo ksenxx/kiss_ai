@@ -15,6 +15,7 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf, readyTabId} = require('./simplify2_harness');
+const {typeAndEnter: answer} = require('./attachment_helpers');
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 const Q = 'Deploy to staging?';
@@ -27,15 +28,6 @@ function surface() {
   send(win, {type: 'status', running: true, tabId: tab, startTs: Date.now()});
   send(win, {type: 'daemonStatus', connected: true});
   return {win, posted, tab};
-}
-
-/** Type *text* into the composer and press Enter. */
-function answer(win, text) {
-  const inp = win.document.getElementById('task-input');
-  inp.value = text;
-  inp.dispatchEvent(
-    new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
-  );
 }
 
 /** The page's userAnswer frames as plain objects. */

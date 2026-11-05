@@ -22,8 +22,9 @@ their assignments to themselves; a ``cd`` that may not run (after
 ``||``, or in an ``if``, a loop or a ``case``) leaves the directory
 unknown, and a variable set any other way than by a literal
 assignment (``read``, ``unset``, ``declare``, ``let``, a loop variable,
-an arithmetic command, ``eval``, ``source``) is unknown afterwards.
-Other commands are taken to succeed.
+an arithmetic command or expansion, an assignment before a special
+builtin, ``eval``, ``source``) is unknown afterwards.  Other commands
+are taken to succeed.
 
 Nothing is expanded: a word holding a parameter, a command or
 arithmetic substitution, a leading ``~`` or a glob is marked as not
@@ -96,14 +97,19 @@ _DECLARING_BUILTINS = frozenset({"declare", "typeset", "local"})
 _DEFAULT_TARGETS = {"read": "REPLY", "readarray": "MAPFILE", "mapfile": "MAPFILE"}
 #: Builtins that run text as commands: afterwards no variable is known.
 _SOURCING_BUILTINS = frozenset({"eval", "source", "."})
+#: The POSIX special builtins: an assignment before one (``T=x export Y``)
+#: holds afterwards in sh, and not in bash.
+_SPECIAL_BUILTINS = frozenset({"break", ":", "continue", ".", "eval", "exec", "exit", "export",
+                               "readonly", "return", "set", "shift", "times", "trap", "unset"})
 #: An assignment in an arithmetic expression: ``i=0``, ``i+=1``, ``i++``, ``--i``.
 _ARITHMETIC_ASSIGNMENT = re.compile(
     r"(?:\+\+|--)\s*([A-Za-z_]\w*)|([A-Za-z_]\w*)\s*(?:\+\+|--|(?:[-+*/%&|^]|<<|>>)?=(?!=))")
 # What may start at a token boundary: a process substitution, a redirection
-# (with its file-descriptor number) or a control operator.
+# (with its file-descriptor number, or the ``{name}`` bash opens a new
+# descriptor for) or a control operator.
 _TOKEN = re.compile(
     r"(?P<substitution>[<>]\()"
-    r"|(?P<fd>\d*)(?P<redirection><<<|<<-|<<|<>|<&|<|>>|>\||>&|>|&>>|&>)"
+    r"|(?P<fd>\d*|\{[A-Za-z_]\w*\})(?P<redirection><<<|<<-|<<|<>|<&|<|>>|>\||>&|>|&>>|&>)"
     r"|(?P<operator>;;&|;;|;&|&&|\|\||\|&|[;&|\n])"
 )
 _PARAMETER = re.compile(r"\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
@@ -217,13 +223,18 @@ class SimpleCommand:
         group: The group it is in; ``None`` at the top level.
         words: Its words (assignments, wrappers, the command word and
             its arguments), without the redirections.
-        outputs: The files its standard output is redirected to.
+        outputs: The files its standard output is redirected to (those
+            of a ``{name}>file`` or ``11>file`` too: bash truncates the
+            file for the descriptor it opens, sh writes the output to it
+            and reads the ``{name}`` or ``11`` as a word, kept in
+            :attr:`words`).
         redirections: Every redirection of it, in order: ``(descriptor,
             operator, operand)``, the descriptor as written (``""`` for
-            the operator's default), the operand of a here-document its
-            delimiter.  What :attr:`outputs` and :attr:`heredoc` leave
-            out (``< file``, ``2> file``, ``1>&2``) is here, for a guard
-            that must know a command's every redirection.
+            the operator's default, ``{name}`` for one bash opens), the
+            operand of a here-document its delimiter.  What
+            :attr:`outputs` and :attr:`heredoc` leave out (``< file``,
+            ``2> file``, ``1>&2``) is here, for a guard that must know a
+            command's every redirection.
         heredoc: Whether a here-document is its own standard input.
         heredoc_body: The text that here-document hands on, every line
             newline-terminated (the leading tabs of a ``<<-`` body
@@ -333,6 +344,11 @@ def handed_text(body: str, expands: bool) -> str | None:
             parts.append(char)
             position += 1
     return "".join(parts)
+
+
+def _continued(line: str) -> bool:
+    """Return whether *line* ends in an unescaped backslash: the next line continues it."""
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
 
 
 def simple_commands(command: str, cwd: str | None,
@@ -548,8 +564,9 @@ class _Scanner:
         """Skip the ``(...)`` at the position when it is the value of the assignment before it.
 
         ``T=(a b)`` and ``T+=(c)`` make ``T`` an array, whose words this
-        scan does not follow: the assignment's variable becomes unknown.
-        Returns whether the parenthesis was such a value.
+        scan does not follow, but for their substitutions, which run:
+        the assignment's variable becomes unknown.  Returns whether the
+        parenthesis was such a value.
         """
         if not command.words or not command.words[-1].text.endswith("="):
             return False
@@ -558,8 +575,14 @@ class _Scanner:
         text, depth = self.text, 0
         while self.pos < len(text):
             char = text[self.pos]
-            if char in "\"'":
+            if char == "'":
                 self.pos = self.closing(self.pos + 1, char)
+            elif char == '"':
+                self.double_quoted([])
+            elif char in "$`":
+                self.expansion()
+            elif text.startswith(("<(", ">("), self.pos):
+                self.substitution()
             else:
                 depth += {"(": 1, ")": -1}.get(char, 0)
                 self.pos += 2 if char == "\\" else 1
@@ -594,9 +617,6 @@ class _Scanner:
         arithmetic = opener == "(" and self.text.startswith("((", self.pos)
         end = self.arithmetic(self.pos + 2) if arithmetic else 0
         if end:
-            expression = self.text[self.pos + 2:end - 2]
-            for prefixed, assigned in _ARITHMETIC_ASSIGNMENT.findall(expression):
-                self.variables[prefixed or assigned] = None
             group = Group("((", self.cwd, self.group)
             self.pos = end
         elif opener == "(":
@@ -700,7 +720,9 @@ class _Scanner:
         one records the variable's literal value for the words after it
         (:attr:`variables`); a value the shell expands, or an assignment
         after ``||`` or ``&&`` or in a compound command that may not run,
-        makes the variable unknown, as do the builtins that assign the
+        makes the variable unknown, as does one before a special builtin
+        or a wrapper running no command (``T=x export Y``, ``T=x exec
+        >f``: sh keeps it, bash does not), as do the builtins that assign the
         variables their operands name (``read T``, ``unset T``, ``declare
         T=x``, ``printf -v T``...) or, named or not, their default
         (``read`` fills REPLY, ``mapfile`` MAPFILE); after ``eval`` or
@@ -752,7 +774,13 @@ class _Scanner:
                     self.variables[texts[index + 1]] = None
                 elif text.startswith("-v"):
                     self.variables[text[2:]] = None
-        assigned = command.words if not argv else argv[1:] if name == "export" else []
+        prefix = command.words[:len(command.words) - len(argv)]
+        bare = not argv and all(_ASSIGNMENT.match(word.text) for word in prefix)
+        if not bare and (not argv or name in _SPECIAL_BUILTINS):
+            for word in prefix:
+                if (match := _ASSIGNMENT.match(word.text)) is not None:
+                    self.variables[match["name"]] = None
+        assigned = prefix if bare else argv[1:] if name == "export" else []
         for word in assigned:
             match = _ASSIGNMENT.match(word.text)
             if match is None:
@@ -778,11 +806,24 @@ class _Scanner:
         while self.pos < len(self.text) and self.text[self.pos] in " \t":
             self.pos += 1
         start = self.pos
-        if self.text.startswith(("<(", ">("), self.pos):
+        if operator in ("<<", "<<-"):  # the shell expands nothing in a delimiter
+            operand = self.word(expand=False)
+        elif self.text.startswith(("<(", ">("), self.pos):
             operand = self.substitution()
         else:
             operand = self.word()
         node.redirections.append((fd, operator, operand))
+        if len(fd) > 1:
+            # ``11>x`` or ``{name}>x``: bash opens descriptor 11 or a new one,
+            # sh reads a word before an unnumbered redirection.  A guard
+            # must hold under both: the word is kept as an argument (before
+            # the command word, where sh would run it, bash's command word
+            # is the one that must be guarded), the redirection is the
+            # default descriptor's (the stdout replay of a guard merges the
+            # two readings from the descriptor as written).
+            if isinstance(node, SimpleCommand) and node.argv():
+                node.words.append(Word(fd, literal=True))
+            fd = ""
         stdout = fd in ("", "1") and operator in _STDOUT
         duplicate = operator == ">&" and (operand.text.isdigit() or operand.text == "-")
         if operator in ("<<", "<<-"):
@@ -816,7 +857,9 @@ class _Scanner:
         """Scan one line of a here-document body.
 
         A body is text, but the substitutions of an unquoted one
-        (*expands*) run, so their commands are scanned.
+        (*expands*) run, so their commands are scanned; and in such a
+        body a line ending in a backslash is joined with the next before
+        the delimiter is looked for, as the shell does.
 
         Returns:
             Whether the line was the delimiter, and the line (its leading
@@ -827,6 +870,10 @@ class _Scanner:
         newline = text.find("\n", self.pos)
         end = len(text) if newline < 0 else newline
         line = text[self.pos:end]
+        while expands and _continued(line) and end < len(text):
+            newline = text.find("\n", end + 1)
+            line = line[:-1] + text[end + 1:len(text) if newline < 0 else newline]
+            end = len(text) if newline < 0 else newline
         if strip_tabs:
             line = line.lstrip("\t")
         if line == delimiter:
@@ -847,8 +894,14 @@ class _Scanner:
         self.pos += 1
         return False, line.lstrip("\t") if strip_tabs else line
 
-    def word(self) -> Word:
-        """Scan the word at the position: quotes removed, expansions kept as written."""
+    def word(self, expand: bool = True) -> Word:
+        """Scan the word at the position: quotes removed, expansions kept as written.
+
+        *expand*: whether the shell expands the word (:meth:`expanded`);
+        not a here-document delimiter, which gets quote removal only: a
+        ``$`` or a backtick in it is a character of the delimiter, and no
+        substitution in it runs.
+        """
         text, start, literal = self.text, self.pos, True
         parts: list[str] = []
         while self.pos < len(text) and text[self.pos] not in _METACHARACTERS:
@@ -861,9 +914,9 @@ class _Scanner:
                 parts.append(text[self.pos + 1:end - 1])
                 self.pos = end
             elif char == '"':
-                literal = self.double_quoted(parts) and literal
+                literal = self.double_quoted(parts, expand=expand) and literal
             elif char in "$`":
-                literal = self.expanded(parts) and literal
+                literal = (self.expanded(parts) if expand else self.unexpanded(parts)) and literal
             else:
                 glob = char in "*?[" or (char == "~" and self.pos == start)
                 literal = literal and not glob
@@ -871,12 +924,12 @@ class _Scanner:
                 self.pos += 1
         return Word("".join(parts), literal)
 
-    def double_quoted(self, parts: list[str], close: str = '"') -> bool:
+    def double_quoted(self, parts: list[str], close: str = '"', expand: bool = True) -> bool:
         """Scan the ``"..."`` string at the position into *parts*; return whether it is literal.
 
         *close* ends it: the single quote of a ``'...'`` in an operand
         of a ``${...}`` that bash reads by the same rules
-        (:meth:`parameter`).
+        (:meth:`parameter`).  *expand* is :meth:`word`'s.
         """
         text, literal = self.text, True
         self.pos += 1
@@ -887,12 +940,27 @@ class _Scanner:
                 parts.append(escaped.replace("\n", ""))
                 self.pos += 2
             elif char in "$`":
-                literal = self.expanded(parts, True, True) and literal
+                literal = (self.expanded(parts, True, True) if expand
+                           else self.unexpanded(parts)) and literal
             else:
                 parts.append(char)
                 self.pos += 1
         self.pos += 1
         return literal
+
+    def unexpanded(self, parts: list[str]) -> bool:
+        """Skip the expansion at the position into *parts* as written; return ``True``.
+
+        A here-document delimiter gets quote removal only: the ``$(...)``
+        is text of the delimiter, so its commands are not commands of the
+        line and its assignments do not happen.  A throwaway scanner
+        finds its end.
+        """
+        scanner = _Scanner(self.text, self.cwd, self.group, self.depth, self.optimistic)
+        scanner.pos = self.pos
+        parts.append(scanner.expansion())
+        self.pos = scanner.pos
+        return True
 
     def expanded(self, parts: list[str], quoted: bool = False, expands: bool = False) -> bool:
         """Scan the expansion at the position into *parts*; return whether its value is known.
@@ -1024,8 +1092,9 @@ class _Scanner:
         the text is scanned again as commands.  The expression is no
         shell syntax (``<<`` is a shift), but bash runs the command
         substitutions in it, so their commands are scanned, and kept
-        once the expression closes.  Quotes are skipped whole, as bash
-        does when it looks for the end.
+        once the expression closes; the variables it assigns (``T=1``,
+        ``i++``) are unknown afterwards.  Quotes are skipped whole, as
+        bash does when it looks for the end.
         """
         if pos in self.not_arithmetic:
             return 0
@@ -1039,6 +1108,8 @@ class _Scanner:
                     break
                 self.commands.extend(scanner.commands)
                 self.heredocs.extend(scanner.heredocs)
+                for prefixed, assigned in _ARITHMETIC_ASSIGNMENT.findall(text[pos:scanner.pos]):
+                    self.variables[prefixed or assigned] = None
                 return scanner.pos + 2
             if char in "$`":
                 scanner.expansion()

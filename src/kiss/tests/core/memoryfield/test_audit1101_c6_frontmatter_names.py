@@ -43,6 +43,27 @@ def test_invalid_yaml_timestamp_page_does_not_disable_search(tmp_path: Path) -> 
     assert "A malformed frontmatter date." in tools.memory_read("bad")
 
 
+UNENCODABLE_METADATA = (  # valid YAML whose Python form JSON cannot encode
+    ("---\ntitle: Imported note\ncounts:\n  2026-11-01: 3\n---\nA nested date key.\n", "counts"),
+    ("---\ntitle: Imported note\na: &node\n  self: *node\n---\nAn alias cycle.\n", "a"),
+)
+
+
+@pytest.mark.parametrize(("text", "key"), UNENCODABLE_METADATA)
+def test_imported_metadata_json_cannot_encode_does_not_disable_search(
+    tmp_path: Path, text: str, key: str
+) -> None:
+    """A hand-edited page's odd metadata value is stored as text, not a sync failure."""
+    tools = MemoryTools(tmp_path / "memory", embed=hashed_embedding)
+    tools.memory_write("good", "Postgres database listens on port 6433.")
+    (tools.memory.root / "imported.md").write_text(text, encoding="utf-8", newline="")
+    hits = tools.memory_search("Postgres database", memory="general")
+    assert "good" in hits and not hits.startswith("Error:")
+    assert "imported  —  Imported note" in tools.memory_list()
+    assert tools.memory_read("imported") == text
+    assert isinstance(tools.index.frontmatters()["imported"][key], str)
+
+
 def test_unquoted_yaml_timestamp_counts_as_stale(tmp_path: Path) -> None:
     tools = MemoryTools(tmp_path / "memory", embed=hashed_embedding)
     tools.memory.root.mkdir()

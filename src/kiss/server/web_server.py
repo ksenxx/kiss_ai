@@ -643,15 +643,21 @@ def _share_subagent_entries(
     while frontier:
         next_frontier: list[str] = []
         for parent_id in frontier:
-            for row in _load_subagent_rows_by_parent_task_id(parent_id):
+            # Metadata only: each child's transcript is read when its
+            # turn comes (below), so the budget check can stop the walk
+            # before the siblings' transcripts are ever read.
+            for row in _load_subagent_rows_by_parent_task_id(parent_id, with_events=False):
                 sub_id = str(row.get("task_id") or "")
                 if not sub_id or sub_id in seen:
                     continue
                 seen.add(sub_id)
                 next_frontier.append(sub_id)
-                events = peek(sub_id) or cast(
-                    "list[dict[str, Any]]", row.get("events") or [],
-                )
+                events = peek(sub_id)
+                if not events:
+                    persisted = _load_chat_events_by_task_id(sub_id)
+                    events = cast(
+                        "list[dict[str, Any]]", (persisted or {}).get("events") or [],
+                    )
                 entry = {
                     "task": row.get("task", ""),
                     "task_id": sub_id,
@@ -840,6 +846,38 @@ def _forwarded_client_ip(websocket: ServerConnection) -> str:
         return cf_ip
     xff = str(headers.get("X-Forwarded-For") or "")
     return xff.split(",")[0].strip()
+
+
+def _basic_auth_password(request: Request) -> str:
+    """Return the password of *request*'s ``Authorization: Basic`` header, ``""`` when none.
+
+    The user name before the colon is ignored: the daemon has one
+    password, not accounts.  An unreadable credential reads as no
+    password.
+    """
+    scheme, _, credential = str(request.headers.get("Authorization") or "").partition(" ")
+    if scheme.lower() != "basic":
+        return ""
+    try:
+        decoded = base64.b64decode(credential.strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return decoded.partition(":")[2]
+
+
+def _no_password_refusal() -> Response:
+    """The 403 page for a peer that is not local while no remote password is set."""
+    return _error_page(
+        403,
+        "This device is not allowed yet",
+        f"Remote access to this {PRODUCT_NAME} server is turned "
+        f"off. On the computer running {PRODUCT_NAME}, set a "
+        "remote password in Settings (or run install.sh); "
+        "then come back to this page.",
+        "Only localhost may connect while no remote password "
+        f"is set (remote_password in ~/{HOME_DIR}/config.json); "
+        "set one in Settings on that computer or run install.sh.",
+    )
 
 
 _HEAD_200 = (
@@ -2274,6 +2312,11 @@ def _remove_url_file(url_file: Path) -> None:
         url_file.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _url_file_lock_path(url_file: Path) -> Path:
+    """The lock file serialising publication and removal of *url_file* across daemons."""
+    return url_file.with_name(f".{url_file.name}.lock")
 
 
 def _read_url_from_file(url_file: Path) -> str | None:
@@ -4545,6 +4588,7 @@ def _page_subs(version: str) -> dict[str, str]:
             "voskSrc": _media_url("vosk.js"),
             "modelUrl": "/voice-model.tar.gz",
             "ackAudioUrl": _media_url("working-on-it.mp3"),
+            "victoryAudioUrl": _media_url("victory.mp3"),
         }),
     }
     return subs
@@ -5184,11 +5228,17 @@ class RemoteAccessServer:
         # Stamp of the latest ``remote_url`` publication; see
         # :meth:`_broadcast_remote_url`.
         self._url_publish_gen = 0
+        # Same for the ``update_available`` state (see
+        # :meth:`_broadcast_update_available`).
+        self._update_publish_gen = 0
         # The watchdog's in-flight LAN-URL republish (see
         # :meth:`_republish_urls`); tracked so shutdown can cancel it.
         self._republish_task: asyncio.Task[None] | None = None
         # Serialises the URL-file writers; see :meth:`_write_url_file_sync`.
         self._url_file_lock = threading.Lock()
+        # Stamp of the URL file as this server last wrote it (``None``:
+        # never); the ownership witness of :meth:`_remove_own_url_file`.
+        self._url_file_stamp: tuple[int, int, int] | None = None
         self._last_ips: frozenset[str] = frozenset()
         # PEM of the auto-generated server certificate the live SSL
         # context is serving; see :meth:`_refresh_tls_cert`.
@@ -5277,17 +5327,7 @@ class RemoteAccessServer:
                 "Refusing non-localhost request from %s: "
                 "no remote password is set", addr,
             )
-            return _error_page(
-                403,
-                "This device is not allowed yet",
-                f"Remote access to this {PRODUCT_NAME} server is turned "
-                f"off. On the computer running {PRODUCT_NAME}, set a "
-                "remote password in Settings (or run install.sh); "
-                "then come back to this page.",
-                "Only localhost may connect while no remote password "
-                f"is set (remote_password in ~/{HOME_DIR}/config.json); "
-                "set one in Settings on that computer or run install.sh.",
-            )
+            return _no_password_refusal()
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
         if path in ("", "/"):
@@ -5326,13 +5366,13 @@ class RemoteAccessServer:
                 await asyncio.to_thread(TRAJECTORY_TEMPLATE.read_bytes),
             )
         if path == "/api/jobs":
-            return _http_response(
+            return await self._trajectory_refusal(connection, request) or _http_response(
                 *await asyncio.to_thread(sorcar_api.ServerApi.trajectory_jobs),
             )
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             # The job name (already URL-decoded with the whole path)
             # is checked and the payload built by the server API.
-            return _http_response(
+            return await self._trajectory_refusal(connection, request) or _http_response(
                 *await asyncio.to_thread(sorcar_api.ServerApi.job_trajectories, path),
             )
         if path == standalone_app.APP_WINDOW_API:
@@ -5479,6 +5519,66 @@ class RemoteAccessServer:
             True when the TCP peer is an IPv4/IPv6 loopback address.
         """
         return _connection_peer_is_loopback(connection)
+
+    async def _trajectory_refusal(
+        self, connection: ServerConnection, request: Request,
+    ) -> Response | None:
+        """Return the refusal of a trajectory data request, ``None`` when it may be served.
+
+        ``/api/jobs`` and ``/api/jobs/<job>/trajectories`` hand out the
+        saved trajectories of every job (prompts, assistant messages,
+        tool exchanges) to the ``/trajectories`` page.  The
+        no-password lockdown of :meth:`_process_request` admits every
+        loopback peer, which a visitor relayed by the cloudflared
+        tunnel is, so these two routes authenticate the requester the
+        way :meth:`ServerApi.authenticate` does a WebSocket client: a
+        direct loopback peer (no forwarded client IP: a browser or
+        program on this machine) and a machine link enrolled with its
+        CA are served as they are; everybody else must send the
+        configured ``remote_password`` as the password of an HTTP
+        ``Authorization: Basic`` credential (401 with a
+        ``WWW-Authenticate`` challenge otherwise, which a browser on
+        the trajectory page answers with its password prompt), and
+        nobody is served while no password is set (403).  A wrong
+        non-empty password counts toward the per-IP lockout shared
+        with the handshake (429 while it holds); a credential-less
+        request, every page's first fetch, does not.
+
+        Args:
+            connection: The connection the request arrived on.
+            request: The HTTP request.
+
+        Returns:
+            The refusal response, or ``None`` for an admitted requester.
+        """
+        ip = self._client_ip(connection)
+        if _connection_peer_is_loopback(connection) and sorcar_api.is_loopback_ip(ip):
+            return None
+        if await self._peer_client_ca(connection):
+            return None
+        lock_remaining = self._auth_lock_remaining(ip)
+        if lock_remaining > 0.0:
+            return _http_response(
+                429, "application/json; charset=utf-8",
+                b'{"error": "Too many failed logins; try again later"}',
+                [("Retry-After", str(int(lock_remaining) + 1))],
+            )
+        stored_password = self._stored_remote_password()
+        if not stored_password:
+            logger.warning(
+                "Refusing trajectory request from %s: no remote password is set", ip,
+            )
+            return _no_password_refusal()
+        client_pw = _basic_auth_password(request)
+        if password_accepted(client_pw, stored_password):
+            return None
+        if client_pw:
+            self._record_auth_failure(ip)
+        return _http_response(
+            401, "application/json; charset=utf-8",
+            b'{"error": "The remote password is required"}',
+            [("WWW-Authenticate", f'Basic realm="{PRODUCT_NAME}", charset="UTF-8"')],
+        )
 
     def _client_ip(self, websocket: ServerConnection) -> str:
         """Return the rate-limit bucket key (source IP) of *websocket*.
@@ -7977,12 +8077,50 @@ class RemoteAccessServer:
         newer publication's write and leave a dead tunnel URL on disk.
         Serialising the read with the write means the last write always
         reflects the newest state.
+
+        Nothing is written once :meth:`stop_async` has begun (checked
+        under the same lock): a republish still queued in the executor
+        when the shutdown removed the file would otherwise recreate
+        it, advertising the closed listener.  The write also holds the
+        URL file's cross-process lock and records the file's stamp,
+        the ownership witness :meth:`_remove_own_url_file` checks: a
+        successor daemon that publishes its own file meanwhile must
+        keep it.
         """
         with self._url_file_lock:
-            _save_url_file(
-                self._url_file, self._local_url, self._current_tunnel_url(),
-                self._loopback_url, self._lan_urls(), self._serves_local_ca,
-            )
+            if self._shutdown_initiated:
+                return
+            with exclusive_file_lock(_url_file_lock_path(self._url_file), timeout=5.0):
+                _save_url_file(
+                    self._url_file, self._local_url, self._current_tunnel_url(),
+                    self._loopback_url, self._lan_urls(), self._serves_local_ca,
+                )
+                self._url_file_stamp = _file_stamp(self._url_file)
+
+    def _remove_own_url_file(self) -> None:
+        """Delete the URL file while it is still the one this server last wrote.
+
+        The last step of :meth:`stop_async`, blocking (two lock waits,
+        bounded): under :attr:`_url_file_lock`, so a republish admitted
+        before the shutdown finishes its write first and is removed
+        with the rest, and under the file's cross-process lock, so the
+        stamp check and the unlink cannot interleave with a successor's
+        publication.  A successor binds this server's port as soon as
+        the listener closed, earlier in the shutdown, and publishes
+        its own file; its stamp differs from the recorded one (an
+        atomic replace moves the inode), so that file is left alone —
+        the local endpoint's ``remove_endpoint_if_owned`` applied to
+        the URL file.  A server that never wrote the file removes
+        nothing.
+        """
+        with (
+            self._url_file_lock,
+            exclusive_file_lock(_url_file_lock_path(self._url_file), timeout=5.0),
+        ):
+            if self._url_file_stamp is not None and (
+                _file_stamp(self._url_file) == self._url_file_stamp
+            ):
+                _remove_url_file(self._url_file)
 
     def _write_url_file_logged(self) -> None:
         """Run :meth:`_write_url_file_sync`, logging any failure.
@@ -8111,15 +8249,30 @@ class RemoteAccessServer:
         alone.  No-op until :meth:`_check_for_update` has cached a
         latest version on :attr:`_latest_version`.  ``_read_version``
         scans a directory on disk, so it runs off-thread (M10).
+
+        A publication to every client stamps a fresh
+        :attr:`_update_publish_gen` before its reads, like
+        :meth:`_broadcast_remote_url`, and every publication is dropped
+        when a newer one was stamped while it was reading: a
+        "Remind me later" snooze that completed meanwhile must not be
+        undone by an older read of the cache landing after it.  A
+        connection's own catch-up stamps nothing: it reports the
+        current state, and must not supersede a publication in
+        flight for everybody.
         """
         latest = self._latest_version
         if not latest:
             return
+        if not conn_id:
+            self._update_publish_gen += 1
+        gen = self._update_publish_gen
         current = await asyncio.to_thread(_read_version)
         available = bool(current) and _compare_versions(latest, current) > 0
         snoozed = available and await asyncio.to_thread(
             _is_update_snoozed, latest,
         )
+        if gen != self._update_publish_gen:
+            return
         broadcast_to_conn(self._printer, {
             "type": "update_available",
             "available": available,
@@ -10081,6 +10234,28 @@ class RemoteAccessServer:
             return False
         return True
 
+    async def _bind_loopback_alias_or_repick_port(self, ephemeral: bool) -> None:
+        """Bind the loopback alias; for an OS-picked port, move to one it can share.
+
+        The OS picks an ephemeral port that is free on :attr:`host`
+        only, so ``127.0.0.1`` of that port may already belong to some
+        other process's socket.  When the caller asked for port 0 any
+        port will do: rebind :attr:`host` on a fresh ephemeral port
+        (at most :data:`_BIND_RETRY_ATTEMPTS` times) instead of leaving
+        the daemon without its loopback alias.  A port the caller chose
+        keeps the warn-and-reclaim behaviour of :meth:`_bind_loopback_alias`.
+        """
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            bound = await self._bind_loopback_alias()
+            if bound or not ephemeral or attempt + 1 == _BIND_RETRY_ATTEMPTS:
+                return
+            self._ws_server.close()
+            await self._ws_server.wait_closed()
+            self.port = 0
+            self._ws_server = await self._serve_wss(self.host)
+            self.port = _bound_loopback(self._ws_server)[1]
+            self._local_url = f"http://localhost:{self.port}"
+
     async def _watchdog_reclaim_loopback(self) -> None:
         """Retry :meth:`_bind_loopback_alias` while another process holds ``127.0.0.1``.
 
@@ -10152,6 +10327,7 @@ class RemoteAccessServer:
             # sibling's newer certificate the context is not serving.
 
         last_err: OSError | None = None
+        ephemeral = self.port == 0
         for attempt in range(_BIND_RETRY_ATTEMPTS):
             try:
                 self._ws_server = await self._serve_wss(self.host)
@@ -10199,7 +10375,7 @@ class RemoteAccessServer:
                 file=sys.stderr,
             )
             raise SystemExit(2)
-        await self._bind_loopback_alias()
+        await self._bind_loopback_alias_or_repick_port(ephemeral)
         # Local clients (``run_agent`` and other ``daemon_client``
         # runs) may connect from here on: the endpoint file is written before
         # the tunnel wait below so they need not wait out the
@@ -10334,10 +10510,43 @@ class RemoteAccessServer:
     def _on_sea_commands_changed(self, commands: list[str]) -> None:
         """Broadcast the new SEA slash-command list to every client.
 
+        Building the event reads the command usage from history.db,
+        which a write-locked database stalls for its busy timeout.  The
+        watcher's first rescan notifies on the event loop
+        (:meth:`_start_sea_command_watcher` runs during startup and
+        ``start_registry_watcher`` rescans synchronously), so that
+        notification is built on a worker thread, from the registry as
+        it is by then rather than an older snapshot.
+
         Args:
             commands: The sorted command names after a registry change.
         """
-        self._printer.broadcast(sea_commands_event(commands))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._printer.broadcast(sea_commands_event(commands))
+            return
+        threading.Thread(
+            target=self._broadcast_current_sea_commands,
+            name="kiss-sea-commands-broadcast",
+            daemon=True,
+        ).start()
+
+    def _broadcast_current_sea_commands(self) -> None:
+        """Broadcast the registry's current SEA slash-command list (worker thread).
+
+        The event is rebuilt while the registry changed during its slow
+        usage read: a rescan published meanwhile has broadcast the newer
+        list inline, and this one, sent last, must not take it back.
+        """
+        from kiss.agents.sorcar import sea_commands
+
+        names = sea_commands.list_commands()
+        event = sea_commands_event(names)
+        while (current := sea_commands.list_commands()) != names:
+            names = current
+            event = sea_commands_event(names)
+        self._printer.broadcast(event)
 
     def _stop_sea_command_watcher(self) -> None:
         """Unsubscribe from the SEA registry and stop its poller.
@@ -10953,12 +11162,34 @@ class RemoteAccessServer:
         could tear down the fields bound so far and return while this
         still-running setup binds the remaining listeners afterwards,
         resurrecting the server after shutdown completed.
+
+        A setup that fails or is cancelled after it started the tunnel
+        stops that tunnel too (:meth:`_stop_tunnel`, off the loop, on
+        top of :meth:`_setup_server`'s own rollback): with no listener
+        and no watchdog nothing would ever supervise or adopt the
+        spawned ``cloudflared``, and a spawn still in flight in the
+        executor reaps its child instead of installing it
+        (:attr:`_tunnel_stopped`).  The URL file it published, which
+        now advertises a closed listener, goes the same way
+        (:meth:`_remove_own_url_file`, after the write still in flight
+        when the cancel landed), and publication is closed first
+        (:attr:`_shutdown_initiated`, as :meth:`stop_async` does): the
+        write queued in the executor but not yet at its lock would
+        otherwise publish the file after the removal.  The instance is
+        done for, as after a stop.  The blocking :meth:`start` keeps
+        its tunnel on purpose, for the next daemon to adopt.
         """
         _raise_open_file_limit()
         async with self._lifecycle_lock:
             if self._shutdown_initiated:
                 return
-            await self._setup_server()
+            try:
+                await self._setup_server()
+            except BaseException:
+                self._shutdown_initiated = True
+                await asyncio.to_thread(self._stop_tunnel)
+                await asyncio.to_thread(self._remove_own_url_file)
+                raise
 
     async def start_private_async(self) -> None:
         """Serve local clients only: loopback WSS on an ephemeral port.
@@ -11078,9 +11309,11 @@ class RemoteAccessServer:
             # only) daemon shares the home with the canonical kiss-web
             # daemon and never writes the file, so removing it here
             # unlinked the live daemon's URL until its watchdog rewrote
-            # it (conc1018 I2-F2).
+            # it (conc1018 I2-F2); a successor that published its own
+            # file while this shutdown ran keeps it.  Off the loop: it
+            # waits for a republish still writing.
             if not self._local_only:
-                _remove_url_file(self._url_file)
+                await asyncio.to_thread(self._remove_own_url_file)
 
 
 def _proc_live(starting: bool, proc: subprocess.Popen[bytes] | None) -> bool:

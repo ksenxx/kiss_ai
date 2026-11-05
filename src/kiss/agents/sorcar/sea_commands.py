@@ -175,17 +175,26 @@ _last_broadcast: tuple[str, ...] | None = ()
 _scan_numbers = itertools.count(1)
 _published_scan = 0
 
+# What the ``register_as_model()`` verdict cache watches of a
+# dependency of a SEA: the (mtime_ns, size, inode) of a file, or the
+# script a ``sea_class("name")`` command name resolves to.
+_Reading = tuple[int, int, int] | Path | None
+
 # ``register_as_model()`` verdict per SEA script, keyed by path and
 # stamped with the (mtime_ns, size, inode) of the script and of every
 # file its class derives from (:func:`_base_stamps`), so an edit or a
-# replacement of any of them is re-read.  Guarded by ``_lock``.
-_model_sea_cache: dict[Path, tuple[dict[Path, tuple[int, int, int] | None], bool]] = {}
+# replacement of any of them is re-read, and with the script every
+# command name its load resolved to (:func:`_reading`).  Guarded by
+# ``_lock``.
+_model_sea_cache: dict[Path, tuple[dict[Path | str, _Reading], bool]] = {}
 
 # ``bases``: while :func:`_registers_as_model` loads a SEA on this
-# thread, the set every :func:`sea_class` call of that load adds the
-# file it was asked for to, loaded or not (``None`` outside such a
-# load).  A load that fails in a base is stamped with that base too,
-# so its repair (the child untouched) is re-read.
+# thread, the dict every :func:`sea_class` call of that load records
+# what it read in before running anything (``None`` outside such a
+# load): the stamp of the file it was asked for, loaded or not, and
+# the script its command name resolved to.  A load that fails in a
+# base is stamped with that base too, so its repair (the child
+# untouched) is re-read.
 _picker_load = threading.local()
 
 # Watcher-thread coordination.
@@ -660,6 +669,7 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
             raise SeaError(f"sea_class({spec!r}): not an existing Python (.py) file")
     else:
         found = get_command(spec)
+        _note_picker_base(spec, found)
         if found is None:
             raise SeaError(
                 f"sea_class({spec!r}): not a registered SEA command; "
@@ -670,11 +680,26 @@ def sea_class(spec: str, relative_to: str | Path = "") -> type[BaseSea]:
     return type(load_sea(path.resolve()))
 
 
-def _note_picker_base(path: Path) -> None:
-    """Record *path* as a base of the SEA the model picker is loading on this thread, if any."""
+def _note_picker_base(base: Path | str, resolved: Path | None = None) -> None:
+    """Record what the SEA the model picker is loading on this thread, if any, read of its
+    base *base*: a file's stamp as it is now, before the file runs, or the script
+    *resolved* a command name resolved to."""
     bases = getattr(_picker_load, "bases", None)
-    if bases is not None:
-        bases.add(path.resolve())
+    if bases is None:
+        return
+    if isinstance(base, Path):
+        base = base.resolve()
+        bases[base] = _reading(base)
+    else:
+        bases[base] = resolved
+
+
+def _reading(base: Path | str) -> _Reading:
+    """Return what the verdict cache watches of *base* now: a file's revision stamp, or the
+    script the command name resolves to (``None`` when it is not registered)."""
+    if isinstance(base, Path):
+        return parsed_sea(base).stamp
+    return _registered_path(base)
 
 
 def sea_layers(
@@ -1250,7 +1275,10 @@ def _registers_as_model(sea_path: Path) -> bool:
     an edit and an atomic replacement are re-read) of the script and
     of every file its class derives from, since the method may be
     inherited from a custom base (``class X(sea_class(...))``) and an
-    edit of that base alone changes the verdict.  Only a script
+    edit of that base alone changes the verdict; a base is stamped as
+    it was before it ran, so one edited while the load was in flight
+    is re-read too, and a base named by command is also keyed on the
+    script the name resolves to (:func:`_reading`).  Only a script
     whose source mentions ``register_as_model`` or derives its class
     from something other than the plain bases (so it may inherit the
     registration) is imported: importing every registered SEA (channel
@@ -1265,14 +1293,14 @@ def _registers_as_model(sea_path: Path) -> bool:
         return False
     cached = locked_call(_lock, _model_sea_cache.get, sea_path)
     if cached is not None and all(
-        parsed_sea(path).stamp == stamp for path, stamp in cached[0].items()
+        _reading(base) == reading for base, reading in cached[0].items()
     ):
         return cached[1]
     verdict = False
-    stamps: dict[Path, tuple[int, int, int] | None] = {sea_path: parsed.stamp}
+    stamps: dict[Path | str, _Reading] = {sea_path: parsed.stamp}
     if parsed.mentions_register_as_model or parsed.bases.difference(SEA_BASES):
         outer = getattr(_picker_load, "bases", None)
-        asked: set[Path] = set()
+        asked: dict[Path | str, _Reading] = {}
         _picker_load.bases = asked
         try:
             sea = load_sea(sea_path)
@@ -1281,18 +1309,22 @@ def _registers_as_model(sea_path: Path) -> bool:
         except SeaError:
             logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
             # A base may be what broke (a parent mid-edit, or not yet
-            # written): keep watching every file this load asked for
+            # written): keep watching every base this load asked for
             # and every one the last verdict depended on, so its repair
             # is re-read.
-            for path in asked.union(cached[0] if cached is not None else ()):
-                stamps.setdefault(path, parsed_sea(path).stamp)
+            for base in cached[0] if cached is not None else ():
+                stamps.setdefault(base, _reading(base))
         finally:
             _picker_load.bases = outer
+        # Each base as it was read, not as it is now: one edited while
+        # the load ran would otherwise lend its new revision to the
+        # verdict of its old class.
+        stamps.update(asked)
     locked_call(_lock, operator.setitem, _model_sea_cache, sea_path, (stamps, verdict))
     return verdict
 
 
-def _base_stamps(sea: BaseSea) -> dict[Path, tuple[int, int, int] | None]:
+def _base_stamps(sea: BaseSea) -> dict[Path | str, _Reading]:
     """Return the revision stamp of every SEA file the class of *sea* derives from."""
     files = {_file_of(cls) for cls in type(sea).__mro__[1:] if issubclass(cls, BaseSea)}
     return {file: parsed_sea(file).stamp for file in files if file is not None}

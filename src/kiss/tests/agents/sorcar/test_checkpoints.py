@@ -297,6 +297,41 @@ def test_file_names_are_kept_byte_for_byte(tmp_path: Path) -> None:
     assert not (repo / "victim\r.txt").exists()
 
 
+@posix_only("Windows forbids a newline in a directory name")
+def test_a_root_ending_in_a_newline_is_not_its_neighbour(tmp_path: Path) -> None:
+    """Only git's record terminator is removed from the root: ``project\\n`` is not ``project``."""
+    intended, neighbour = _repo(tmp_path / "project\n"), _repo(tmp_path / "project")
+    tools = UsefulTools(work_dir=str(intended))
+    assert tools.checkpoint("v1").startswith(f"Saved checkpoint 'v1' of {intended.resolve()} (")
+    (intended / "a.py").write_text("print('v2')\n")
+    (neighbour / "a.py").write_text("print('neighbour')\n")
+    assert "rewrote 1 file (a.py)" in tools.rollback("v1")
+    assert (intended / "a.py").read_text() == "print('v1')\n"
+    assert (neighbour / "a.py").read_text() == "print('neighbour')\n"
+
+
+def test_the_environment_cannot_redirect_a_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE`` of the daemon never pick the repository."""
+    wanted, other = _repo(tmp_path / "wanted"), _repo(tmp_path / "other")
+    tools = UsefulTools(work_dir=str(wanted))
+    before = _state(wanted), _state(other)
+    with monkeypatch.context() as env:
+        env.setenv("GIT_DIR", str(other / ".git"))
+        env.setenv("GIT_WORK_TREE", str(other))
+        env.setenv("GIT_INDEX_FILE", str(tmp_path / "stray-index"))
+        assert tools.checkpoint("v1").startswith(
+            f"Saved checkpoint 'v1' of {wanted.resolve()} (")
+        (wanted / "a.py").write_text("print('v2')\n")
+        (other / "a.py").write_text("print('other')\n")
+        assert "rewrote 1 file (a.py)" in tools.rollback("v1")
+    assert (wanted / "a.py").read_text() == "print('v1')\n"
+    assert (other / "a.py").read_text() == "print('other')\n"
+    assert (_state(wanted), _state(other)) == before
+    assert not (tmp_path / "stray-index").exists()
+
+
 def test_files_git_assumes_unchanged_are_still_saved(tmp_path: Path) -> None:
     """assume-unchanged and skip-worktree bits of the real index do not hide changes."""
     repo = _repo(tmp_path / "repo")

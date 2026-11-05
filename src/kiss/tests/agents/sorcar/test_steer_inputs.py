@@ -17,7 +17,9 @@ Every test runs against a real sqlite file in a temp directory.
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
@@ -108,6 +110,49 @@ class TestSteerInputs:
             ]
         finally:
             th._MAX_STEER_INPUTS = saved_cap
+
+    def test_a_write_delayed_at_the_lock_lands_after_the_watermark(self) -> None:
+        """A steer input that waited for the write lock is newer than a reader's watermark.
+
+        The composer page refreshes its history with ``since`` set to
+        the newest use it was sent (``_load_input_texts(since=...)``).
+        A write that stamped its time, then waited for the write lock
+        while a newer text committed and a reader took that text's time
+        as its watermark, would commit with an OLDER time: every later
+        delta skips it and only a full reload shows it.  ``sys.settrace``
+        is thread-local: it parks only the delayed writer, at the entry
+        of ``_capped_upsert``, before it takes the write lock.
+        """
+        th._get_db()
+        parked, resume = threading.Event(), threading.Event()
+        upsert = th._capped_upsert.__code__
+
+        def trace(frame, event, arg):  # type: ignore[no-untyped-def]
+            if frame.f_code is upsert and event == "call" and not parked.is_set():
+                parked.set()
+                assert resume.wait(timeout=15)
+            return None
+
+        def delayed() -> None:
+            sys.settrace(trace)
+            try:
+                th._record_steer_input("delayed steer")
+            finally:
+                sys.settrace(None)
+                th._close_thread_db()
+
+        thread = threading.Thread(target=delayed, daemon=True)
+        thread.start()
+        assert parked.wait(timeout=15), "the delayed writer never reached the upsert"
+        th._record_steer_input("newer steer")
+        watermark = max(used for _text, used in th._load_input_texts())
+        resume.set()
+        thread.join(30)
+        assert not thread.is_alive(), "the delayed writer did not finish"
+        assert sorted(r[0] for r in _steer_rows()) == ["delayed steer", "newer steer"]
+        assert [t for t, _used in th._load_input_texts(since=watermark)] == [
+            "delayed steer",
+        ], "regression: the delayed write carries a time older than the watermark"
 
     def test_prefix_match_merges_steer_and_tasks_by_recency(self) -> None:
         old_task, _chat = th._add_task("add a README")

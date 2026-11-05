@@ -34,12 +34,14 @@ import time
 from typing import Any
 
 from kiss.core import stop_signal
+from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent, NativeTurn
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ToolBridge
 from kiss.core.models.codex_model import CodexModel
 from kiss.core.tool_verdict import Verdict
 from kiss.server.json_printer import JsonPrinter
+from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.tests.core.test_audit1018_codex_bridge_stop import (
     HOLD_STARTED,
     RELEASE_HOLD,
@@ -134,6 +136,114 @@ def test_a_call_abandoned_by_the_stop_leaves_the_conversation_alone_when_it_retu
         stop_signal.set_thread_stop_event(None)
     assert agent._native_turn.calls == 0, "the abandoned call was recorded after the turn"
     assert agent.messages == messages_before
+
+
+class _HeldPastTheGuard:
+    """A trace hook holding the bridge's handler at its first ``_add_message``.
+
+    The handler is past the "publish unless the turn has closed" check
+    there; it waits until the turn closes (the interleaving under test)
+    or the test lets go, bounded, and records whether the turn was
+    closed as each message was appended.  Installed with
+    ``threading.settrace`` for the threads started after it.
+
+    Args:
+        turn: The turn record the handler publishes for.
+        owner: The thread running the turn; its own appends are not held.
+    """
+
+    def __init__(self, turn: NativeTurn, owner: threading.Thread) -> None:
+        self.turn = turn
+        self.owner = owner
+        self.paused = threading.Event()
+        self.release = threading.Event()
+        self.closed_at_append: list[bool] = []
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if (
+            event != "call"
+            or frame.f_code is not Base._add_message.__code__
+            or threading.current_thread() is self.owner
+        ):
+            return None
+        self.paused.set()
+        deadline = time.monotonic() + 30
+        while not (self.turn.closed.is_set() or self.release.is_set()):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        self.closed_at_append.append(self.turn.closed.is_set())
+        return None
+
+
+def test_a_call_past_the_closed_check_when_the_stop_closes_the_turn_is_published_first() -> None:
+    """The check of ``closed`` and the publication (the routine-turn note, the two
+    transcript messages, the limit check) were not one step: a handler past the check
+    when the Stop closed the turn published afterwards, into the transcript the agent
+    had moved on to — a later run's, once the agent was reused.  Closing the turn now
+    waits for a publication in progress, so nothing lands on the agent after it; and
+    the daemon's forced Stop (the task runner's watchdog injects ``KeyboardInterrupt``
+    twice: the bridge's wait for the call takes the first, the closing wait the second)
+    cannot cut that wait short, or the publication would land in the next run after
+    all.  The owner thread reuses the agent once the run returns, as a tab's next task
+    does, and the publication is let go only once both injections have landed."""
+    stop = threading.Event()
+    agent = KISSAgent("abandoned bridge call past the check")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"noop": noop}
+    agent._cached_tools_schema = _schema("noop")
+    turn = agent._native_turn
+    entered = threading.Event()
+    leave = threading.Event()
+    bridges: list[ToolBridge] = []
+    outcome: list[str] = []
+    closed_at_exit: list[bool] = []
+
+    def own_the_turn() -> None:
+        stop_signal.set_thread_stop_event(stop)
+        try:
+            with agent._native_tools_exposed():
+                bridges.append(_bridge_of(agent))
+                entered.set()
+                leave.wait(30)
+        except KeyboardInterrupt:
+            outcome.append("KeyboardInterrupt")
+        finally:
+            closed_at_exit.append(turn.closed.is_set())
+            # The run has returned: the agent is reused for its next run.
+            agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+            agent._add_message("user", "NEW RUN")
+            stop_signal.set_thread_stop_event(None)
+
+    owner = threading.Thread(target=own_the_turn, daemon=True)
+    watchdog = threading.Thread(
+        target=_TaskRunnerMixin._force_stop_thread, args=(owner, owner.is_alive), daemon=True
+    )
+    held = _HeldPastTheGuard(turn, owner)
+    threading.settrace(held)
+    try:
+        owner.start()
+        assert entered.wait(5)
+        client = _call(bridges[0], "noop")
+        assert held.paused.wait(5), "the handler never reached the publication"
+        stop.set()
+        leave.set()  # the Stop waits STOP_WAIT_SECONDS for the call, abandons it, closes
+        watchdog.start()
+        watchdog.join(STOP_WAIT_SECONDS * 2 + 5)  # both injections landed, or the owner died
+        assert not watchdog.is_alive()
+        held.release.set()
+        assert _reply(client) == {"text": "noop ran"}
+        owner.join(10)
+    finally:
+        held.release.set()
+        leave.set()
+        threading.settrace(None)
+    assert not owner.is_alive()
+    assert outcome == ["KeyboardInterrupt"], "the forced Stop must still end the run"
+    assert closed_at_exit == [True], "the owner left the turn before it was closed"
+    assert held.closed_at_append == [False, False], "a message was appended after the turn closed"
+    assert turn.calls == 1
+    assert [m["content"] for m in agent.messages] == ["NEW RUN"], "the old call reached the new run"
 
 
 def _hold_then_raise(name: str, args: dict[str, Any]) -> Verdict:

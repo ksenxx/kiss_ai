@@ -540,17 +540,25 @@
     notificationTimers.delete(id);
   }
 
-  function notificationSelector(id) {
-    return (
-      '.kiss-notification[data-notification-id="' +
-      String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"') +
-      '"]'
-    );
+  /**
+   * The toast showing notification *id* under *root*, or null.  Found
+   * by comparing ids, not by a selector: an id built from a file name
+   * may hold a newline, which no CSS string may.
+   *
+   * @param {Document|Element} root Where to look.
+   * @param {*} id The notification id (compared as a string).
+   * @returns {Element|null} The `.kiss-notification`.
+   */
+  function findNotification(root, id) {
+    const key = String(id);
+    for (const toast of root.querySelectorAll('.kiss-notification'))
+      if (toast.dataset.notificationId === key) return toast;
+    return null;
   }
 
   function removeNotification(id) {
     clearNotificationTimer(id);
-    const toast = document.querySelector(notificationSelector(id));
+    const toast = findNotification(document, id);
     if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
   }
 
@@ -577,7 +585,7 @@
   function showNotification(ev) {
     const container = ensureNotificationContainer();
     const id = ev.id || 'anon-' + ++anonymousNotificationSeq;
-    let toast = container.querySelector(notificationSelector(id));
+    let toast = findNotification(container, id);
     const severity = ev.severity || 'info';
     const actions = Array.isArray(ev.actions) ? ev.actions : [];
     // An error never dismisses itself: the reader may be looking
@@ -775,7 +783,7 @@
   function dialogOpener(id) {
     const active = document.activeElement;
     const source =
-      document.querySelector(notificationSelector(id)) ||
+      findNotification(document, id) ||
       (active && active.closest ? active.closest('.kiss-notification') : null);
     const inherited = source && source.kissOpenerFocus;
     return inherited && inherited.isConnected ? inherited : active;
@@ -903,7 +911,7 @@
       severity: 'warning',
       actions: actions,
     });
-    const toast = document.querySelector(notificationSelector(opts.id));
+    const toast = findNotification(document, opts.id);
     toast.kissOpenerFocus = opener;
     toast.onkeydown = onDialogToastKey;
     const buttons = toast.querySelectorAll('.kiss-notification-action');
@@ -922,7 +930,7 @@
       label: action.label,
       danger: !!action.danger,
       onClick: function () {
-        const toast = document.querySelector(notificationSelector(id));
+        const toast = findNotification(document, id);
         if (toast) restoreToastOpenerFocus(toast);
         if (typeof action.onClick === 'function') action.onClick();
       },
@@ -977,7 +985,7 @@
       severity: 'info',
       sticky: true,
     });
-    const toast = document.querySelector(notificationSelector(opts.id));
+    const toast = findNotification(document, opts.id);
     toast.kissPrompt = opts;
     toast.kissOpenerFocus = opener;
     toast.onkeydown = onDialogToastKey;
@@ -1230,15 +1238,20 @@
       // Set by sendMessage() the moment a submit leaves this tab, so the tab
       // owns the task before the daemon has told anyone its real id.
       pendingTaskId: null,
-      // The last prompt sent from this tab until the daemon echoes it
-      // (setTaskText for a run, prompt for a follow-up), and the
-      // ask-user answer (with its question) until askUserDone confirms
-      // it.  A connection that died silently swallows both without any
-      // error; persistTabState carries them over to the reloaded page
-      // as drafts so the user can send them again instead of losing
-      // them.
-      unackedPrompt: '',
-      unackedAttachments: [],
+      // The prompts sent from this tab until the daemon acknowledges
+      // them (setTaskText for a run, prompt for a follow-up,
+      // promptOpened for a file path), oldest first, each
+      // {text, attachments, echoed}, and the ask-user answer (with its
+      // question) until askUserDone confirms it.  A connection that
+      // died silently swallows both without any error; persistTabState
+      // carries them over to the reloaded page as drafts so the user
+      // can send them again instead of losing them.  The daemon
+      // answers a tab's prompts in the order they were sent and names
+      // none in its answers: each answer is the oldest prompt's it can
+      // be for.  A run's prompt is `echoed` (setTaskText) before the
+      // daemon decides on it: it stays until the run's `clear` starts
+      // it, so that, refused meanwhile, it goes back into the composer.
+      unackedPrompts: [],
       unackedAnswer: '',
       unackedQuestion: null,
       isRunning: false,
@@ -2228,11 +2241,15 @@
   }
 
   /**
-   * The sign-in failed (`signinError`): say why, keep the buttons.
-   * @param {{error: string}} ev
+   * The sign-in failed (`signinError`): say why, keep the buttons.  The
+   * failure of a click since replaced by another provider's (the daemon
+   * ended that attempt; this one's page is still to come) is ignored,
+   * like its `signinUrl`.  A paste's failure names no provider.
+   * @param {{error: string, provider?: string}} ev
    */
   function signinFailed(ev) {
     if (!signinWindowOpen()) return;
+    if (ev.provider && ev.provider !== signinProvider) return;
     signinProvider = '';
     dropSigninTab();
     setSigninNote('Sign-in failed: ' + (ev.error || 'unknown error'), true);
@@ -5953,7 +5970,7 @@
         (!t.statusKnown ||
           t.isRunning ||
           t.askPendingQuestion !== null ||
-          !!t.unackedPrompt),
+          t.unackedPrompts.length > 0),
     );
     if (busy) return;
     if (!draftMoved && (root.inputValue || '').trim()) return;
@@ -5980,7 +5997,7 @@
       !t.pendingTaskId &&
       !t.isRunning &&
       t.askPendingQuestion === null &&
-      !t.unackedPrompt &&
+      !t.unackedPrompts.length &&
       !task
     );
   }
@@ -6094,7 +6111,8 @@
     // drafts on the way out
     // and the first snapshot after the reload hands them back.  The
     // active tab's draft is what the composer shows, or, when that is
-    // empty, a prompt the daemon never acknowledged (see unackedPrompt).
+    // empty, the newest prompt the daemon never echoed (see
+    // unackedPrompts; an echoed one is the daemon's already).
     const inputDrafts = {};
     const askDrafts = {};
     tabs.forEach(t => {
@@ -6102,7 +6120,10 @@
       // While the composer is the answer box the prompt is the parked
       // one (enterAnswerMode) and what is typed is the answer.
       const asked = t.askPendingQuestion !== null;
-      const draft = (asked ? t.promptDraft : typed) || t.unackedPrompt;
+      const unechoed = t.unackedPrompts.filter(p => !p.echoed);
+      const draft =
+        (asked ? t.promptDraft : typed) ||
+        (unechoed.length ? unechoed[unechoed.length - 1].text : '');
       if (draft) inputDrafts[t.id] = draft;
       // Likewise the answer typed into (or sent from, but never
       // confirmed) the composer, with its question: it comes back when
@@ -7922,9 +7943,25 @@
       const values = {};
       for (const field of fields)
         values[field.key] = form.elements[field.key].value;
-      if (onSave(values) !== false) save.disabled = true;
+      if (onSave(values) !== false) setSidebarFormSaving(form, true);
     });
     return form;
+  }
+
+  /**
+   * Lock an in-place form while the save it sent awaits its reply, or
+   * arm it again: its Save and its fields.  The fields too: text typed
+   * into a still-live field meanwhile was never sent, and the reply
+   * closing the form would discard it.  Cancel stays live.
+   *
+   * @param {HTMLFormElement} form The form (sidebarInlineForm).
+   * @param {boolean} saving Whether its save is in flight.
+   */
+  function setSidebarFormSaving(form, saving) {
+    for (const control of form.querySelectorAll(
+      '[name], .sidebar-inline-form-save',
+    ))
+      control.disabled = saving;
   }
 
   /**
@@ -7973,28 +8010,41 @@
   const pendingCronSaves = [];
   const pendingMachineSaves = [];
 
+  // The `generation` the last machine add was stamped with: an add
+  // without a name registers the address's host, so two unnamed adds
+  // name the same key ('') while the daemon adds them in parallel
+  // (one lock per host) and answers in either order.  This daemon
+  // echoes the stamp on the reply (a forwarded machine's reply does
+  // not: takePendingSave then falls back to the name).
+  let machineSaveGeneration = 0;
+
   /**
-   * Take, off *pending*, the oldest save a reply answers: the same
-   * action naming the same job or machine (a reply naming none, from
-   * a daemon that does not echo them, answers the oldest of the
+   * Take, off *pending*, the oldest save a reply answers: the save
+   * whose `generation` the reply echoes when it echoes one, else the
+   * same action naming the same job or machine (a reply naming none,
+   * from a daemon that does not echo them, answers the oldest of the
    * action), sent to the machine the reply is from.
    *
-   * @param {Array<{machine: string, action: string, key: string, state: Object}>} pending
+   * @param {Array<{machine: string, action: string, key: string, state: Object, generation?: number}>} pending
    *     pendingCronSaves or pendingMachineSaves.
    * @param {string|undefined} action The reply's `action`.
    * @param {*} key The reply's `jobId` or `name` (undefined when it
    *     carries none).
    * @param {string} machine The machine the reply is from (replyMachine).
+   * @param {*} generation The reply's `generation` (undefined or 0
+   *     when it carries none).
    * @returns {Object|null} The form state that sent the save, or null
    *     when the reply answers no save awaited (a poll, another
    *     action, a save the disconnect released meanwhile).
    */
-  function takePendingSave(pending, action, key, machine) {
+  function takePendingSave(pending, action, key, machine, generation) {
     const i = pending.findIndex(
       p =>
         p.machine === machine &&
         p.action === action &&
-        (key == null || p.key === String(key)),
+        (generation
+          ? p.generation === generation
+          : key == null || p.key === String(key)),
     );
     return i < 0 ? null : pending.splice(i, 1)[0].state;
   }
@@ -8011,8 +8061,8 @@
     if (scheduleAdd) scheduleAdd.saving = false;
     if (machineAdd) machineAdd.saving = false;
     for (const list of [scheduleList, machinesList])
-      for (const save of list.querySelectorAll('.sidebar-inline-form-save'))
-        save.disabled = false;
+      for (const form of list.querySelectorAll('form.sidebar-inline-form'))
+        setSidebarFormSaving(form, false);
   }
 
   /**
@@ -8211,7 +8261,7 @@
         li.focus();
       },
     );
-    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
+    setSidebarFormSaving(form, state.saving);
     li.appendChild(form);
     return form;
   }
@@ -8280,7 +8330,7 @@
         scheduleAddBtn.focus();
       },
     );
-    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
+    setSidebarFormSaving(form, state.saving);
     const kind = form.elements.kind;
     const whatLabel = form.elements.what.previousElementSibling;
     kind.addEventListener('change', () => {
@@ -8477,11 +8527,13 @@
       saved => {
         if (sidebarFormOffline(machinesStatusLine)) return false;
         machineAdd = {values: saved, saving: true};
+        const generation = ++machineSaveGeneration;
         pendingMachineSaves.push({
           machine: panelsMachine,
           action: 'add',
           key: String(saved.name),
           state: machineAdd,
+          generation,
         });
         api.machineAction(
           panelCommand({
@@ -8491,6 +8543,7 @@
             // Not ``password``: that field is this daemon's own
             // credential, added to every frame by transport.js.
             machinePassword: saved.password,
+            generation,
           }),
         );
       },
@@ -8500,7 +8553,7 @@
         machinesAddBtn.focus();
       },
     );
-    form.querySelector('.sidebar-inline-form-save').disabled = state.saving;
+    setSidebarFormSaving(form, state.saving);
     row.appendChild(form);
     machinesList.prepend(row);
     return form;
@@ -8560,6 +8613,7 @@
       ev.action,
       ev.name,
       replyMachine(ev),
+      ev.generation,
     );
     if (saved && saved === machineAdd)
       machineAdd = error ? {values: machineAdd.values, saving: false} : null;
@@ -10757,8 +10811,20 @@
   function explorerActionRows(row) {
     const selected = explorerSelectedRows();
     if (selected.length < 2 || selected.indexOf(row) < 0) return [row];
-    return selected.filter(r => {
-      return !selected.some(other => {
+    // One folder shown twice (an added top-level folder inside the
+    // working directory) is one entry, not each row's ancestor: its
+    // top-level row stands for it, so the folder is no more cut or
+    // deleted than a top-level folder ever is.
+    const byPath = new Map();
+    for (const r of selected) {
+      const key = rootIdentity(r.dataset.explorerPath);
+      const seen = byPath.get(key);
+      if (!seen || (explorerRowIsRoot(r) && !explorerRowIsRoot(seen)))
+        byPath.set(key, r);
+    }
+    const rows = Array.from(byPath.values());
+    return rows.filter(r => {
+      return !rows.some(other => {
         return (
           other !== r &&
           other.classList.contains('is-dir') &&
@@ -12021,8 +12087,16 @@
           // asks once per clash, and a shared id would replace the
           // earlier question (and lose its Replace) with the later one.
           // For copy/move `dest` is the destination folder, so the
-          // entry's own name is part of the key.
-          id: 'fs-overwrite:' + (request.dest || request.path) + '|' + target,
+          // entry's own name is part of the key, and so is the machine
+          // (the same path on two machines is two files).  A JSON
+          // tuple: no separator can be mistaken for part of a name.
+          id:
+            'fs-overwrite:' +
+            JSON.stringify([
+              request.machine || '',
+              request.dest || request.path,
+              target,
+            ]),
           message:
             "A file or folder named '" +
             target +
@@ -13847,7 +13921,9 @@
    *     for this one.
    */
   function openWorkDir(dir, machine) {
-    dir = String(dir || '').trim();
+    // Not trimmed: a selected path is a directory's name as it is (a
+    // trailing space included), not free-form input.
+    dir = String(dir || '');
     if (!dir) return;
     if (isRootDir(dir)) {
       setWorkDirError(WORK_DIR_ROOT_REFUSED);
@@ -15357,6 +15433,13 @@
   // find them.
   const _pendingPathChecks = new Set();
   const _pendingFileLinkSpans = new Set();
+  // Per key of _pendingPathChecks, how many checks of it were asked
+  // over one still unanswered (recheckFileLinksForTab, after a merge
+  // or discard, asks again whatever is in flight).  The replies come
+  // in the order asked, so that many answer the older checks -- made
+  // before the file changed -- and must not settle the span: the last
+  // reply does.
+  const _supersededPathChecks = new Map();
 
   // Raised while a share export replays persisted tasks into detached
   // containers that are serialized at once: their file-path spans can
@@ -15501,8 +15584,19 @@
       return;
     }
     // tableak-coverage:start
+    const stale = new Set();
     for (const p of Object.keys(results)) {
-      _pendingPathChecks.delete(_fileLinkCacheKey(owner, workDir, p, machine));
+      const key = _fileLinkCacheKey(owner, workDir, p, machine);
+      const newer = _supersededPathChecks.get(key) || 0;
+      if (newer > 0) {
+        // A fresher check of the path is on its way: this answers the
+        // older one, and the span stays registered for the fresher.
+        if (newer > 1) _supersededPathChecks.set(key, newer - 1);
+        else _supersededPathChecks.delete(key);
+        stale.add(p);
+        continue;
+      }
+      _pendingPathChecks.delete(key);
     }
     // tableak-coverage:end
     const spans = new Set(_pendingFileLinkSpans);
@@ -15521,7 +15615,7 @@
       // data-path or data-path-missing instead of data-path-candidate;
       // _fileLinkPath() reads whichever state attribute holds the path.
       const p = _stripLineSuffix(_fileLinkPath(span));
-      if (Object.prototype.hasOwnProperty.call(results, p)) {
+      if (Object.prototype.hasOwnProperty.call(results, p) && !stale.has(p)) {
         if (results[p]) promoteFileLink(span);
         else demoteFileLink(span);
       }
@@ -15561,6 +15655,7 @@
       const parts = key.split('\u0000');
       if (parts[0] === tab && parts[2] === machine) {
         _pendingPathChecks.delete(key);
+        _supersededPathChecks.delete(key);
       }
     }
   }
@@ -15626,6 +15721,7 @@
     for (const key of Array.from(_pendingPathChecks)) {
       if (key.indexOf(prefix) === 0) {
         _pendingPathChecks.delete(key);
+        _supersededPathChecks.delete(key);
         dropped.push(key);
       }
     }
@@ -15693,6 +15789,7 @@
    */
   function forgetInFlightPathChecks() {
     _pendingPathChecks.clear();
+    _supersededPathChecks.clear();
   }
 
   /**
@@ -15750,6 +15847,7 @@
    */
   function queueFileLinkChecks(owner, spans, skipInFlight) {
     const groups = new Map();
+    const asked = new Set();
     for (const span of spans) {
       const raw = _fileLinkPath(span);
       if (!raw) continue;
@@ -15758,6 +15856,14 @@
       const p = _stripLineSuffix(raw);
       const key = _fileLinkCacheKey(owner, wd, p, machine);
       if (skipInFlight && _pendingPathChecks.has(key)) continue;
+      // Two spans of one path are one check: the key is counted once.
+      if (!asked.has(key) && _pendingPathChecks.has(key)) {
+        _supersededPathChecks.set(
+          key,
+          (_supersededPathChecks.get(key) || 0) + 1,
+        );
+      }
+      asked.add(key);
       _pendingPathChecks.add(key);
       const groupKey = wd + '\u0000' + machine;
       let group = groups.get(groupKey);
@@ -19999,6 +20105,127 @@
     player.onpause = null;
   }
 
+  // victory-coverage:start
+  // The victory jingle (media/victory.mp3, rendered by
+  // kiss.scripts.make_victory_sound; its URL rides in the page's voice
+  // config next to the "working on it" ack) plays when a task of this
+  // page finishes -- its `task_done`, see handleEvent -- whether the
+  // task ran on this daemon or on a registered machine: a tab bound to
+  // one gets the remote daemon's frames relayed as they are.  The
+  // Settings checkbox mutes it per browser profile (localStorage, like
+  // the voice auto-submit choice), and same-origin pages follow each
+  // other through the `storage` event.
+  const VICTORY_SOUND_KEY = 'kissVictorySound';
+  const victorySoundToggle = document.getElementById('cfg-victory-sound');
+
+  function victorySoundEnabled() {
+    try {
+      return window.localStorage.getItem(VICTORY_SOUND_KEY) !== 'off';
+    } catch (_e) {
+      return true;
+    }
+  }
+
+  function renderVictorySoundToggle() {
+    if (victorySoundToggle) victorySoundToggle.checked = victorySoundEnabled();
+  }
+
+  renderVictorySoundToggle();
+  if (victorySoundToggle) {
+    victorySoundToggle.addEventListener('change', () => {
+      try {
+        window.localStorage.setItem(
+          VICTORY_SOUND_KEY,
+          victorySoundToggle.checked ? 'on' : 'off',
+        );
+      } catch (_e) {}
+    });
+  }
+  window.addEventListener('storage', ev => {
+    if (ev && ev.key === VICTORY_SOUND_KEY) renderVictorySoundToggle();
+  });
+
+  // The finishes the browser would not sound: their players, kept in
+  // order for the next user gesture.  The autoplay policy refuses a
+  // `play()` on a page that has had no gesture yet (a reload, a second
+  // device opened to watch), and the gesture that would have allowed
+  // it is the one the user makes when they come back -- so the jingle
+  // sounds then, once per finish missed, one after the other.
+  let victoryDeferred = [];
+
+  /**
+   * Play the victory jingle once, unless the page has none or the user
+   * muted it.  A `play()` the autoplay policy refuses is kept for the
+   * next gesture (victoryDeferred); any other failure (an undecodable
+   * clip, an engine without promises) is dropped: the finished tab
+   * shows the result either way.
+   */
+  function playVictorySound() {
+    const url = window.__VOICE__ && window.__VOICE__.victoryAudioUrl;
+    if (!url || typeof window.Audio !== 'function') return;
+    if (!victorySoundEnabled()) return;
+    startVictoryPlayer(new window.Audio(url), []);
+  }
+
+  /**
+   * Start *player*, then the deferred players *next* in turn (each
+   * when the one before ends or fails).  A refusal by the autoplay
+   * policy puts *player* and *next* back in the deferred queue, in
+   * order, for the next gesture.
+   *
+   * @param {HTMLAudioElement} player The jingle to sound now.
+   * @param {Array<HTMLAudioElement>} next The ones to sound after it.
+   */
+  function startVictoryPlayer(player, next) {
+    player.onended = () => soundVictoryInTurn(next);
+    player.onerror = () => soundVictoryInTurn(next);
+    try {
+      const played = player.play();
+      if (played && typeof played.catch === 'function') {
+        played.catch(err => {
+          if (err && err.name === 'NotAllowedError')
+            victoryDeferred.push(player, ...next);
+        });
+      }
+    } catch (_e) {}
+  }
+
+  function soundVictoryInTurn(players) {
+    const player = players.shift();
+    if (player) startVictoryPlayer(player, players);
+  }
+
+  function soundDeferredVictory() {
+    const players = victoryDeferred;
+    victoryDeferred = [];
+    soundVictoryInTurn(players);
+  }
+
+  document.addEventListener('pointerdown', soundDeferredVictory, true);
+  document.addEventListener('keydown', soundDeferredVictory, true);
+
+  /**
+   * Whether the tab a task event names (undefined: the visible tab)
+   * carries the user's own task rather than a sub-agent's: a
+   * sub-agent's end is a step of its parent's task, which is still
+   * running (the daemon closes the child's tab with `subagentDone`),
+   * so only the parent's own finish is the user's.  The tab need not
+   * be open here: closing a chat tab does not stop its task
+   * (server._drop_tab_state), and a finish the user is not looking at
+   * is the one worth hearing; a tab this page never had is told by its
+   * id, `<parent>__sub_<task>` being the daemon's sub-agent tab id.
+   *
+   * @param {string|undefined} tabId The tab a task event names.
+   * @returns {boolean} True for the user's own task.
+   */
+  function isUsersTaskTab(tabId) {
+    const id = tabId !== undefined ? tabId : activeTabId;
+    const tab = getTab(id);
+    if (tab && tab.isSubagentTab && tab.parentTabId) return false;
+    return !String(id || '').includes('__sub_');
+  }
+  // victory-coverage:end
+
   // tableak-coverage:start
   // The streaming transcript types. Each one carries a fragment of one
   // task's output, so it is meaningless without a tab to attribute it to.
@@ -20262,12 +20489,29 @@
     // The daemon echoes every prompt it takes — setTaskText for a run,
     // prompt for a follow-up — to the tab it came from (an unaddressed
     // echo is for the tab on screen, as in the handlers below):
-    // acknowledged.
-    if (t === 'setTaskText' || t === 'prompt') {
+    // acknowledged.  The echo names no message but carries its text,
+    // and the daemon answers a tab's messages in order: it
+    // acknowledges the oldest waiting message with that text, so an
+    // earlier message's echo leaves a newer one's recovery copy alone,
+    // even one with the same text.  A run's echo comes before the
+    // daemon decides on the run: its copy is kept (echoed) until the
+    // run's `clear` starts it, or its `prompt` echo queues it as a
+    // follow-up, so the refusal that may follow the echo
+    // (prompt_refused) still puts the draft back.  The daemon echoes
+    // a run again once its tab is registered, before the `clear`: the
+    // repeated echo is that run's still (the oldest copy with its
+    // text, echoed already), never a newer run's.  (A `prompt`
+    // without `steer` is a running task's own prompt panel, not an
+    // echo.)
+    if (t === 'setTaskText' || (t === 'prompt' && ev.steer)) {
       const echoed = getTab(ev.tabId || activeTabId);
-      if (echoed) {
-        echoed.unackedPrompt = '';
-        echoed.unackedAttachments = [];
+      const text = String(ev.text || '').trim();
+      const i = echoed
+        ? echoed.unackedPrompts.findIndex(p => p.text === text)
+        : -1;
+      if (i >= 0) {
+        if (t === 'prompt') echoed.unackedPrompts.splice(i, 1);
+        else echoed.unackedPrompts[i].echoed = true;
       }
     }
     // A prompt that was just the path of an existing file opened that
@@ -20280,8 +20524,9 @@
     if (t === 'promptOpened') {
       const opened = getTab(ev.tabId || activeTabId);
       if (opened) {
-        opened.unackedPrompt = '';
-        opened.unackedAttachments = [];
+        // A file path gets no echo: the oldest unechoed prompt is it.
+        const i = opened.unackedPrompts.findIndex(p => !p.echoed);
+        if (i >= 0) opened.unackedPrompts.splice(i, 1);
         if (!opened.currentTaskId) opened.pendingTaskId = null;
       }
       return;
@@ -20345,11 +20590,22 @@
           // one never comes, so the latch would hold Share shut for
           // its whole failsafe.
           setShareInFlight(false);
+          // So does a worktree Merge / Discard / Do nothing's result
+          // (the replay re-presents an undecided worktree only): the
+          // bar is armed again, on screen or parked on a background
+          // tab, and a retry gets the daemon's answer -- "no pending
+          // worktree" once the lost action was done, which dismisses
+          // the bar.
+          setActionBarBtnsDisabled(worktreeBar, false);
+          tabs.forEach(t => setActionBarBtnsDisabled(t.worktreeBarEl, false));
           tabs.forEach(t => {
             // A "Reload from disk" whose reply was swallowed is dead
             // too: nothing awaits its token any more.
             t.contentReloadRequested = false;
             failContentSave(t, 'Save failed: the server connection dropped');
+            // A terminal holds its keystrokes until the reconnect's
+            // terminalOpen has re-attached its shell (reattachTerminalTabs).
+            if (t.terminalView) t.terminalView.disconnected();
           });
           // An outage swallows in-flight replies. A getAdjacentTask reply
           // that never comes must not leave the loader row up and every
@@ -20365,6 +20621,7 @@
           // would show under the Add box as its rejection.  The typed
           // text stays in the box for the user to resend.
           pendingTrickAdd = '';
+          pendingTrickEdits = [];
           // A "Sign in with ChatGPT" awaiting its device code never
           // gets it: the button works again, and the status poll a
           // code had started ends with the daemon's `codex login`.
@@ -20546,10 +20803,23 @@
           break;
         }
         const stTab = getTab(activeTabId);
-        const stChatId = String(
-          ev.chatId || (stTab && stTab.backendChatId) || activeTabId || '',
+        const shownChatId = String(
+          (stTab && stTab.backendChatId) || activeTabId || '',
         );
-        sendShareExport(stChatId, ev.tasks || [], !!ev.truncated);
+        // The tab may have moved on to another chat meanwhile (a run
+        // from another surface rebinds it, to another machine too):
+        // the reply, echoing the chat asked for, would splice the new
+        // chat's screen into the old chat's page.  Dropped; the button
+        // works again for the chat on screen.
+        if (ev.chatId && String(ev.chatId) !== shownChatId) {
+          setShareInFlight(false);
+          break;
+        }
+        sendShareExport(
+          String(ev.chatId || shownChatId),
+          ev.tasks || [],
+          !!ev.truncated,
+        );
         break;
       }
       case 'share_done': {
@@ -20876,21 +21146,31 @@
           });
         }
         break;
-      case 'tricksData':
+      case 'tricksData': {
         // The daemon's full promptlet list, sent on every `ready` and
         // after an Add, Edit or Delete (from this or any other window):
         // it replaces the list frozen into the page at load time so the
         // panel repaints right away. The first `userCount` entries are
         // the user's own (editable, deletable) rows. An in-place editor
-        // still open on a row is closed: its index may point at another
-        // promptlet now.
+        // still open on a row is closed when its index may point at
+        // another promptlet now; a row that still holds the promptlet
+        // it edits keeps the editor, with its draft (renderTricks
+        // re-attaches it).
+        const shown = window.__TRICKS__ || [];
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
-        closeTrickEditor();
+        if (
+          editingTrickIndex >= window.__MY_TRICKS_COUNT__ ||
+          window.__TRICKS__[editingTrickIndex] !== shown[editingTrickIndex]
+        ) {
+          closeTrickEditor();
+        }
         confirmTrickAdd(window.__TRICKS__);
         renderTricks(window.__TRICKS__);
+        settleTrickEdit(window.__TRICKS__);
         break;
+      }
       case 'taskUpdate':
         renderTaskUpdateEvent(ev);
         break;
@@ -21144,6 +21424,7 @@
         if (!isAddressed(ev)) {
           relayUpdateStatus(ev.text, true);
           relayTrickAddError(ev.text);
+          relayTrickEditError(ev.text);
           // Likewise a custom-model save this daemon refused.
           restoreRefusedCustomModelSave('');
         }
@@ -21184,6 +21465,9 @@
         if (clearTab) {
           clearTab.lastTaskFailed = false;
           clearTab.hasRunTask = true;
+          // The run the daemon echoed is on: nothing to put back.
+          const started = clearTab.unackedPrompts.findIndex(p => p.echoed);
+          if (started >= 0) clearTab.unackedPrompts.splice(started, 1);
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
@@ -21229,6 +21513,10 @@
           collapseNestedRunParallel(clearTab.outputFragment);
         }
         if (evTabId === undefined || evTabId === activeTabId) {
+          // The replacement task's id comes with its first id-bearing
+          // event: until then the transcript shows no task.
+          currentTaskId = null;
+          resetAdjacentState();
           clearOutput();
           resetOutputState();
           // The new transcript opens with the task's text (the
@@ -21605,21 +21893,20 @@
           // tableak-coverage:end
           if (stt) {
             pendingTaskText = stt;
-            currentTaskId = null;
-            resetAdjacentState();
             if (welcome) {
               welcome.style.display = 'none';
               refreshWelcomeLayout();
             }
             updateActiveTabTitle(stt);
           }
-          // Neither the shown task nor the settings change here, and
-          // no task panel is put up: the server echoes setTaskText for
-          // queued follow-ups and refused submits too, which stay part
-          // of the CURRENT task (a follow-up shows as a prompt event).
+          // Neither the shown task nor its id or settings change here,
+          // and no task panel is put up: the server echoes setTaskText
+          // for queued follow-ups and refused submits too, which stay
+          // part of the CURRENT task (a follow-up shows as a prompt
+          // event; an export must not take the task for a new one).
           // A real replacement task announces itself with the 'clear'
           // event, which opens the new transcript with the echoed
-          // text's panel and drops the previous task's settings.
+          // text's panel and drops the previous task's id and settings.
         } else if (stt) {
           const sttTab = getTab(ev.tabId);
           if (sttTab) {
@@ -21751,6 +22038,9 @@
             : doneLabelFor(doneT0 || doneNow, doneNow);
         // donelabel-coverage:end
         finishTabTask(ev, doneLabel, ev.success === false);
+        // victory-coverage:start
+        if (!ev.subagent && isUsersTaskTab(ev.tabId)) playVictorySound();
+        // victory-coverage:end
         // The task may have registered a machine (`/machine add`, on
         // this daemon or on the machine the chat runs on): the report
         // is cached unless the registry changed, and a new machine
@@ -25572,8 +25862,7 @@
     // A message added to a running task carries its files too: the
     // daemon shows them to the running agent with the text.
     if (isRunning) {
-      tab.unackedPrompt = prompt;
-      tab.unackedAttachments = attachments;
+      tab.unackedPrompts.push({text: prompt, attachments, echoed: false});
       api.appendUserMessage({
         prompt: prompt,
         tabId: activeTabId,
@@ -25618,8 +25907,7 @@
     // only it -- a legitimate owner of the output that is about to arrive.
     if (!tab.currentTaskId) tab.pendingTaskId = 'pending:' + tab.id;
     // tableak-coverage:end
-    tab.unackedPrompt = prompt;
-    tab.unackedAttachments = attachments;
+    tab.unackedPrompts.push({text: prompt, attachments, echoed: false});
     // Sent: the machine stays the chat's pick until the daemon's
     // binding confirms it (`tabMachine` clears the pick) -- a refused
     // run leaves the pick standing for the retry, and the chat's
@@ -25702,11 +25990,14 @@
    * started a new draft in (any text or attachment) is left alone.
    */
   function restoreRefusedPrompt(tab) {
-    if (!tab || !tab.unackedPrompt) return;
-    const text = tab.unackedPrompt;
-    const files = tab.unackedAttachments || [];
-    tab.unackedPrompt = '';
-    tab.unackedAttachments = [];
+    if (!tab) return;
+    // The daemon answers a tab's prompts in order: the refusal is the
+    // oldest waiting one's, echoed (a run turned down after its echo)
+    // or not (a run refused unechoed, too long say, or a follow-up).
+    const refused = tab.unackedPrompts.shift();
+    if (!refused) return;
+    const text = refused.text;
+    const files = refused.attachments || [];
     const onScreen = tab.id === activeTabId;
     const parked = onScreen ? attachments : tab.attachments || [];
     if (composerTextOf(tab).trim() || parked.length) return;
@@ -26564,11 +26855,33 @@
   // ---- History sections: running tasks/chats, then local-day buckets ----
   // Keep pagination order in the session/row arrays; arrange only the DOM.
   const historyChatGroups = new Map(); // chat id -> .history-chat-group
-  // Chat id -> the summary the user retyped on its panel header, kept
-  // until a history refresh carries the daemon's copy of it (the
-  // groups are rebuilt on every refresh, so the DOM cannot hold it).
+  // Chat id -> {text, ts}: the summary the user retyped on its panel
+  // header and when, kept until a history refresh carries the daemon's
+  // copy of it (the groups are rebuilt on every refresh, so the DOM
+  // cannot hold it) or HISTORY_TITLE_OVERLAY_MS pass: setChatSummary
+  // has no acknowledgement, and another surface may have renamed the
+  // chat since, so no refresh need ever carry this text.  The expiry
+  // asks for the refresh that paints the daemon's title.
   const historyEditedSummaries = new Map();
+  const HISTORY_TITLE_OVERLAY_MS = 10000;
+  let historyTitleExpiryTimer = null;
   let historyMidnightTimer = null;
+
+  /**
+   * Refresh the history once the retyped title shown for *edited*
+   * (a historyEditedSummaries entry) is past its bound, unless a
+   * refresh is already due for an earlier one.
+   */
+  function scheduleHistoryTitleExpiry(edited) {
+    if (historyTitleExpiryTimer) return;
+    historyTitleExpiryTimer = setTimeout(
+      () => {
+        historyTitleExpiryTimer = null;
+        refreshHistory();
+      },
+      Math.max(0, edited.ts + HISTORY_TITLE_OVERLAY_MS + 100 - Date.now()),
+    );
+  }
 
   function historyDayKey(d) {
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
@@ -26811,11 +27124,15 @@
     if (titleEl.querySelector('input')) return;
     const edited = historyEditedSummaries.get(group.dataset.chatId);
     if (edited) {
-      if (session.chat_summary !== edited) {
-        if (titleEl.textContent !== edited) {
-          titleEl.textContent = edited;
-          titleEl.parentElement.setAttribute('aria-label', edited);
+      if (
+        session.chat_summary !== edited.text &&
+        Date.now() - edited.ts <= HISTORY_TITLE_OVERLAY_MS
+      ) {
+        if (titleEl.textContent !== edited.text) {
+          titleEl.textContent = edited.text;
+          titleEl.parentElement.setAttribute('aria-label', edited.text);
         }
+        scheduleHistoryTitleExpiry(edited);
         return;
       }
       historyEditedSummaries.delete(group.dataset.chatId);
@@ -27134,7 +27451,7 @@
         // copy (updateHistoryGroupHeader keeps this text until then).
         // An emptied box asks for the computed summary back, which
         // that refresh brings.
-        if (text) historyEditedSummaries.set(chatId, text);
+        if (text) historyEditedSummaries.set(chatId, {text, ts: Date.now()});
         else historyEditedSummaries.delete(chatId);
         titleEl.textContent = text || original;
         header.setAttribute('aria-label', titleEl.textContent);
@@ -27771,6 +28088,14 @@
           if (!el) return;
           const text = historyMetricsText(s);
           if (el.textContent !== text) el.textContent = text;
+        });
+        // A retyped title past its bound gives way to the daemon's: the
+        // expiry's refresh lands here when the rows did not change.
+        historyEditedSummaries.forEach((edited, chatId) => {
+          const group = historyChatGroups.get(chatId);
+          if (group && group._kissLastSession) {
+            updateHistoryGroupHeader(group, group._kissLastSession);
+          }
         });
         // This page supersedes any older parked one: the newest data
         // says the screen is already right.
@@ -29266,6 +29591,93 @@
   }
 
   /**
+   * The edits posted as `editTrick` whose `tricksData` answers have
+   * not arrived yet, oldest first ({text, newText, error}: the text
+   * the edited row holds on disk as far as the page knows, the text
+   * it should read, and the daemon's rejection once it came).  The
+   * daemon answers them in order.  A new text lives nowhere else once
+   * its editor is closed: a rejection must not lose it.  A row saved
+   * again before its answer is edited under the text the page shows
+   * (the earlier edit's new text, optimistically): `retargetTrickEdits`
+   * keeps such a record naming what the row holds on disk.
+   */
+  let pendingTrickEdits = [];
+
+  /**
+   * The row some pending edits name by *from* holds *to* on disk (an
+   * earlier edit of it was accepted, or refused): they name *to* now.
+   */
+  function retargetTrickEdits(from, to) {
+    pendingTrickEdits.forEach(e => {
+      if (e.text === from) e.text = to;
+    });
+  }
+
+  /**
+   * An unaddressed `error` arrived while a promptlet edit was pending:
+   * it is the daemon's rejection of the oldest edit not yet rejected,
+   * kept for the list on disk that follows it (`settleTrickEdit`).
+   */
+  function relayTrickEditError(text) {
+    const edit = pendingTrickEdits.find(e => !e.error);
+    if (!edit) return;
+    edit.error = text || 'The promptlet could not be edited.';
+    // Refused: the row kept its text.
+    retargetTrickEdits(edit.newText, edit.text);
+  }
+
+  /**
+   * `tricksData` arrived (and was painted) while edits were pending:
+   * a list reading an edit's new text settles it; the refused ones
+   * get their drafts back (`placeRefusedTrickEdits`).  Any other list
+   * (another window's change) says nothing about the edits yet.
+   */
+  function settleTrickEdit(tricks) {
+    const settled = pendingTrickEdits.filter(
+      e => tricks.indexOf(e.newText) >= 0,
+    );
+    pendingTrickEdits = pendingTrickEdits.filter(e => !settled.includes(e));
+    // Accepted: the row reads the new text.
+    settled.forEach(e => retargetTrickEdits(e.text, e.newText));
+    placeRefusedTrickEdits(tricks);
+  }
+
+  /**
+   * Give the refused edits their drafts back, oldest first: the editor
+   * reopens on the stored promptlet with the refused draft and the
+   * reason, so the user can fix it (a one-line draft goes to the Add
+   * box when the promptlet is gone meanwhile).  A draft that cannot be
+   * placed yet waits: the editor is open (a draft of its own, never
+   * overwritten) or the box taken, or the promptlet is gone and the
+   * draft has lines the one-line box would fold -- the editor closing
+   * or the next list places it.
+   */
+  function placeRefusedTrickEdits(tricks) {
+    for (const refused of pendingTrickEdits.filter(e => e.error)) {
+      const {text, newText, error} = refused;
+      const index = tricks.indexOf(text);
+      if (index >= 0 && index < (window.__MY_TRICKS_COUNT__ || 0)) {
+        if (editingTrickIndex >= 0) continue;
+        editingTrickIndex = index;
+        editingTrickRow = makeTrickEditor(index, newText, error);
+        renderTricks(tricks);
+        focusTrickEditor(editingTrickRow);
+      } else if (
+        tricksAddInput &&
+        !tricksAddInput.value.trim() &&
+        newText.indexOf('\n') < 0
+      ) {
+        tricksAddInput.value = newText;
+        syncTricksAddBtn();
+        setTricksAddError(error);
+      } else {
+        continue;
+      }
+      pendingTrickEdits.splice(pendingTrickEdits.indexOf(refused), 1);
+    }
+  }
+
+  /**
    * Post `deleteTrick` for the user-owned promptlet at *index* and drop
    * it from the page's list right away: the daemon removes its section
    * from <brand home>/MY_INJECTION.md and answers every window with a fresh
@@ -29317,7 +29729,10 @@
   /** Close the promptlet editor without saving and repaint the list. */
   function cancelTrickEdit() {
     closeTrickEditor();
-    renderTricks(window.__TRICKS__ || []);
+    const tricks = window.__TRICKS__ || [];
+    renderTricks(tricks);
+    // A refused draft that waited for the editor takes it now.
+    placeRefusedTrickEdits(tricks);
   }
 
   /**
@@ -29333,6 +29748,7 @@
     const text = newText.trim();
     closeTrickEditor();
     if (text && text !== tricks[index]) {
+      pendingTrickEdits.push({text: tricks[index], newText: text, error: ''});
       api.editTrick({text: tricks[index], newText: text});
       tricks[index] = text;
     }
@@ -29349,9 +29765,10 @@
    * inserts a newline, Escape cancels (keys typed into an IME
    * composition are left alone); clicks inside the editor never reach
    * a row click, so they do not inject the promptlet.  The caller
-   * attaches the row and then calls `focusTrickEditor`.
+   * attaches the row and then calls `focusTrickEditor`.  *error*, when
+   * given, is the daemon's rejection of the draft, shown under it.
    */
-  function makeTrickEditor(index, text) {
+  function makeTrickEditor(index, text, error) {
     const div = document.createElement('div');
     div.className = 'sidebar-item tricks-item editing';
     const textarea = document.createElement('textarea');
@@ -29372,6 +29789,13 @@
     actions.appendChild(saveBtn);
     actions.appendChild(cancelBtn);
     div.appendChild(textarea);
+    if (error) {
+      const note = document.createElement('div');
+      note.className = 'config-field-note config-field-note-error';
+      note.setAttribute('role', 'alert');
+      note.textContent = error;
+      div.appendChild(note);
+    }
     div.appendChild(actions);
     saveBtn.addEventListener('click', () =>
       saveTrickEdit(index, textarea.value),

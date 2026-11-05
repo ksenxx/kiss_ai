@@ -20,7 +20,7 @@ import yaml
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
 from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
 from kiss.agents.seas.write_paper.write_paper_sea import _find_tex_binary
-from kiss.agents.sorcar import machines, sea_commands
+from kiss.agents.sorcar import machines
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -35,6 +35,7 @@ from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_available_models
 from kiss.core.processes import run_process_group
 from kiss.server import agent_state
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve
 
 HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
@@ -156,10 +157,8 @@ def reset_registry() -> Iterator[None]:
     points ``KISS_HOME`` elsewhere requests this after ``monkeypatch``
     so the registry is empty again before the real home comes back.
     """
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 @pytest.fixture

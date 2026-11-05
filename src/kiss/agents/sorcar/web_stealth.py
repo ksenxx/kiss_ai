@@ -51,8 +51,24 @@ calls and OpenAlex rate-limits anonymous search under load).  AWS WAF's
 ``token.awswaf.com/.../challenge.js`` acquires a token and reloads the
 page in about a second; read before that, it was an "(empty page)" three
 times in the task history, so a blank page carrying that script is now
-waited out like a Cloudflare challenge.  Three groups of helpers, all
-consumed by :mod:`kiss.agents.sorcar.web_use_tool`:
+waited out like a Cloudflare challenge.  On 3 Nov 2026 a research task
+met two more pages that came back as content, unrecognised: Stack
+Overflow's own "Human verification" page (``/nocaptcha?s=<id>``, where
+``/search?q=`` redirects a visitor it rates a script; a Google reCAPTCHA
+v2 box, "Check the CAPTCHA box, and we'll be out of your way") and
+Reddit's "You've been blocked by network security" page (HTTP 403 on
+every reddit.com host -- www, old.reddit.com's "whoa there, pardner!",
+the ``.json`` API -- its network policy on data-centre, cloud and VPN
+addresses, lifted only for logged-in accounts).  The reCAPTCHA box is
+ticked like Turnstile's; from this machine the tick opens a picture
+puzzle at once (:data:`RECAPTCHA_PUZZLE_OPEN_JS` ends the wait there),
+on a network Google rates better the page submits itself.  Reddit's
+page is static, so it gets no wait; both are reported with the way out
+(:func:`block_advice`).  The same task also got a Cloudflare interstitial
+back from a ``click`` on a search result: only ``go_to_url`` settled
+challenges, so clicks, typed submissions and key presses that navigate
+now do too.  Three groups of helpers, all consumed by
+:mod:`kiss.agents.sorcar.web_use_tool`:
 
 * **Engine**: :func:`playwright_api` prefers Patchright, a patched
   Playwright driver that does not send the ``Runtime.enable`` CDP command
@@ -613,6 +629,14 @@ PERIMETERX_CHECK = "PerimeterX press-and-hold check"
 # puzzle (HTTP 405), which only a person solves.
 AWS_WAF_CHALLENGE = "AWS WAF challenge"
 AWS_WAF_CAPTCHA = "AWS WAF CAPTCHA puzzle"
+# Stack Overflow's own "Human verification" page (``/nocaptcha?s=<id>``,
+# the search endpoint redirects to it for a visitor it rates a script):
+# a Google reCAPTCHA v2 box, "Check the CAPTCHA box, and we'll be out of
+# your way".  Reddit's two block pages (HTTP 403, every reddit.com host:
+# www, old.reddit.com, the ``.json`` API), its network policy on data
+# centre, cloud and VPN addresses for visitors who are not logged in.
+STACK_OVERFLOW_CAPTCHA = "Stack Overflow 'Human verification' CAPTCHA"
+REDDIT_BLOCK = "Reddit network-policy block"
 
 _TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Cloudflare block", re.compile(r"^Attention Required! \| Cloudflare$", re.I)),
@@ -690,6 +714,33 @@ _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
         ),
     ),
 )
+# (vendor label, pattern the whole title must match, pattern the body
+# head must match): pages whose title alone is a question's or an
+# article's (a Stack Overflow question can be titled "Human verification")
+# and whose wording alone is quoted by articles and meta posts about
+# the page.  Reddit's block pages carry nothing but their sentence, so
+# the body must *start* with it, which an article's never does.
+_PAGE_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
+    (
+        STACK_OVERFLOW_CAPTCHA,
+        re.compile(
+            r"^Human verification - (?:Stack Overflow.*|.*Stack Exchange|Super User|"
+            r"Ask Ubuntu|Server Fault|MathOverflow)$",
+            re.I,
+        ),
+        re.compile(r"Check the CAPTCHA box", re.I),
+    ),
+    (
+        REDDIT_BLOCK,
+        re.compile(r"^$"),
+        re.compile(r"^\s*You.ve been blocked by network security\b", re.I),
+    ),
+    (
+        REDDIT_BLOCK,
+        re.compile(r"^Blocked$", re.I),
+        re.compile(r"^\s*whoa there, pardner!", re.I),
+    ),
+)
 # AWS WAF's interstitials carry no vendor name in their text: the
 # Challenge action's page has an empty title and no text at all, only the
 # token script, and the CAPTCHA page's wording is rendered by its puzzle
@@ -756,6 +807,9 @@ def challenge_vendor(title: str, body_head: str, scripts: str = "") -> str | Non
     for label, first, second in _BODY_PATTERNS:
         if first.search(body_head) and second.search(body_head):
             return label
+    for label, title_pattern, body_pattern in _PAGE_PATTERNS:
+        if title_pattern.search(stripped) and body_pattern.search(body_head):
+            return label
     aws = _aws_waf_scripts(scripts)
     if "captcha.js" in aws and stripped.lower() == _AWS_WAF_CAPTCHA_TITLE:
         return AWS_WAF_CAPTCHA
@@ -787,12 +841,15 @@ def challenge_wait_secs(vendor: str) -> float:
 
     Returns:
         Seconds; longer for Anubis, whose proof-of-work is CPU-bound,
-        shorter for AWS WAF's puzzle, which no wait clears.
+        shorter for AWS WAF's puzzle, which no wait clears, none for
+        Reddit's static 403 page.
     """
     if vendor == ANUBIS_CHECK:
         return _ANUBIS_WAIT_SECS
     if vendor == AWS_WAF_CAPTCHA:
         return _PUZZLE_WAIT_SECS
+    if vendor == REDDIT_BLOCK:
+        return 0.0
     return _CHALLENGE_WAIT_SECS
 
 
@@ -820,19 +877,71 @@ def widget_presses(vendor: str) -> int:
     """How many times *vendor*'s widget is pressed before the page is reported.
 
     Turnstile's box is ticked once: a second tick on a box that has not
-    cleared is what a person does not do (and unticks it).  HUMAN's
-    two-step variant asks to "press again when prompted".
+    cleared is what a person does not do (and unticks it).  So is
+    reCAPTCHA's "I'm not a robot" box on Stack Overflow's page: ticked,
+    it either passes (the page submits itself) or opens a picture puzzle
+    (:data:`RECAPTCHA_PUZZLE_OPEN_JS`).  HUMAN's two-step variant asks to
+    "press again when prompted".
 
     Args:
         vendor: A label returned by :func:`challenge_vendor`.
 
     Returns:
-        2 for the press-and-hold bar, 1 for the Turnstile box, 0 for pages
-        with nothing to press.
+        2 for the press-and-hold bar, 1 for the Turnstile and reCAPTCHA
+        boxes, 0 for pages with nothing to press.
     """
     if vendor == PERIMETERX_CHECK:
         return 2
-    return 1 if vendor == CLOUDFLARE_CHALLENGE else 0
+    return 1 if vendor in (CLOUDFLARE_CHALLENGE, STACK_OVERFLOW_CAPTCHA) else 0
+
+
+# Whether reCAPTCHA v2 has opened its picture puzzle: the challenge
+# iframe (``/recaptcha/api2/bframe``, titled "recaptcha challenge expires
+# in two minutes") is on the page from the start inside a wrapper kept
+# ``visibility: hidden`` until the box's verdict calls for a puzzle, when
+# the wrapper is shown.  Read from the main frame, whatever the puzzle's
+# own markup; once it is open no wait clears the page (only a person
+# solves it), so the wait ends there.  Answers a one-element list, as
+# the tool's bounded page read wants (it polls until the value is truthy).
+RECAPTCHA_PUZZLE_OPEN_JS = """() => {
+  const frame = document.querySelector('iframe[src*="/recaptcha/api2/bframe"]');
+  if (!frame) return [false];
+  const box = frame.getBoundingClientRect();
+  return [getComputedStyle(frame).visibility === 'visible' && box.width > 0 && box.height > 0];
+}"""
+
+_SHOW_BROWSER_ADVICE = (
+    "Call show_browser() so the user can complete the check, or use another source "
+    "for the same information."
+)
+_BLOCK_ADVICE: dict[str, str] = {
+    REDDIT_BLOCK: (
+        "Reddit refuses this network's IP address for visitors who are not logged in, "
+        "on every reddit.com host (old.reddit.com and the .json API included), which no "
+        "browser setting changes. Call show_browser() so the user can log in to Reddit, "
+        "or use another source for the same information."
+    ),
+    STACK_OVERFLOW_CAPTCHA: (
+        "Its reCAPTCHA box opens a picture puzzle for this network's IP address, which "
+        "only a person solves. Call show_browser() so the user can solve it, or search "
+        "the web with site:stackoverflow.com for the same questions."
+    ),
+}
+
+
+def block_advice(vendor: str) -> str:
+    """The way out that the ``Note:`` about *vendor*'s page suggests to the agent.
+
+    Args:
+        vendor: A label returned by :func:`challenge_vendor`.
+
+    Returns:
+        One or two sentences: why the page will not clear and what to do
+        instead, for the pages that rate the network's address (Reddit,
+        Stack Overflow's reCAPTCHA); the generic ``show_browser()`` advice
+        otherwise.
+    """
+    return _BLOCK_ADVICE.get(vendor, _SHOW_BROWSER_ADVICE)
 
 
 def hold_tremor(x: float, y: float) -> tuple[float, float]:

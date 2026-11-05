@@ -31,10 +31,14 @@ to the canned implementation — no mocks, patches, or monkeypatching.
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
+import threading
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
+import pytest
 import yaml
 
 import kiss.agents.sorcar.persistence as th
@@ -44,8 +48,14 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _load_chat_events_by_task_id,
     _load_latest_chat_events_by_chat_id,
+    _write_event_batch_locked,
+    task_end_ms,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core import tool_interrupt
+
+_SYNTHESIS_CODE = ChatSorcarAgent._persist_replay_events_if_missing.__code__
+_BATCH_INSERT_CODE = _write_event_batch_locked.__code__
 
 _CANNED_RESULT: str = yaml.dump(
     {"success": True, "summary": "all done"}, sort_keys=False,
@@ -83,6 +93,42 @@ class _OfflineChatAgent(ChatSorcarAgent, _CannedModelAgent):
     ``ChatSorcarAgent.run`` dispatches to ``_CannedModelAgent.run`` — no
     model is invoked and no test double is used.
     """
+
+
+def _stop_at_allocation(task_id: str, chat_id: str) -> None:
+    """``_on_task_id_allocated`` hook: deliver the runner's Stop as the row is allocated."""
+    tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+class _SecondStopInSynthesis:
+    """Profile hook: a second Stop at the *nth* return into the final save's event synthesis.
+
+    Counts the returns of the functions ``_persist_replay_events_if_missing``
+    calls directly (its transcript check, then its writes) and, inside
+    the batch insert, the return of the ``INSERT`` itself (``nth`` of
+    ``0``): the injection then lands with the transaction open.
+    """
+
+    def __init__(self, nth: int) -> None:
+        self.nth = nth
+        self.seen = 0
+        self.fired = ""
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        caller = frame.f_back
+        if event != "return" or caller is None:
+            return
+        if self.nth:
+            if caller.f_code is not _SYNTHESIS_CODE:
+                return
+            self.seen += 1
+            if self.seen != self.nth:
+                return
+        elif caller.f_code is not _BATCH_INSERT_CODE or frame.f_code.co_name != "executemany":
+            return
+        self.fired = frame.f_code.co_name
+        sys.setprofile(None)
+        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -254,6 +300,56 @@ class TestReplayEventsOutsideChat:
         events = loaded.get("events", [])
         assert isinstance(events, list)
         assert not any(e.get("type") == "followup_suggestion" for e in events)
+
+    def test_cleanup_retry_completes_an_interrupted_event_synthesis(self) -> None:
+        """A second Stop anywhere in the synthesis leaves one prompt and one result.
+
+        The runner's Stop lands at row allocation, so the run's cleanup
+        synthesizes the replay events in its final save; a second Stop
+        (the watchdog repeats its injection) lands in that synthesis,
+        and the cleanup retries the save once.  The synthesized events
+        used to be committed one by one, so a second Stop between the
+        prompt's commit and the result's left a finished row whose
+        replay had the prompt alone: the retry took the prompt for a
+        recorded transcript.  The sweep places the second Stop after
+        each call the synthesis makes, and inside its insert.
+        """
+        covered: list[str] = []
+        hook = _SecondStopInSynthesis(1)
+        while self._run_stopped_twice(hook):
+            covered.append(hook.fired)
+            hook = _SecondStopInSynthesis(len(covered) + 1)
+        assert covered[0] == "_task_has_transcript_events" and len(covered) >= 3, covered
+        hook = _SecondStopInSynthesis(0)
+        assert self._run_stopped_twice(hook) and hook.fired == "executemany"
+
+    def _run_stopped_twice(self, hook: _SecondStopInSynthesis) -> bool:
+        """Run a chat agent stopped at allocation and again where *hook* fires; check its replay.
+
+        Returns whether *hook* fired (a round past the last call of the
+        synthesis sees no second Stop and ends the sweep).
+        """
+        agent = _OfflineChatAgent("stopped")
+        sys.setprofile(hook)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                agent.run(
+                    prompt_template="stopped at allocation", model_name="canned",
+                    work_dir=str(self.tmpdir), _on_task_id_allocated=_stop_at_allocation,
+                )
+        finally:
+            sys.setprofile(None)
+        task_id = agent._last_task_id
+        assert task_id is not None
+        _flush_chat_events()
+        loaded = _load_chat_events_by_task_id(task_id)
+        assert loaded is not None
+        events = loaded.get("events")
+        assert isinstance(events, list)
+        types = [str(e.get("type")) for e in events]
+        assert types.count("prompt") == 1 and types.count("result") == 1, (hook.fired, types)
+        assert task_end_ms(task_id) > 0, hook.fired
+        return bool(hook.fired)
 
     def test_suggestion_persistence_is_idempotent(self) -> None:
         agent = ChatSorcarAgent("wt")

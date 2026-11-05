@@ -69,6 +69,7 @@ def _slow_answer() -> list[dict[str, Any]]:
     """Five chunks whose total generation time exceeds the stall clock."""
     chunks = [chunk([text_part(token)]) for token in _TOKENS]
     chunks[-1]["usageMetadata"] = {"promptTokenCount": 10, "candidatesTokenCount": 5}
+    chunks[-1]["candidates"][0]["finishReason"] = "STOP"
     return chunks
 
 
@@ -276,7 +277,7 @@ class TestStopAliasReachesBothProviders:
     ) -> None:
         """Gemini's ``stopSequences`` must be a list even for ``stop="END"``."""
         base_url, script = gemini_endpoint
-        script.play([chunk([text_part("ok")])])
+        script.play([chunk([text_part("ok")], finish_reason="STOP")])
         monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
         model = GeminiModel("gemini-under-test", api_key="test-key", model_config=_STOP_CONFIG)
         model.initialize("hi")

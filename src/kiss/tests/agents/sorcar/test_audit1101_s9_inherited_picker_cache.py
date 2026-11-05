@@ -11,13 +11,19 @@ on the child's revision alone, so an edit of the parent alone (the
 child untouched) kept the old verdict for good: ``model_sea`` still
 offered a child whose fresh load no longer registers, and the reverse
 edit left a newly registering child out of the picker.  The verdict is
-now stamped with every file of the class's inheritance chain.
+now stamped with every file of the class's inheritance chain, as each
+was read before it ran (an edit while the child's load is in flight is
+re-read, not cached under the new revision), and with the script every
+``sea_class("name")`` resolved to (a parent registered or rebound
+later is re-read).
 
 Real files, the real loader and registry; nothing is mocked.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -25,15 +31,14 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
     """Isolate the registry state and the session-wide ``SEAS.md`` per test."""
-    sea_commands._reset_for_tests()
-    yield
-    sea_commands._reset_for_tests()
-    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
+    with isolated_sea_registry():
+        yield
 
 
 def _write_parent(parent: Path, registers: bool) -> None:
@@ -123,3 +128,84 @@ def test_a_parent_broken_at_the_first_load_is_re_read_once_repaired(
     assert (child.stat().st_mtime_ns, child.stat().st_size) == (stamp.st_mtime_ns, stamp.st_size)
     assert sea_commands.model_sea(name) == child, "the repaired parent was not re-read"
     assert sea_commands.model_seas()[name] == child
+
+
+def test_a_parent_edited_while_the_child_loads_is_re_read(tmp_path: Path) -> None:
+    """The child's module body is still running when the parent is edited: its verdict came
+    from the old parent and must not be cached under the new parent's revision."""
+    folder = tmp_path / "seas"
+    parent = tmp_path / "parent_sea.py"
+    ready, resume = tmp_path / "ready", tmp_path / "resume"
+    name = "racedpicker"
+    child = folder / name / f"{name}_sea.py"
+    child.parent.mkdir(parents=True)
+    child.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        "from kiss.agents.sorcar.sea_commands import sea_class\n\n\n"
+        f"class Child(sea_class({str(parent)!r})):\n"
+        "    pass\n\n\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "for _ in range(1000):  # the test edits the parent before it lets the load go on\n"
+        f"    if Path({str(resume)!r}).exists():\n"
+        "        break\n"
+        "    time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+    _write_parent(parent, False)
+    sea_commands.refresh_registry()
+    verdicts: list[Path | None] = []
+
+    def query() -> None:
+        verdicts.append(sea_commands.model_sea(name))
+
+    worker = threading.Thread(target=query, name="picker-query")
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "the child never got to its old parent's class"
+        _write_parent(parent, True)
+    finally:
+        resume.touch()
+        worker.join(10)
+    assert not worker.is_alive() and verdicts == [None]
+    assert sea_commands.load_sea(child).register_as_model() is True
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) == child, "the old verdict is cached under the new parent"
+
+
+def test_a_named_parent_registered_or_rebound_later_is_re_read(tmp_path: Path) -> None:
+    """``sea_class("name")``: the child's verdict follows what the registry resolves the
+    name to, a parent that was missing and a higher-precedence folder alike."""
+    low, high = tmp_path / "low", tmp_path / "high"
+    child = low / "namedchild" / "namedchild_sea.py"
+    child.parent.mkdir(parents=True)
+    child.write_text(
+        "from kiss.agents.sorcar.sea_commands import sea_class\n\n\n"
+        'class Child(sea_class("namedparent")):\n'
+        "    pass\n",
+        encoding="utf-8",
+    )
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{low}\n{high}\n", encoding="utf-8")
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("namedchild") is None  # no such parent yet
+
+    (low / "namedparent").mkdir()
+    _write_parent(low / "namedparent" / "namedparent_sea.py", True)
+    sea_commands.refresh_registry()
+    assert sea_commands.load_sea(child).register_as_model() is True
+    assert sea_commands.model_sea("namedchild") == child, "the parent registered later"
+
+    # The bottom folder of ``SEAS.md`` wins: the name now resolves to
+    # another file, the one it resolved to before untouched.
+    (high / "namedparent").mkdir(parents=True)
+    _write_parent(high / "namedparent" / "namedparent_sea.py", False)
+    sea_commands.refresh_registry()
+    assert sea_commands.get_command("namedparent") == high / "namedparent" / "namedparent_sea.py"
+    assert sea_commands.load_sea(child).register_as_model() is False
+    assert sea_commands.model_sea("namedchild") is None, "the rebound parent was not re-read"

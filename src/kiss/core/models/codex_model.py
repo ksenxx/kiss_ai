@@ -44,11 +44,13 @@ import importlib.metadata
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING, Any
@@ -536,6 +538,150 @@ def _find_codex_cli() -> str:
     return path
 
 
+#: How long a resolved ``codex/default`` model is reused, and how soon a
+#: failed resolution is retried (seconds).
+_DEFAULT_MODEL_TTL_SECONDS = 3600.0
+_DEFAULT_MODEL_RETRY_SECONDS = 60.0
+#: ``(cli path, CODEX_HOME)`` -> ``(expiry on time.monotonic(), model or None)``.
+_default_model_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+_default_model_lock = threading.Lock()
+
+
+def codex_default_model(env: dict[str, str], timeout: float = 15.0) -> str | None:
+    """Return the model ``codex exec`` runs when given no ``-m`` (``codex/default``).
+
+    ``codex exec --json`` never names the model it ran, so the CLI's
+    default is asked of ``codex app-server`` (JSON-RPC, one JSON object
+    per line on stdio), which answers without a model request: after
+    ``initialize`` / ``initialized``, ``model/list`` lists the presets
+    and flags the default with ``isDefault`` (``gpt-6.1-sol`` on CLI
+    0.163.0).  That flag is the CLI's built-in default: a ``model`` in
+    ``config.toml`` does not move it, matching ``codex exec
+    --ignore-user-config`` (:data:`CODEX_LOCKDOWN_ARGS`).  Notifications
+    and other lines on the server's stdout are skipped.
+
+    The answer is cached per ``(cli path, CODEX_HOME)`` for an hour, a
+    failure for a minute.
+
+    Args:
+        env: The turn's child environment (:meth:`CodexModel._prepare_turn_env`),
+            so the same login and ``CODEX_HOME`` decide.
+        timeout: Seconds the whole exchange may take.
+
+    Returns:
+        The default model's id, or ``None`` when the CLI is missing,
+        fails, answers garbage, names no default or misses the deadline.
+    """
+    path = find_codex_executable()
+    if path is None:
+        return None
+    key = (path, env.get("CODEX_HOME", ""))
+    cached = _default_model_cache.get(key)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1]
+    model = _query_default_model(path, env, timeout)
+    with _default_model_lock:
+        now = time.monotonic()
+        current = _default_model_cache.get(key)
+        if model is None and current is not None and current[1] and current[0] > now:
+            # A concurrent turn resolved it meanwhile: a late failure
+            # must not replace that answer.
+            return current[1]
+        ttl = _DEFAULT_MODEL_TTL_SECONDS if model else _DEFAULT_MODEL_RETRY_SECONDS
+        _default_model_cache[key] = (now + ttl, model)
+    return model
+
+
+def _query_default_model(path: str, env: dict[str, str], timeout: float) -> str | None:
+    """Ask ``path app-server`` for its default model; see :func:`codex_default_model`.
+
+    The server runs until it is killed, which happens in every case.
+    """
+    deadline = time.monotonic() + timeout
+    try:
+        proc = popen_process_group(
+            [path, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    except OSError:
+        return None
+    assert proc.stdin is not None and proc.stdout is not None
+    lines: queue.Queue[str | None] = queue.Queue()
+    threading.Thread(
+        target=_queue_lines, args=(proc.stdout, lines), name="codex-app-server", daemon=True
+    ).start()
+    initialize = {"clientInfo": {"name": "kiss", "title": "kiss", "version": "0"}}
+    try:
+        _send_rpc(proc.stdin, {"id": 1, "method": "initialize", "params": initialize})
+        if _await_rpc_result(lines, 1, deadline) is None:
+            return None
+        _send_rpc(proc.stdin, {"method": "initialized", "params": {}})
+        _send_rpc(proc.stdin, {"id": 2, "method": "model/list", "params": {}})
+        listing = _await_rpc_result(lines, 2, deadline)
+    except OSError:  # the server died: a broken pipe
+        return None
+    finally:
+        kill_process_tree(proc)
+        proc.wait()
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+    data = listing.get("data") if isinstance(listing, dict) else None
+    for entry in data if isinstance(data, list) else []:
+        if isinstance(entry, dict) and entry.get("isDefault") is True:
+            model = entry.get("id")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
+def _queue_lines(stream: IO[str], lines: "queue.Queue[str | None]") -> None:
+    """Put every line of *stream* on *lines*, then ``None`` at EOF, and close it."""
+    with stream:
+        for line in stream:
+            lines.put(line)
+    lines.put(None)
+
+
+def _send_rpc(stdin: IO[str], message: dict[str, Any]) -> None:
+    """Write one JSON-RPC 2.0 *message* line to the app server."""
+    stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
+    stdin.flush()
+
+
+def _await_rpc_result(lines: "queue.Queue[str | None]", rpc_id: int, deadline: float) -> Any:
+    """Return the ``result`` of the response to request *rpc_id*.
+
+    Lines that are not that response (notifications, log noise, other
+    ids) are skipped.
+
+    Returns:
+        The result, or ``None`` on an error response, EOF or the deadline.
+    """
+    while True:
+        # Checked on every line, so a backlog of notifications cannot
+        # outlast the deadline, and a reply after it is ignored.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty:
+            return None
+        if line is None:
+            return None
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("id") == rpc_id:
+            return message.get("result")
+
+
 # GPT-5's tokenizer is tiktoken's ``o200k_base``.  ``tiktoken.get_encoding``
 # downloads its ranks, with no timeout, when tiktoken's cache lacks them, so
 # they are read from the copy litellm (a dependency of harbor) installs under
@@ -658,12 +804,15 @@ class CodexModel(CLITextModel):
         self._tool_bridge: ToolBridge | None = None
         # The current turn's child environment, the subscription switch
         # it was built from and whether an API key pays for it, all
-        # decided at the top of generate (_prepare_turn_env), and whether
-        # extract_cost_from_response has logged that this API-billed
-        # model has no catalog price.
+        # decided at the top of generate (_prepare_turn_env); the catalog
+        # model that prices it (see extract_cost_from_response), set in
+        # generate; and
+        # whether extract_cost_from_response has logged that this
+        # API-billed model has no catalog price.
         self._turn_env: dict[str, str] = {}
         self._use_subscription = False
         self._api_billed = False
+        self._priced_model = self._cli_model
         self._warned_unpriced = False
 
     @contextlib.contextmanager
@@ -813,7 +962,7 @@ class CodexModel(CLITextModel):
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_response).  The
-            response is a dict ``{"usage": {...}, "thread_id": "..."}``.
+            response is the dict :meth:`_parse_stream_events` builds.
 
         Raises:
             KISSError: If the CLI could not be started, exited with a
@@ -828,14 +977,18 @@ class CodexModel(CLITextModel):
         """
         self._rejected_response = None
         self._turn_env = self._prepare_turn_env()
+        self._priced_model = self._cli_model
+        if self._cli_model == "default" and self._api_billed:
+            self._priced_model = codex_default_model(self._turn_env) or self._cli_model
         prompt = self._build_prompt()
         preamble = CODEX_INSTRUCTIONS_PREAMBLE
         if self._tool_bridge is not None:
             preamble += CODEX_MCP_TOOLS_NOTE
+        instructions = preamble + (self.system_instruction_text() or "")
         fd, instructions_file = tempfile.mkstemp(prefix="kiss-codex-", suffix=".md")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(preamble + (self.system_instruction_text() or ""))
+                f.write(instructions)
             args = self._build_cli_args(instructions_file)
             with self._cli_turn(args, "Codex CLI") as proc:
                 proc.send_prompt(prompt)
@@ -927,13 +1080,17 @@ class CodexModel(CLITextModel):
             *error_message* is ``None`` on success.
         """
         content = ""
-        # What prices the turn (see extract_cost_from_response): whether
-        # an API key paid, decided at launch, and the API requests the
-        # turn made.  The CLI reports no request count; every tool item
-        # (command, file change, MCP call, ...) cost at least one more
-        # request after the first, so 1 + tool items bounds it from
-        # above, which is all the long-context rule needs.
+        # What prices the turn (see extract_cost_from_response), frozen
+        # here so the partial-usage response prices the same way: whether
+        # an API key paid, decided at launch, the API requests the turn
+        # made and, when known, the catalog model the key pays for (only
+        # when it is not the name after ``codex/``).  The CLI reports no request count;
+        # every tool item (command, file change, MCP call, ...) cost at
+        # least one more request after the first, so 1 + tool items
+        # bounds it from above, which is all the long-context rule needs.
         result_json: dict[str, Any] = {"api_billed": self._api_billed, "requests": 1}
+        if self._priced_model != self._cli_model:
+            result_json["priced_model"] = self._priced_model
         error_message: str | None = None
 
         for event in _iter_jsonl(lines):
@@ -1055,12 +1212,20 @@ class CodexModel(CLITextModel):
         no API key was available) keeps the ``codex/*`` catalog price of
         zero (``None`` here).  A turn a ``CODEX_API_KEY`` paid for is
         billed by OpenAI at standard API rates, so its usage is priced
-        through :func:`calculate_cost` under the model named after
-        ``codex/`` (``codex/gpt-5.5`` -> ``gpt-5.5``); the per-request
-        long-context tier applies only to a single-request turn (see
-        ``single_request``).  ``codex/default`` and other names the
-        catalog cannot price stay at the catalog entry, with a warning
-        once per model instance.
+        through :func:`calculate_cost` under the model the response's
+        ``priced_model`` names: the one after ``codex/`` (``codex/gpt-5.5``
+        -> ``gpt-5.5``), or for ``codex/default`` the CLI's default model
+        (:func:`codex_default_model`).  ``codex/default`` whose default
+        could not be resolved, and names the catalog cannot price, stay
+        at the catalog entry, with a warning once per model instance.
+
+        The long-context tier is a per-request rule, and the CLI reports
+        only the sum over the turn's requests, so it applies only to a
+        single-request turn (see ``single_request``).  A multi-request
+        turn bills at the short-context rates: the sum cannot tell which
+        requests crossed the line, and the CLI may compact the transcript
+        mid-turn, so even a long first request does not make the later
+        ones long.
 
         Args:
             response: The dict returned by :meth:`generate`.
@@ -1072,16 +1237,17 @@ class CodexModel(CLITextModel):
 
         if not isinstance(response, dict) or not response.get("api_billed"):
             return None
-        if not is_known_model(self._cli_model):
+        model = response.get("priced_model") or self._cli_model
+        if not is_known_model(model):
             if not self._warned_unpriced:
                 self._warned_unpriced = True
                 logger.warning(
                     "%s bills the OpenAI API (codex_use_subscription is off) but "
                     "MODEL_INFO has no price for '%s': its cost is reported as $0.",
                     self.model_name,
-                    self._cli_model,
+                    model,
                 )
             return None
         counts = self.extract_input_output_token_counts_from_response(response)
         single_request = response.get("requests", 1) <= 1
-        return calculate_cost(self._cli_model, *counts, single_request=single_request)
+        return calculate_cost(model, *counts, single_request=single_request)

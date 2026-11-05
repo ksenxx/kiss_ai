@@ -3,38 +3,36 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Tests of the evidence gate (:mod:`kiss.agents.sorcar.evidence_gate`).
+"""Tests of the file-change readers of :mod:`kiss.agents.sorcar.evidence_gate`.
 
-The gate refuses, once per task, a ``finish(success=True)`` whose summary
-hedges or that follows a file change no shell command checked; the Sorcar
-agent installs it in its tool-call guard (:meth:`SorcarAgent._guard_tool_call`)
-for every run that has the edit tools.
+The coding gate and the coding SEA read what a shell command changes
+(:func:`~kiss.agents.sorcar.evidence_gate.writes_files`,
+:func:`~kiss.agents.sorcar.evidence_gate.file_changes`) to arm the gate on a
+code file a command wrote, to count the changes since the agent's own passing
+verifier run, and to re-review only after a change: a program counts in
+command position only, a package or build tool writes through its mutating
+subcommands only (``uv run pytest`` is a check, ``uv sync`` a write), and a
+file under a ``tmp`` directory is the run's scratch, not a change of the work.
 """
 
 from __future__ import annotations
 
-import tempfile
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 
 from kiss.agents.sorcar import evidence_gate as eg
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 
-def test_hedges_and_writing_commands_are_recognised() -> None:
-    assert eg.hedges_in("All checks pass; see the table.") == []
-    assert eg.hedges_in("This is my best guess; the output is UNVERIFIED.") == [
-        "best guess", "unverified"]
-    # quoted and coded text is cited, not claimed: a UI label, a command, the
-    # gate's own wording; an apostrophe opens no quotation; "not verified" is
-    # a label (iOS, macOS profiles) and no hedge on its own
-    assert eg.hedges_in('The profile shows "Not Verified" until signed; it is now verified.') == []
-    assert eg.hedges_in("The gate refuses a summary saying 'could not verify' or `untested`.") == []
-    assert eg.hedges_in("<p>Refused phrases: <code>should work</code>, "
-                        "<pre>\nmy guess\n</pre></p>") == []
-    assert eg.hedges_in("Pages marked &quot;untested&quot; are listed; "
-                        "the agent’s run is “unverified”.") == []
-    assert eg.hedges_in("I couldn't verify it; it's an educated guess.") == [
-        "educated guess", "couldn't verify"]
-    assert eg.hedges_in("The output is Not Verified, so I did not test it.") == ["did not test"]
+def test_writing_commands_and_scratch_paths_are_recognised() -> None:
+    for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp"):
+        assert eg.is_scratch_path(path), path
+    for path in ("tmpfile", "mytmp/x", "tmp/../a.py", "a.tmp", "src/a.py"):
+        assert not eg.is_scratch_path(path), path
     for command in ("echo x > f.txt", "cat a >> log", "tee out.txt", "cp a b", "mv a b",
                     "sed -i s/a/b/ f", "sed --in-place s/a/b/ f", "git apply p.diff",
                     "pip install x", "make -j8", "touch f", "cat <<EOF > f\nx\nEOF", "mkdir d",
@@ -47,6 +45,8 @@ def test_hedges_and_writing_commands_are_recognised() -> None:
                     "# don't change the input\nprintf x > result.txt",
                     'bash -c "rm -rf build"', 'bash -c "printf x > result.txt"',
                     "sh -ec 'echo a > b'", "timeout 60 bash -o pipefail -c 'make > log'",
+                    # audit 2026-11-04 (S8): -c first in its cluster, then more options
+                    "bash -ce 'mv a b'", "sh -ceu 'echo a > b'",
                     "bash -c \"echo it's\"; printf x > f", "/usr/bin/env bash -c 'echo a > b'",
                     "cd x && sh -c 'echo a > b'", "FOO=1 sudo -u me bash -lc 'echo a > b'",
                     "nohup nice -n 5 bash -c 'echo a > b' &", "ls | xargs -0 sh -c 'echo a > b'",
@@ -198,82 +198,126 @@ def test_hedges_and_writing_commands_are_recognised() -> None:
     assert not eg.writes_files({})
 
 
-def test_gate_refuses_once_with_the_reason_then_passes() -> None:
-    gate = eg.EvidenceGate(track_changes=True)
-    done = {"success": True, "summary_in_html": "<p>Done, tests pass.</p>"}
-    # nothing changed: a clean claim passes
-    assert gate.verdict(done) is None and not gate.used
-    # an edit with no check after it
-    gate.observe("Edit", {"file_path": "a.py", "old_string": "x", "new_string": "y"})
-    assert gate.unchecked_change
-    assert gate.verdict({"success": False, "summary_in_html": "gave up"}) is None
-    assert gate.verdict({}) is None  # the implicit finish
-    verdict = gate.verdict(done)
-    assert verdict is not None and verdict.startswith("Not finished: finish(success=True)")
-    assert "1. files were changed after the last shell command" in verdict
-    assert gate.used
-    # the second finish passes whatever it says
-    assert gate.verdict(done) is None
-    # a check after the change clears it; a writing command re-marks it
-    gate = eg.EvidenceGate(track_changes=True)
-    gate.observe("Write", {"file_path": "a.py", "content": "x"})
-    gate.observe("Bash", {"command": "pytest -q"})
-    assert not gate.unchecked_change
-    gate.observe("Bash", {"command": "echo fix >> a.py"})
-    assert gate.unchecked_change
-    gate.observe("run_commands_parallel", {"commands": '["pytest a", "pytest b"]'})
-    assert not gate.unchecked_change
-    gate.observe("Read", {"file_path": "a.py"})  # neither a change nor a check
-    assert not gate.unchecked_change
-    assert gate.verdict(done) is None
-    # waiting on a background check reads its outcome: it clears the change; a tail does not
-    gate.observe("Edit", {"file_path": "a.py"})
-    gate.observe("bash_job", {"job_id": "j1", "action": "tail"})
-    assert gate.unchecked_change
-    gate.observe("bash_job", {"job_id": "j1", "action": "wait", "timeout_seconds": 600})
-    assert not gate.unchecked_change
-    # a hedged summary is refused even without a change; both reasons are listed together
-    hedged = {"success": "true", "summary_in_html": "It should work but I could not test it."}
-    verdict = gate.verdict(hedged)
-    assert verdict is not None and '"could not test"' in verdict and '"should work"' in verdict
-    assert "2." not in verdict
-    gate = eg.EvidenceGate(track_changes=True)
-    gate.observe("Edit", {"file_path": "a.py"})
-    verdict = gate.verdict(hedged)
-    assert verdict is not None and "1. the summary itself says" in verdict
-    assert "2. files were changed" in verdict
-    # without change tracking (the interactive agent) only the hedge counts
-    gate = eg.EvidenceGate()
-    gate.observe("Edit", {"file_path": "a.py"})
-    assert gate.unchecked_change and gate.verdict(done) is None
-    verdict = gate.verdict(hedged)
-    assert verdict is not None and "files were changed" not in verdict
+#: Running the tests or a lint through a package or build tool is a check, not a
+#: write (sweep 2026-10-30: the bare tool names once matched); review 1, R4
+#: finding 2: a global option (``npm --prefix web run build``, ``uv --project .
+#: sync``), a Cargo toolchain (``cargo +stable fmt``), a later Make target
+#: (``make test build``) and ``--fix`` do not hide the mutating subcommand.
+CHECKS = (
+    "uv run pytest -q", "uv run check --full", "npm test", "npm run test", "yarn test",
+    "pnpm test", "cargo test", "cargo clippy", "make test", "make check", "ninja test",
+    "python -m pytest -q", "uv --project . run pytest -q", "npm --prefix src/kiss/webapp test",
+    "cargo +stable test", "make test V=1", "make -k check", "make test check",
+    "make test 2>&1 | tail -5", "make check && echo ok", "git -C repo diff", "pytest --fixtures",
+    # review 2, Q2 finding 2: a quoted or escaped option value with blanks is one
+    # word, so the subcommand after it is still found; a remote shell's command
+    # string is text to this host's shell
+    'npm --prefix "src/web app" test', "npm --prefix src/web\\ app run lint",
+    'git -C "my repo" diff', "uv --project 'my project' run pytest -q",
+    'cargo --manifest-path "a b/Cargo.toml" test', "bash -c \"npm --prefix 'my app' test\"",
+    "git -C repo\ncheckout main", 'ssh host "cd $DIR && git -C \\"my repo\\" pull"',
+)
+WRITES = (
+    "pip install x", "pip3 uninstall -y x", "uv pip install -e .", "uv add httpx", "uv sync",
+    "uv lock", "uv build", "npm install", "npm ci", "npm i lodash", "npm run build",
+    "yarn add left-pad", "pnpm remove x", "cargo build --release", "cargo install ripgrep",
+    "cargo fmt", "apt-get install -y curl", "apt remove vim", "make", "make -j8",
+    "make test && make install", "cmake -S . -B build", "ninja -C build",
+    "npm --prefix src/kiss/webapp run build", "uv --project . sync", "cargo +stable fmt",
+    "make test build", "npm run lint -- --fix", "uv run ruff check --fix .",
+    "git -C repo checkout main", "pip --quiet install x", "make -k test install", "make V=1",
+    'npm --prefix "src/web app" run build', "npm --prefix src/web\\ app run build",
+    "yarn --cwd 'my app' add left-pad", 'pnpm --dir "my app" remove x',
+    'uv --project "my project" sync', "uv --directory 'a b' add httpx",
+    'git -C "my repo" checkout main', "git -C my\\ repo stash", "git -c 'user.name=A B' pull",
+    'cargo --manifest-path "a b/Cargo.toml" build', "cargo --config 'a b' fmt",
+    'pip --log "a b.log" uninstall -y x', 'apt-get -o "Debug::X=a b" purge vim',
+    'apt -o "Debug::X=a b" upgrade', "git -C repo \\\n  checkout main",
+    "bash -c \"npm --prefix 'my app' ci\"", "echo ok && sudo git -C 'my repo' reset --hard",
+    "(cd x; npm --prefix \"a b\" i)", "x=$(git -C 'a b' rebase main)",
+)
 
 
-def test_sorcar_agent_guard_installs_the_gate_for_runs_with_edit_tools() -> None:
-    agent = ChatSorcarAgent("evidence")
-    with tempfile.TemporaryDirectory() as work_dir:
-        agent.work_dir = work_dir
-        agent._begin_task(None)
-        done = {"success": True, "summary_in_html": "Done."}
-        hedged = {"success": True, "summary_in_html": "Done, but untested."}
-        # a read-only run (a reviewer) is never gated, hedged or not
-        agent._run_tool_names = frozenset({"Bash", "Read", "finish"})
-        assert agent._guard_tool_call("Bash", {"command": "echo x > f"}) is None
-        assert agent._guard_tool_call("finish", hedged) is None
-        # a full run that writes prose: an unchecked write passes (the run
-        # changed no code, so only the hedge check applies), a hedged
-        # success is refused once
-        agent._run_tool_names = frozenset({"Bash", "Read", "Edit", "Write", "finish"})
-        write_args = {"file_path": f"{work_dir}/notes.md", "content": "x"}
-        assert agent._guard_tool_call("Write", write_args) is None
-        assert agent._coding_gate.evidence.unchecked_change
-        assert not agent._coding_gate.armed
-        assert agent._guard_tool_call("finish", done) is None
-        refusal = agent._guard_tool_call("finish", hedged)
-        assert refusal is not None and '"untested"' in refusal
-        assert agent._guard_tool_call("finish", hedged) is None
-        # a new task starts with a fresh gate
-        agent._begin_task(None)
-        assert not agent._coding_gate.evidence.used
-        assert agent._guard_tool_call("finish", hedged) is not None
+@pytest.mark.parametrize("command", CHECKS)
+def test_a_package_or_build_tools_check_is_no_write(command: str) -> None:
+    assert not eg.writes_files({"command": command})
+
+
+@pytest.mark.parametrize("command", WRITES)
+def test_a_package_or_build_tools_mutating_subcommand_is_a_write(command: str) -> None:
+    assert eg.writes_files({"command": command})
+
+
+# Runs writes_files on the commands read from stdin (JSON) while a thread ticks
+# every 10 ms; prints the results, the time taken and the longest pause of
+# the ticking thread (a regex that runs for seconds holds the GIL that long).
+_PROBE = r"""
+import json, sys, threading, time
+from kiss.agents.sorcar.evidence_gate import writes_files
+
+beats = []
+done = threading.Event()
+
+
+def beat():
+    while not done.is_set():
+        beats.append(time.monotonic())
+        time.sleep(0.01)
+
+
+thread = threading.Thread(target=beat)
+thread.start()
+commands = json.load(sys.stdin)
+start = time.monotonic()
+results = [writes_files({"command": command}) for command in commands]
+elapsed = time.monotonic() - start
+done.set()
+thread.join()
+gaps = [later - earlier for earlier, later in zip(beats, beats[1:])]
+print(json.dumps({"results": results, "elapsed": elapsed, "max_gap": max(gaps, default=0.0)}))
+"""
+
+#: Review 2, Q2 finding 1: the global options before a subcommand were one
+#: repeated regex in which a ``+a`` word was both a possible value of the
+#: option before it and an option itself, so ``npm --prefix +a ... test`` had
+#: 2**n readings: a 300-byte command held the GIL, and with it the whole
+#: daemon, for seconds; a long run of options with tool names in it was
+#: quadratic.  The nested-shell scan had the same shapes.
+ADVERSARIAL = {
+    "npm " + "--prefix +a " * 2000 + "test": False,
+    "npm " + "--prefix +a " * 2000 + "ci": True,
+    "npm -a " * 20000 + "test": False,
+    "uv " + "-a pip " * 20000 + "test": False,
+    "git " + '-c "a b" ' * 20000 + "status": False,
+    "cargo " + "+a " * 20000 + "fmt": True,
+    # the nested-shell scan: shells with options and no -c, shells with -c, quotes,
+    # command starts with assignments or paths
+    "bash -a " * 20000 + "status": False,
+    "bash -c " * 20000 + "'x'": False,
+    "bash -a " * 20000 + "-c 'x > y'": True,
+    "'" * 20000 + " > f": True,
+    ";x=1" * 20000 + " > f": True,
+    "(x=" * 20000: False,
+    "(" * 20000 + "/x/" * 10000 + "sh": False,
+    "sudo " * 20000 + "echo": False,
+    "find x " * 10000 + "-exec sh -c 'x > y'": True,
+}
+
+
+def test_repeated_options_are_read_in_linear_time_without_holding_the_gil() -> None:
+    src = str(Path(eg.__file__).resolve().parents[3])
+    env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    commands = list(ADVERSARIAL)
+    done = subprocess.run(
+        [sys.executable, "-c", _PROBE], input=json.dumps(commands),
+        capture_output=True, text=True, timeout=120, env=env, check=True,
+    )
+    report = json.loads(done.stdout)
+    assert report["results"] == list(ADVERSARIAL.values())
+    assert report["elapsed"] < 30, report
+    assert report["max_gap"] < 2, report
+    # short runs of the same shape still find the subcommand
+    assert not eg.writes_files({"command": "npm " + "--prefix +a " * 25 + "test"})
+    assert eg.writes_files({"command": "npm " + "--prefix +a " * 25 + "ci"})
+    assert eg.writes_files({"command": "npm --prefix +a ci"})
+    assert not eg.writes_files({"command": "npm --prefix +a test"})

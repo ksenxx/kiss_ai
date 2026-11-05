@@ -124,6 +124,8 @@ class _JevHandler(BaseHTTPRequestHandler):
             )
         elif state.startswith("no-kind"):
             self._send(200, {"model": SERVED_MODEL, "answers": {}, "usage": usage})
+        elif state.startswith("no-answers"):
+            self._send(200, {"model": SERVED_MODEL, "usage": usage})  # charged, yet rejected
         elif state.startswith("no-usage"):
             self._send(200, {"model": SERVED_MODEL, "answers": _choice_answer("development")})
         elif state.startswith("answers:"):
@@ -333,6 +335,7 @@ def test_probability_floor_applies_only_below_it(env: IsolatedKissHome) -> None:
         "http-400 task",
         "unknown-kind task",
         "no-kind task",
+        "no-answers task",
         _answers_state({"kind": "development"}),  # the answer is not an object
         _answers_state({"other": {"choice": "simple"}}),  # no ``kind`` answer
         _answers_state({"kind": {"choice": ["simple", "git_only"]}}),  # unhashable choice
@@ -351,7 +354,8 @@ def test_decisions_failure_falls_back_to_the_llm(env: IsolatedKissHome, state: s
     assert outcome.steps == 1  # the LLM generation
     assert len(_JevHandler.requests) == 1
     # A failed decisions attempt costs nothing on HTTP 400; a 200 with an
-    # unusable answer still spent tokens, which the outcome includes.
+    # unusable answer, or none at all, still spent tokens, which the
+    # outcome includes.
     if state.startswith("http-400"):
         assert outcome.tokens_used == 52
     else:

@@ -6,8 +6,10 @@
 """End-to-end tests of the coding SEA's evidence gate and exec bridge.
 
 The gate (:meth:`ContainerHarness.finish_verdict`) runs the agent's own
-verifier in the trial container, lets a hedged summary through to the
-agent's evidence gate, and asks a reviewer model once; the exec bridge
+verifier in the trial container (or reuses the agent's own passing run of
+it), asks a reviewer model once with a deadline, refuses a round past the
+first only while the verifier fails, and holds the first edit to an
+independent reading of the statement; the exec bridge
 (:mod:`kiss.agents.sorcar.exec_bridge`,
 :mod:`kiss.benchmarks.terminal_bench.exec_bridge_server`) runs the same
 tools on an environment that is not a local container.  Container tests
@@ -45,11 +47,13 @@ from kiss.agents.sorcar.container_jobs import ContainerJobs
 from kiss.agents.sorcar.decide_tool import decisions_tool_available
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.benchmarks.terminal_bench.exec_bridge_server import SERVER_THREAD_NAME, ExecBridgeServer
+from kiss.core import stop_signal
 from kiss.core.event_sink import bind_printer
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import model_families
 from kiss.core.models.model_families import other_family_model
 from kiss.core.models.model_info import get_fast_model
-from kiss.core.tool_verdict import ALLOW, refuse
+from kiss.core.tool_verdict import ALLOW, allow_with_note, refuse
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.agents.seas.test_coding_sea import _live_container
 from kiss.tests.agents.sorcar.local_model_server import MODEL as SCRIPTED_MODEL
@@ -154,6 +158,35 @@ def _serve_then_refuse(script: list[bytes], refuse_at: int,
         thread.join(timeout=30)
 
 
+#: A scripted body :class:`_StallingHandler` never sends: the request hangs.
+STALL = b"stall"
+
+
+class _StallingHandler(ScriptedHandler):
+    """Answer the scripted bodies, but hold a request scripted as :data:`STALL` until released.
+
+    The held request is answered by nothing: the handler returns once
+    :attr:`release` is set (the test's cleanup), after the client gave up
+    (``server_close`` joins the handler's thread, so the wait is bounded).
+    """
+
+    release = threading.Event()
+
+    def do_POST(self) -> None:  # noqa: N802
+        cls = type(self)
+        with cls.lock:
+            cls.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = cls.script[min(len(cls.requests), len(cls.script)) - 1]
+        if body == STALL:
+            cls.release.wait(10)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def test_gate_runs_the_agents_own_verifier_in_the_container(tmp_path: Path) -> None:
     """finish(success=True) is refused until /tmp/kiss-verify.sh exists and exits 0."""
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
@@ -197,39 +230,21 @@ def test_gate_runs_the_agents_own_verifier_in_the_container(tmp_path: Path) -> N
         assert harness.container_run(["sh", "-c", "echo out; echo err >&2"]) == (0, b"out\n")
 
         # a passing verifier on a fresh harness: the work tree is checkpointed as
-        # "verified", then a hedged summary (an open reading included) is refused
-        # once by the evidence gate; no review is configured, so the next finish passes
+        # "verified" and the finish passes whatever the summary says (a hedge or
+        # an open reading is the reviewer's input, and no reviewer is configured)
         passing = _harness(tmp_path, container=live.id, verifier_timeout=10)
         passing.on_llm_call([])
         _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
-        hedged = {"success": True, "summary_in_html": "<p>Should work; not verified. If the "
-                                                      "grader wants more, that is a judgement "
-                                                      "call.</p>"}
-        refused = passing.on_tool_call("finish", hedged)
-        assert not refused.allowed
-        # "not verified" is no hedge of its own since the 2026-11-03 audit (a
-        # label the summary cites); the three hedges that remain refuse the finish
-        assert '"should work", "if the grader", "judgement call"' in refused.text
-        assert passing.last_verifier_run[1] == 0
+        hedged: dict[str, Any] = {"success": True,
+                                  "summary_in_html": "<p>Should work; not verified. If the "
+                                                     "grader wants more, that is a judgement "
+                                                     "call.</p>"}
+        assert passing.on_tool_call("finish", hedged) == ALLOW
+        assert "Delivered after" not in hedged["summary_in_html"]
+        assert passing.last_verifier_run[1] == 0 and passing.gate_rounds == 0
         assert passing.checkpoints == ["verified"]
         archive = f"{coding_sea.CHECKPOINT_DIR}/verified.tar"
         assert live.exec_run(["test", "-f", archive]).exit_code == 0
-        assert passing.on_tool_call("finish", hedged) == ALLOW
-        # an edit after the last command: refused once unless the verifier passes
-        edited = _harness(tmp_path, container=live.id, verifier_timeout=10, workdir="/app/")
-        edited.on_llm_call([])
-        _write_in(live, coding_sea.LEDGER_PATH, "- out.txt: exactly hello, no newline")
-        write = {"file_path": "/app/out.txt", "content": "hello"}
-        assert edited.on_tool_call("Write", write) == ALLOW
-        assert edited.evidence.unchecked_change
-        assert edited.on_tool_call("finish", done) == ALLOW  # the verifier checked the final state
-        assert not edited.evidence.unchecked_change
-        _write_in(live, VERIFIER, "exit 1")
-        assert edited.on_tool_call("Edit", {"file_path": "/app/out.txt", "old_string": "h",
-                                            "new_string": "H"}) == ALLOW
-        failing = edited.on_tool_call("finish", done)
-        assert not failing.allowed and "exited 1" in failing.text
-        assert edited.evidence.unchecked_change
     finally:
         live.remove(force=True)
 
@@ -258,16 +273,16 @@ def test_checkpoints_and_the_best_snapshot_submitted(
         assert live.exec_run(["sh", "-c", "printf changed > /app/out.txt && rm /app/sub/k.txt "
                                           "&& echo new > /app/extra.txt"]).exit_code == 0
         assert harness.rollback("v1") == "Restored /app from checkpoint 'v1'."
-        assert harness.evidence.unchecked_change
+        assert harness.changes == 1  # a rollback changes the tree (the verifier reuse counts it)
         listing = live.exec_run(["sh", "-c", "cat /app/out.txt; cat /app/sub/k.txt; ls /app"])
         assert listing.output == b"hellokeep\nout.txt\nsub\n"
         assert harness.rollback("nope") == "Error: unknown checkpoint 'nope'. Known: v1."
-        # the verified checkpoint: taken when both verifiers pass, whatever the
-        # later checks say; a run ending without an accepted finish is restored
-        # to it when the tree then fails the verifier
+        # the verified checkpoint: taken when both verifiers pass; a run ending
+        # without an accepted finish is restored to it when the tree then fails
+        # the verifier
         _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
-        hedged = {"success": True, "summary_in_html": "<p>untested</p>"}
-        assert not harness.on_tool_call("finish", hedged).allowed
+        done = {"success": True, "summary_in_html": "<p>untested</p>"}
+        assert harness.on_tool_call("finish", done) == ALLOW
         assert harness.checkpoints == ["v1", "verified"]
         assert coding_sea.submit_best_checkpoint(config) == "kept"  # still passes
         assert live.exec_run(["sh", "-c", "printf broken > /app/out.txt"]).exit_code == 0
@@ -419,16 +434,151 @@ def test_heredoc_meets_the_ledger_gate_like_an_edit(tmp_path: Path) -> None:
         live.remove(force=True)
 
 
-@pytest.mark.live_api
-def test_gate_reviews_the_work_and_holds_the_findings(tmp_path: Path) -> None:
-    """A reviewer's findings must be answered by a change or by evidence; the diff is re-reviewed.
+def test_the_independent_reading_gates_the_first_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first edit waits for the ledger to settle the sentences another model reads differently.
 
-    Round 1: the reviewer finds the file wrong (a real model call).  A finish
-    that neither changes a file nor quotes evidence is refused by the
-    decisions model's judgement, no review spent.  A finish after an edit
-    gets a re-review scoped to the files changed since; ``max_reviews``
-    bounds the rounds.  A reviewer whose first answer is cut before its
-    verdict (``max_tokens`` override) is retried at the provider's defaults.
+    Once the ledger exists, the ``reading_check`` model (scripted here)
+    reads the statement and the ledger once, at the provider's default
+    effort; its numbered items refuse the edit until the ledger's text
+    changes, at most ``MAX_READING_REFUSALS`` times for one ledger;
+    ``NONE`` or a failed call refuses nothing.  The call is logged as a
+    ``reading_check`` event the trial runner charges and as the
+    ``reading`` gate stage.  ``other`` names a model of another family
+    than the trial's and turns the reading off when none is configured;
+    the prompt mentions the reading only when a model is set.
+    """
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
+    try:
+        items = ('1. "containing exactly `hello`": the ledger allows any greeting; the file '
+                 'would then hold goodbye.')
+        refused = refuse(coding_sea.READING_VERDICT.format(items=items, workdir="/app",
+                                                           ledger=coding_sea.LEDGER_PATH))
+        edit = {"file_path": "/app/out.txt", "old_string": "hello", "new_string": "goodbye"}
+        with serve([text_body(items)]) as (url, requests):
+            overrides = {"base_url": url, "api_key": "local", "reasoning_effort": "high"}
+            harness = _harness(tmp_path, container=live.id, reading_check=SCRIPTED_MODEL,
+                               model_config=overrides)
+            harness.on_llm_call([])
+            assert coding_sea.READING_NOTE in harness.system_prompt()
+            # no ledger yet: the ledger refusal comes first, and no reading is asked for
+            assert harness.on_tool_call("Edit", edit) == refuse(coding_sea.LEDGER_VERDICT.format(
+                workdir="/app", ledger=coding_sea.LEDGER_PATH))
+            assert not requests
+            ledger = "- 'containing exactly hello': any greeting will do"
+            _write_in(live, coding_sea.LEDGER_PATH, ledger)
+            # the ledger exists: one call with the statement and the ledger, at the
+            # default effort; its item refuses the edit
+            assert harness.on_tool_call("Edit", edit) == refused
+            assert len(requests) == 1 and "reasoning_effort" not in requests[0]
+            assert requests[0]["messages"] == [{
+                "role": "user", "content": coding_sea.READING_CHECK_PROMPT.format(
+                    task=harness.task_prompt, ledger=ledger)}]
+            assert harness.reading_items == [items] and harness.reading_refusals == 1
+            checked = _events(tmp_path, "reading_check")[-1]
+            assert (checked["model"], checked["items"], checked["error"]) == (
+                SCRIPTED_MODEL, [items], "")
+            assert checked["cost_usd"] > 0 and checked["tokens"] > 0 and checked["answer"] == items
+            stage = _events(tmp_path, "gate_stage")[-1]
+            assert (stage["stage"], stage["outcome"], stage["items"], stage["model"]) == (
+                "reading", "fail", 1, SCRIPTED_MODEL)
+            assert stage["cost_usd"] == checked["cost_usd"]
+            assert coding_sea.review_usage(tmp_path / "trajectory.jsonl") == (
+                checked["cost_usd"], checked["tokens"])
+            # the ledger changed (the agent settled the item): the edit goes through,
+            # with no second call, and so does every later edit
+            _write_in(live, coding_sea.LEDGER_PATH, ledger + "\n- settled: exactly hello")
+            assert harness.on_tool_call("Edit", edit) == ALLOW
+            assert harness.on_tool_call("Write", {"file_path": "b.txt", "content": ""}) == ALLOW
+            assert len(requests) == 1 and harness.reading_items == []
+            assert harness.reading_refusals == 1
+            # the same ledger retried: refused MAX_READING_REFUSALS times, then let through
+            retried = _harness(tmp_path, container=live.id, reading_check=SCRIPTED_MODEL,
+                               model_config=overrides, trajectory=str(tmp_path / "retried.jsonl"))
+            retried.on_llm_call([])
+            for _ in range(coding_sea.MAX_READING_REFUSALS):
+                assert retried.on_tool_call("Edit", edit) == refused
+            assert retried.on_tool_call("Edit", edit) == ALLOW
+            assert retried.reading_refusals == 2 and retried.reading_items == []
+            assert len(requests) == 2
+        # the ledger written with Write: the reading is made at once, from the written text,
+        # and its items end the Write's result; the first edit under the workdir is then
+        # held to them (the ledger in the container still reads the same) until the
+        # ledger changes.  A second Write of the ledger asks for no second reading.
+        with serve([text_body(items)]) as (url, requests):
+            noted = _harness(tmp_path, container=live.id, reading_check=SCRIPTED_MODEL,
+                             model_config={"base_url": url, "api_key": "local"},
+                             trajectory=str(tmp_path / "noted.jsonl"))
+            noted.on_llm_call([])
+            written = {"file_path": coding_sea.LEDGER_PATH, "content": ledger}
+            assert noted.on_tool_call("Write", written) == allow_with_note(
+                coding_sea.READING_NOTE_RESULT.format(items=items, workdir="/app",
+                                                      ledger=coding_sea.LEDGER_PATH))
+            assert len(requests) == 1 and requests[0]["messages"][0]["content"] == (
+                coding_sea.READING_CHECK_PROMPT.format(task=noted.task_prompt, ledger=ledger))
+            assert noted.reading_items == [items] and noted.reading_ledger == ledger
+            assert _events(tmp_path, "gate_stage", "noted.jsonl")[-1]["stage"] == "reading"
+            _write_in(live, coding_sea.LEDGER_PATH, ledger)
+            assert noted.on_tool_call("Edit", edit) == refused and noted.reading_refusals == 1
+            assert noted.on_tool_call("Write", written) == ALLOW and len(requests) == 1
+            _write_in(live, coding_sea.LEDGER_PATH, ledger + "\n- settled: exactly hello")
+            assert noted.on_tool_call("Edit", edit) == ALLOW and noted.reading_items == []
+            # the reader agrees with a ledger written with Write: the result carries no note
+        with serve([text_body("NONE")]) as (url, requests):
+            agreed = _harness(tmp_path, container=live.id, reading_check=SCRIPTED_MODEL,
+                              model_config={"base_url": url, "api_key": "local"},
+                              trajectory=str(tmp_path / "agreed.jsonl"))
+            agreed.on_llm_call([])
+            assert agreed.on_tool_call("Write", written) == ALLOW and len(requests) == 1
+            assert agreed.on_tool_call("Edit", edit) == ALLOW and len(requests) == 1
+        # NONE: nothing refused, the stage passes
+        with serve([text_body("NONE")]) as (url, requests):
+            agreeing = _harness(tmp_path, container=live.id, reading_check=SCRIPTED_MODEL,
+                                model_config={"base_url": url, "api_key": "local"},
+                                trajectory=str(tmp_path / "none.jsonl"))
+            agreeing.on_llm_call([])
+            assert agreeing.on_tool_call("Edit", edit) == ALLOW and len(requests) == 1
+            checked = _events(tmp_path, "reading_check", "none.jsonl")[-1]
+            assert checked["items"] == [] and checked["answer"] == "NONE"
+            assert _events(tmp_path, "gate_stage", "none.jsonl")[-1]["outcome"] == "pass"
+        # a call that fails (no such model): nothing refused, the stage is an error
+        failing = _harness(tmp_path, container=live.id, reading_check="no-such-model-xyz",
+                           trajectory=str(tmp_path / "failed.jsonl"))
+        failing.on_llm_call([])
+        assert failing.on_tool_call("Edit", edit) == ALLOW
+        checked = _events(tmp_path, "reading_check", "failed.jsonl")[-1]
+        assert checked["error"] and checked["items"] == [] and checked["cost_usd"] == 0
+        assert _events(tmp_path, "gate_stage", "failed.jsonl")[-1]["outcome"] == "error"
+        # `other`: a model of another family than the trial's, when one is configured
+        other = other_family_model("m")
+        if other is not None:
+            assert _harness(tmp_path, container=live.id, reading_check="other").reading_check \
+                == other
+        monkeypatch.setattr(model_families, "SECOND_OPINION_MODELS", ())
+        off = _harness(tmp_path, container=live.id, reading_check="other",
+                       trajectory=str(tmp_path / "off.jsonl"))
+        assert off.reading_check == "" and coding_sea.READING_NOTE not in off.system_prompt()
+        off.on_llm_call([])
+        assert off.on_tool_call("Edit", edit) == ALLOW  # the ledger exists; nothing is read
+        assert not _events(tmp_path, "reading_check", "off.jsonl")
+    finally:
+        live.remove(force=True)
+
+
+@pytest.mark.live_api
+def test_gate_reviews_the_work_once_and_holds_the_findings(tmp_path: Path) -> None:
+    """One real review per trial; its findings are judged at the next finish, never re-reviewed.
+
+    Round 1: the reviewer (a real model call) finds the file wrong and the
+    finish is refused.  The next finish neither changes a file nor quotes
+    evidence: the decisions model finds the findings unanswered, but the
+    scripts pass and the first refusal already bought its round, so the
+    work is delivered with the findings as caveats and no second review.
+    A reviewer whose model call fails refuses nothing, and past
+    ``MAX_FAILED_REVIEWS`` failures no review is asked for.
     """
     if not decisions_tool_available():
         pytest.skip("no decisions model configured")
@@ -436,93 +586,66 @@ def test_gate_reviews_the_work_and_holds_the_findings(tmp_path: Path) -> None:
     if live is None:
         pytest.skip("Docker is not available")
     try:
-        harness = _harness(tmp_path, container=live.id, reviewer=get_fast_model(), max_reviews=2,
-                           max_gate_rounds=10)
+        harness = _harness(tmp_path, container=live.id, reviewer=get_fast_model())
         harness.on_llm_call([])
+        assert harness.max_reviews == coding_sea.MAX_REVIEWS == 1
         # the agent writes something else than the task asks for
         assert live.exec_run(["sh", "-c", "printf goodbye > /app/out.txt"]).exit_code == 0
         _write_in(live, VERIFIER, "test -s /app/out.txt")
         _write_in(live, coding_sea.LEDGER_PATH, "- 'containing exactly hello': any greeting")
-        # the commands the summaries below quote were run (the quote gate checks that)
         _turn(harness, [("Bash", {"command": "test -s /app/out.txt"}),
                         ("Bash", {"command": "cat /app/out.txt"})], ["", "goodbye"])
-        # The summary claims the asked content outright: a bare "`test -s` passes"
-        # reads as a weaker rule to the open-reading gate, whose live score for it
-        # sat at 0.58-0.70 against the 0.7 threshold and now and then refused first.
-        done = {"success": True,
+        done = {"success": True, "evidence": json.dumps(["test -s /app/out.txt"]),
                 "summary_in_html": "<p>Wrote /app/out.txt with the requested content; "
                                    "`test -s /app/out.txt` passes.</p>"}
         review = harness.on_tool_call("finish", done)
         assert not review.allowed and "Not finished: an independent review" in review.text
+        assert review.text.startswith("Finish refused (round 1 of up to 3;")
         assert "out.txt" in review.text and "Answer every numbered finding" in review.text
         logged = _events(tmp_path, "review")
         assert len(logged) == 1 and logged[0]["model"] == get_fast_model()
         assert logged[0]["cost_usd"] > 0 and logged[0]["tokens"] > 0 and logged[0]["findings"]
-        assert logged[0]["round"] == 1 and not logged[0]["failed"]
+        assert logged[0]["round"] == 1 and not logged[0]["failed"] and not logged[0]["error"]
         assert logged[0]["last_call"]["stop_reason"] and logged[0]["last_call"]["output_tokens"] > 0
         assert "VERDICT: NOT DONE" in logged[0]["answer"].upper()
         assert harness.open_findings and harness.open_findings[0].startswith("1")
         assert coding_sea.review_usage(tmp_path / "trajectory.jsonl") == (
             logged[0]["cost_usd"], logged[0]["tokens"])
-        # the reviewer saw the changed file and the ledger
+        # the reviewer saw the changed file, the ledger and the evidence with its exit code
         report = harness.changed_files_report()
         assert "/app/out.txt (modified)" in report and "goodbye" in report
         assert f"{VERIFIER}" not in report  # outside the workdir
-        # no change, no evidence: the summary settles the statement by a weaker rule
-        # ("any greeting is fine"), which the open-reading gate refuses once, and the
-        # open finding is unanswered: both in one refusal, without a review (nothing
-        # changed since the review); then the open-reading refusal is spent
-        argued = {"success": True, "summary_in_html": "<p>The reviewer misread the task; any "
-                                                      "greeting is fine. Done.</p>"}
-        weaker = harness.on_tool_call("finish", argued)
-        assert weaker == refuse(coding_sea.gate_refusal(2, 10, [
-            coding_sea.OPEN_READING_VERDICT.format(verifier=VERIFIER),
-            coding_sea.UNANSWERED_VERDICT.format(findings="\n".join(harness.open_findings))]))
-        unanswered = harness.on_tool_call("finish", argued)
-        assert not unanswered.allowed and unanswered.text == coding_sea.gate_refusal(3, 10, [
-            coding_sea.UNANSWERED_VERDICT.format(findings="\n".join(harness.open_findings))])
-        assert len(_events(tmp_path, "review")) == 1
+        assert harness.evidence_report(done) == "- `test -s /app/out.txt` (exit 0)"
+        # the one review is spent: a change would not buy another
+        assert not harness.review_possible() and not harness.review_wanted()
+        # no change, no evidence: the findings are unanswered (the decisions model's
+        # judgement), but the scripts pass and the first refusal bought the one
+        # round: delivered, the findings as caveats, no second review
+        argued: dict[str, Any] = {"success": True, "summary_in_html": "<p>The reviewer "
+                                  "misread the task; any greeting is fine. Done.</p>"}
+        assert harness.on_tool_call("finish", argued) == ALLOW
+        assert harness.gate_rounds == 1 and len(_events(tmp_path, "review")) == 1
         assert _events(tmp_path, "findings_answered")[-1]["answered"] == [False] * len(
             harness.open_findings)
-        # a change since the review: the second (and last) review covers the diff
-        assert harness.on_tool_call("Write", {"file_path": "/app/out.txt", "content": "hello"}) \
-            == ALLOW
-        assert live.exec_run(["sh", "-c", "printf hello > /app/out.txt"]).exit_code == 0
-        fixed = {"success": True, "summary_in_html": "<p>1. Rewrote /app/out.txt: `cat "
-                                                     "/app/out.txt` prints hello.</p>"}
-        second = harness.on_tool_call("finish", fixed)
-        logged = _events(tmp_path, "review")
-        assert len(logged) == 2 and logged[1]["round"] == 2
-        assert second == ALLOW or "Not finished: an independent review" in second.text
-        # max_reviews reached: a third finish is not reviewed again, and with no
-        # re-review to come a change alone no longer answers an open finding
-        third = harness.on_tool_call("finish", fixed)
-        assert third == ALLOW or "Not finished: these findings" in third.text
-        assert len(_events(tmp_path, "review")) == 2
-        # a review that fails twice (here: a reviewer model that does not exist) is
-        # neither approval nor rejection: the finish is refused while another review
-        # is possible, and goes through at the cap
-        failing = _harness(tmp_path, container=live.id, reviewer="no-such-model-xyz",
-                           max_reviews=2)
+        unanswered = coding_sea.UNANSWERED_VERDICT.format(
+            findings="\n".join(harness.open_findings))
+        assert harness.delivered_findings == [unanswered.splitlines()[0]]
+        assert "Delivered after 1 refused finish rounds" in argued["summary_in_html"]
+        assert html.escape(unanswered) in argued["summary_in_html"]
+        delivered = _events(tmp_path, "delivered_with_findings")[-1]
+        assert delivered["checks_passed"] and delivered["rounds"] == 1
+        assert not _events(tmp_path, "unverified_finish")
+        # a review whose model call fails (here: a reviewer model that does not
+        # exist) is neither approval nor rejection: nothing is refused, the failure
+        # is counted, and past MAX_FAILED_REVIEWS no review is asked for
+        failing = _harness(tmp_path, container=live.id, reviewer="no-such-model-xyz")
         failing.on_llm_call([])
-        failing.open_reading_refused = True
-        assert failing.on_tool_call("finish", fixed) == refuse(
-            coding_sea.gate_refusal(1, 3, [coding_sea.REVIEW_FAILED_VERDICT]))
-        assert failing.on_tool_call("finish", fixed) == ALLOW
+        for _ in range(coding_sea.MAX_FAILED_REVIEWS + 1):
+            assert failing.on_tool_call("finish", dict(done)) == ALLOW
         failed = [e for e in _events(tmp_path, "review") if e["model"] == "no-such-model-xyz"]
         assert [e["failed"] for e in failed] == [True, True] and all(e["error"] for e in failed)
-        # a reviewer cut off before its verdict (5 output tokens) is retried at the
-        # provider's defaults; the retry is logged and the review counted once
-        short = _harness(tmp_path, container=live.id, reviewer=get_fast_model(),
-                         model_config={"max_tokens": 5})
-        short.on_llm_call([])
-        verdict = short.on_tool_call("finish", fixed)
-        retries = _events(tmp_path, "review_retry")
-        assert len(retries) == 1 and not coding_sea.REVIEW_VERDICT_LINE.search(retries[0]["answer"])
-        last = _events(tmp_path, "review")[-1]
-        assert last["round"] == 1 and not last["failed"] and "VERDICT" in last["answer"].upper()
-        assert last["cost_usd"] > retries[0]["last_call"]["cost"]  # both calls are charged
-        assert verdict == ALLOW or "Not finished: an independent review" in verdict.text
+        assert failing.failed_reviews == 2 and failing.reviews == 0 and failing.gate_rounds == 0
+        assert not failing.review_possible() and not failing.open_findings
     finally:
         live.remove(force=True)
 
@@ -597,8 +720,9 @@ def test_blind_verifier_runs_from_the_host_copy(tmp_path: Path) -> None:
                            verifier_timeout=10)
         harness.on_llm_call([])
         _write_in(live, VERIFIER, "test -s /app/out.txt")
-        # the author already ran (and delivered a strict check, kept on the host)
-        harness.blind_written = True
+        # the author already ran (no such model): seed the strict check it would have
+        # delivered once its thread is done, or it overwrites the seed with ""
+        assert harness.blind_script_ready() == ""
         harness.blind_script = 'echo "checking as $0"; test "$(cat /app/out.txt)" = goodbye'
         done = {"success": True, "summary_in_html": "<p>Done: out.txt written and checked.</p>"}
         # the agent silences the container copy before each finish
@@ -716,54 +840,56 @@ def _turn(harness: coding_sea.ContainerHarness, calls: list[tuple[str, dict[str,
     harness.on_llm_call([{"role": "tool", "content": text + footer} for text in results])
 
 
-def test_evidence_names_commands_that_ran_and_passed(tmp_path: Path) -> None:
-    """finish's ``evidence`` lists commands; one that never ran or failed refuses the finish.
+def test_evidence_is_reported_with_its_exit_codes_and_refuses_nothing(tmp_path: Path) -> None:
+    """finish's ``evidence`` lists commands; the reviewer gets each with its last exit code.
 
     The gate pairs each named command with the exit code its result showed
-    (``record_exit_codes``); the reviewer gets the same list.  Every stage
-    runs in one round and the refusal names them all, with the round count.
+    (``record_exit_codes``).  A command that never ran, failed or timed
+    out no longer refuses the finish, nor does a hedged summary: both go
+    to the reviewer as they are, and the finish is gated on the scripts
+    and the review alone.
     """
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
     if live is None:
         pytest.skip("Docker is not available")
     try:
-        harness = _harness(tmp_path, container=live.id, verifier_timeout=10)
-        harness.on_llm_call([{"role": "user", "content": "task"}])
-        harness.open_reading_refused = True  # the verdicts below are the gate's own
-        _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
-        good, bad = "cd /app && cat out.txt && wc -c out.txt", "grep -q goodbye /app/out.txt"
-        _turn(harness, [("Bash", {"command": good}), ("Bash", {"command": bad}),
-                        ("Bash", {"command": "python3 slow.py"})],
-              ["hello\n5 out.txt", "\n[exit code: 1]", "Error: command timed out after 10s"])
-        assert harness.exit_codes == {good: "0", bad: "1", "python3 slow.py": "timeout"}
-        # a command that never ran, one that failed, one that timed out: each is named
-        claimed = {"success": True, "summary_in_html": "<p>done</p>",
-                   "evidence": json.dumps([good, "pytest -q", bad, "python3 slow.py"])}
-        verdict = harness.on_tool_call("finish", claimed)
-        assert verdict == refuse(coding_sea.gate_refusal(1, 3, [coding_sea.EVIDENCE_VERDICT.format(
-            problems="- `pytest -q`: never ran as a Bash command in this run\n"
-                     f"- `{bad}`: last exit code 1\n- `python3 slow.py`: last exit code timeout")]))
-        logged = _events(tmp_path, "evidence_field")[-1]
-        assert logged["commands"] == [good, "pytest -q", bad, "python3 slow.py"]
-        assert len(logged["problems"]) == 3
+        with serve([text_body("VERDICT: OK")]) as (url, requests):
+            harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
+                               reviewer=SCRIPTED_MODEL,
+                               model_config={"base_url": url, "api_key": "local"})
+            harness.on_llm_call([{"role": "user", "content": "task"}])
+            _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
+            good, bad = "cd /app && cat out.txt && wc -c out.txt", "grep -q goodbye /app/out.txt"
+            _turn(harness, [("Bash", {"command": good}), ("Bash", {"command": bad}),
+                            ("Bash", {"command": "python3 slow.py"})],
+                  ["hello\n5 out.txt", "\n[exit code: 1]", "Error: command timed out after 10s"])
+            assert harness.exit_codes == {good: "0", bad: "1", "python3 slow.py": "timeout"}
+            # a command that never ran, one that failed, one that timed out: each is
+            # listed with its exit code for the reviewer, and none refuses
+            named = [good, "pytest -q", bad, "python3 slow.py"]
+            claimed: dict[str, Any] = {
+                "success": True, "evidence": json.dumps(named),
+                "summary_in_html": "<p>Should work; if the grader wants more, that is a "
+                                   "judgement call.</p>"}
+            report = harness.evidence_report(claimed)
+            assert report == (f"- `{good}` (exit 0)\n- `pytest -q` (exit never ran)\n"
+                              f"- `{bad}` (exit 1)\n- `python3 slow.py` (exit timeout)")
+            assert harness.evidence_report({}) == "(none named)"
+            assert harness.on_tool_call("finish", claimed) == ALLOW
+            assert "Delivered after" not in claimed["summary_in_html"]
+            assert harness.gate_rounds == 0 and not _events(tmp_path, "gate_round")
+            # the reviewer read the list and the summary as they were
+            prompt = json.dumps(requests[0]["messages"])
+            assert json.dumps(report)[1:-1] in prompt and "judgement call" in prompt
         # the verifier passed in the same round: the verified checkpoint was taken,
         # and the stages were recorded with their outcome (no blind check configured)
         assert harness.checkpoints == ["verified"]
         stages = _events(tmp_path, "gate_stage")
-        assert [(s["stage"], s["outcome"]) for s in stages] == [("verifier", "pass")]
+        assert [(s["stage"], s["outcome"]) for s in stages] == [("verifier", "pass"),
+                                                                ("review", "pass")]
         assert all(s["seconds"] >= 0 for s in stages)
-        gate_round = _events(tmp_path, "gate_round")[-1]
-        assert (gate_round["round"], gate_round["refusals"]) == (1, 1)
-        # the reviewer's list shows each command with its exit code
-        report = harness.evidence_report(claimed)
-        assert f"- `{good}` (exit 0)" in report and "- `pytest -q` (exit never ran)" in report
-        assert harness.evidence_report({}) == "(none named)"
-        # the same command run again and passing settles it; a plain string is one command
-        # (the refused finish got its result too: the refusal, paired like any result)
-        _turn(harness, [("Bash", {"command": bad})], ["REFUSED: " + verdict.text, ""])
-        assert harness.on_tool_call("finish", {**claimed, "evidence": bad}) == ALLOW
-        # no evidence is no refusal: the reviewer sees that none was named
-        assert harness.on_tool_call("finish", {**claimed, "evidence": ""}) == ALLOW
+        # a plain string is one command, its surrounding blanks dropped
+        assert harness.evidence_report({"evidence": f" {bad} "}) == f"- `{bad}` (exit 1)"
         # how the field is read: a JSON list, a list, a plain string, junk
         assert coding_sea.evidence_commands('["a", " b ", 3, ""]') == ["a", "b"]
         assert coding_sea.evidence_commands(["a", 1]) == ["a"]
@@ -776,32 +902,125 @@ def test_evidence_names_commands_that_ran_and_passed(tmp_path: Path) -> None:
         live.remove(force=True)
 
 
+def test_the_agents_own_passing_verifier_run_is_reused(tmp_path: Path) -> None:
+    """A foreground run of the verifier that exited 0 stands for the gate's while nothing changed.
+
+    The verifier counts its runs in the container.  After the agent's own
+    run (a plain ``bash`` of it, exit 0) the gated finish runs nothing and
+    records the reuse; an edit under the workdir, a writing shell command,
+    a rollback or an edit of the verifier itself makes the gate run it
+    again; a command that names the verifier, a run whose exit says
+    nothing about it (``|| true``, ``; echo``) and a failed run do not
+    stand for a passing one.
+    """
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
+    try:
+        harness = _harness(tmp_path, container=live.id, verifier_timeout=10)
+        harness.on_llm_call([{"role": "user", "content": "task"}])
+        _write_in(live, coding_sea.LEDGER_PATH, "- out.txt: exactly hello")
+        script = 'echo run >> /tmp/runs; test "$(cat /app/out.txt)" = hello'
+        _write_in(live, VERIFIER, script)
+        done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
+
+        def runs() -> int:
+            return int(live.exec_run(["sh", "-c", "wc -l < /tmp/runs"]).output.strip() or 0)
+
+        def call(name: str, args: dict[str, Any], result: str = "") -> Any:
+            """One agent turn: the tool call, then its result handed to the model."""
+            verdict = harness.on_tool_call(name, args)
+            harness.on_llm_call([{"role": "tool", "content": result}])
+            return verdict
+
+        def agent_runs(command: str, result: str = "") -> None:
+            """Run *command* in the container as the agent would, its result in the turn."""
+            assert live.exec_run(["bash", "-c", command]).exit_code == 0
+            assert call("Bash", {"command": command}, result) == ALLOW
+
+        # the agent's own run passed and nothing changed since: reused, not run again
+        # (a command naming the verifier counts as a change, since it may rewrite the
+        # script; its passing run is then credited at that count)
+        agent_runs(f"bash {VERIFIER}")
+        assert runs() == 1 and harness.verifier_passed_at == harness.changes == 1
+        assert call("finish", dict(done)) == ALLOW
+        assert runs() == 1 and harness.checkpoints == ["verified"]
+        assert harness.last_verifier_run == (
+            script, 0, "(passed when you ran it; nothing changed since)")
+        reused = _events(tmp_path, "verifier")[-1]
+        assert reused["exit_code"] == 0 and reused["reused"] is True
+        stage = _events(tmp_path, "gate_stage")[-1]
+        assert (stage["stage"], stage["outcome"], stage["reused"]) == ("verifier", "pass", True)
+        # an edit under the workdir: the gate runs the verifier itself
+        assert call("Write", {"file_path": "out.txt", "content": "hello"}) == ALLOW
+        assert harness.changes == 2 and harness.verifier_passed_at == 1
+        assert call("finish", dict(done)) == ALLOW
+        assert runs() == 2 and "reused" not in _events(tmp_path, "verifier")[-1]
+        assert "reused" not in _events(tmp_path, "gate_stage")[-1]
+        # a writing shell command, then a rollback: each makes the agent's run stale
+        agent_runs(f"bash {VERIFIER} && echo ok", "ok")
+        assert runs() == 3 and harness.verifier_passed_at == harness.changes == 3
+        agent_runs("echo note > /app/notes.txt")
+        assert harness.changes == 4
+        assert call("finish", dict(done)) == ALLOW and runs() == 4
+        agent_runs(f"cd /app && bash {VERIFIER}")
+        assert runs() == 5 and harness.verifier_passed_at == harness.changes == 5
+        assert harness.checkpoint("v1") == "Saved checkpoint 'v1' of /app."
+        assert harness.rollback("v1") == "Restored /app from checkpoint 'v1'."
+        assert harness.changes == 6
+        assert call("finish", dict(done)) == ALLOW and runs() == 6
+        # an edit of the verifier itself, or a shell command naming it: stale too
+        agent_runs(f"bash {VERIFIER}")
+        assert runs() == 7 and harness.verifier_passed_at == harness.changes == 7
+        assert call("Write", {"file_path": VERIFIER, "content": script}) == ALLOW
+        assert harness.verifier_passed_at is None and harness.changes == 8
+        assert call("finish", dict(done)) == ALLOW and runs() == 8
+        agent_runs(f"bash {VERIFIER}")
+        assert runs() == 9 and harness.verifier_passed_at == harness.changes == 9
+        agent_runs(f"cat {VERIFIER}", script)
+        assert harness.verifier_passed_at is None and harness.changes == 10
+        # an exit 0 that says nothing about the verifier, or a failed run, is no passing run
+        agent_runs(f"bash {VERIFIER} || true")
+        agent_runs(f"bash {VERIFIER}; echo done", "done")
+        assert call("Bash", {"command": f"bash {VERIFIER}"}, "FAIL\n[exit code: 1]") == ALLOW
+        assert runs() == 11 and harness.verifier_passed_at is None
+        assert call("finish", dict(done)) == ALLOW and runs() == 12
+        assert all("reused" not in e for e in _events(tmp_path, "verifier")[1:])
+    finally:
+        live.remove(force=True)
+
+
 def test_round_cap_delivers_with_caveats_and_a_giveup_is_checked(tmp_path: Path) -> None:
-    """Past ``max_gate_rounds`` refusals the finish goes through with the open verdicts as
-    caveats; a ``finish(success=False)`` runs the checks and is answered once when they pass."""
+    """Past ``max_gate_rounds`` rounds refused by the verifier the finish goes through with the
+    open verdicts as caveats; a ``finish(success=False)`` runs the checks and is answered once
+    when they pass."""
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
     if live is None:
         pytest.skip("Docker is not available")
     try:
         harness = _harness(tmp_path, container=live.id, verifier_timeout=10, max_gate_rounds=2)
         harness.on_llm_call([])
-        harness.open_reading_refused = True
-        _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
-        claimed: dict[str, Any] = {"success": True, "summary_in_html": "<p>done</p>",
-                                   "evidence": json.dumps(["pytest -q"])}
+        _write_in(live, VERIFIER, "exit 7")
+        claimed: dict[str, Any] = {"success": True, "summary_in_html": "<p>done</p>"}
         for round_number in (1, 2):
             verdict = harness.on_tool_call("finish", dict(claimed))
             assert not verdict.allowed and verdict.text.startswith(
-                f"Finish refused (round {round_number} of 2;")
-        # the third refused round is the cap: delivered, the caveat on the summary
+                f"Finish refused (round {round_number} of up to 2;")
+            assert "exited 7" in verdict.text
+        # the third refused round would be past the cap: delivered with the verifier's
+        # verdict as the caveat on the summary, as an unverified finish (the verifier
+        # ran and failed again, under its own cap of three refusals)
         delivered = dict(claimed)
         assert harness.on_tool_call("finish", delivered) == ALLOW
         assert "Delivered after 2 refused finish rounds" in delivered["summary_in_html"]
-        assert "never ran as a Bash command" in delivered["summary_in_html"]
+        assert "exited 7" in delivered["summary_in_html"]
         assert harness.delivered_findings == [
-            "Not finished: the evidence named in the finish call does not hold:"]
-        assert _events(tmp_path, "delivered_with_findings")[-1]["findings"] == (
-            harness.delivered_findings)
+            f"Not finished: your own verifier {VERIFIER} exited 7 (bash {VERIFIER}):"]
+        record = _events(tmp_path, "delivered_with_findings")[-1]
+        assert record["findings"] == harness.delivered_findings and record["rounds"] == 2
+        assert record["checks_passed"] is False and not harness.checks_passed
+        assert _events(tmp_path, "unverified_finish")[-1]["refusals"] == 3
+        assert harness.gate_rounds == 2 and harness.checkpoints == []
         # a pause for a fresh context is not a give-up: no check runs, nothing is appended
         pause = {"success": False, "is_continue": True, "summary_in_html": "<p>so far</p>"}
         assert harness.on_tool_call("finish", pause) == ALLOW
@@ -809,6 +1028,7 @@ def test_round_cap_delivers_with_caveats_and_a_giveup_is_checked(tmp_path: Path)
         # a give-up: both checks run (no blind check here: "missing"), the note is
         # appended, a passing tree is checkpointed, and the first such give-up is
         # sent back once
+        _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
         giveup: dict[str, Any] = {"success": False, "summary_in_html": "<p>could not finish</p>"}
         verdict = harness.on_tool_call("finish", giveup)
         assert verdict == refuse(coding_sea.GIVEUP_RECONSIDER_VERDICT.format(
@@ -818,8 +1038,7 @@ def test_round_cap_delivers_with_caveats_and_a_giveup_is_checked(tmp_path: Path)
             giveup["summary_in_html"])
         checked = _events(tmp_path, "giveup_check")[-1]
         assert checked["states"] == {"verifier": "pass", "blind": "missing"} and checked["passed"]
-        # three passing rounds and the give-up: four verified saves
-        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 4
+        assert harness.checkpoints == ["verified"]  # the give-up's passing tree
         giveup_stages = [s for s in _events(tmp_path, "gate_stage") if s.get("giveup")]
         assert [(s["stage"], s["outcome"]) for s in giveup_stages] == [
             ("verifier", "pass"), ("blind", "missing")]
@@ -827,12 +1046,13 @@ def test_round_cap_delivers_with_caveats_and_a_giveup_is_checked(tmp_path: Path)
         again: dict[str, Any] = {"success": False, "summary_in_html": "<p>still no</p>"}
         assert harness.on_tool_call("finish", again) == ALLOW
         assert f"verifier {VERIFIER}: pass" in again["summary_in_html"]
+        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 2
         # a failing verifier makes the give-up note say so, with no checkpoint
         _write_in(live, VERIFIER, "exit 7")
         failing: dict[str, Any] = {"success": False, "summary_in_html": "<p>no</p>"}
         assert harness.on_tool_call("finish", failing) == ALLOW
         assert f"verifier {VERIFIER}: fail (exit 7)" in failing["summary_in_html"]
-        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 5
+        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 2
     finally:
         live.remove(force=True)
 
@@ -850,12 +1070,11 @@ def test_the_verifier_cap_delivers_with_the_caveat(tmp_path: Path) -> None:
     try:
         harness = _harness(tmp_path, container=live.id, verifier_timeout=10)
         harness.on_llm_call([])
-        harness.open_reading_refused = True
         _write_in(live, VERIFIER, "exit 7")
         done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
         for round_number in (1, 2, 3):
             verdict = harness.on_tool_call("finish", dict(done))
-            assert not verdict.allowed and f"round {round_number} of 3" in verdict.text
+            assert not verdict.allowed and f"round {round_number} of up to 3" in verdict.text
             assert "exited 7" in verdict.text
         assert harness.verifier_refusals == 3 and harness.gate_rounds == 3
         delivered = dict(done)
@@ -879,40 +1098,58 @@ def test_the_verifier_cap_delivers_with_the_caveat(tmp_path: Path) -> None:
         live.remove(force=True)
 
 
-def test_a_failing_verifier_makes_a_capped_delivery_unverified(tmp_path: Path) -> None:
-    """A verifier that fails on the round-capped finish leaves ``checks_passed`` false.
+def test_rounds_after_the_first_are_refused_only_by_the_verifier(tmp_path: Path) -> None:
+    """The first refusal buys one round whatever refused it; later ones need a failing verifier.
 
-    Three rounds refused for bad evidence (the verifier passing each time)
-    spend the round cap; the verifier then fails on the delivered finish,
-    which is recorded as unverified (``ended_unchecked()``), with the
-    verifier's verdict as its caveat and no verified checkpoint of the tree.
+    A scripted reviewer finds the work wrong (round 1).  The next finish
+    changes nothing, so the finding stays unanswered (the decisions
+    model's judgement), and the verifier fails: refused again, both
+    verdicts listed.  With the verifier passing again the same unanswered
+    finding refuses no more: the finish is delivered with it as a caveat,
+    as a verified finish, and the reviewer was asked once.
     """
-    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
+    if not decisions_tool_available():
+        pytest.skip("no decisions model configured")
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf goodbye > /app/out.txt")
     if live is None:
         pytest.skip("Docker is not available")
     try:
-        harness = _harness(tmp_path, container=live.id, verifier_timeout=10)
-        harness.on_llm_call([])
-        harness.open_reading_refused = True
-        _write_in(live, VERIFIER, "exit 0")
-        done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
-        for _round in range(3):
-            assert not harness.on_tool_call("finish", {**done, "evidence": "pytest -q"}).allowed
-        assert harness.checks_passed and harness.checkpoints == ["verified"]
-        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 3
-        trajectory = tmp_path / "trajectory.jsonl"
-        assert not coding_sea.ended_unchecked(trajectory)
-        _write_in(live, VERIFIER, "exit 7")
-        delivered = dict(done)
-        assert harness.on_tool_call("finish", delivered) == ALLOW
-        assert not harness.checks_passed
-        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 3
-        assert harness.last_verifier_run[1] == 7 and "exited 7" in delivered["summary_in_html"]
-        assert harness.delivered_findings == [
-            f"Not finished: your own verifier {VERIFIER} exited 7 (bash {VERIFIER}):"]
-        assert _events(tmp_path, "delivered_with_findings")[-1]["checks_passed"] is False
-        assert _events(tmp_path, "unverified_finish")[-1]["refusals"] == 1
-        assert coding_sea.ended_unchecked(trajectory)
+        finding = "1. out.txt must contain exactly hello: it contains goodbye"
+        with serve([text_body(f"VERDICT: NOT DONE\n{finding}\n")]) as (url, requests):
+            harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
+                               reviewer=SCRIPTED_MODEL,
+                               model_config={"base_url": url, "api_key": "local"})
+            harness.on_llm_call([])
+            _write_in(live, VERIFIER, "test -s /app/out.txt")
+            argued: dict[str, Any] = {"success": True, "summary_in_html": "<p>The reviewer "
+                                      "misread the task; any greeting is fine. Done.</p>"}
+            first = harness.on_tool_call("finish", dict(argued))
+            assert first == refuse(coding_sea.gate_refusal(1, 3, [
+                coding_sea.REVIEW_VERDICT.format(findings=finding)]))
+            assert harness.open_findings == [finding]
+            assert harness.checks_passed and harness.checkpoints == ["verified"]
+            # the verifier fails: refused again, the finding still open beside it
+            _write_in(live, VERIFIER, "exit 7")
+            unanswered = coding_sea.UNANSWERED_VERDICT.format(findings=finding)
+            second = harness.on_tool_call("finish", dict(argued))
+            assert not second.allowed and second.text.startswith("Finish refused (round 2 of up")
+            assert f"verifier {VERIFIER} exited 7" in second.text and unanswered in second.text
+            assert not harness.checks_passed
+            # the verifier passes: the same open finding is a caveat, not a refusal
+            _write_in(live, VERIFIER, "test -s /app/out.txt")
+            delivered = dict(argued)
+            assert harness.on_tool_call("finish", delivered) == ALLOW
+            assert len(requests) == 1 and harness.reviews == 1
+        assert harness.gate_rounds == 2 and harness.checks_passed
+        assert harness.delivered_findings == [unanswered.splitlines()[0]]
+        assert "Delivered after 2 refused finish rounds" in delivered["summary_in_html"]
+        assert html.escape(unanswered) in delivered["summary_in_html"]
+        record = _events(tmp_path, "delivered_with_findings")[-1]
+        assert record["checks_passed"] is True and record["rounds"] == 2
+        assert not _events(tmp_path, "unverified_finish")
+        assert not coding_sea.ended_unchecked(tmp_path / "trajectory.jsonl")
+        assert [e["answered"] for e in _events(tmp_path, "findings_answered")] == [[False]] * 2
+        assert len([e for e in _events(tmp_path, "checkpoint") if e["verified"]]) == 2
     finally:
         live.remove(force=True)
 
@@ -935,7 +1172,8 @@ def test_a_giveup_whose_check_cannot_run_is_not_a_passing_one(tmp_path: Path) ->
                            blind_verifier="no-such-model-xyz")
         harness.on_llm_call([])
         _write_in(live, VERIFIER, "exit 0")
-        harness.blind_written, harness.blind_script = True, "exit 0 # \udcff"
+        assert harness.blind_script_ready() == ""  # the real author (no such model) is done
+        harness.blind_script = "exit 0 # \udcff"
         giveup: dict[str, Any] = {"success": False, "summary_in_html": "<p>Could not finish.</p>"}
         assert harness.on_tool_call("finish", giveup) == ALLOW
         checked = _events(tmp_path, "giveup_check")[-1]
@@ -957,7 +1195,6 @@ def test_a_giveup_whose_check_cannot_run_is_not_a_passing_one(tmp_path: Path) ->
         assert harness.checkpoints == ["verified"]
         # the gate's own stages: a check that raises is a failed stage, not a pass
         harness.blind_script = "exit 0 # \udcff"
-        harness.open_reading_refused = True
         done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
         verdict = harness.on_tool_call("finish", done)
         assert not verdict.allowed
@@ -977,13 +1214,14 @@ def test_a_giveup_whose_check_cannot_run_is_not_a_passing_one(tmp_path: Path) ->
         live.remove(force=True)
 
 
-def test_background_and_parallel_checks_count_as_evidence(tmp_path: Path) -> None:
-    """A check run as a background job or through run_commands_parallel satisfies the evidence.
+def test_background_and_parallel_checks_are_read_for_their_exit_codes(tmp_path: Path) -> None:
+    """A check run as a background job or through run_commands_parallel gets its exit code.
 
     A real container job (:class:`ContainerJobs`) is started and waited on
     through the tools' own reports, paired by job id; the host tool's
     report shape and a parallel report with a timed-out and a signalled
-    command are read the same way.
+    command are read the same way.  The exit codes are what the reviewer
+    sees next to the commands named as evidence.
     """
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
     if live is None:
@@ -991,7 +1229,6 @@ def test_background_and_parallel_checks_count_as_evidence(tmp_path: Path) -> Non
     try:
         harness = _harness(tmp_path, container=live.id, verifier_timeout=10)
         harness.on_llm_call([])
-        harness.open_reading_refused = True
         _write_in(live, VERIFIER, "test \"$(cat /app/out.txt)\" = hello")
 
         def bash_fn(command: str, description: str, timeout_seconds: float = 30,
@@ -1007,15 +1244,14 @@ def test_background_and_parallel_checks_count_as_evidence(tmp_path: Path) -> Non
         harness.on_llm_call([{"role": "tool", "content": started}])
         assert harness.exit_codes == {check: "background"}
         assert harness.background_jobs == {job_id: check}
-        refused = harness.evidence_field_verdict({"evidence": check})
-        assert refused is not None and "last exit code background" in refused
+        assert harness.evidence_report({"evidence": check}) == f"- `{check}` (exit background)"
         wait: dict[str, Any] = {"job_id": job_id, "action": "wait", "timeout_seconds": 10}
         assert harness.on_tool_call("bash_job", wait) == ALLOW
         report = jobs.bash_job(**wait)
         assert "status: exited 0" in report
         harness.on_llm_call([{"role": "tool", "content": report}])
         assert harness.exit_codes[check] == "0"
-        assert harness.evidence_field_verdict({"evidence": check}) is None
+        assert harness.evidence_report({"evidence": check}) == f"- `{check}` (exit 0)"
         # the host tool's reports: a job still running settles nothing, its exit does
         failing = "grep -q goodbye /app/out.txt"
         _turn(harness, [("Bash", {"command": failing, "background": True})],
@@ -1039,16 +1275,14 @@ def test_background_and_parallel_checks_count_as_evidence(tmp_path: Path) -> Non
         assert harness.exit_codes[check] == "0" and harness.exit_codes["sleep 100"] == "timeout"
         assert harness.exit_codes["./crash"] == "killed by signal 9"
         assert harness.exit_codes[failing] == "1"
-        assert harness.evidence_field_verdict({"evidence": json.dumps(parallel)}) == (
-            coding_sea.EVIDENCE_VERDICT.format(problems=(
-                "- `sleep 100`: last exit code timeout\n"
-                "- `./crash`: last exit code killed by signal 9\n"
-                f"- `{failing}`: last exit code 1")))
+        assert harness.evidence_report({"evidence": json.dumps(parallel)}) == (
+            f"- `{check}` (exit 0)\n- `sleep 100` (exit timeout)\n"
+            f"- `./crash` (exit killed by signal 9)\n- `{failing}` (exit 1)")
         # a report cut short (the tally only) settles nothing
         _turn(harness, [("run_commands_parallel", {"commands": json.dumps([failing])})],
               ["Error: commands must be a JSON list of strings."])
         assert harness.exit_codes[failing] == "1"
-        # the check that ran as a job and in parallel is evidence enough for the finish
+        # the finish is gated on the verifier, which passes; the evidence is the reviewer's
         claimed = {"success": True, "summary_in_html": "<p>done</p>", "evidence": check}
         assert harness.on_tool_call("finish", claimed) == ALLOW
     finally:
@@ -1093,8 +1327,7 @@ def test_a_running_jobs_output_is_not_its_exit_status(tmp_path: Path) -> None:
         assert "status: running" in report and "child exited 0" in report
         harness.on_llm_call([{"role": "tool", "content": report}])
         assert harness.exit_codes[check] == "background"
-        refused = harness.evidence_field_verdict({"evidence": check})
-        assert refused is not None and "last exit code background" in refused
+        assert harness.evidence_report({"evidence": check}) == f"- `{check}` (exit background)"
         assert live.exec_run(["touch", "/app/release"]).exit_code == 0
         wait = {"job_id": job_id, "action": "wait", "timeout_seconds": 30}
         assert harness.on_tool_call("bash_job", wait) == ALLOW
@@ -1136,7 +1369,6 @@ def test_the_blind_authors_records_are_filed_under_the_task(tmp_path: Path) -> N
                            blind_verifier="no-such-model-xyz")
         harness.on_llm_call([])  # starts the author thread (no such model: no script)
         assert harness.blind_script_ready() == ""
-        harness.open_reading_refused = True
         _write_in(live, VERIFIER, "exit 0")
         done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
         assert harness.on_tool_call("finish", done) == ALLOW
@@ -1320,48 +1552,14 @@ def test_a_credential_failure_at_the_last_step_is_not_exhaustion(tmp_path: Path)
         live.remove(force=True)
 
 
-def test_a_clean_review_is_not_repeated_on_an_unchanged_tree(tmp_path: Path) -> None:
-    """A clean review is cached like one with findings: no file changed, no second review.
-
-    The reviewer is a scripted model answering ``VERDICT: OK``; the first
-    finish is refused for its evidence after that review, the second
-    changes nothing and is not reviewed again, the third follows a file
-    change and is.
-    """
-    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
-    if live is None:
-        pytest.skip("Docker is not available")
-    try:
-        with serve([text_body("VERDICT: OK")]) as (url, requests):
-            harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
-                               reviewer=SCRIPTED_MODEL,
-                               model_config={"base_url": url, "api_key": "local"})
-            harness.on_llm_call([])
-            harness.open_reading_refused = True
-            _write_in(live, VERIFIER, "exit 0")
-            done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
-            refused = harness.on_tool_call("finish", {**done, "evidence": "pytest -q"})
-            assert not refused.allowed and "never ran" in refused.text
-            assert harness.reviews == 1 and not harness.open_findings
-            assert harness.review_snapshot is not None and len(requests) == 1
-            assert not harness.review_wanted()
-            assert harness.on_tool_call("finish", dict(done)) == ALLOW
-            assert harness.reviews == 1 and len(requests) == 1
-            assert live.exec_run(["sh", "-c", "printf x > /app/new.txt"]).exit_code == 0
-            assert harness.review_wanted()
-            assert harness.on_tool_call("finish", dict(done)) == ALLOW
-            assert harness.reviews == 2 and len(requests) == 2
-        assert [r["round"] for r in _events(tmp_path, "review")] == [1, 2]
-    finally:
-        live.remove(force=True)
-
-
 def test_gate_stage_records_carry_the_stages_model_and_cost(tmp_path: Path) -> None:
     """The review's and the blind author's ``gate_stage`` records name their model and cost.
 
     One scripted endpoint serves both: the author delivers its script at
-    its first step (the first request, at the first model call), the
-    reviewer answers ``VERDICT: OK`` at the finish.
+    its first step (the first request, at the first model call, at the
+    trial's effort), the reviewer answers ``VERDICT: OK`` at the finish
+    (at the provider's default effort).  The review is the trial's one:
+    a later finish after a file change is not reviewed again.
     """
     live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
     if live is None:
@@ -1371,14 +1569,23 @@ def test_gate_stage_records_carry_the_stages_model_and_cost(tmp_path: Path) -> N
         with serve([author, text_body("VERDICT: OK")]) as (url, requests):
             harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
                                reviewer=SCRIPTED_MODEL, blind_verifier=SCRIPTED_MODEL,
-                               model_config={"base_url": url, "api_key": "local"})
+                               model_config={"base_url": url, "api_key": "local",
+                                             "reasoning_effort": "high"})
             harness.on_llm_call([])
             assert harness.blind_script_ready() == "test -s /app/out.txt"
-            harness.open_reading_refused = True
             _write_in(live, VERIFIER, "exit 0")
             done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
             assert harness.on_tool_call("finish", done) == ALLOW
             assert len(requests) == 2
+            assert requests[0]["reasoning_effort"] == "high"  # the author, at the trial's effort
+            assert "reasoning_effort" not in requests[1]  # the review, at the default effort
+            assert harness.reviews == 1 and not harness.review_possible()
+            assert harness.review_snapshot is not None and not harness.open_findings
+            assert live.exec_run(["sh", "-c", "printf x > /app/new.txt"]).exit_code == 0
+            assert harness.changed_since(harness.review_snapshot) and not harness.review_wanted()
+            assert harness.on_tool_call("finish", dict(done)) == ALLOW
+            assert harness.reviews == 1 and len(requests) == 2
+        assert [r["round"] for r in _events(tmp_path, "review")] == [1]
         stages = {s["stage"]: s for s in _events(tmp_path, "gate_stage")}
         written = _events(tmp_path, "blind_verifier_written")[-1]
         review = _events(tmp_path, "review")[-1]
@@ -1394,6 +1601,151 @@ def test_gate_stage_records_carry_the_stages_model_and_cost(tmp_path: Path) -> N
         assert all("model" not in stages[s] for s in ("verifier", "blind"))
     finally:
         live.remove(force=True)
+
+
+def test_a_review_without_a_verdict_or_past_its_deadline_refuses_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed review is neither approval nor rejection; a stalled one fails at the deadline.
+
+    A scripted reviewer finds the work wrong (round 1).  The file changes
+    and, with a second review allowed by the config, the reviewer answers
+    without a verdict line, then (after another change) stalls past
+    ``REVIEW_DEADLINE`` (one second here): each is logged as failed with
+    its error, refuses nothing, keeps the first review's findings open
+    and counts under ``MAX_FAILED_REVIEWS``, past which no review is
+    asked for.  A finish no review verdict came back for is judged on
+    those findings: unanswered by the summary (the decisions model's
+    call), they go with the delivered work as caveats, not lost to a
+    re-review that did not happen.  Every review request went at the
+    provider's default effort: the trial's own effort overrides, in the
+    framework's spelling and in the providers' own (Anthropic's
+    ``output_config.effort``, OpenAI's ``reasoning``), are left out (the
+    scripted server speaks chat completions, which the native keys would
+    break), while the rest of ``output_config`` stays.
+    """
+    monkeypatch.setattr(coding_sea, "REVIEW_DEADLINE", 1)
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf goodbye > /app/out.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
+    _StallingHandler.release.clear()
+    try:
+        finding = "1. out.txt must contain exactly hello: it contains goodbye"
+        script = [text_body(f"VERDICT: NOT DONE\n{finding}"), text_body("I could not tell."),
+                  STALL]
+        with serve(script, handler_base=_StallingHandler) as (url, requests):
+            harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
+                               reviewer=SCRIPTED_MODEL, max_reviews=2,
+                               model_config={"base_url": url, "api_key": "local",
+                                             "reasoning_effort": "high",
+                                             "output_config": {"effort": "max"},
+                                             "reasoning": {"effort": "high"}})
+            assert coding_sea.default_effort(harness.model_overrides) == {
+                "base_url": url, "api_key": "local"}
+            assert coding_sea.default_effort({"output_config": {"effort": "max", "format": "x"},
+                                              "thinking": {"budget_tokens": 9}}) == {
+                "output_config": {"format": "x"}}
+            assert coding_sea.default_effort({"reasoning_effort": "low"}) is None
+            harness.on_llm_call([])
+            _write_in(live, VERIFIER, "exit 0")
+            done: dict[str, Any] = {"success": True, "summary_in_html": "<p>Done.</p>"}
+            assert harness.on_tool_call("finish", dict(done)) == refuse(coding_sea.gate_refusal(
+                1, 3, [coding_sea.REVIEW_VERDICT.format(findings=finding)]))
+            assert harness.open_findings == [finding] and harness.review_possible()
+            # a change since the review: the second review runs and answers no verdict
+            assert live.exec_run(["sh", "-c", "printf hello > /app/out.txt"]).exit_code == 0
+            assert harness.review_wanted()
+            second = dict(done)
+            assert harness.on_tool_call("finish", second) == ALLOW
+            assert harness.open_findings == [finding]
+            assert (harness.reviews, harness.failed_reviews) == (1, 1)
+            unanswered = coding_sea.UNANSWERED_VERDICT.format(findings=finding)
+            if decisions_tool_available():
+                assert _events(tmp_path, "findings_answered")[-1]["answered"] == [False]
+                assert harness.delivered_findings == [unanswered.splitlines()[0]]
+                assert "Delivered after 1 refused finish rounds" in second["summary_in_html"]
+                assert html.escape(unanswered) in second["summary_in_html"]
+            else:
+                assert not harness.delivered_findings and second == done
+            # another change: the third review stalls and is given up at the deadline
+            assert live.exec_run(["sh", "-c", "printf x > /app/new.txt"]).exit_code == 0
+            started = time.time()
+            assert harness.on_tool_call("finish", dict(done)) == ALLOW
+            assert time.time() - started < 15
+            _StallingHandler.release.set()
+            assert (harness.reviews, harness.failed_reviews) == (1, 2)
+            assert harness.open_findings == [finding] and not harness.review_possible()
+            assert live.exec_run(["sh", "-c", "printf y > /app/new.txt"]).exit_code == 0
+            assert not harness.review_wanted()
+            assert len(requests) == 3
+            assert not any(set(r) & {"reasoning_effort", "output_config", "reasoning"}
+                           for r in requests)
+        reviews = _events(tmp_path, "review")
+        assert [(r["failed"], r["error"], r["round"], r["answer"]) for r in reviews] == [
+            (False, "", 1, f"VERDICT: NOT DONE\n{finding}"), (True, "", 1, "I could not tell."),
+            (True, "no answer within 1 s", 1, "")]
+        assert reviews[1]["cost_usd"] > 0 and reviews[2]["cost_usd"] == 0
+        assert reviews[2]["last_call"] == {}
+        stages = [s for s in _events(tmp_path, "gate_stage") if s["stage"] == "review"]
+        assert [(s["model"], s["round"]) for s in stages] == [(SCRIPTED_MODEL, 1)] * 3
+        assert [s["outcome"] for s in stages] == ["fail", "error", "error"]
+        assert [s.get("error") for s in stages] == [None, "no verdict", "no answer within 1 s"]
+        assert stages[2]["seconds"] >= 1
+        assert len(_events(tmp_path, "gate_round")) == 1 and harness.gate_rounds == 1
+        assert harness.checks_passed
+        assert bool(harness.delivered_findings) == decisions_tool_available()
+    finally:
+        _StallingHandler.release.set()
+        live.remove(force=True)
+
+
+def test_a_stop_during_the_review_propagates_and_logs_its_spend(tmp_path: Path) -> None:
+    """The run's Stop ends a review in flight; what the call cost is still the trial's.
+
+    The scripted server sets the run's stop event when the review request
+    arrives and holds the connection: the model client gives the request
+    up on the stop, the stop propagates out of the review (no verdict,
+    nothing counted as a review or a failed review), and the side call
+    logs its spend as a failed ``review`` event before it does, so
+    :func:`coding_sea.review_usage` sees it (review of 2026-11-05, finding
+    2: the spend of a stopped call was lost).  Here the client was stopped
+    before any reply was billed, so the logged spend is zero; a reply
+    billed before the stop landed would be the event's cost.  The thread's
+    stop event is the run's again afterwards.
+    """
+    live = _live_container("python:3.11-slim", "mkdir -p /app && printf hello > /app/out.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
+    run_stop = threading.Event()
+
+    class Stopping(_StallingHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            run_stop.set()
+            super().do_POST()
+
+    outer = stop_signal.get_thread_stop_event()
+    stop_signal.set_thread_stop_event(run_stop)
+    _StallingHandler.release.clear()
+    try:
+        with serve([STALL], handler_base=Stopping) as (url, requests):
+            harness = _harness(tmp_path, container=live.id, verifier_timeout=10,
+                               reviewer=SCRIPTED_MODEL,
+                               model_config={"base_url": url, "api_key": "local"})
+            harness.on_llm_call([])
+            _write_in(live, VERIFIER, "exit 0")
+            with pytest.raises(KeyboardInterrupt):
+                harness.review_verdict({"success": True, "summary_in_html": "<p>Done.</p>"})
+            assert len(requests) == 1 and run_stop.is_set()
+        assert stop_signal.get_thread_stop_event() is run_stop
+    finally:
+        _StallingHandler.release.set()
+        stop_signal.set_thread_stop_event(outer)
+        live.remove(force=True)
+    assert (harness.reviews, harness.failed_reviews) == (0, 0)
+    reviews = _events(tmp_path, "review")
+    assert [(r["failed"], r["error"], r["model"], r["cost_usd"], r["tokens"]) for r in reviews] == [
+        (True, "stopped", SCRIPTED_MODEL, 0.0, 0)]
+    assert coding_sea.review_usage(tmp_path / "trajectory.jsonl") == (0.0, 0)
 
 
 def test_inventory_is_appended_at_a_context_restart(tmp_path: Path) -> None:
@@ -1486,56 +1838,6 @@ def test_numbered_items_and_answered_findings() -> None:
         pytest.skip("no decisions model configured")
     assert coding_sea.answered_findings(evidence, findings) == [True]
     assert coding_sea.answered_findings(argument, findings) == [False]
-
-
-STATEMENT = ("A log rotation daemon is not working. Symptoms: the current log is truncated "
-             "while a writer still holds it open; rotation stalls when one of the watched "
-             "directories sits on a slow disk; archives older than the retention period are "
-             "kept forever. Fix the bugs.")
-OPEN = ("<p>Fixed the truncation and the retention. Choices the symptoms didn't settle: I read "
-        "the stalls symptom as the scan order being wrong. I added nothing for a directory on "
-        "a slow disk, because NOTES.md requires every directory to be scanned in order.</p>")
-CLOSED = ("<p>Fixed three bugs. 1. the file was truncated before the rename; rotation now "
-          "renames first. 2. a directory on a slow disk no longer holds the others back: each "
-          "directory is scanned by its own worker with a deadline (checked: a 5 s stat delay on "
-          "one directory leaves the other two rotating on time). 3. the retention cutoff was "
-          "compared against the archive's own mtime, not its creation time. "
-          "Checks: bash /tmp/kiss-verify.sh passes, 9 scenarios.</p>")
-PLANNER = ("A warehouse's picking route planner has been producing incorrect results since "
-           "the last update: walking distances that don't match a manual count, and routes "
-           "that cleared carts known to be over the weight limit. Fix the planner so that "
-           "routes.py writes a correct route plan for today's orders.")
-INFEASIBLE = ("<p>I fixed the planner (aisle distance sign, cart tare counted, load no longer "
-              "capped at the rack capacity). The plan it writes is marked not feasible: with "
-              "the bugs fixed, today's orders cannot be picked by any of the 24 candidate "
-              "routes; the best one ends 2.3 kg over the 150 kg cart limit. Checks: "
-              "/tmp/kiss-verify.sh passes.</p>")
-PLANNED = ("<p>I fixed the planner: aisle distance sign, cart tare counted, and the items "
-           "loaded at each stop are now bounded by the cart's remaining capacity (the stop-2 "
-           "load drops to 31 kg, leaving 12 kg of headroom). The plan is feasible on all five "
-           "stops, route_feasible true, 48.7 min including the return leg. Checks: "
-           "/tmp/kiss-verify.sh passes, every stop's weight and distance within limits.</p>")
-
-
-@pytest.mark.live_api
-def test_a_summary_that_leaves_a_case_open_is_refused_once(tmp_path: Path) -> None:
-    """The decisions model reads the statement and the summary; an admitted gap costs one finish."""
-    if not decisions_tool_available():
-        pytest.skip("no decisions model configured")
-    assert coding_sea.leaves_a_case_open(STATEMENT, OPEN) >= coding_sea.OPEN_READING_THRESHOLD
-    assert coding_sea.leaves_a_case_open(STATEMENT, CLOSED) < coding_sea.OPEN_READING_THRESHOLD
-    # the asked outcome missed ("not feasible", "no tour passes") is an open case too
-    assert coding_sea.leaves_a_case_open(PLANNER, INFEASIBLE) >= coding_sea.OPEN_READING_THRESHOLD
-    assert coding_sea.leaves_a_case_open(PLANNER, PLANNED) < coding_sea.OPEN_READING_THRESHOLD
-    harness = _harness(tmp_path, prompt=STATEMENT, container="none")
-    closed = harness.open_reading_verdict({"summary_in_html": CLOSED})
-    assert closed is None and not harness.open_reading_refused
-    verdict = harness.open_reading_verdict({"summary_in_html": OPEN})
-    assert verdict == coding_sea.OPEN_READING_VERDICT.format(verifier=VERIFIER)
-    assert harness.open_reading_refused
-    assert harness.open_reading_verdict({"summary_in_html": OPEN}) is None  # once per trial
-    scores = [e["score"] for e in _events(tmp_path, "open_reading")]
-    assert len(scores) == 2 and scores[0] < 0.7 <= scores[1]
 
 
 def test_review_findings_parse_the_reviewer_answer() -> None:
@@ -2031,13 +2333,16 @@ def test_harbor_agent_bridges_a_non_docker_environment(tmp_path: Path) -> None:
 
     agent = harbor_agent.SeaHarborAgent(
         logs_dir=tmp_path, model_name="m", home=str(tmp_path / "no-daemon"),
-        reviewer="none", reasoning_effort="max",
+        reviewer="none", reading_check="same", reasoning_effort="max",
     )
     context = AgentContext()
     asyncio.run(agent.run("do it", LocalEnvironment(str(tmp_path)), context))  # type: ignore[arg-type]
     config = json.loads((tmp_path / "config.json").read_text())
     assert config["container"].startswith("exec:http://127.0.0.1:")
     assert config["workdir"] == str(tmp_path) and config["reviewer"] == ""
+    # the side-model options reach the SEA config by their aliases: `same` is the
+    # trial's model, `none` is off, the default `other` is left to the harness
+    assert config["reading_check"] == "m" and config["blind_verifier"] == ""
     assert config["model_config"] == {"reasoning_effort": "max"}
     # no daemon: the trial records the failure, and the bridge is closed afterwards
     assert context.metadata is not None and context.metadata["error"]
@@ -2052,7 +2357,8 @@ def test_harbor_agent_bridges_a_non_docker_environment(tmp_path: Path) -> None:
     reused = AgentContext()
     asyncio.run(same.run("do it", LocalEnvironment(str(tmp_path)), reused))  # type: ignore[arg-type]
     config = json.loads((tmp_path / "s" / "config.json").read_text())
-    assert config["reviewer"] == "m" and config["model_config"] is None
+    assert config["reviewer"] == config["reading_check"] == harbor_agent.OTHER_FAMILY
+    assert config["blind_verifier"] == "" and config["model_config"] is None
     assert reused.cost_usd == 0.0 and reused.metadata is not None
     assert reused.metadata["review_cost_usd"] == 0.0
 

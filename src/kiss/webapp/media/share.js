@@ -256,11 +256,16 @@
    * .chat-tab.subagent-tab per open sub-agent (done indicator, title,
    * close button), roving tabindex on the active tab. The bar only
    * shows when there is something beyond the root chat to switch to.
+   * A focus inside the strip (Enter / Space on a tab or its close
+   * button rebuilds it) moves to the active tab, the strip's one Tab
+   * stop, so the arrow keys keep working instead of focus falling to
+   * the body; a focus elsewhere is left alone.
    */
   function renderShareTabBar() {
     const list = ensureTabBar();
     const bar = list.parentElement;
     bar.style.display = openSubTabs.length > 0 ? '' : 'none';
+    const refocus = list.contains(document.activeElement);
     list.innerHTML = '';
     const rootTitle = (document.title || '').trim() || 'Chat';
 
@@ -309,6 +314,8 @@
         : 'Sub-agent';
       makeTab(openSubTabs[i], title);
     }
+    const stop = refocus && list.querySelector('.chat-tab[tabindex="0"]');
+    if (stop) stop.focus();
   }
 
   /**

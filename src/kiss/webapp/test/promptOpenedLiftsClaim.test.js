@@ -120,7 +120,29 @@ function testUnaddressedAckTargetsTheVisibleTab() {
   console.log('  ok - an unaddressed promptOpened is for the visible tab');
 }
 
+// The host answers a tab's prompts in order: the ack of a path sent
+// before a second prompt is the path's, and the second prompt, still
+// unanswered, is what a reload gives back.
+function testAckOfAnEarlierPathKeepsTheNewerPrompt() {
+  const {win, posted, getState} = makePage();
+  const tabId = win._testApi.getActiveTabId();
+  typeAndEnter(win, PROMPT);
+  typeAndEnter(win, 'SECOND unacknowledged task');
+  assert.strictEqual(submits(posted).length, 2);
+  send(win, {type: 'promptOpened', tabId});
+  assert.strictEqual(
+    persistedDrafts(win, getState)[tabId],
+    'SECOND unacknowledged task',
+    "BUG: the path's ack dropped the second prompt's recovery copy",
+  );
+  send(win, {type: 'setTaskText', text: 'SECOND unacknowledged task', tabId});
+  assert.strictEqual(persistedDrafts(win, getState)[tabId], undefined);
+  win.close();
+  console.log("  ok - an earlier path's promptOpened keeps the newer prompt");
+}
+
 testAckLiftsTheClaim();
 testAckKeepsAnAdoptedTask();
 testUnaddressedAckTargetsTheVisibleTab();
+testAckOfAnEarlierPathKeepsTheNewerPrompt();
 console.log('promptOpenedLiftsClaim: all tests passed');

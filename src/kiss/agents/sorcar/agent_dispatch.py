@@ -534,6 +534,7 @@ def _attribute_dispatch_usage(
     epoch: Any = None,
     parent_task_id: str = "",
     job: AgentJob | None = None,
+    machine: str = "",
 ) -> None:
     """Fold a dispatched sub-task's spend into the calling task.
 
@@ -565,6 +566,13 @@ def _attribute_dispatch_usage(
     printer (standalone use) gets the plain ledger fold
     (:func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`).
 
+    A sub-task that ran on another *machine* has its row there only:
+    the folded totals are recorded with its model
+    (:func:`~kiss.agents.sorcar.persistence._record_remote_subtask`),
+    so the Spend panel files them under that model and spend the
+    machine charges to the row later reaches the caller
+    (:func:`~kiss.server.task_update.sync_remote_subtask_usage`).
+
     Args:
         parent_agent: The agent that called ``run_agent``; ``None``
             (standalone use, where no calling agent exists)
@@ -581,6 +589,8 @@ def _attribute_dispatch_usage(
             on to another task), or ``""`` when it has none.
         job: The job the sub-task ran as, whose :attr:`AgentJob.budget`
             reservation the fold replaces; ``None`` without one.
+        machine: The registered machine the sub-task ran on, ``""``
+            for this one.
     """
     if parent_agent is None or result is None:
         return
@@ -593,6 +603,15 @@ def _attribute_dispatch_usage(
         charge = getattr(getattr(parent_agent, "printer", None), "charge_task_usage", None)
         if parent_task_id and callable(charge):
             charge(parent_agent, parent_task_id, cost, tokens, steps, epoch=epoch)
+            task_id = str(getattr(result, "task_id", "") or "")
+            if machine and task_id:
+                from kiss.agents.sorcar.persistence import _record_remote_subtask
+
+                settings = getattr(result, "settings", None) or {}
+                _record_remote_subtask(
+                    task_id, parent_task_id, machine, str(settings.get("model") or ""),
+                    cost, tokens, steps,
+                )
             return
         from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
@@ -1236,7 +1255,9 @@ def dispatch_result(
     except daemon_client.CancelledError as e:
         # A confirmed stop carries the stopped task's spend, which still
         # counts towards the caller.
-        _attribute_dispatch_usage(parent_agent, e.result, epoch, parent_task_id, job)
+        _attribute_dispatch_usage(
+            parent_agent, e.result, epoch, parent_task_id, job, kwargs["machine"],
+        )
         if not e.confirmed:
             return unconfirmed_stop_error(name)
         spend = ""
@@ -1249,6 +1270,7 @@ def dispatch_result(
     except Exception as e:
         _attribute_dispatch_usage(
             parent_agent, getattr(e, "task_result", None), epoch, parent_task_id, job,
+            kwargs["machine"],
         )
         logger.warning("agent dispatch failed", exc_info=True)
         if isinstance(e, daemon_client.ConnectionLostError):
@@ -1258,7 +1280,7 @@ def dispatch_result(
                 + f"{e}); it MAY STILL BE RUNNING (and spending) on the daemon."
             )
         return f"Error: the {name} agent task could not run: {e}"
-    _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id, job)
+    _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id, job, kwargs["machine"])
     return result
 
 
@@ -2149,8 +2171,9 @@ def digest_agent_results(entries: list[str], shown: str) -> str:
     """Render the short form of a ``run_parallel`` result whose whole YAML is in a file.
 
     One line per child: its number, ``success`` and the start of its
-    summary as text (or its job id when it is still running), then the
-    file to read for the rest.
+    summary as text (its job id when it is still running; ``FAILED``
+    and the error when the dispatch could not run), then the file to
+    read for the rest.
 
     Args:
         entries: Each child's result text (:func:`format_dispatch_result`)
@@ -2168,10 +2191,50 @@ def digest_agent_results(entries: list[str], shown: str) -> str:
             status = "ok" if parsed["success"] else "FAILED"
         else:
             text = " ".join(entry.split())
-            status = f"running (job {notice_job_id(entry) or '?'})"
+            job_id = notice_job_id(entry)
+            status = f"running (job {job_id})" if job_id else "FAILED"
         lines.append(f"[{index}/{len(entries)}] {status}: {text[:200]}"
                      f"{'...' if len(text) > 200 else ''}")
     return "\n".join(lines)
+
+
+class _JobEvent(threading.Event):
+    """An event whose ``set`` and ``wait`` a task's Stop cannot leave locked.
+
+    A job's ``cancel`` is set and its ``running`` waited for on task
+    threads, where a Stop is a ``KeyboardInterrupt`` injected at any
+    check point of the bytecode, including the one right after the
+    ``with self._cond:`` of the stock methods took the condition's
+    lock, outside the ``with`` block (CPython gh-74174): the lock then
+    stayed held by the dead thread, the job thread's own
+    ``running.set()`` never returned, and a later kill hung on
+    ``cancel.set()``.  Here the flag is published without the lock
+    (one store, nothing to leak) and the condition, over a reentrant
+    lock, is only ever taken through :func:`locked_call`, which
+    releases it on every exit.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cond = threading.Condition(threading.RLock())
+
+    def set(self) -> None:
+        """Set the flag and wake every waiter."""
+        self._flag = True
+        locked_call(self._cond, self._cond.notify_all)
+
+    def clear(self) -> None:
+        """Reset the flag."""
+        self._flag = False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until the flag is set or *timeout* seconds pass; return the flag."""
+        return locked_call(self._cond, self._wait_held, timeout)
+
+    def _wait_held(self, timeout: float | None) -> bool:
+        if not self._flag:
+            self._cond.wait(timeout)
+        return self._flag
 
 
 @dataclass(eq=False)
@@ -2303,7 +2366,7 @@ def new_agent_job(
     """
     job_id = f"agent-{uuid.uuid4().hex[:8]}"
     job = AgentJob(
-        job_id, name, owner, threading.Event(), threading.Event(),
+        job_id, name, owner, _JobEvent(), _JobEvent(),
         timeout=float(kwargs["timeout"]), workspace=str(kwargs.get("workspace") or ""),
         call_id=call_id or uuid.uuid4().hex, budget=kwargs.get("budget"),
     )

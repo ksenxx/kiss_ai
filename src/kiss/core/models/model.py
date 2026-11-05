@@ -46,6 +46,8 @@ from kiss.core.models.heif import (
 )
 from kiss.core.models.stream_abort import (
     DEFAULT_STREAM_STALL_TIMEOUT,
+    RequestAbortWatchdog,
+    make_pool_abortable,
     stop_aware_events,
     stop_error,
 )
@@ -223,6 +225,34 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
     return out
 
 
+def image_mime_type(data: bytes) -> str | None:
+    """The image format ``data`` starts with, from its file header.
+
+    A file's extension is not its format: Terminal-Bench ships ``.png``
+    files that hold WebP bytes, and a vision API rejects the whole
+    request when the declared ``media_type`` and the bytes disagree
+    (Anthropic: "The image was specified using the image/png media type,
+    but the image appears to be a image/webp image").
+
+    Args:
+        data: Raw file bytes (only the first 12 are inspected).
+
+    Returns:
+        ``image/png``, ``image/jpeg``, ``image/gif`` or ``image/webp`` when
+        the header identifies one of the formats the vision APIs accept;
+        ``None`` otherwise.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 @dataclasses.dataclass
 class Attachment:
     """A file attachment (image, document, audio, or video) to include in a prompt.
@@ -238,24 +268,27 @@ class Attachment:
 
     @staticmethod
     def from_bytes(data: bytes, mime_type: str) -> "Attachment":
-        """Create an Attachment from raw bytes, transcoding HEIF photos.
+        """Create an Attachment from raw bytes, labelled by the file header.
 
+        The declared MIME type is ignored whenever the header identifies the
+        format: iOS and the browsers disagree about (and sometimes omit) the
+        type of a camera photo, and a file's extension can lie (a ``.png``
+        holding WebP bytes), which makes a vision API reject the request.
         iPhone camera photos arrive as HEIC, which the OpenAI and Anthropic
-        vision APIs reject.  Such bytes are transcoded to JPEG here so that
-        every model sees a format it understands; the declared MIME type is
-        ignored in favour of the file header, because iOS and the browsers
-        disagree about (and sometimes omit) it.
+        vision APIs reject; such bytes are transcoded to JPEG here so that
+        every model sees a format it understands.
 
         Args:
             data: Raw file bytes.
-            mime_type: MIME type reported by the sender, if any.
+            mime_type: MIME type reported by the sender, if any; used when
+                the header is not one of the recognised image formats.
 
         Returns:
             An Attachment holding either the original bytes or, for a HEIF
             photo on a host with a HEIF decoder, its JPEG rendition.
         """
         if not is_heif(data):
-            return Attachment(data=data, mime_type=mime_type)
+            return Attachment(data=data, mime_type=image_mime_type(data) or mime_type)
         jpeg = heif_to_jpeg(data)
         if jpeg is not None:
             return Attachment(data=jpeg, mime_type="image/jpeg")
@@ -568,15 +601,25 @@ def import_provider_module(name: str) -> types_module.ModuleType:
     return locked_call(_IMPORT_LOCK, importlib.import_module, name)
 
 
+#: Bound on the whole of one :func:`transcribe_audio` call, SDK retries
+#: included: five minutes outlasts any clip a prompt carries, and the SDK's
+#: 120 s read timeout only bounds the silence between two bytes, so without
+#: this a peer that keeps dripping bytes would hold the request build for good.
+_TRANSCRIBE_DEADLINE_SECONDS = 300.0
+
+
 def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
     """Transcribe audio bytes to text using OpenAI's Whisper API.
 
     This is used as a fallback for model providers that do not support audio
     attachments natively (e.g. Anthropic).  The call runs synchronously while
-    a request is being built and is not stop-aware, so its wait is bounded
-    tightly: 10 s to connect, 120 s per attempt, and the SDK's own retry of
-    transient failures (connection errors, timeouts, 408/409/429 and 5xx)
-    at most twice.  That is the only retry policy; there is no loop here.
+    a request is being built, so its wait is bounded tightly: 10 s to
+    connect, 120 s per attempt, the SDK's own retry of transient failures
+    (connection errors, timeouts, 408/409/429 and 5xx) at most twice, and
+    :data:`_TRANSCRIBE_DEADLINE_SECONDS` for the whole call.  That is the
+    only retry policy; there is no loop here.  A
+    :class:`~kiss.core.models.stream_abort.RequestAbortWatchdog` cuts the
+    request at that deadline, and as soon as the task is stopped.
 
     Args:
         data: Raw audio file bytes.
@@ -590,6 +633,7 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
     Raises:
         ValueError: If no API key is available.
         RuntimeError: If the transcription API call fails.
+        KeyboardInterrupt: The user pressed Stop during the call.
     """
     import httpx
 
@@ -603,13 +647,24 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
     client = openai.OpenAI(api_key=key, timeout=httpx.Timeout(120.0, connect=10.0), max_retries=2)
+    # Abortable pool: a Stop also reaches a request still setting up its
+    # connection.  The private client is closed with the call.
+    make_pool_abortable(client._client)
     try:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(f"audio{ext}", data, mime_type),
-            response_format="text",
-        )
+        with (
+            client,
+            RequestAbortWatchdog(
+                client._client, _TRANSCRIBE_DEADLINE_SECONDS, "transcription-abort-watchdog"
+            ),
+        ):
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(f"audio{ext}", data, mime_type),
+                response_format="text",
+            )
     except Exception as exc:
+        if stop_signal.stop_requested():
+            raise stop_error() from exc
         raise RuntimeError(f"Audio transcription failed: {exc}") from exc
     return str(transcript).strip()
 
@@ -842,8 +897,10 @@ def _unrecorded_tool_calls_text(message: dict[str, Any], content: str) -> str:
     items) keep a call only in ``tool_calls``; it is rendered like an
     Anthropic ``tool_use`` block, ``[Tool Call] name(arguments)``.  The CLI
     adapters' own turns already carry their calls in the text (the raw
-    ``{"tool_calls": ...}`` block, or Codex's ``name(...)`` invocation),
-    so those are not rendered twice.
+    ``{"tool_calls": ...}`` block, or Codex's rendered invocation, see
+    :func:`render_tool_call`), so those are not rendered twice.  A call
+    is recorded only by its name *and* arguments: prose that mentions
+    the tool, or a same-name call with other arguments, records nothing.
 
     Args:
         message: An assistant message in chat format.
@@ -855,16 +912,26 @@ def _unrecorded_tool_calls_text(message: dict[str, Any], content: str) -> str:
     calls = message.get("tool_calls") or []
     if not calls:
         return ""
-    recorded = {call["name"] for call in _parse_text_based_tool_calls(content)}
+    recorded = {
+        (call["name"], json.dumps(call["arguments"], sort_keys=True))
+        for call in _parse_text_based_tool_calls(content)
+    }
     lines: list[str] = []
     for call in calls:
         function = call.get("function") or {}
         name = function.get("name", "")
-        if name in recorded or f"{name}(" in content:
-            continue
         arguments = function.get("arguments", "")
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments)
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            parsed = None
+        if parsed is not None and (
+            (name, json.dumps(parsed, sort_keys=True)) in recorded
+            or (isinstance(parsed, dict) and render_tool_call(name, parsed) in content)
+        ):
+            continue
         lines.append(f"[Tool Call] {name}({arguments})")
     return "\n".join(lines)
 
@@ -1004,9 +1071,9 @@ FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
         # say, without the framework's own additions (see ``plain_io``).
         "plain_io",
         # ``False``: the run is no coding run for Sorcar's finish gate
-        # (``kiss.agents.sorcar.coding_gate``): no verifier, review or
-        # unchecked-change stage, whatever it changes (a SEA such as
-        # ``/sync``, whose edits resolve merge conflicts, sets it).
+        # (``kiss.agents.sorcar.coding_gate``): no verifier or review
+        # stage, whatever it changes (a SEA such as ``/sync``, whose
+        # edits resolve merge conflicts, sets it).
         "coding_gate",
     }
 )
@@ -1046,7 +1113,8 @@ def plain_io(model_config: dict[str, Any] | None) -> bool:
 
 
 def framework_flags_over(
-    model_config: dict[str, Any] | None, base: dict[str, Any] | None,
+    model_config: dict[str, Any] | None,
+    base: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Return the model configuration a run gets from *model_config* on top of *base*.
 
@@ -2601,8 +2669,8 @@ class _CLIProcess:
         except OSError as e:
             raise KISSError(f"Failed to start {label}: {e}") from e
         try:
-            readers.append(self._start_reader(self._drain_stdout, "stdout"))
-            readers.append(self._start_reader(self._drain_stderr, "stderr"))
+            self._start_reader(readers, self._drain_stdout, "stdout")
+            self._start_reader(readers, self._drain_stderr, "stderr")
             self._readers = (readers[0], readers[1])
         except BaseException:
             self._abort_start(readers)
@@ -2625,15 +2693,20 @@ class _CLIProcess:
         stay alive behind three open pipes.  Once
         the child is dead a reader that did start drains its pipe to EOF
         and exits; as in :meth:`close`, an output pipe is closed only
-        after its reader is gone, stdin unconditionally.
+        after its reader is gone, stdin unconditionally.  A reader is
+        recorded before its ``start()`` (see :meth:`_start_reader`), so
+        the last one may never have started: only an alive reader is
+        joined, and a reader parked inside ``read(2)`` holding its
+        pipe's buffer lock is always alive, so its pipe is left to it.
 
         Args:
-            readers: The reader threads that did start, stdout's first.
+            readers: The reader threads recorded so far, stdout's first.
         """
         self._signal_tree(SIGKILL)
         self._reap(_REAP_GRACE_SECONDS)
         for thread in readers:
-            thread.join(timeout=_REAP_GRACE_SECONDS)
+            if thread.is_alive():
+                thread.join(timeout=_REAP_GRACE_SECONDS)
         owners = dict(zip((self._proc.stdout, self._proc.stderr), readers, strict=False))
         for pipe in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
             owner = owners.get(pipe)
@@ -2642,11 +2715,19 @@ class _CLIProcess:
                 with contextlib.suppress(OSError):
                     pipe.close()
 
-    def _start_reader(self, target: Callable[[], None], suffix: str) -> threading.Thread:
-        """Start a daemon thread draining one of the child's pipes."""
+    def _start_reader(
+        self, readers: list[threading.Thread], target: Callable[[], None], suffix: str
+    ) -> None:
+        """Start a daemon thread draining one of the child's pipes, recorded in *readers* first.
+
+        The thread is live from the spawn inside ``start()`` on, so it is
+        recorded before that: a Stop landing in or right after ``start()``
+        must reach :meth:`_abort_start` with the pipe's owner known, or
+        the pipe would be closed under a reader parked inside ``read(2)``.
+        """
         thread = threading.Thread(target=target, daemon=True, name=f"cli-{suffix}-drain")
+        readers.append(thread)
         thread.start()
-        return thread
 
     def _drain_stdout(self) -> None:
         """Move every stdout line into the queue, then post the EOF sentinel."""

@@ -35,8 +35,9 @@ const messages = utils.ruleMessages(ruleName, {
 
 const HEX = /^#[\da-f]{3,8}$/i;
 const BORDER_RADIUS = /^border(-(top|bottom)-(left|right)|-(start|end)-(start|end))?-radius$/;
-// Units a font size can carry; `font: oblique 10deg ...` is an angle.
-const SIZE_UNIT = /^(px|em|rem|%|pt|pc|ch|ex|vw|vh|vmin|vmax)$/i;
+// Before the `/` of a font declaration every unit is a size (any CSS length
+// or `%`) except the angle of `font: oblique 10deg ...`; a weight is unitless.
+const ANGLE_UNIT = /^(deg|grad|rad|turn)$/i;
 
 function isTokenDeclaration(decl, tokenSelectors) {
   const parent = decl.parent;
@@ -67,7 +68,7 @@ function violation(kind, word, lineHeight) {
   if (kind === 'zIndex') return 'zIndex';
   if (Number(num.number) === 0) return null;
   if (kind === 'radius') return num.unit.toLowerCase() === 'px' ? 'radius' : null;
-  return SIZE_UNIT.test(num.unit) && !lineHeight ? 'fontSize' : null;
+  return num.unit && !ANGLE_UNIT.test(num.unit) && !lineHeight ? 'fontSize' : null;
 }
 
 function checkDeclaration(decl, result) {

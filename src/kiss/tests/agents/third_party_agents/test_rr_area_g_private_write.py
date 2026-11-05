@@ -81,10 +81,19 @@ class TestWritePrivateFile:
         target = tmp_path / "state.json"
         write_private_file(target, json.dumps({"writer": -1, "payload": "x" * 4096}))
         stop = threading.Event()
+        seen = threading.Event()  # the reader observed a payload a writer published
         errors: list[str] = []
 
         def writer(idx: int) -> None:
-            for i in range(150):
+            # 150 writes, then more (bounded) until the reader has seen a
+            # writer's payload: proof that it read while the writers wrote,
+            # not only before they started or after they finished.
+            deadline = time.monotonic() + 30.0
+            i = 0
+            while i < 150 or not seen.is_set():
+                if time.monotonic() > deadline:  # pragma: no cover
+                    errors.append(f"writer {idx}: the reader observed none of the writes")
+                    return
                 try:
                     write_private_file(
                         target, json.dumps({"writer": idx, "i": i, "payload": "x" * 4096})
@@ -95,6 +104,7 @@ class TestWritePrivateFile:
                     # merely warning about a dead thread.
                     errors.append(f"writer {idx} failed: {e}")
                     return
+                i += 1
 
         def reader() -> None:
             while not stop.is_set():
@@ -112,6 +122,8 @@ class TestWritePrivateFile:
                 if _IS_POSIX and _mode(target) != 0o600:  # pragma: no cover
                     errors.append(f"bad mode {oct(_mode(target))}")
                     return
+                if data["writer"] != -1:
+                    seen.set()
 
         threads = [threading.Thread(target=writer, args=(i,), daemon=True) for i in range(4)]
         observer = threading.Thread(target=reader, daemon=True)
@@ -124,6 +136,7 @@ class TestWritePrivateFile:
         observer.join(timeout=60.0)
         assert not any(t.is_alive() for t in [*threads, observer]), "writer or reader hung"
         assert errors == []
+        assert seen.is_set(), "the reader never observed a writer's payload"
         assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
 

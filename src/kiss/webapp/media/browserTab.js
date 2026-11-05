@@ -288,11 +288,16 @@
     screen.addEventListener('contextmenu', e => e.preventDefault());
 
     // Touch: a tap is a click, a drag scrolls (as on a phone browser).
+    // A second finger (a pinch) or a cancelled touch ends the gesture:
+    // its final touchend must not click where the first finger landed.
     let touchStart = null;
     screen.addEventListener(
       'touchstart',
       e => {
-        if (e.touches.length !== 1) return;
+        if (e.touches.length !== 1) {
+          touchStart = null;
+          return;
+        }
         const t = e.touches[0];
         touchStart = {x: t.clientX, y: t.clientY, moved: false};
       },
@@ -301,7 +306,11 @@
     screen.addEventListener(
       'touchmove',
       e => {
-        if (!touchStart || e.touches.length !== 1) return;
+        if (!touchStart) return;
+        if (e.touches.length !== 1) {
+          touchStart = null;
+          return;
+        }
         const t = e.touches[0];
         const dx = touchStart.x - t.clientX;
         const dy = touchStart.y - t.clientY;
@@ -323,6 +332,9 @@
         mouse('mousePressed', fake, {buttons: 1});
         mouse('mouseReleased', fake, {buttons: 0});
       }
+      touchStart = null;
+    });
+    screen.addEventListener('touchcancel', () => {
       touchStart = null;
     });
 

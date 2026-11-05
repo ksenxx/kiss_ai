@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
+import traceback
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
@@ -41,6 +43,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
     make_run_parallel_tool,
 )
+from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.agents.sorcar.test_dispatch_timeout import _StopConfirmingDaemon
 
 
@@ -211,3 +214,85 @@ def test_a_stop_inside_an_ownerless_run_parallel_start_cancels_its_job(
     tasks = json.dumps(["never finishes", "never finishes either"])
     assert _interrupted(partial(run_parallel, tasks, DEFAULT_AGENT_PATH, timeout="30"), stop)
     _assert_the_ownerless_job_was_abandoned(stop)
+
+
+def _inside(tid: int | None, method: str, event: threading.Event) -> bool:
+    """Whether thread *tid* is inside *event*'s *method* (``wait`` or ``set``)."""
+    frame = sys._current_frames().get(tid or -1)
+    while frame is not None:
+        if frame.f_code.co_name == method and frame.f_locals.get("self") is event:
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _stopped_on_the_events_lock(
+    call: Callable[[], object], event: threading.Event, method: str,
+) -> bool:
+    """Run *call* on a worker and Stop it while it waits for *event*'s own lock in *method*.
+
+    The test holds the lock behind the event's ``set`` / ``wait`` (the
+    job thread's ``running.set()``, another kill's ``cancel.set()``),
+    injects the Stop once the worker is blocked on it, and releases it:
+    the Stop then lands as the worker takes the lock.  Returns whether
+    the worker ended with the ``KeyboardInterrupt``.
+    """
+    outcome: list[str] = []
+
+    def body() -> None:
+        try:
+            call()
+            outcome.append("returned")
+        except KeyboardInterrupt:
+            outcome.append("interrupted")
+
+    worker = threading.Thread(target=body, name="stopped-caller", daemon=True)
+    with event._cond:  # type: ignore[attr-defined]
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not _inside(worker.ident, method, event) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _inside(worker.ident, method, event), f"the worker never reached {method}"
+        assert inject_keyboard_interrupt(worker.ident or 0) == 1
+    worker.join(30)
+    assert not worker.is_alive()
+    return outcome == ["interrupted"]
+
+
+def _launch_and_wait(job: agent_dispatch.AgentJob) -> None:
+    """A ``run_agent(wait="false")`` call's launch and startup wait."""
+    agent_dispatch.launch_agent_job(job)
+    agent_dispatch.wait_until_started(job)
+
+
+def test_a_stop_on_a_job_events_lock_leaves_the_lock_free(
+    tmp_path: Path, daemon: _StopConfirmingDaemon,
+) -> None:
+    """Audit 2026-11-04 (S6, P1): a Stop landing as ``running.wait`` / ``cancel.set``
+    took the event's lock left it held for good (CPython gh-74174): the job thread's
+    own ``running.set()`` then never returned, and a later kill of the job hung."""
+    owner = object()
+    job = agent_dispatch.new_agent_job("sorcar", _job_kwargs(tmp_path), owner)
+    try:
+        # The lock is held before the launch, so the job thread's running.set()
+        # (the sub-task's tab) and the caller's startup wait contend for it.
+        assert _stopped_on_the_events_lock(partial(_launch_and_wait, job), job.running, "wait")
+        job.cancel.set()
+        assert agent_dispatch.join_agent_job(job, 10.0), (
+            "the stopped job thread never ended; it is at:\n"
+            + "".join(traceback.format_stack(sys._current_frames()[job.thread.ident or 0]))
+        )
+        # A kill of the finished job, stopped while another setter holds
+        # the cancel's lock, must not leave the run's end hanging on it.
+        assert _stopped_on_the_events_lock(
+            partial(agent_dispatch.kill_agent_job, job), job.cancel, "set",
+        )
+        ended = threading.Thread(
+            target=agent_dispatch.kill_jobs_of, args=(owner,), name="run-end", daemon=True,
+        )
+        ended.start()
+        ended.join(5.0)
+        assert not ended.is_alive(), "kill_jobs_of hung on the finished job's cancel"
+    finally:
+        job.cancel.set()
+        agent_dispatch.forget_agent_job(job)

@@ -120,22 +120,24 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
 
     def test_empty_chat_id_is_passed_through_without_global_fallback(self) -> None:
         server, _ = make_capturing_server()
-        captured: list[tuple[str, str | None, str, str]] = []
+        captured: list[tuple[str, str | None, str, str, tuple[str, str] | None]] = []
 
         def stub(
             chat_id: str,
             task_id: str | None,
             direction: str,
             tab_id: str = "",
+            *,
+            view: tuple[str, str] | None = None,
         ) -> None:
-            captured.append((chat_id, task_id, direction, tab_id))
+            captured.append((chat_id, task_id, direction, tab_id, view))
 
         server._get_adjacent_task = stub  # type: ignore[assignment]
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask", "tabId": "T",
             "taskId": None, "direction": "prev",
         })
-        assert captured == [("", None, "prev", "T")]
+        assert captured == [("", None, "prev", "T", ("", ""))]
 
 
 class TestC2ReplayRequiresTabId(unittest.TestCase):

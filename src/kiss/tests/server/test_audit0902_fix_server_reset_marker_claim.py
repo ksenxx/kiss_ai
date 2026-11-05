@@ -121,9 +121,10 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         self.fail("probe reply never arrived")
 
     def _url_dir_entries(self) -> list[str]:
-        return sorted(
-            p.name for p in self.url_dir.iterdir() if p.name != "remote-url.json"
-        )
+        """The directory's entries besides the URL file and its publication lock."""
+        url_file = self.url_dir / "remote-url.json"
+        own = {url_file.name, web_server_mod._url_file_lock_path(url_file).name}
+        return sorted(p.name for p in self.url_dir.iterdir() if p.name not in own)
 
     async def test_valid_marker_is_claimed_once_and_announced(self) -> None:
         self.flag_path.write_text(_VALID_MARKER, encoding="utf-8")

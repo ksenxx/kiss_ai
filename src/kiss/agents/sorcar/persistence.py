@@ -36,7 +36,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import TracebackType
@@ -1696,6 +1696,24 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             chat_id TEXT PRIMARY KEY,
             deleted_ts REAL NOT NULL
         );
+        -- A sub-agent this daemon's task ran on another machine
+        -- (run_agent(machine=...)): its row lives in that machine's
+        -- history only.  cost/tokens/steps are what the local parent
+        -- has been charged for it so far (the fold at dispatch return,
+        -- then each late delta); model_costs is the machine's split of
+        -- that spend by model (JSON {model: [cost, tokens]}, '' until
+        -- the machine reported one).  See _record_remote_subtask.
+        CREATE TABLE IF NOT EXISTS remote_subtasks (
+            task_id TEXT PRIMARY KEY,
+            parent_task_id TEXT NOT NULL,
+            machine TEXT NOT NULL,
+            model TEXT DEFAULT '',
+            cost REAL DEFAULT 0,
+            tokens INTEGER DEFAULT 0,
+            steps INTEGER DEFAULT 0,
+            model_costs TEXT DEFAULT '',
+            timestamp REAL NOT NULL
+        );
     """)
     # Columns first: an index over a column this version added to an
     # existing table can only be created once the column is there.
@@ -2642,7 +2660,9 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
     include its sub-agents') are split among the models its task tree
     ran on (see :func:`_split_tree_spend`), so sub-agents on another
     model are not filed under the top-level task's model while the
-    per-day sums still equal the listed tasks' totals.  ``tasks``
+    per-day sums still equal the listed tasks' totals.  A sub-agent that
+    ran on another machine has no row here: its ``remote_subtasks``
+    record stands in for it (:func:`_spend_children`).  ``tasks``
     counts top-level tasks under the model they were started with.  An
     empty or NULL model is reported as ``"unknown"``.  Thread-safe.
 
@@ -2653,21 +2673,8 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
     """
     db = _get_db()
     with _rw_lock.read_lock():
-        rows = db.execute(
-            "SELECT id, COALESCE(parent_task_id, '') AS p, "
-            "date(timestamp, 'unixepoch', 'localtime') AS d, "
-            "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
-            "COALESCE(cost, 0) AS cost, COALESCE(tokens, 0) AS tokens, "
-            "COALESCE(model_costs, '') AS mc "
-            "FROM task_history"
-        ).fetchall()
-    # A launch name such as "anthropic/claude-sonnet-4-6" is served (and
-    # its llm_call events named) as "claude-sonnet-4-6": file both alike.
-    rows = [dict(row, m=_strip_provider_prefix(row["m"])) for row in rows]
-    children: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        if row["p"]:
-            children.setdefault(row["p"], []).append(row)
+        rows = _spend_rows(db.execute(f"SELECT {_SPEND_COLUMNS} FROM task_history"))
+        children = _spend_children(db, rows)
     sums: dict[tuple[str, str], list[float]] = {}  # [cost, tokens, tasks]
     for root in rows:
         if root["p"] or not root["d"]:
@@ -2695,6 +2702,219 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
     ]
     result.sort(key=lambda r: (r["date"], -float(r["cost"]), r["model"]))  # type: ignore[arg-type]
     return result
+
+
+_SPEND_COLUMNS = (
+    "id, COALESCE(parent_task_id, '') AS p, "
+    "date(timestamp, 'unixepoch', 'localtime') AS d, "
+    "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
+    "COALESCE(cost, 0) AS cost, COALESCE(tokens, 0) AS tokens, "
+    "COALESCE(steps, 0) AS steps, COALESCE(model_costs, '') AS mc"
+)
+"""The ``task_history`` columns :func:`_split_tree_spend` reads, as it names them."""
+
+
+def _spend_rows(cursor: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Return the :data:`_SPEND_COLUMNS` rows of *cursor* as dicts.
+
+    A launch name such as "anthropic/claude-sonnet-4-6" is served (and
+    its llm_call events named) as "claude-sonnet-4-6": both are filed
+    alike.
+    """
+    return [dict(row, m=_strip_provider_prefix(row["m"])) for row in cursor]
+
+
+def _spend_children(
+    db: sqlite3.Connection, rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return the sub-agents of *rows* keyed by ``parent_task_id`` (read lock held).
+
+    The sub-agent rows among *rows*, plus one stand-in row per
+    ``remote_subtasks`` record (a sub-agent run on another machine,
+    whose spend the parent's total includes): its model, the spend the
+    parent was charged for it, and the machine's split of that spend
+    by model as its ``mc``.  A record whose task has a row among *rows*
+    (one copied over from the machine) counts once: the row, unless the
+    record has grown past it (late spend the parent was charged after
+    the copy) or holds the machine's split of the same total, when the
+    record replaces it.  A stand-in holding that split is a leaf.
+    """
+    children: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row["p"]:
+            children.setdefault(row["p"], []).append(row)
+    copies = {row["id"]: row for row in rows}
+    remote = db.execute(
+        "SELECT task_id AS id, parent_task_id AS p, '' AS d, "
+        "COALESCE(NULLIF(model, ''), 'unknown') AS m, cost, tokens, steps, "
+        "model_costs AS mc FROM remote_subtasks"
+    )
+    leaves: list[str] = []
+    for row in _spend_rows(remote):
+        copy = copies.get(row["id"])
+        if copy is None:
+            children.setdefault(row["p"], []).append(row)
+        elif copy["p"] == row["p"] and (
+            float(row["cost"]) > float(copy["cost"])
+            or (float(row["cost"]) == float(copy["cost"]) and row["mc"])
+        ):
+            siblings = children[row["p"]]
+            siblings[siblings.index(copy)] = row
+        else:
+            continue
+        if row["mc"]:
+            leaves.append(row["id"])
+    # A stand-in with the machine's split is a leaf: the split covers its
+    # whole tree there, local rows under it included (a mirrored copy's
+    # descendants, or a sub-agent it dispatched back to this machine).
+    for task_id in leaves:
+        children.pop(task_id, None)
+    return children
+
+
+def _task_usage(task_ids: list[str]) -> dict[str, dict[str, object]]:
+    """Return the totals of each task of *task_ids* that has a row, with their split by model.
+
+    What a machine answers a daemon that ran these tasks as sub-agents
+    there (``getTaskUsage``): each task's ``cost``, ``tokens`` and
+    ``steps`` as its row holds them now (late charges included), and
+    ``models``, ``{model: [cost, tokens]}`` of that spend split over the
+    task's tree (:func:`_split_tree_spend`).
+    """
+    if not task_ids:
+        return {}
+    marks = ",".join("?" * len(task_ids))
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = _spend_rows(db.execute(
+            "WITH RECURSIVE tree(id) AS ("
+            f"SELECT id FROM task_history WHERE id IN ({marks}) "
+            "UNION SELECT t.id FROM task_history t JOIN tree ON t.parent_task_id = tree.id"
+            f") SELECT {_SPEND_COLUMNS} FROM task_history WHERE id IN tree",
+            task_ids,
+        ))
+        children = _spend_children(db, rows)
+    usage: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if row["id"] not in task_ids:
+            continue
+        costs = _split_tree_spend(row, children, "cost")
+        tokens = _split_tree_spend(row, children, "tokens")
+        usage[row["id"]] = {
+            "cost": float(row["cost"]), "tokens": int(row["tokens"]), "steps": int(row["steps"]),
+            "models": {
+                model: [costs.get(model, 0.0), tokens.get(model, 0.0)]
+                for model in costs.keys() | tokens.keys()
+            },
+        }
+    return usage
+
+
+def _record_remote_subtask(
+    task_id: str, parent_task_id: str, machine: str, model: str,
+    cost: float, tokens: int, steps: int,
+) -> None:
+    """Record that *parent_task_id* folded the spend of *task_id*, a sub-agent on *machine*.
+
+    Called when ``run_agent(machine=...)`` returns and the sub-agent's
+    totals are folded into its local parent.  The record is the parent's
+    side of the account: the Spend panel files the spend under the
+    sub-agent's *model* (:func:`_spend_children`) instead of the
+    parent's, and a later charge to the sub-agent's row on the machine
+    (an ``/ask`` answer or task update finishing after it) reaches the
+    parent as the growth of the machine's totals over the recorded ones
+    (:func:`_advance_remote_subtask`).  A task already recorded keeps
+    its record.
+    """
+    db = _get_db()
+    with _rw_lock.write_lock():
+        db.execute(
+            "INSERT OR IGNORE INTO remote_subtasks (task_id, parent_task_id, machine, "
+            "model, cost, tokens, steps, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, parent_task_id, machine, model, max(cost, 0.0), max(tokens, 0),
+             max(steps, 0), time.time()),
+        )
+
+
+def _remote_subtask_ids(machine: str, since: float) -> list[str]:
+    """Return the sub-agents run on *machine* since *since* whose parent still has a row."""
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = db.execute(
+            "SELECT r.task_id FROM remote_subtasks r JOIN task_history t "
+            "ON t.id = r.parent_task_id WHERE r.machine = ? AND r.timestamp >= ? "
+            "ORDER BY r.timestamp DESC",
+            (machine, since),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def _advance_remote_subtask(
+    task_id: str, cost: float, tokens: int, steps: int, models: object,
+) -> tuple[str, float, int, int, str] | None:
+    """Move *task_id*'s record up to the machine's current totals; return what is new.
+
+    The machine reported *cost*, *tokens* and *steps* as the sub-agent's
+    row holds them now, cumulative, and *models* as their split by model
+    (stored when it is a dict).  The growth over the recorded totals is
+    what its local parent has not been charged yet; the record moves up
+    to the reported totals in the same transaction, so a report seen
+    twice, or one equal to the folded amount, yields nothing.  A report
+    below the record (spend the fold counted before the machine's row
+    did) lowers nothing.
+
+    Returns:
+        ``(parent_task_id, cost, tokens, steps, previous model_costs)``:
+        what is still to charge and the split the record held, or
+        ``None`` for a task not recorded.  Should charging it fail, the
+        caller takes it back (:func:`_restore_remote_subtask`) so a later
+        report owes it again.
+    """
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        row = db.execute(
+            "SELECT parent_task_id, cost, tokens, steps, model_costs FROM remote_subtasks "
+            "WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        # The split follows only a report not below the record (SET reads the
+        # old cost): an older report keeps the newer split with its totals.
+        db.execute(
+            "UPDATE remote_subtasks SET cost = MAX(cost, ?), tokens = MAX(tokens, ?), "
+            "steps = MAX(steps, ?), "
+            "model_costs = CASE WHEN ? >= cost THEN ? ELSE model_costs END WHERE task_id = ?",
+            (cost, tokens, steps, cost,
+             json.dumps(models) if isinstance(models, dict) else row["model_costs"], task_id),
+        )
+    return (
+        str(row["parent_task_id"]),
+        max(cost - _safe_float(row["cost"]), 0.0),
+        max(tokens - _safe_int(row["tokens"]), 0),
+        max(steps - _safe_int(row["steps"]), 0),
+        str(row["model_costs"] or ""),
+    )
+
+
+def _restore_remote_subtask(
+    task_id: str, cost: float, tokens: int, steps: int, models: str,
+) -> None:
+    """Take back what :func:`_advance_remote_subtask` owed for *task_id*: charging it failed.
+
+    The record moves back down by the owed *cost*, *tokens* and *steps*
+    and gets its previous split by model *models* back, so the parent is
+    not left short and the Spend panel shows no uncharged split: the
+    next report owes them again.  Called with ``TASK_USAGE_LOCK`` held,
+    like the advance, so no other report moved the record in between.
+    """
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        db.execute(
+            "UPDATE remote_subtasks SET cost = MAX(cost - ?, 0), tokens = MAX(tokens - ?, 0), "
+            "steps = MAX(steps - ?, 0), model_costs = ? WHERE task_id = ?",
+            (cost, tokens, steps, models, task_id),
+        )
 
 
 def user_tasks_since(since: float) -> list[dict[str, object]]:
@@ -2926,12 +3146,11 @@ def _record_steer_input(text: str) -> None:
     """
     if not text.strip():
         return
-    now = time.time()
     _capped_upsert(
         "steer_inputs", "text", text, _MAX_STEER_INPUTS, "timestamp ASC",
         "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
         "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
-        (text, now, now),
+        (text,),
     )
 
 
@@ -2943,7 +3162,11 @@ def _capped_upsert(
 
     Evicts rows first when *key* is new and the table is at *cap* (see
     :func:`_evict_for_new_key`), inside the same ``BEGIN IMMEDIATE``
-    transaction as the upsert.
+    transaction as the upsert.  The row's time is taken inside that
+    transaction too: a writer stamped before it waited for the write
+    lock would commit with a time older than a row that committed
+    meanwhile, and a reader that refreshes with that row's time as its
+    watermark (``_load_input_texts(since=...)``) would never see it.
 
     Args:
         table: Table name (a literal from this module).
@@ -2951,13 +3174,15 @@ def _capped_upsert(
         key: The value about to be upserted.
         cap: Maximum number of rows the table may hold.
         evict_order: ``ORDER BY`` clause selecting the rows to evict first.
-        upsert_sql: The ``INSERT ... ON CONFLICT`` statement.
-        params: Its bound parameters.
+        upsert_sql: The ``INSERT ... ON CONFLICT`` statement; its last
+            two placeholders take the current time (insert, then update).
+        params: Its bound parameters before those two.
     """
     db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
         _evict_for_new_key(db, table, key_col, key, cap, evict_order)
-        db.execute(upsert_sql, params)
+        now = time.time()
+        db.execute(upsert_sql, (*params, now, now))
 
 
 def _evict_for_new_key(
@@ -3239,23 +3464,23 @@ def _backfill_orphan_progress(
             ).fetchone()
             if row is None or not row["id"]:
                 continue
-            # The row's result was just rewritten to its terminal text:
-            # derive its tags (``failed`` included) and refresh its
-            # chat's summary row, as _save_task_extra does for a task
-            # that ends normally.
-            _finalize_task_metadata(db, str(row["id"]))
             progress = _recovered_progress_from_events(db, str(row["id"]))
-            if not progress:
-                continue
-            sets = [
-                f"{col} = CASE WHEN {col} IS NULL OR {col} = 0 "
-                f"THEN ? ELSE {col} END"
-                for col in progress
-            ]
-            db.execute(
-                f"UPDATE task_history SET {', '.join(sets)} WHERE rowid = ?",
-                [*progress.values(), rid],
-            )
+            if progress:
+                sets = [
+                    f"{col} = CASE WHEN {col} IS NULL OR {col} = 0 "
+                    f"THEN ? ELSE {col} END"
+                    for col in progress
+                ]
+                db.execute(
+                    f"UPDATE task_history SET {', '.join(sets)} WHERE rowid = ?",
+                    [*progress.values(), rid],
+                )
+            # The row's result was just rewritten to its terminal text
+            # and its ``end_ts`` recovered above: derive its tags
+            # (``failed`` included) and refresh its chat's summary row
+            # (``last_finished`` reads that ``end_ts``), as
+            # _save_task_extra does for a task that ends normally.
+            _finalize_task_metadata(db, str(row["id"]))
         except Exception:
             logger.warning(
                 "orphan progress backfill failed for rowid %s", rid,
@@ -3347,7 +3572,11 @@ def _recover_orphaned_tasks(
         candidates = db.execute(select_sql, params).fetchall()
     # The liveness probes touch the filesystem (flock per marker), so
     # they run outside the write transaction; the transaction below
-    # re-checks that each row still carries the sentinel.
+    # re-checks that each row still carries the sentinel AND is still
+    # the probed row: ``task_history`` has no AUTOINCREMENT, so a task
+    # started in the gap after the dead candidate was deleted can
+    # reuse its rowid (with a fresh id, and a timestamp past any
+    # cut-off) while carrying the same sentinel.
     probed = [
         (int(row["rid"]), str(row["id"] or ""))
         for row in candidates
@@ -3360,14 +3589,13 @@ def _recover_orphaned_tasks(
     with _rw_lock.write_lock(), _immediate_txn(db):
         placeholders = ",".join(["?"] * len(probed))
         still_sentinel = {
-            int(row["rid"])
+            int(row["rid"]): str(row["id"] or "")
             for row in db.execute(
-                "SELECT rowid AS rid FROM task_history "
-                f"WHERE rowid IN ({placeholders}) AND result = ?",
-                [*[rid for rid, _tid in probed], "Agent Failed Abruptly"],
+                f"{select_sql}AND rowid IN ({placeholders})",
+                [*params, *[rid for rid, _tid in probed]],
             ).fetchall()
         }
-        dead_rows = [(rid, tid) for rid, tid in probed if rid in still_sentinel]
+        dead_rows = [(rid, tid) for rid, tid in probed if still_sentinel.get(rid) == tid]
         # A dead row whose final result survives in the sidecar journal
         # was NOT killed mid-task: its result was saved to the database
         # but the committed pages were later lost (e.g. the 2026-09-12
@@ -3803,7 +4031,11 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
     carrying the model that served it, its USD cost and its token
     counts.  The Spend panel splits a task's own spend by this record, so
     a task that switched models with ``set_model`` is not filed entirely
-    under the model it was launched with.
+    under the model it was launched with.  A finish-gate review runs on
+    another model and emits no ``llm_call``; the ``gate_stage`` record
+    each charged attempt leaves (``stage`` ``charge``, with ``model``,
+    ``cost_usd`` and ``tokens``, see :func:`_record_gate_charge`) is
+    counted under the reviewer's model the same way.
 
     Args:
         db: The connection (inside the caller's transaction).
@@ -3811,7 +4043,7 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
 
     Returns:
         ``{"model": [cost, tokens], ...}`` as JSON, or ``""`` when the
-        task has no ``llm_call`` event.
+        task has neither record.
     """
     rows = db.execute(
         "SELECT json_extract(event_json, '$.model') AS m, "
@@ -3824,11 +4056,59 @@ def _own_model_costs(db: sqlite3.Connection, task_id: str) -> str:
         "AND json_extract(event_json, '$.type') = 'llm_call' GROUP BY m",
         (task_id,),
     ).fetchall()
+    rows += db.execute(
+        "SELECT json_extract(event_json, '$.model') AS m, "
+        "SUM(json_extract(event_json, '$.cost_usd')) AS c, "
+        "SUM(COALESCE(json_extract(event_json, '$.tokens'), 0)) AS t "
+        "FROM events WHERE task_id = ? AND event_json LIKE '%\"gate_stage\"%' "
+        "AND json_extract(event_json, '$.type') = 'gate_stage' "
+        "AND json_extract(event_json, '$.stage') = 'charge' "
+        "AND json_extract(event_json, '$.cost_usd') > 0 GROUP BY m",
+        (task_id,),
+    ).fetchall()
     if not rows:
         return ""
-    return json.dumps(
-        {str(r[0] or "unknown"): [float(r[1] or 0.0), int(r[2] or 0)] for r in rows}
-    )
+    sums: dict[str, list[float | int]] = {}
+    for r in rows:
+        entry = sums.setdefault(str(r[0] or "unknown"), [0.0, 0])
+        entry[0] = float(entry[0]) + float(r[1] or 0.0)
+        entry[1] = int(entry[1]) + int(r[2] or 0)
+    return json.dumps(sums)
+
+
+def _record_gate_charge(task_id: str, model: str, cost: float, tokens: int, key: str) -> None:
+    """Record under *task_id* that a finish-gate review attempt on *model* was charged to it.
+
+    The reviewer emits no ``llm_call``: this ``gate_stage`` record
+    (``stage`` ``charge``) is what files the attempt's *cost* and
+    *tokens* under *model* in the row's split by model
+    (:func:`_own_model_costs`).  Written as the attempt is charged, so a
+    review a Stop ended is recorded too.  A row already finished (the
+    charge landed after its final save) has its split refreshed now;
+    an unfinished row's final save computes it.
+
+    Args:
+        task_id: The run's persisted row id.
+        model: The reviewer model.
+        cost: The attempt's spend in USD.
+        tokens: Its tokens.
+        key: The attempt's charge key (counted once by the caller).
+    """
+    _append_chat_event({
+        "type": "gate_stage", "stage": "charge", "seconds": 0.0, "outcome": "charged",
+        "model": model, "cost_usd": cost, "tokens": tokens, "key": key,
+        "taskId": task_id, "ts": int(time.time() * 1000),
+    }, task_id=task_id)
+    _flush_chat_events()
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        resolved = _resolve_task_id(db, task_id)
+        if resolved is None:
+            return
+        row = db.execute("SELECT end_ts FROM task_history WHERE id = ?", (resolved,)).fetchone()
+        if row is not None and _safe_int(row["end_ts"], 0):
+            db.execute("UPDATE task_history SET model_costs = ? WHERE id = ?",
+                       (_own_model_costs(db, resolved), resolved))
 
 
 def _finalize_task_metadata(
@@ -4314,24 +4594,29 @@ def _append_final_result(sidecar: str, task_id: str, line: str) -> None:
             if not locked:
                 _spill_journal_lines(sidecar, [line + "\n"])
                 return
-            # A process killed mid-append can leave a torn last
-            # record with no trailing newline; appending directly
-            # onto that fragment would fuse THIS record into one
-            # malformed line and lose it too.  Terminate any torn
-            # tail first so only the torn record is discarded.
-            prefix = ""
-            if os.path.exists(sidecar) and os.path.getsize(sidecar):
-                with open(sidecar, "rb") as tail:
-                    tail.seek(-1, os.SEEK_END)
-                    if tail.read(1) != b"\n":
-                        prefix = "\n"
             with open(sidecar, "a", encoding="utf-8") as stream:
-                stream.write(prefix + line + "\n")
+                stream.write(_torn_tail_prefix(sidecar) + line + "\n")
     except OSError:
         logger.warning(
             "final result for task %s could not be journalled in %s",
             task_id, sidecar, exc_info=True,
         )
+
+
+def _torn_tail_prefix(path: str) -> str:
+    """Return ``"\\n"`` when the journal *path* ends in a torn record, else ``""``.
+
+    A process killed mid-append can leave a torn last record with no
+    trailing newline; appending directly onto that fragment would fuse
+    the next record into one malformed line and lose it too.  The
+    caller writes the returned prefix first so only the torn record is
+    discarded by the replay.
+    """
+    if not os.path.exists(path) or not os.path.getsize(path):
+        return ""
+    with open(path, "rb") as tail:
+        tail.seek(-1, os.SEEK_END)
+        return "" if tail.read(1) == b"\n" else "\n"
 
 
 #: Suffix of a journal record written while a peer process kept the
@@ -4632,8 +4917,9 @@ def _journal_failed_events(
                     if locked:
                         if _journal_spills(sidecar):
                             _claim_journal_rows(sidecar)
+                        prefix = _torn_tail_prefix(sidecar)
                         with open(sidecar, "a", encoding="utf-8") as stream:
-                            stream.writelines(lines)
+                            stream.writelines([prefix, *lines])
                         target = sidecar
                     else:
                         target = _spill_journal_lines(sidecar, lines)
@@ -5352,7 +5638,7 @@ def _task_has_transcript_events(task_id: str) -> bool:
     with _rw_lock.read_lock():
         rows = db.execute(
             "SELECT event_json FROM events WHERE task_id = ? "
-            "ORDER BY seq ASC LIMIT 3",
+            "ORDER BY seq ASC LIMIT 20",
             (task_id,),
         ).fetchall()
     for row in rows:
@@ -5362,11 +5648,17 @@ def _task_has_transcript_events(task_id: str) -> bool:
             return True
         if not isinstance(event, dict):
             return True
-        if event.get("type") != "task_settings":
-            return True
-    # A run broadcasts task_settings once, so three metadata-only rows
-    # cannot occur; anything beyond the scanned window is transcript.
-    return len(rows) >= 3
+        # Metadata, not transcript: the run's settings, and the charge
+        # records of its finish-gate reviews (_record_gate_charge).
+        if event.get("type") == "task_settings" or (
+            event.get("type") == "gate_stage" and event.get("stage") == "charge"
+        ):
+            continue
+        return True
+    # A run broadcasts task_settings once and a gate charges a few review
+    # attempts, so a window of metadata-only rows this long cannot occur;
+    # anything beyond it is transcript.
+    return len(rows) >= 20
 
 
 def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
@@ -5985,12 +6277,11 @@ def _record_file_usage(path: str) -> None:
     path at the cap evicts the least recently used one first (see
     :func:`_evict_for_new_key`).
     """
-    now = time.time()
     _capped_upsert(
         "file_usage", "path", path, _MAX_FILE_USAGE_ENTRIES, "last_used ASC",
         "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
         "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
-        (path, now, now),
+        (path,),
     )
 
 
@@ -6011,11 +6302,10 @@ def _record_frequent_task(task: str) -> None:
     """
     if not task:
         return
-    now = time.time()
     _capped_upsert(
         "frequent_tasks", "task", task, _MAX_FREQUENT_TASKS,
         "count ASC, timestamp ASC",
         "INSERT INTO frequent_tasks (task, count, timestamp) VALUES (?, 1, ?) "
         "ON CONFLICT(task) DO UPDATE SET count = count + 1, timestamp = ?",
-        (task, now, now),
+        (task,),
     )

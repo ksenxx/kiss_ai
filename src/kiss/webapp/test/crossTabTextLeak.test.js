@@ -206,6 +206,55 @@ test('a background tab keeps its own file-link candidates checkable', () => {
   win.close();
 });
 
+test('an older reply never settles a path a tab re-asked over it', () => {
+  const {win, posted} = makePage();
+  sameWorkspace(win);
+  const {first, second} = twoTabs(win);
+  const file = 'leak1dir/gamma_QK43.txt';
+  send(win, {type: 'system_output', text: 'wrote ' + file + ' now', tabId: first});
+  send(win, {type: 'system_output', text: 'wrote ' + file + ' now', tabId: second});
+  const checks = owner =>
+    posted.filter(
+      m => m.type === 'checkPaths' && m.tabId === owner && m.paths.includes(file),
+    );
+  assert.strictEqual(checks(first).length, 1, 'the first tab asked once');
+  // The first tab's worktree was merged: its path is asked again over
+  // the check still in flight.  The older reply answers the older
+  // check and must not settle the span; the fresher verdict decides.
+  send(win, {type: 'worktree_result', tabId: first, success: true, message: 'merged'});
+  assert.strictEqual(checks(first).length, 2, 'the merge re-asks the path');
+  assert.strictEqual(checks(second).length, 1, 'the other tab is not re-asked');
+  const answer = (owner, verdict) =>
+    send(win, {
+      type: 'pathsExist',
+      workDir: '/tmp/wd-leak1',
+      tabId: owner,
+      results: {[file]: verdict},
+    });
+  answer(first, false);
+  answer(first, true);
+  clickTab(win, first);
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path="' + file + '"]').length,
+    1,
+    'the fresher verdict promotes the first tab link',
+  );
+  // The second tab's own check is still open and still its own.
+  clickTab(win, second);
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path="' + file + '"]').length,
+    0,
+    'the first tab replies never promoted the second tab link',
+  );
+  answer(second, false);
+  assert.strictEqual(
+    win.document.querySelectorAll('#output [data-path-missing="' + file + '"]').length,
+    1,
+    'the second tab reply settles the second tab link',
+  );
+  win.close();
+});
+
 // ---------------------------------------------------------------------------
 // Leak 2 -- files / ghost / completions correlate on content, not identity.
 // ---------------------------------------------------------------------------

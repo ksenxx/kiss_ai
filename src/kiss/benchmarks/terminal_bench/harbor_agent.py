@@ -61,10 +61,13 @@ from kiss.benchmarks.terminal_bench.daemon import DEFAULT_HOME, ENDPOINT_FILE
 from kiss.benchmarks.terminal_bench.exec_bridge_server import ExecBridgeServer
 from kiss.benchmarks.terminal_bench.trial import run_trial
 
-AGENT_VERSION = "2026.10.28"
+AGENT_VERSION = "2026.11.04"
 
-#: ``reviewer`` option values: the trial's own model, and no review at all.
+#: Side-model option values (``reviewer``, ``blind_verifier``, ``reading_check``):
+#: the trial's own model, the strongest configured model of another family,
+#: and none at all.
 SAME_MODEL = "same"
+OTHER_FAMILY = "other"
 NO_REVIEW = "none"
 #: Seconds between two looks at the exec bridge's ``lost`` state while a trial runs.
 LOST_POLL_S = 5.0
@@ -82,14 +85,20 @@ class SeaOptions(AgentOptions):
     #: ``KISS_HOME`` of the benchmark daemon (its endpoint file lives there).
     home: str = str(DEFAULT_HOME)
     #: Gate ``finish(success=True)`` on evidence (the coding SEA's ``finish_gate``:
-    #: the agent's own verifier, the blind verifier, no hedged summary, a review).
+    #: the agent's own verifier, a review, the independent check when one is set).
     finish_gate: bool = True
-    #: Model of the gate's read-only reviews of the work: ``same`` (the
-    #: trial's model), a model name, or ``none``.
-    reviewer: str = SAME_MODEL
+    #: Model of the gate's one read-only review of the work: ``other`` (the
+    #: strongest configured model of another family than the trial's, which
+    #: does not share its reading), ``same`` (the trial's model), a model
+    #: name, or ``none``.
+    reviewer: str = OTHER_FAMILY
     #: Model that writes the gate's independent check from the task statement
-    #: alone: ``same``, a model name, or ``none``.
-    blind_verifier: str = SAME_MODEL
+    #: alone: ``none`` (its verdicts did not predict the hidden tests and it
+    #: cost a sixth of the run), ``same``, ``other``, or a model name.
+    blind_verifier: str = NO_REVIEW
+    #: Model of the independent reading of the statement when the agent's
+    #: ledger is first written: ``other``, ``same``, a model name, or ``none``.
+    reading_check: str = OTHER_FAMILY
     #: Reasoning effort sent with every model request (``low`` .. ``max`` for
     #: Claude's ``output_config.effort``, ``minimal`` .. ``xhigh`` for OpenAI
     #: models); ``""`` sends the level of the model's catalog entry (``high``
@@ -189,6 +198,7 @@ class SeaHarborAgent(BaseAgent):
             "finish_gate": options.finish_gate,
             "reviewer": aliases.get(options.reviewer, options.reviewer),
             "blind_verifier": aliases.get(options.blind_verifier, options.blind_verifier),
+            "reading_check": aliases.get(options.reading_check, options.reading_check),
             "model_config": ({"reasoning_effort": options.reasoning_effort}
                              if options.reasoning_effort else None),
         }

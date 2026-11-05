@@ -140,10 +140,19 @@ class TestAppendUserMessageHandler:
         ]
 
     def test_dropped_when_no_live_task(self) -> None:
-        """An idle tab has no drain hook, so queueing would leak forever."""
+        """An idle tab has no drain hook, so queueing would leak forever.
+
+        The drop is announced: the page cleared its composer on submit,
+        and a ``prompt_refused`` error addressed to the tab is what puts
+        the text back (main.js ``restoreRefusedPrompt``).  No ``status``
+        goes with it: the run's own end already lowered the tab, and a
+        successor run may have raised it again.
+        """
         server, events = _make_server()
-        st = AgentState("task-idle", tab_id="tab-idle", server_owned=True)
-        agent_state.register(st)
+        st = _register_active_state("task-idle", "tab-idle")
+        # The task finished (``_release_run_state``) before the message
+        # typed into it arrived.
+        st.is_task_active = False
 
         server._cmd_append_user_message(
             {"tabId": "tab-idle", "prompt": "ignored"},
@@ -151,6 +160,11 @@ class TestAppendUserMessageHandler:
 
         assert st.pending_user_messages == []
         assert [e for e in events if e.get("type") == "prompt"] == []
+        assert [e for e in events if e.get("type") == "status"] == []
+        errors = [e for e in events if e.get("type") == "error"]
+        assert len(errors) == 1
+        assert errors[0]["code"] == "prompt_refused"
+        assert errors[0]["tabId"] == "tab-idle"
 
     def test_dropped_when_tab_missing(self) -> None:
         server, events = _make_server()
@@ -158,6 +172,12 @@ class TestAppendUserMessageHandler:
             {"tabId": "ghost-tab", "prompt": "ignored"},
         )
         assert [e for e in events if e.get("type") == "prompt"] == []
+        # A tab the daemon never saw gets its text back the same way;
+        # a message naming no tab (an API client's) has no composer
+        # to restore and gets no error.
+        server._cmd_append_user_message({"prompt": "ignored"})
+        errors = [e for e in events if e.get("type") == "error"]
+        assert [(e["code"], e["tabId"]) for e in errors] == [("prompt_refused", "ghost-tab")]
 
     def test_empty_prompt_ignored(self) -> None:
         server, events = _make_server()

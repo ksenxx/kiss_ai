@@ -77,7 +77,7 @@ class TestHistoryCutWatermark(unittest.TestCase):
             reader.start()
             self.assertTrue(pause.paused.wait(10), "the history read never ran")
             self.server._delete_history(
-                {}, "the task", [task_id], "", th._delete_task, task_id,
+                {}, "the task", th._task_tree, "", th._delete_task, task_id,
             )
             pause.release()
             reader.join(10)

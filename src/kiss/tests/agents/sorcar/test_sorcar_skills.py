@@ -13,7 +13,11 @@ tool is built and invoked for real.  No model calls are made.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +31,7 @@ from kiss.agents.sorcar.skills import (
     make_skill_tool,
     skill_permission,
 )
+from kiss.tests.conftest import posix_only
 
 
 @pytest.fixture
@@ -202,6 +207,43 @@ def test_name_derived_from_directory(isolated_homes: Path) -> None:
         "---\nname: other-name\ndescription: D\n---\nBody.", encoding="utf-8"
     )
     assert "dirname" in discover_skills(str(project))
+
+
+@posix_only("os.mkfifo: a FIFO is the non-regular file whose open blocks")
+def test_fifo_skill_file_skipped_without_blocking(isolated_homes: Path) -> None:
+    """A FIFO named ``SKILL.md`` is skipped at once, by discovery and by activation.
+
+    Opening a FIFO with no writer blocks for ever, with no deadline and
+    no bytecode boundary where the runner's Stop could land, and every
+    agent's tool setup runs discovery.  The regular skill beside it must
+    still be found.
+    """
+    project = isolated_homes / "project"
+    _write_skill(project / ".agents" / "skills", "good", description="Good one.")
+    fifo = project / ".agents" / "skills" / "blocked" / "SKILL.md"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+    outcome: list[object] = []
+
+    def run() -> None:
+        outcome.append(set(discover_skills(str(project))))
+        outcome.append(load_skill_content(
+            Skill(name="blocked", description="d", path=str(fifo), source="project"),
+        ))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    try:
+        assert not worker.is_alive(), f"blocked opening the FIFO after {outcome}"
+    finally:
+        deadline = time.monotonic() + 5  # a writer releases each blocked open
+        while worker.is_alive() and time.monotonic() < deadline:
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(timeout=0.05)
+    assert outcome[0] == {"good"}
+    assert "no longer readable" in str(outcome[1])
 
 
 

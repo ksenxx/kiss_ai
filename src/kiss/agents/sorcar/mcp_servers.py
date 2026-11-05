@@ -612,6 +612,11 @@ class _Connection:
     #: the manager's lock; a connection is never evicted while it is
     #: non-zero (see :meth:`MCPManager._evict_surplus`).
     in_flight: int = 0
+    #: The maintainer's asyncio task, and whether it has begun tearing
+    #: its transport down.  Both are touched on the manager loop only
+    #: (:func:`_cancel_unless_unwinding`, the straggler reaper's cancel).
+    loop_task: asyncio.Task[Any] | None = None
+    unwinding: bool = False
 
 
 def _child_errlog() -> Any:
@@ -774,6 +779,16 @@ async def _maintain_connection(
     the transport and session contexts are opened here, the task then
     parks on the ``stop`` event, and the contexts unwind here too.
 
+    The handshake (transport, ``initialize``, ``tools/list``) runs under
+    a deadline of this task's own: :data:`CONNECT_TIMEOUT` is otherwise
+    enforced only by the thread waiting in :meth:`MCPManager.connect`,
+    and a Stop injected into that thread takes the deadline with it,
+    leaving a silent server's child in the pool for the life of the
+    process — unready, so never evicted, and never cancelled.  The
+    deadline is the moment the waiter's straggler reaper would have
+    cancelled the task (:meth:`MCPManager._reap_straggler`), so a
+    waiter that is not stopped sees no change.
+
     Args:
         conn: The connection record to fill in and own.
         auth: Optional ``httpx.Auth`` for remote transports.
@@ -783,15 +798,32 @@ async def _maintain_connection(
 
     from mcp import ClientSession
 
+    handshake_timeout = CONNECT_TIMEOUT + _CONNECT_STRAGGLER_GRACE_S
+    conn.loop_task = asyncio.current_task()
     try:
         async with AsyncExitStack() as stack:
-            read, write = await _enter_transport(stack, conn.config, auth)
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            conn.tools = await _list_all_tools(session)
-            conn.session = session
-            conn.ready.set()
-            await _park_until_stopped(conn, session, health_interval)
+            try:
+                try:
+                    async with asyncio.timeout(handshake_timeout):
+                        read, write = await _enter_transport(stack, conn.config, auth)
+                        session = await stack.enter_async_context(ClientSession(read, write))
+                        await session.initialize()
+                        conn.tools = await _list_all_tools(session)
+                except TimeoutError:
+                    raise TimeoutError(f"no MCP handshake within {handshake_timeout:g}s") from None
+                conn.session = session
+                conn.ready.set()
+                await _park_until_stopped(conn, session, health_interval)
+            finally:
+                # The stack's exit now runs the transport's own shutdown
+                # (stdio: close stdin, wait, then SIGTERM/SIGKILL).  A
+                # second cancellation landing inside it skips the
+                # signals and leaks the child; the straggler reaper,
+                # due at the same instant as this task's handshake
+                # deadline, leaves an unwinding task alone.
+                # ``disconnect_all`` still cancels one at its deadline:
+                # an HTTP transport's exit can block on the server.
+                conn.unwinding = True
     except BaseException as exc:
         conn.error = describe_exception(exc)
         logger.debug("MCP connection %s failed", conn.config.name, exc_info=True)
@@ -830,6 +862,21 @@ def _start_call(
     )
     future.add_done_callback(functools.partial(_cancel_task, task))
     task.add_done_callback(functools.partial(_settle, future))
+
+
+def _cancel_unless_unwinding(conn: _Connection) -> None:
+    """Cancel *conn*'s maintainer unless it is already tearing its transport down.
+
+    Runs on the manager loop, so the check and the cancel cannot be
+    split by the task stepping into its teardown.  A maintainer that
+    has not started yet is cancelled through its future.
+    """
+    if conn.unwinding:
+        return
+    if conn.loop_task is not None:
+        conn.loop_task.cancel()
+    elif conn.task is not None:
+        conn.task.cancel()
 
 
 def _cancel_task(task: asyncio.Task[Any], future: concurrent.futures.Future[Any]) -> None:
@@ -1055,16 +1102,23 @@ class MCPManager:
         candidates again (the last call returns; the handshake ends),
         so the cap still holds — it is enforced a little later.
 
+        Each connection is told to stop before it leaves the pool, under
+        the lock (:meth:`_pop_surplus`): this runs on the task thread,
+        where a Stop can land between any two statements, and one that
+        landed after the pop but before the stop left the connection in
+        no registry — its task parked and its child alive for the life
+        of the process, invisible to :meth:`disconnect_all`.  Now a Stop
+        anywhere in the eviction leaves every connection either still
+        in the pool or already stopping.
+
         Args:
             keep: The connection keys just connected (one, or a whole
                 :meth:`connect_all` batch), never evicted.
         """
-        for conn in locked_call(self._lock, self._pop_surplus, keep):
-            conn.error = conn.error or "evicted: idle or over the connection cap"
-            self._loop.call_soon_threadsafe(conn.stop.set)
+        locked_call(self._lock, self._pop_surplus, keep)
 
     def _pop_surplus(self, keep: set[str]) -> list[_Connection]:
-        """Remove and return the idle and over-cap connections (locked; :meth:`_evict_surplus`)."""
+        """Stop and remove the idle and over-cap connections, returning them (locked)."""
         now = time.monotonic()
         evictable = {
             key for key, conn in self._connections.items()
@@ -1082,7 +1136,14 @@ class MCPManager:
                 key=lambda key: self._connections[key].last_used,
             )
             doomed.update(oldest[:surplus])
-        return [self._connections.pop(key) for key in doomed]
+        popped: list[_Connection] = []
+        for key in doomed:
+            conn = self._connections[key]
+            conn.error = conn.error or "evicted: idle or over the connection cap"
+            self._loop.call_soon_threadsafe(conn.stop.set)
+            popped.append(conn)
+            del self._connections[key]
+        return popped
 
     def _reap_straggler(self, conn: _Connection, task: Any) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
@@ -1104,11 +1165,12 @@ class MCPManager:
         task.add_done_callback(
             functools.partial(locked_call, self._lock, self._forget_orphan, conn),
         )
-        # Cancelling the future propagates to the wrapped asyncio task,
-        # raising ``CancelledError`` at its stuck ``await`` so the
-        # transport context unwinds and its child dies.
+        # The cancel raises ``CancelledError`` at the task's stuck
+        # ``await`` so the transport context unwinds and its child dies;
+        # a task whose own handshake deadline already started that
+        # teardown is left to finish it.
         self._loop.call_soon_threadsafe(
-            self._loop.call_later, _CONNECT_STRAGGLER_GRACE_S, task.cancel,
+            self._loop.call_later, _CONNECT_STRAGGLER_GRACE_S, _cancel_unless_unwinding, conn,
         )
 
     def _take_all(self) -> list[_Connection]:

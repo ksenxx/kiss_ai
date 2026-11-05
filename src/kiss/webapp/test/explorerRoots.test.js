@@ -552,6 +552,26 @@ async function main() {
     confirmDelete(win);
     fsReq = ofType(posted, 'fsAction').pop();
     assert.strictEqual(fsReq.workDir, WD);
+    // 2026-11-04 W3 F1: both rows of the one folder selected are one
+    // entry (neither row is the other's ancestor): the menu opens, as
+    // the top-level folder's, so the folder cannot be cut or deleted.
+    const ctrlClick = r =>
+      r.dispatchEvent(new win.MouseEvent('click', {bubbles: true, ctrlKey: true}));
+    all(win, '.explorer-row.is-selected').forEach(ctrlClick);
+    [nested, top].forEach(ctrlClick);
+    assert.strictEqual(all(win, '.explorer-row.is-selected').length, 2);
+    const errors = [];
+    win.addEventListener('error', e => {
+      errors.push(String(e.error));
+      e.preventDefault();
+    });
+    rightClick(win, nested);
+    assert.deepStrictEqual(errors, [], 'the menu opens without an error');
+    const labels = all(win, '#sidebar-context-menu .tree-ctx-item').map(i =>
+      i.textContent.trim(),
+    );
+    assert.ok(labels.includes('Remove Folder from Explorer'), labels.join(','));
+    assert.ok(!labels.includes('Cut') && !labels.includes('Delete'), labels.join(','));
     win.close();
   });
 

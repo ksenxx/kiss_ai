@@ -7,14 +7,19 @@
 
 The containerised coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`)
 checks a ``finish`` mechanically before the run ends: the agent's own
-verifier runs, the commands the call names as evidence are compared with
-the exit codes they had, a summary that hedges or admits an unhandled case
-is refused, a reviewer of another model family reads the diff, a give-up
-is checked the same way as a success claim, and after three refused rounds
-the work is delivered with the open findings as caveats.  The gate exists
-because success claims and give-ups are both unreliable, refused rounds
-past the third buy nothing, and a reviewer of the executor's own family
-shares its reading.
+verifier runs (or its own passing run is reused), a reviewer of another
+model family reads the diff once against the task, the summary and the
+commands named as evidence, a give-up is checked the same way as a success
+claim, and a refused finish gets one more round, after which only a failing
+verifier refuses again and the work is delivered with the open findings as
+caveats.  The gate exists because success claims and give-ups are both
+unreliable and a reviewer of the executor's own family shares its reading.
+What it no longer does, after the measurement of 2026-11-04
+(``reports/terminal-bench-4-cost-deep-analysis-2026-11-04.html``): refuse
+on the wording of the summary, on the ``evidence`` field, on a blank review
+or on review findings past the first refused round, and review the same
+work again after an approval; those refusals cost rounds of work at full
+context and did not change what the hidden tests found.
 
 This module is the part of that gate that depends on nothing in the
 benchmark container: :class:`CodingGate`, which
@@ -23,13 +28,14 @@ with the edit tools, and the readers of shell results both the gate and
 the SEA use.  A run is a *coding run* once an ``Edit`` or ``Write`` targets
 a code file (:func:`is_code_file`), a writing shell command names one
 (:func:`names_code_file`), or the verifier exists; a run that writes only
-prose keeps the hedge check of
-:class:`~kiss.agents.sorcar.evidence_gate.EvidenceGate` and the check of
-the commands a ``finish`` names as evidence, and nothing more.
-The verifier is ``verify.sh`` in the task's scratch directory, the path the
-system prompt gives the agent (How to Work, rule 3).  The gate runs it
-with the run's own shell: a subprocess in the work dir
-(:func:`run_on_host`), or the task's container.
+prose is not gated.  The verifier is ``verify.sh`` in the task's scratch
+directory, the path the system prompt gives the agent (How to Work, rule
+3).  The gate runs it with the run's own shell: a subprocess in the work
+dir (:func:`run_on_host`), or the task's container.  When the agent writes
+the ledger the prompt asks for (``ledger.md`` in the scratch directory),
+the reviewer model reads the task and the ledger once and names the
+sentences it would read differently; the answer joins the ``Write``'s
+result (:meth:`CodingGate.reading_note`).
 """
 
 from __future__ import annotations
@@ -57,8 +63,6 @@ from kiss.agents.sorcar.evidence_gate import (
     EDIT_TOOLS,
     SHELL_TOOLS,
     SHELLS,
-    UNCHECKED_REASON,
-    EvidenceGate,
     file_changes,
     runs_subcommand,
     shell_commands,
@@ -90,13 +94,26 @@ VERIFIER_TIMEOUT = 900
 #: Finishes the verifier may refuse; past them the finish is delivered with a
 #: caveat, so a check the agent cannot make pass does not trap the run.
 MAX_VERIFIER_REFUSALS = 3
-#: Refused rounds of the gate per run; past them the finish goes through with
-#: the open verdicts as caveats (a run refused again and again rarely recovers).
+#: Refused rounds of the gate per run.  The first refusal buys one round
+#: whatever refused it; a later round is refused only when the verifier
+#: refused, up to this cap, past which the finish goes through with the open
+#: verdicts as caveats (the pass rate was flat against the number of refused
+#: rounds, and each round costs a model turn at full context).
 MAX_GATE_ROUNDS = 3
-#: Reviews per run: the first on the whole diff, later ones after a change.
-MAX_REVIEWS = 3
-#: Reviews that produced no verdict (or failed) before a finish goes through without one.
+#: Reviews per run: one, on the whole diff.  A re-review after an approval
+#: changed its verdict in 13 of 164 cases, and the rounds after a rejection
+#: did not bring the refused runs up to the average; a later finish is
+#: judged on the review's findings by :meth:`CodingGate.unanswered_verdict`.
+MAX_REVIEWS = 1
+#: Reviews that produced no verdict (or failed) before no review is asked for again.
 MAX_FAILED_REVIEWS = 2
+#: Seconds the reviewer gets to answer.  The provider's prompt cache lives
+#: about five minutes; a gate that outlasts it makes the agent's next call
+#: cost about twelve times the cached price for the same context.
+REVIEW_DEADLINE = 240
+#: The ledger the system prompt asks the agent to write in the scratch
+#: directory; its first ``Write`` gets the independent reading.
+LEDGER_NAME = "ledger.md"
 #: Seconds the diff listing for the reviewer may take.
 DIFF_TIMEOUT = 60
 #: Largest diff shown to the reviewer, and the largest share of it one file gets.
@@ -130,7 +147,7 @@ IMPLICIT_FINISH_VERDICT = (
     "Not finished: a text reply does not end a run that changed code. Call finish "
     "explicitly: with success=True only if every requirement is met and verified by a "
     "command you ran (name those commands in the evidence argument; the gate runs your "
-    "verifier and checks the evidence), otherwise with success=False and what remains."
+    "verifier and a review reads the evidence), otherwise with success=False and what remains."
 )
 VERIFIER_FAILED_VERDICT = (
     "Not finished: your own verifier {path} exited {code} (bash {path}):\n{output}\n"
@@ -141,24 +158,6 @@ VERIFIER_TIMEOUT_VERDICT = (
     "Not finished: your own verifier {path} did not finish within {seconds:.0f} seconds. "
     "Make it fast enough to run at the end (or run its slow part yourself and keep the "
     "quick checks in it), then call finish again."
-)
-#: A finish whose ``evidence`` names a command that did not run or did not pass.
-EVIDENCE_FIELD_VERDICT = (
-    "Not finished: the evidence named in the finish call does not hold:\n{problems}\n"
-    "The `evidence` argument is a JSON list of commands you ran in this run, exactly as you "
-    "ran them, that exited 0. Run the check again and name it as run, or drop the item, then "
-    "call finish again."
-)
-#: The finish refused once per run for a summary that leaves a case open.
-OPEN_READING_VERDICT = (
-    "Not finished: your summary says that a symptom, scenario or requirement of the task "
-    "was left unhandled or settled by assumption, or that the result falls short of what "
-    "the task asks for (infeasible, unsolvable, failing your own definition of done). Every "
-    "such admission is a requirement unmet: the task promises an outcome, so a result short "
-    "of it means a reading or a fix is still wrong, not that the data is. For each item: "
-    "either handle the case and add a check for it to {verifier} (a supplied input that "
-    "nothing consumes yet is the usual way in), or quote the sentence of the task or the "
-    "data that rules it out. Then call finish again."
 )
 #: Shown once when a give-up's verifier passes.
 GIVEUP_RECONSIDER_VERDICT = (
@@ -177,14 +176,11 @@ DELIVERED_CAVEATS = (
     "\n<h4>Delivered after {rounds} refused finish rounds; open findings</h4>\n<ol>\n{items}\n</ol>"
 )
 #: The caveat of a finish delivered past the verifier-refusal cap: the
-#: verifier did not run again.  (Worded without the evidence gate's hedge
-#: phrases, which it would otherwise flag in the summary it joins.)
+#: verifier did not run again.
 UNVERIFIED_CAVEAT = (
     "The verifier {verifier} refused {refusals} finishes and was not run again; the work is "
     "delivered as it stands."
 )
-#: The unchecked-change verdict of a merge: the evidence gate's reason, as a sentence.
-UNCHECKED_VERDICT = "Not finished: {reason}."
 #: What the reviewer reads as the summary when the review runs at the merge of a worktree.
 MERGE_SUMMARY_PLACEHOLDER = (
     "(not written yet: this review runs at the merge of the task's worktree, before the "
@@ -206,9 +202,10 @@ engineer's summary, their verifier script and its last output, the commands they
 evidence, and the diff of the files they changed). The gate runs the verifier itself at \
 this finish and refuses on a failure, so judge the script by what it covers, not by the \
 output shown, which is from its most recent run before this review. The evidence section \
-lists the commands the engineer names as backing the claim, each checked to have run in \
-this session and exited 0; a command is evidence of a requirement only when it tests that \
-requirement: `echo`, `cat`, a script the engineer wrote themselves, or the words of the \
+lists the commands the engineer names as backing the claim, each with the exit code of \
+its last run in this session (`not run` for one that did not run); a command is evidence \
+of a requirement only when it ran, exited 0 and tests that requirement: `echo`, `cat`, a \
+script the engineer wrote themselves, or the words of the \
 task prove nothing about the work on their own. When the summary and evidence sections \
 say they are not written yet (a review at the merge of the worktree, before the finish), \
 judge the diff and the verifier against the task and do not report their absence as a \
@@ -239,12 +236,49 @@ Its last output:
 {output}
 ```
 
-# Commands the engineer names as evidence (each ran in this session and exited 0)
+# Commands the engineer names as evidence, with the exit code of their last run
 {evidence}
 {previous}
 # The diff of the files the engineer created or changed under {workdir}{scope}
 {files}
 """
+#: The independent reading of the task (B1 of the 2026-11-04 analysis): the
+#: reviewer model reads the task and the agent's ledger once, when the
+#: ledger is written, and names the sentences it would read differently.
+#: Most lost runs are a reading the checks settle the other way, and every
+#: check the agent writes starts from its own reading; this one does not.
+READING_PROMPT = """\
+An engineer is about to work on the task below and has written the interpretation \
+ledger below: the readings they chose for the task's ambiguous sentences, the inputs \
+they will use, the tolerances and formats they settled, and what "done" means to them. \
+You have not seen the task before and you will not see the work. Read the task on its \
+own, then the ledger, and list only the places where you would read the task differently \
+from the ledger, or where the task asks for something the ledger does not settle: quote \
+the sentence of the task, then say in one sentence how you read it and what the \
+engineer's reading would get wrong (a file, a name, a format, a value, a case, an input \
+left unused). Take the task literally. Do not restate readings you agree with, do not \
+invent requirements the task does not make, and do not comment on the approach.
+
+Answer with the single line `NONE` when you read every sentence as the ledger does, \
+otherwise with a numbered list, one item per sentence.
+
+# Task
+{task}
+
+# The engineer's interpretation ledger
+```
+{ledger}
+```
+"""
+#: Model answers that mean "no different reading".
+READING_NONE = re.compile(r"^\s*`?NONE`?\.?\s*$", re.I)
+#: Appended to the result of the ledger's ``Write``: the readings to settle.
+READING_NOTE = (
+    "\n\nIndependent reading of the task ({model}, from the task and this ledger): it would "
+    "read these sentences differently or finds them unsettled. Settle each in the ledger "
+    "before the first edit: adopt the reading, or keep yours and write next to it the words "
+    "of the task that rule the other out.\n{items}"
+)
 #: Section of a re-review: the findings of the previous round and how the
 #: engineer answered them.  A re-review judges those findings; it opens no
 #: new front of its own (a further spelling, input or edge case the task
@@ -273,13 +307,6 @@ REVIEW_VERDICT = (
     "number, the command you ran and its output that shows the finding wrong. An argument "
     "without a change or quoted evidence does not count."
 )
-#: A review that produced no verdict (or whose model call failed): the finish
-#: is refused, not approved by silence, while another review is possible.
-REVIEW_FAILED_VERDICT = (
-    "Not finished: the independent review of the work did not complete (no verdict "
-    "came back), so it counts as neither approval nor rejection. Re-check the work "
-    "against the task and call finish again; the review runs again."
-)
 #: A finding the next finish neither changed code for nor answered with evidence.
 UNANSWERED_VERDICT = (
     "Not finished: these findings of the review were not answered by a change or by "
@@ -299,10 +326,10 @@ MERGED_CAVEATS = (
     "\n<h4>Merged after {rounds} refused merge rounds; findings open at the merge</h4>\n<ol>\n"
     "{items}\n</ol>"
 )
-#: The last line of the merge refusal before the one that goes through.
+#: The last line of every merge refusal: what happens to the next merge.
 MERGE_CAP_NOTE = (
-    "This is the last refusal: a merge refused again goes through with its open findings "
-    "attached to the result, so fix them now."
+    "A merge asked for again goes through with its open findings attached to the result "
+    "(and to the finish summary) unless your verifier fails, so fix them now."
 )
 #: A merge asked for while the last review's findings are open and nothing changed.
 MERGE_UNANSWERED_VERDICT = (
@@ -324,29 +351,6 @@ ANSWER_QUESTION = (
     "command it ran and the output quoted, or a described change to the files? Prose "
     "rebuttals without a command, output or change do not count. Finding: {finding}"
 )
-#: Probability at which the decisions model's answer counts the summary as
-#: leaving a case of the task unhandled or the asked outcome missed (probed:
-#: a summary that says "I added nothing for <a listed symptom>" scores above
-#: 0.9 on the first question, one that reports the asked artifact as "not
-#: feasible" above 0.9 on the second; summaries reporting the outcome
-#: produced and every symptom checked score below 0.2).
-OPEN_READING_THRESHOLD = 0.7
-#: Questions the decisions model answers about the summary (:func:`leaves_a_case_open`).
-OPEN_READING_QUESTIONS = {
-    "case_open": (
-        "Does the engineer explicitly admit that a symptom, scenario or requirement of the "
-        "task statement is NOT handled by the delivered work (phrases like 'I added nothing "
-        "for', 'left as is', 'known limitation', 'not addressed', 'did not handle', 'out of "
-        "scope', 'I read X as Y' choosing one reading of a symptom while leaving another "
-        "case unhandled)? Answer no when every listed symptom is reported as fixed and "
-        "checked."),
-    "outcome_missed": (
-        "Does the delivered result, as the engineer describes it, fall short of the outcome "
-        "the task statement asks for (the expected artifact is reported as infeasible, "
-        "unsolvable, empty, failing its own criterion, or produced only under a weaker "
-        "rule), rather than being the outcome itself? Answer no when the engineer reports "
-        "the asked-for outcome as produced and checked."),
-}
 
 #: The failure marker of the container ``Bash`` tools, after the output.
 EXIT_CODE_MARKER = re.compile(r"\[exit code: (-?\d+)\]")
@@ -404,25 +408,60 @@ DISPATCH_TOOLS = frozenset({"run_agent", "run_parallel"})
 #: A ``run_agent`` result for a sub-task left running (``wait="false"``, or
 #: its timeout passed), with the job id ``agent_job`` takes.
 STARTED_AGENT_JOB = re.compile(r"\bas job (agent-\w+)\b")
-#: A shell's option that parses a script without running it (``bash -n``, ``-xn``).
-NOEXEC_OPTION = re.compile(r"-[a-zA-Z]*n[a-zA-Z]*|--noexec")
+#: A shell's option under which ``bash <option> v.sh`` still runs ``v.sh``: a
+#: switch that takes no value and keeps the first operand the script (``-x``,
+#: ``-e``, ``--posix``).  Not ``-n`` or ``-D`` (nothing runs), ``-s`` (the
+#: script comes from stdin, ``v.sh`` is ``$1``), ``-c`` (the operand is shell
+#: text), ``-o`` / ``-O`` / ``--rcfile`` (the next word is their value).
+SHELL_SWITCH = re.compile(r"-[xeuvlpET]+|--?|--(?:posix|norc|noprofile|login|verbose)")
 #: ``git``'s subcommands that move HEAD: a commit or merge of the run's own.
 HEAD_MOVING = {"git": re.compile(
     r"(?:commit|merge|pull|rebase|cherry-pick|revert|am|reset|checkout|switch)\b")}
 
 
 def leaves_shell(command: SimpleCommand) -> bool:
-    """Whether the simple *command* may end the shell before the commands after it run.
+    """Whether the simple *command* may keep the commands after it from running.
 
-    ``exit`` and ``return`` do; so does ``exec`` of a program (the shell
-    becomes it), unlike a bare ``exec 2>&1``.
+    ``exit`` and ``return`` end the shell; so does ``exec`` of a program
+    (the shell becomes it), unlike a bare ``exec 2>&1``; after ``set -n``
+    (``set -o noexec``) the shell reads the rest without running it.
 
     Args:
         command: A scanned simple command.
     """
-    if command.program() in ("exit", "return"):
+    program = command.program()
+    if program in ("exit", "return"):
         return True
+    if program == "set":
+        return _sets_noexec([word.text for word in command.argv()[1:]])
     return bool(command.words) and command.words[0].text == "exec" and bool(command.argv())
+
+
+def _sets_noexec(args: list[str]) -> bool:
+    """Return whether ``set args`` leaves the shell's noexec option on.
+
+    ``-n`` (clustered too: ``-xn``) and ``-o noexec`` turn it on, ``+n``
+    and ``+o noexec`` off, in order; ``--`` or ``-`` ends the options,
+    and so does the first word that is no option: what follows is the
+    positional parameters (``set -- -n``).  A ``--word`` is no option of
+    ``set`` (an error, the shell goes on).
+    """
+    noexec = False
+    pending = ""  # the sign of a ``-o`` / ``+o`` waiting for its option name
+    for arg in args:
+        if pending:
+            if arg == "noexec":
+                noexec = pending == "-"
+            pending = ""
+        elif arg in ("--", "-") or arg.startswith("--") or arg[:1] not in ("-", "+"):
+            break
+        else:
+            for flag in arg[1:]:
+                if flag == "n":
+                    noexec = arg[0] == "-"
+                elif flag == "o":
+                    pending = arg[0]
+    return noexec
 
 
 def moves_head(command: str) -> bool:
@@ -433,6 +472,76 @@ def moves_head(command: str) -> bool:
     """
     return any(runs_subcommand([word.text for word in simple.argv()], HEAD_MOVING)
                for simple in simple_commands(command, None))
+
+
+def verifier_command(commands: list[SimpleCommand], verifier_path: str) -> SimpleCommand | None:
+    """The first of the scanned *commands* that runs the verifier at *verifier_path*, or ``None``.
+
+    ``bash ./tmp/<id>/verify.sh`` (``sh``, with no option but the
+    switches of :data:`SHELL_SWITCH`: ``bash -n`` parses the script
+    without running it, ``bash -s`` reads one from stdin instead),
+    or the script itself as the command, from the work dir or after
+    a ``cd`` the scanner follows.  ``--`` or ``-`` ends the options:
+    the word after it is the script whatever it starts with (``bash
+    -- -x verify.sh`` runs a file named ``-x`` with the verifier as
+    its argument).
+
+    Args:
+        commands: The simple commands of a shell command
+            (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`).
+        verifier_path: The verifier's absolute path.
+    """
+    verifier = posixpath.normpath(bash_path(os.path.abspath(verifier_path)))
+    for simple in commands:
+        argv = simple.argv()
+        if not argv:
+            continue
+        words = argv[1:] if posixpath.basename(argv[0].text) in SHELLS else argv[:1]
+        at = 0  # the words before the first operand are the shell's options
+        while at < len(words) and words[at].text.startswith("-"):
+            at += 1
+            if words[at - 1].text in ("--", "-"):
+                break
+        if not all(SHELL_SWITCH.fullmatch(word.text) for word in words[:at]):
+            continue
+        if at < len(words) and resolve(simple.cwd, words[at]) == verifier:
+            return simple
+    return None
+
+
+def verifier_decides(command: str, work_dir: str, verifier_path: str) -> bool:
+    """Whether an exit status 0 of the shell *command* means its run of the verifier passed.
+
+    So when the verifier's command is at the top level, not negated,
+    its output not piped, not after ``||``, not in the background,
+    nothing before it leaves the shell (``exit``, ``return``, an
+    ``exec`` of a program) and everything after it follows ``&&``
+    (``bash v.sh && echo ok`` fails when the verifier fails): ``bash
+    v.sh || true``, ``bash v.sh | cat``, ``true || bash v.sh``,
+    ``bash v.sh; echo done``, ``bash v.sh &``, ``! bash v.sh`` and
+    ``exit 0; bash v.sh`` all exit 0 whatever the verifier did, so
+    their exit shows nothing about it.
+
+    Args:
+        command: The command as the agent ran it.
+        work_dir: The directory the command started in.
+        verifier_path: The verifier's absolute path.
+    """
+    commands = simple_commands(command, bash_path(os.path.abspath(work_dir)))
+    simple = verifier_command(commands, verifier_path)
+    if (simple is None or simple.group is not None or simple.reader is not None
+            or simple.conditional or simple.background or simple.negated):
+        return False
+    at = next(index for index, candidate in enumerate(commands) if candidate is simple)
+    if any(leaves_shell(earlier) for earlier in commands[:at]):
+        return False
+    for later in commands[at + 1:]:
+        top: SimpleCommand | Group = later
+        while top.group is not None:
+            top = top.group
+        if not top.after_and or top.background:
+            return False
+    return True
 
 
 def is_code_file(path: Any) -> bool:
@@ -668,26 +777,6 @@ def evidence_commands(raw: Any) -> list[str]:
     return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
 
 
-def evidence_problems(commands: list[str], codes: dict[str, str]) -> list[str]:
-    """The evidence *commands* that did not run, or did not exit 0, per *codes*.
-
-    Args:
-        commands: The commands a finish names (:func:`evidence_commands`).
-        codes: The last exit code of every command run, by command.
-
-    Returns:
-        One ``- `command`: reason`` line per problem; empty when all hold.
-    """
-    problems = []
-    for command in commands:
-        code = codes.get(command.strip())
-        if code is None:
-            problems.append(f"- `{command[:200]}`: never ran as a Bash command in this run")
-        elif code != "0":
-            problems.append(f"- `{command[:200]}`: last exit code {code}")
-    return problems
-
-
 def review_findings(answer: str) -> str:
     """The gaps a reviewer's *answer* lists, or ``""`` when it says ``VERDICT: OK``.
 
@@ -741,32 +830,6 @@ def numbered_items(findings: str) -> list[str]:
     return items
 
 
-def leaves_a_case_open(statement: str, summary: str) -> float:
-    """The decisions model's probability that *summary* admits a case of *statement* unhandled.
-
-    The larger of the answers to :data:`OPEN_READING_QUESTIONS` (a case
-    left open, the asked outcome missed); ``0.0`` without the decisions
-    model or when its call fails.
-
-    Args:
-        statement: The task statement.
-        summary: The finish summary.
-    """
-    from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
-
-    if not decisions_tool_available():
-        return 0.0
-    state = json.dumps({"task_statement": statement, "engineer_summary": summary})
-    questions = {name: {"type": "noul", "instructions": text}
-                 for name, text in OPEN_READING_QUESTIONS.items()}
-    try:
-        answers = json.loads(make_decide_tool(None)(state, json.dumps(questions)))["answers"]
-        values = [answers[name]["noul"] for name in OPEN_READING_QUESTIONS]
-    except Exception:
-        return 0.0
-    return max((float(v) for v in values if isinstance(v, int | float)), default=0.0)
-
-
 def answered_findings(summary: str, findings: list[str]) -> list[bool] | None:
     """Whether *summary* answers each of *findings* with evidence, per the decisions model.
 
@@ -813,10 +876,12 @@ def gate_refusal(round_number: int, max_rounds: int, verdicts: list[str],
         call: The refused tool: ``finish`` or ``commit_and_merge``.
     """
     what = "Merge" if call == "commit_and_merge" else "Finish"
-    header = (f"{what} refused (round {round_number} of {max_rounds}; every stage ran, "
-              f"fix everything below before calling {call} again):")
+    header = (f"{what} refused (round {round_number} of up to {max_rounds}; every stage ran, "
+              f"fix everything below before calling {call} again; a later round is refused "
+              "only while your verifier fails, otherwise the work goes through with the open "
+              "findings as caveats):")
     parts = [header, *verdicts]
-    if call == "commit_and_merge" and round_number >= max_rounds - 1:
+    if call == "commit_and_merge":
         parts.append(MERGE_CAP_NOTE)
     return "\n\n".join(parts)
 
@@ -845,6 +910,69 @@ STOP_POLL_SECONDS = 0.2
 #: Seconds :func:`run_on_host` waits for its killed command to be reaped and
 #: for the pipe of a descendant that survived the kill to close.
 REAP_GRACE_SECONDS = 2.0
+
+
+#: Model overrides that set the effort or the thinking budget of a call: the
+#: framework's ``reasoning_effort``, Anthropic's ``thinking``, OpenAI's
+#: ``reasoning`` and Gemini's ``thinking_config``; a side call drops them.
+EFFORT_KEYS = frozenset({"reasoning_effort", "thinking", "reasoning", "thinking_config"})
+
+
+def default_effort(model_config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """*model_config* without its reasoning-effort override, for a side call.
+
+    The run's overrides carry what a model needs to be reached at all (a
+    ``base_url``, an ``api_key``) and the effort the run was asked for;
+    a side call (the review, the reading) keeps the former and runs at
+    the provider's default effort.
+
+    Args:
+        model_config: The run's model overrides, or ``None``.
+
+    Returns:
+        The overrides without ``reasoning_effort`` and without the
+        providers' own effort settings (:data:`EFFORT_KEYS`, and
+        ``effort`` inside Anthropic's ``output_config``), or ``None`` when
+        nothing remains.
+    """
+    kept = {key: value for key, value in (model_config or {}).items()
+            if key not in EFFORT_KEYS}
+    output_config = kept.get("output_config")
+    if isinstance(output_config, dict) and "effort" in output_config:
+        output_config = {key: value for key, value in output_config.items() if key != "effort"}
+        if output_config:
+            kept["output_config"] = output_config
+        else:
+            del kept["output_config"]
+    return kept or None
+
+
+def call_stop_event(seconds: float, done: threading.Event) -> threading.Event:
+    """An event set after *seconds*, or when the calling thread's own stop event is set.
+
+    Bound as the stop event of the thread that makes a side call
+    (:mod:`kiss.core.stop_signal`), it gives the model call a deadline
+    without losing the run's Stop: a watcher thread polls both until
+    *done* is set (the call ended) or it fires.
+
+    Args:
+        seconds: The deadline.
+        done: Set by the caller when the call has ended, which ends the watcher.
+    """
+    stop = threading.Event()
+    threading.Thread(target=_watch_call, name="side-call-deadline", daemon=True,
+                     args=(stop, done, stop_signal.get_thread_stop_event(),
+                           time.time() + seconds)).start()
+    return stop
+
+
+def _watch_call(stop: threading.Event, done: threading.Event,
+                previous: threading.Event | None, end: float) -> None:
+    """The watcher of :func:`call_stop_event`: sets *stop* at *end* or on *previous*."""
+    while not done.wait(STOP_POLL_SECONDS):
+        if (previous is not None and previous.is_set()) or time.time() >= end:
+            stop.set()
+            return
 
 
 def run_on_host(command: str, work_dir: str, timeout: int) -> ShellRun:
@@ -967,11 +1095,12 @@ def gate_stage(stage: str, seconds: float, outcome: str, **fields: Any) -> None:
     """Record one gate stage in the task's event log (a ``gate_stage`` record).
 
     Args:
-        stage: ``verifier``, ``review``, ``round`` or ``delivered``.
+        stage: ``verifier``, ``review``, ``reading``, ``round`` or ``delivered``.
         seconds: The stage's wall-clock duration.
-        outcome: ``pass``, ``fail``, ``skipped``, ``missing`` or a count.
+        outcome: ``pass``, ``fail``, ``error``, ``skipped``, ``missing`` or a count.
         **fields: Extra fields: the ``model``, ``cost_usd`` and ``round`` of
-            a review, ``giveup`` for a verifier run by a give-up.
+            a review, the ``items`` of a reading, ``giveup`` for a verifier
+            run by a give-up.
     """
     logger.info("coding gate: stage=%s outcome=%s seconds=%.1f %s", stage, outcome, seconds,
                 fields)
@@ -984,12 +1113,10 @@ class CodingGate:
     The agent's tool-call guard calls :meth:`observe` for every call, its
     ``tool_result_hook`` calls :meth:`result` with every call's result
     (a shell result gives the exit-code ledger its entry), and the guard
-    calls :meth:`finish_verdict` for every ``finish`` and
-    :meth:`merge_verdict` for every ``commit_and_merge``.  Until the run
-    is a coding run (:meth:`coding_run`) only the check of the evidence a
-    finish names and the hedge check of the
-    :class:`~kiss.agents.sorcar.evidence_gate.EvidenceGate` apply, the
-    latter as it did before this gate existed.
+    calls :meth:`finish_verdict` for every ``finish``,
+    :meth:`merge_verdict` for every ``commit_and_merge`` and
+    :meth:`reading_note` for every ``Write``.  Until the run is a coding
+    run (:meth:`coding_run`) a finish is not gated.
 
     Args:
         shell: Runs a command in the run's environment, in the run's
@@ -1007,10 +1134,10 @@ class CodingGate:
         charge: Attributes a review attempt's spend ``(budget USD, tokens,
             model calls, key)`` to the run, once per key (a stop makes the
             gate retry it with the same key); ``None`` leaves it uncounted.
-        model_config: The run's model overrides, tried first for the
-            reviewer (a second attempt runs without them); its
-            ``coding_gate: False`` (a SEA's setting, ``/sync`` says it)
-            declares the run not a coding run, whatever it changes.
+        model_config: The run's model overrides; its ``coding_gate: False``
+            (a SEA's setting, ``/sync`` says it) declares the run not a
+            coding run, whatever it changes.  The reviewer runs without
+            the overrides, at the provider's default effort.
         verifier_timeout: Seconds the verifier gets at a finish.
         custom_tools: The names of the tools the gate does not model (a
             SEA's own, an MCP server's); after one HEAD is read again,
@@ -1033,7 +1160,6 @@ class CodingGate:
         self.custom_tools = custom_tools
         #: The run may be a coding run (``coding_gate`` of the model config).
         self.coding = (model_config or {}).get("coding_gate", True) is not False
-        self.evidence = EvidenceGate()
         #: The run changed a code file or has a verifier.
         self.armed = False
         #: The commit the run started from (``git rev-parse HEAD`` at its first
@@ -1055,6 +1181,9 @@ class CodingGate:
         self.exit_codes: dict[str, str] = {}
         #: The commands of the background jobs started, by job id.
         self.background_jobs: dict[str, str] = {}
+        #: :attr:`changes` when each background job started, by job id: the
+        #: job checked the files of then, not those of a later edit.
+        self.job_changes: dict[str, int | None] = {}
         #: The sub-tasks left running (``run_agent`` job id -> whether it is a
         #: read-only review, :attr:`changes` at its dispatch, and the
         #: :meth:`fingerprint` of the work then), read when ``agent_job``
@@ -1091,7 +1220,9 @@ class CodingGate:
         self.failed_reviews = 0
         #: The findings of the last review, for the next finish to answer.
         self.open_findings: list[str] = []
-        self.open_reading_refused = False
+        #: The independent reading of the task was done (once per run, at
+        #: the first ``Write`` of the ledger).
+        self.reading_done = False
         self.implicit_finish_vetoed = False
         self.giveup_reconsidered = False
         self.delivered_findings: list[str] = []
@@ -1134,7 +1265,13 @@ class CodingGate:
                 out its HEAD holds the checkout's dirty state, so the diff
                 against it is the run's own work.  Leaving the worktree
                 keeps the base, so the merged work is still the diff.
+
+        The agent's passing run of the verifier (:attr:`verifier_passed_at`)
+        was a run on the tree left behind: another tree (the merged
+        checkout) may hold other files, so the finish runs it again.
         """
+        if work_dir != self.work_dir:
+            self.verifier_passed_at = None
         self.work_dir = work_dir
         if fresh_base:
             self.base_resolved = False
@@ -1154,7 +1291,6 @@ class CodingGate:
             if self.is_verifier(str(args.get("file_path", ""))):
                 self.verifier_passed_at = None  # the verifier itself changes: its last run is stale
             return  # a scratch note (tmp/PROGRESS.md, a probe): no change of the work
-        self.evidence.observe(name, args)
         if name in EDIT_TOOLS or name in SHELL_TOOLS or name in DISPATCH_TOOLS:
             self.resolve_base()
         if name in EDIT_TOOLS:
@@ -1218,14 +1354,16 @@ class CodingGate:
             self.base_commit = head.strip()
 
     def fingerprint(self) -> str | None:
-        """A digest of the work since the base: the tracked diff and the untracked files' contents.
+        """A digest of the work since the base: the diff, the untracked files' paths and contents.
 
         Taken before a local sub-task is dispatched and when its result
         is read: equal digests mean the sub-task changed no file of the
-        work.  ``None`` outside git (the sub-task is then read as a change).
+        work (an untracked file renamed, its contents kept, is a change
+        too).  ``None`` outside git (the sub-task is then read as a change).
         """
         code, text = self.git(
             f"git diff {self.base_commit or 'HEAD'} -- && "
+            "git ls-files --others --exclude-standard -z && "
             "git ls-files --others --exclude-standard | git hash-object --stdin-paths")
         return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest() if code == 0 else None
 
@@ -1233,27 +1371,6 @@ class CodingGate:
         """Whether *path* (as an ``Edit`` / ``Write`` names it) is the agent's verifier."""
         return os.path.normpath(os.path.join(self.work_dir, path)) == os.path.normpath(
             self.verifier_path)
-
-    def _verifier_in(self, commands: list[SimpleCommand]) -> SimpleCommand | None:
-        """The first of the scanned *commands* that runs the agent's verifier, or ``None``.
-
-        ``bash ./tmp/<id>/verify.sh`` (``sh``, with options other than
-        ``-n``, which parses the script without running it), or the
-        script itself as the command, from the work dir or after a
-        ``cd`` the scanner follows.
-        """
-        verifier = posixpath.normpath(bash_path(os.path.abspath(self.verifier_path)))
-        for simple in commands:
-            argv = simple.argv()
-            if not argv:
-                continue
-            words = argv[1:] if posixpath.basename(argv[0].text) in SHELLS else argv[:1]
-            if any(NOEXEC_OPTION.fullmatch(word.text) for word in words):
-                continue
-            operands = [word for word in words if not word.text.startswith("-")]
-            if operands and resolve(simple.cwd, operands[0]) == verifier:
-                return simple
-        return None
 
     def scan(self, command: str) -> list[SimpleCommand]:
         """The simple commands of the shell *command*, started in the work dir.
@@ -1264,44 +1381,20 @@ class CodingGate:
         return simple_commands(command, bash_path(os.path.abspath(self.work_dir)))
 
     def runs_verifier(self, command: str) -> bool:
-        """Whether the shell *command* runs the agent's verifier (:meth:`_verifier_in`).
+        """Whether the shell *command* runs the agent's verifier (:func:`verifier_command`).
 
         Args:
             command: The command as the agent ran it.
         """
-        return self._verifier_in(self.scan(command)) is not None
+        return verifier_command(self.scan(command), self.verifier_path) is not None
 
     def verifier_decides(self, command: str) -> bool:
         """Whether an exit status 0 of the shell *command* means its run of the verifier passed.
 
-        So when the verifier's command is at the top level, not negated,
-        its output not piped, not after ``||``, not in the background,
-        nothing before it leaves the shell (``exit``, ``return``, an
-        ``exec`` of a program) and everything after it follows ``&&``
-        (``bash v.sh && echo ok`` fails when the verifier fails): ``bash
-        v.sh || true``, ``bash v.sh | cat``, ``true || bash v.sh``,
-        ``bash v.sh; echo done``, ``bash v.sh &``, ``! bash v.sh`` and
-        ``exit 0; bash v.sh`` all exit 0 whatever the verifier did, so
-        their exit shows nothing about it.
-
         Args:
             command: The command as the agent ran it.
         """
-        commands = self.scan(command)
-        simple = self._verifier_in(commands)
-        if (simple is None or simple.group is not None or simple.reader is not None
-                or simple.conditional or simple.background or simple.negated):
-            return False
-        at = next(index for index, candidate in enumerate(commands) if candidate is simple)
-        if any(leaves_shell(earlier) for earlier in commands[:at]):
-            return False
-        for later in commands[at + 1:]:
-            top: SimpleCommand | Group = later
-            while top.group is not None:
-                top = top.group
-            if not top.after_and or top.background:
-                return False
-        return True
+        return verifier_decides(command, self.work_dir, self.verifier_path)
 
     def root_relative(self, path: str) -> str:
         """*path*, as an ``Edit`` / ``Write`` named it, relative to the repository root.
@@ -1342,10 +1435,20 @@ class CodingGate:
         self.moved_head = True
         self.gate_rounds = 0
         self.open_findings = []
+        self.verifier_passed_at = None  # the merged tree is not the one that passed
         if not self.merge_caveats:
             return ""
         items = "\n".join(f"{i}. {v}" for i, v in enumerate(self.merge_caveats, 1))
         return MERGED_WITH_FINDINGS.format(rounds=self.merge_rounds, items=items)
+
+    def is_ledger(self, path: str) -> bool:
+        """Whether *path* (as a ``Write`` names it) is the run's ledger in its scratch dir.
+
+        Args:
+            path: The path, relative to the work dir or absolute.
+        """
+        return os.path.normpath(os.path.join(self.work_dir, path)) == os.path.normpath(
+            os.path.join(self.work_dir, self.scratch_dir, LEDGER_NAME))
 
     def is_scratch(self, path: Any) -> bool:
         """Whether *path* (as an ``Edit`` / ``Write`` names it) is a scratch file of the run.
@@ -1377,11 +1480,22 @@ class CodingGate:
                 for command in shell_commands(args):
                     self.exit_codes[command.strip()] = "refused"
             return
+        started = STARTED_JOB.search(text) if name == "Bash" else None
+        if started:
+            # a job whose command writes a file itself is never credited (the
+            # write may follow the verifier in it); the exit of another counts
+            # for the files as they were when it started
+            self.job_changes[started.group(1)] = None if file_changes(args) else self.changes
         for command, code in result_exit_codes(name, args, text, self.background_jobs):
             self.exit_codes[command.strip()] = code
-            if code == "0" and self.verifier_decides(command):
+            if code == "0" and self.verifier_decides(command) and not file_changes(args) and (
+                    name != "bash_job"
+                    or self.job_changes.get(str(args.get("job_id", ""))) == self.changes):
                 # the agent's own passing run of its verifier, its exit the
-                # command's: reused at a finish that nothing changed before
+                # command's and no write of the call's own that may follow
+                # the run (``bash v.sh && printf x > f``): reused at a finish
+                # that nothing changed before (a background job's, when its
+                # command writes nothing and nothing changed since it started)
                 self.verifier_passed_at = self.changes
                 self.last_verifier_run = (0, text)
         if name in DISPATCH_TOOLS or name == "agent_job":
@@ -1434,7 +1548,6 @@ class CodingGate:
         elif fingerprint is None or self.fingerprint() != fingerprint:
             self.delegated = True
             self.changed()
-            self.evidence.unchecked_change = True
 
     def coding_run(self) -> bool:
         """Whether the run changed code or has a verifier (then it is gated).
@@ -1449,8 +1562,6 @@ class CodingGate:
             self.armed = True
         if not self.armed and self.delegated:
             self.armed = any(is_code_file(path) for path, _ in self.changed_paths() or [])
-        if self.armed:
-            self.evidence.track_changes = True
         return self.armed
 
     def verifier_exists(self) -> bool:
@@ -1484,15 +1595,16 @@ class CodingGate:
         An implicit (text-only) finish on a coding run is vetoed once with
         :data:`IMPLICIT_FINISH_VERDICT`.  A pause (``is_continue=True``)
         is never gated; a give-up is checked by :meth:`giveup_verdict`.  A
-        success claim on a run that is not a coding run gets the check of
-        the evidence it names and the hedge check; on a coding run the
-        verifier and the review run at
-        once (:meth:`run_stages`), then the evidence named, the hedge and
-        unchecked-change check, the open-reading check and the review's
-        findings are judged, and every failed stage is refused together
-        (:func:`gate_refusal`) up to :data:`MAX_GATE_ROUNDS` rounds, after
-        which the work is delivered with the open verdicts as caveats
-        (:meth:`deliver_with_findings`).
+        success claim on a run that is not a coding run is not gated; on
+        a coding run the verifier and the review run at once
+        (:meth:`run_stages`), then the review's findings (or, once the
+        review is spent, their answers) are judged, and every failed stage
+        is refused together (:meth:`refusal`): the first refusal buys one
+        round whatever refused it, a later round only when the verifier
+        refused, up to :data:`MAX_GATE_ROUNDS`, after which the work is
+        delivered with the open verdicts as caveats
+        (:meth:`deliver_with_findings`).  The summary's wording and the
+        ``evidence`` field refuse nothing: they are the reviewer's input.
 
         Args:
             args: Arguments of the ``finish`` call (empty for an implicit finish;
@@ -1509,19 +1621,15 @@ class CodingGate:
                 return None
             return self.giveup_verdict(args)
         if not self.coding_run():
-            # not a coding run: the evidence named must still hold, and the
-            # hedge check applies as it did before this gate existed
-            return self.refusal("finish", [self.evidence_field_verdict(args)]) or (
-                self.evidence.verdict(args))
+            return None
         self.verifier_skipped = False
         stages = self.run_stages(args, task)
-        verdicts = [stages["verifier"], self.evidence_field_verdict(args),
-                    self.evidence.verdict(args), self.open_reading_verdict(args, task)]
-        if "review" in stages:
+        verdicts = [stages["verifier"]]
+        if stages.get("review") is not None:
             verdicts.append(stages["review"])
-        else:
+        else:  # no review this round, or one that passed or failed: its findings stand
             verdicts.append(self.unanswered_verdict(args))
-        refusal = self.refusal("finish", verdicts)
+        refusal = self.refusal("finish", verdicts, stages["verifier"] is not None)
         if refusal:
             return refusal
         open_verdicts = [v for v in verdicts if v]
@@ -1538,16 +1646,16 @@ class CodingGate:
 
         The merge is where the work of a worktree is declared complete,
         and the worktree is where fixing it is cheap, so the checks that
-        need no summary run here first: the verifier, the unchecked-change
-        check and the review of the diff (:meth:`run_stages`; the
-        reviewer is told the summary is not written yet).  A merge asked
-        for again with the last review's findings open and no file
-        changed since is refused with them (:data:`MERGE_UNANSWERED_VERDICT`:
-        a merge has no summary to answer them in).  The refusal counts as
-        a gate round like a finish's; past the cap the merge goes through
-        and its rounds and findings stay with it (:meth:`merged`): the
-        finish is gated afresh and reviewed again only when a file
-        changed.
+        need no summary run here first: the verifier and the review of
+        the diff (:meth:`run_stages`; the reviewer is told the summary is
+        not written yet).  A merge asked for again with the last review's
+        findings open and no file changed since is refused with them
+        (:data:`MERGE_UNANSWERED_VERDICT`: a merge has no summary to answer
+        them in).  The refusal counts as a gate round like a finish's,
+        under the same rule (:meth:`refusal`); a merge not refused goes
+        through with its open findings attached, and its rounds and
+        findings stay with it (:meth:`merged`): the finish is gated
+        afresh and reviewed again only when a file changed.
 
         Args:
             task: The task statement.
@@ -1556,36 +1664,46 @@ class CodingGate:
             return None
         self.verifier_skipped = False
         stages = self.run_stages({"summary_in_html": MERGE_SUMMARY_PLACEHOLDER}, task)
-        unchecked = None
-        if self.evidence.unchecked_change:
-            unchecked = UNCHECKED_VERDICT.format(reason=UNCHECKED_REASON)
         unanswered = None
         if stages.get("review") is None and self.open_findings and not self.changed_since_review:
             unanswered = MERGE_UNANSWERED_VERDICT.format(findings="\n".join(self.open_findings))
-        verdicts = [stages["verifier"], unchecked, stages.get("review"), unanswered]
+        verdicts = [stages["verifier"], stages.get("review"), unanswered]
         open_verdicts = [v for v in verdicts if v]
-        if open_verdicts and self.gate_rounds + 1 >= MAX_GATE_ROUNDS:
-            # The round that would be refused last is not refused: the
-            # merge goes through with its findings attached (the merge's
-            # result, then the finish summary), so no run ends with its
-            # work on a branch nobody merges.
+        if open_verdicts and not self.refusable(stages["verifier"] is not None):
+            # The round that is not refused: the merge goes through with
+            # its findings attached (the merge's result, then the finish
+            # summary), so no run ends with its work on a branch nobody
+            # merges.
             self.gate_rounds += 1
             self.merge_rounds = self.gate_rounds
             self.merge_caveats = open_verdicts
             gate_stage("delivered", 0.0, str(len(open_verdicts)), round=self.gate_rounds,
                        call="commit_and_merge")
             return None
-        return self.refusal("commit_and_merge", verdicts)
+        return self.refusal("commit_and_merge", verdicts, stages["verifier"] is not None)
 
-    def refusal(self, call: str, verdicts: list[str | None]) -> str | None:
-        """The refusal of *call* for the open *verdicts*, or ``None`` past the round cap.
+    def refusable(self, verifier_failed: bool) -> bool:
+        """Whether a call with open verdicts is refused now rather than delivered with caveats.
+
+        The first refusal buys one round whatever refused it; a later
+        round only when the verifier refused, up to :data:`MAX_GATE_ROUNDS`.
+
+        Args:
+            verifier_failed: Whether the verifier stage refused at this call.
+        """
+        return self.gate_rounds < MAX_GATE_ROUNDS and (self.gate_rounds == 0 or verifier_failed)
+
+    def refusal(self, call: str, verdicts: list[str | None],
+                verifier_failed: bool) -> str | None:
+        """The refusal of *call* for the open *verdicts*, or ``None`` when it is not refused.
 
         Args:
             call: ``finish`` or ``commit_and_merge``.
             verdicts: The stages' verdicts (``None`` for a stage that passed).
+            verifier_failed: Whether the verifier stage refused (:meth:`refusable`).
         """
         open_verdicts = [v for v in verdicts if v]
-        if not open_verdicts or self.gate_rounds >= MAX_GATE_ROUNDS:
+        if not open_verdicts or not self.refusable(verifier_failed):
             return None
         self.gate_rounds += 1
         gate_stage("round", 0.0, str(len(open_verdicts)), round=self.gate_rounds, call=call)
@@ -1695,19 +1813,11 @@ class CodingGate:
         return VERIFIER_FAILED_VERDICT.format(path=self.verifier_shown, code=code,
                                               output=output[-OUTPUT_CHARS:])
 
-    def evidence_field_verdict(self, args: dict[str, Any]) -> str | None:
-        """The verdict when a command the finish names as evidence did not run or did not pass.
-
-        Args:
-            args: Arguments of the ``finish`` call.
-        """
-        problems = evidence_problems(evidence_commands(args.get("evidence")), self.exit_codes)
-        if not problems:
-            return None
-        return EVIDENCE_FIELD_VERDICT.format(problems="\n".join(problems))
-
     def evidence_report(self, args: dict[str, Any]) -> str:
         """The commands a finish names as evidence, with their last exit code, for the reviewer.
+
+        The field refuses nothing: a command that did not run or failed
+        is shown as such, and the reviewer judges what it proves.
 
         Args:
             args: Arguments of the ``finish`` call.
@@ -1718,24 +1828,6 @@ class CodingGate:
             return MERGE_EVIDENCE_PLACEHOLDER if at_merge else "(none named)"
         return "\n".join(f"- exit {self.exit_codes.get(c.strip(), 'not run')}: `{c[:300]}`"
                          for c in commands[:30])
-
-    def open_reading_verdict(self, args: dict[str, Any], task: str) -> str | None:
-        """Refuse once per run a summary that admits a case of the task is unhandled.
-
-        The decisions model reads the task and the summary
-        (:func:`leaves_a_case_open`); without it there is no verdict.
-
-        Args:
-            args: Arguments of the ``finish`` call.
-            task: The task statement.
-        """
-        summary = str(args.get("summary_in_html", "")).strip()
-        if self.open_reading_refused or not summary or not task:
-            return None
-        if leaves_a_case_open(task, summary) < OPEN_READING_THRESHOLD:
-            return None
-        self.open_reading_refused = True
-        return OPEN_READING_VERDICT.format(verifier=self.verifier_shown)
 
     def review_possible(self) -> bool:
         """Whether another review may run (neither the review nor the failed-review cap is hit)."""
@@ -1865,28 +1957,76 @@ class CodingGate:
         if self.charge is not None and (spent > 0 or used > 0 or calls > 0):
             self.charge(spent, used, calls, key)
 
+    def side_call(self, label: str, prompt: str, key: str) -> tuple[str, str, float, int]:
+        """One non-agentic call of the reviewer model, charged to the run, with a deadline.
+
+        The call runs at the provider's default effort (the run's model
+        overrides minus the effort, :func:`default_effort`) under a stop
+        event of its own (:func:`call_stop_event`) that fires after
+        :data:`REVIEW_DEADLINE` seconds or when the run is stopped; the
+        model clients end the streaming call on it.  The attempt is
+        charged as it ends, however it ends: a stop (which propagates)
+        loses none of its spend, and a stop that lands inside the charge
+        itself is charged again, once per key.
+
+        Args:
+            label: The agent's name in the logs.
+            prompt: The whole prompt.
+            key: The charge key's prefix (``finish-review``, ``reading``).
+
+        Returns:
+            ``(answer, error, cost, tokens)``: the answer (``""`` for none),
+            the error (``""`` when the call completed; the deadline when it
+            was hit), the cost in USD and the tokens.
+        """
+        from kiss.core.kiss_agent import KISSAgent
+
+        agent = KISSAgent(label)
+        charge_attempt = functools.partial(self._charge_review, agent, f"{key}:{uuid.uuid4().hex}")
+        previous = stop_signal.get_thread_stop_event()
+        done = threading.Event()
+        deadline = call_stop_event(REVIEW_DEADLINE, done)
+        stop_signal.set_thread_stop_event(deadline)
+        answer, error = "", ""
+        try:
+            try:
+                answer = str(agent.run(model_name=str(self.reviewer), prompt_template="{p}",
+                                       arguments={"p": prompt}, is_agentic=False,
+                                       verbose=False,
+                                       model_config=default_effort(self.model_config)) or "")
+            finally:
+                done.set()
+                stop_signal.set_thread_stop_event(previous)
+                charge_attempt()
+        except Exception as failure:
+            error = repr(failure)
+        except BaseException:
+            if deadline.is_set() and not (previous is not None and previous.is_set()):
+                error = f"no answer within {REVIEW_DEADLINE} s"
+            else:
+                charge_attempt()
+                raise
+        return answer, error, agent.budget_used, agent.total_tokens_used
+
     def review_verdict(self, args: dict[str, Any], task: str) -> str | None:
         """A read-only review of the work by the reviewer model; its gaps as a verdict.
 
         The reviewer sees the task, the agent's summary, the verifier and
         its last output, the evidence named, and the diff
-        (:meth:`diff_report`); a re-review also sees its previous findings.
-        It runs no commands; its spend is charged to the run.  An answer
-        without a ``VERDICT:`` line is retried once; a review that still
-        has no verdict, or whose model call fails, refuses the finish
-        (:data:`REVIEW_FAILED_VERDICT`) and keeps the previous findings
-        open; it counts under :data:`MAX_FAILED_REVIEWS`, past which the
-        finish goes through without a review.  Each ``NOT DONE`` finding
-        is kept (:attr:`open_findings`) for the next finish to answer.
+        (:meth:`diff_report`); a re-review (when :data:`MAX_REVIEWS` allows
+        one) also sees its previous findings.  It runs no commands; its
+        spend is charged to the run (:meth:`side_call`).  A review without
+        a ``VERDICT:`` line, past the deadline, or whose model call failed
+        refuses nothing: it keeps the previous findings open and counts
+        under :data:`MAX_FAILED_REVIEWS`, past which no review is asked for
+        again.  Each ``NOT DONE`` finding is kept (:attr:`open_findings`)
+        for the next finish to answer.
 
         Args:
             args: Arguments of the ``finish`` call.
             task: The task statement.
         """
-        from kiss.core.kiss_agent import KISSAgent
-
-        reviewer = self.reviewer
-        if reviewer is None:  # only called when review_wanted(): a reviewer is set
+        if self.reviewer is None:  # only called when review_wanted(): a reviewer is set
             return None
         started = time.time()
         code, output = self.last_verifier_run
@@ -1902,66 +2042,86 @@ class CodingGate:
             evidence=self.evidence_report(args), previous=previous, scope=scope,
             workdir=self.work_dir, files=self.diff_report(),
         )
-        answer, cost, error = "", 0.0, ""
-        for overrides in (self.model_config or None, None):
-            agent = KISSAgent("Finish reviewer")
-            charge_attempt = functools.partial(
-                self._charge_review, agent, f"finish-review:{uuid.uuid4().hex}"
-            )
-            try:
-                try:
-                    answer = agent.run(model_name=reviewer, prompt_template="{p}",
-                                       arguments={"p": prompt}, is_agentic=False,
-                                       verbose=False, model_config=overrides)
-                finally:
-                    # Each attempt is charged as it ends, however it ends:
-                    # a stop (which propagates) loses none of its spend.
-                    charge_attempt()
-            except Exception as failure:
-                error = repr(failure)
-            except BaseException:
-                # A stop can land inside the finally's own charge: charge
-                # again (once per key) before it propagates.
-                charge_attempt()
-                raise
-            cost += agent.budget_used
-            if error or review_complete(answer):
-                break
+        answer, error, cost, tokens = self.side_call("Finish reviewer", prompt, "finish-review")
         findings = review_findings(answer)
         failed = bool(error or not review_complete(answer))
         if failed:
             self.failed_reviews += 1
         else:
             self.reviews += 1
+        # A report of the stage; the Spend-by-model split counts each attempt's
+        # charge record instead (SorcarAgent._charge_gate_usage), so a review a
+        # Stop ended is counted too and this one never twice.
         fields: dict[str, Any] = {"model": self.reviewer, "cost_usd": round(cost, 6),
-                                  "round": self.reviews, "findings": len(numbered_items(findings))}
+                                  "tokens": tokens, "round": self.reviews,
+                                  "findings": len(numbered_items(findings))}
         if error:
             fields["error"] = error[:500]
         gate_stage("review", time.time() - started,
                    "error" if failed else ("fail" if findings else "pass"), **fields)
         if failed:
-            return REVIEW_FAILED_VERDICT if self.review_possible() else None
+            return None
         self.changed_since_review = False
         self.open_findings = numbered_items(findings)
         if not findings:
             return None
         return REVIEW_VERDICT.format(findings=findings)
 
-    def unanswered_verdict(self, args: dict[str, Any]) -> str | None:
-        """The open review findings this finish answers neither by a change nor by evidence.
+    def reading_note(self, name: str, args: dict[str, Any], task: str) -> str | None:
+        """The independent reading of *task* to append to the ``Write`` of the agent's ledger.
 
-        A finding is answered when a file changed since the review and a
-        re-review will judge the change, or when the decisions model finds
-        the summary quoting a command and its output for it
-        (:func:`answered_findings`).  Without the decisions model every
-        finding counts as answered.
+        Once per run, when the agent first writes ``ledger.md`` in the
+        scratch directory (:data:`LEDGER_NAME`; the system prompt asks for
+        it when the task leaves points open), the reviewer model reads the
+        task and the ledger's content (:data:`READING_PROMPT`, one call,
+        :meth:`side_call`) and names the sentences of the task it would
+        read differently.  The items join the ``Write``'s result
+        (:data:`READING_NOTE`); ``NONE``, a failed call or an answer
+        without items add nothing.  The call is recorded as the
+        ``reading`` gate stage with its cost.
+
+        Args:
+            name: The tool called.
+            args: Its arguments.
+            task: The task statement.
+
+        Returns:
+            The note, or ``None`` when the call is not the ledger's first
+            ``Write``, no reviewer is set, or the reading agrees.
+        """
+        path = args.get("file_path")
+        if (name != "Write" or self.reading_done or not self.reviewer or not task
+                or not isinstance(path, str) or not self.is_ledger(path)):
+            return None
+        self.reading_done = True
+        started = time.time()
+        prompt = READING_PROMPT.format(task=task,
+                                       ledger=str(args.get("content", ""))[:REVIEW_ONE_FILE_BYTES])
+        answer, error, cost, tokens = self.side_call("Reading check", prompt, "reading")
+        items = [] if error or READING_NONE.match(answer) else numbered_items(answer)
+        fields: dict[str, Any] = {"model": self.reviewer, "cost_usd": round(cost, 6),
+                                  "tokens": tokens, "items": len(items)}
+        if error:
+            fields["error"] = error[:500]
+        gate_stage("reading", time.time() - started,
+                   "error" if error else ("fail" if items else "pass"), **fields)
+        if not items:
+            return None
+        return READING_NOTE.format(model=self.reviewer, items="\n".join(items))
+
+    def unanswered_verdict(self, args: dict[str, Any]) -> str | None:
+        """The open review findings this finish does not answer by quoted evidence.
+
+        Judged at a finish no review verdict came back for (none was
+        wanted, or the one asked for failed): a finding is answered when
+        the decisions model finds the summary quoting a command and its
+        output for it (:func:`answered_findings`).  Without the decisions
+        model every finding counts as answered.
 
         Args:
             args: Arguments of the ``finish`` call.
         """
         if not self.open_findings:
-            return None
-        if self.review_possible() and self.changed_since_review:
             return None
         answered = answered_findings(str(args.get("summary_in_html", "")), self.open_findings)
         if answered is None:

@@ -123,6 +123,7 @@ from xml.parsers.expat import ExpatError
 
 from kiss.core.brand import BRAND
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import run_process_group
 from kiss.server.helpers import MEDIA_DIR
 
@@ -1073,10 +1074,18 @@ def write_macos_launcher(
     bundle (no browser, a bare binary, a clone that failed) the bundle
     is the launcher alone and the Dock shows the browser's icon.
     *in_use* is whether a window runs from the bundle when the caller
-    already listed the processes (None: find out here).  A stale
-    bundle is also left alone when that cannot be found out (``ps``
-    does not answer): deleting a bundle a window may run from is worse
-    than one more launch under the browser's icon.
+    already listed the processes: True is trusted, anything else is
+    found out again here.  A stale bundle is also left alone when that
+    cannot be found out (``ps`` does not answer): deleting a bundle a
+    window may run from is worse than one more launch under the
+    browser's icon.  One writer at a time (a first launch next to an
+    ``--install-launcher``, two launches): the checks and the rewrite
+    they authorize are one step under a lock file next to the bundle,
+    and the process listing that authorizes deleting a stale clone is
+    taken under it, so a writer whose own listing predates the clone
+    another just built, and the window that started from it, finds
+    that clone current, or in use when it clones a different browser,
+    instead of deleting it.
 
     Returns:
         The clone's main executable, kept or just written; None when
@@ -1092,31 +1101,36 @@ def write_macos_launcher(
         browser_info = read_plist(browser_bundle / "Contents" / "Info.plist")
     # The browser to clone: one in a bundle whose plist can be read.
     source = browser if browser_info is not None else None
-    clone = macos_bundle_browser(bundle, source) if source else None
-    if clone is None:
-        # Anything but a current clone is rebuilt from scratch, unless a
-        # window still runs from the bundle, or might: an inconclusive
-        # listing does not authorize deleting it.
-        if in_use is None:
-            in_use = macos_bundle_in_use(bundle)
-        if in_use is not False:
-            print(f"{bundle} may be in use; it is rewritten at the next launch.", file=sys.stderr)
-            return None
-        shutil.rmtree(bundle, ignore_errors=True)
-        if source:
-            clone = clone_macos_browser(contents, source, identifier)
-    (contents / "MacOS").mkdir(parents=True, exist_ok=True)
-    (contents / "Resources").mkdir(exist_ok=True)
-    info = macos_bundle_plist(brand, browser_info if clone and browser_info else {})
-    if not write_icns(icon, contents / "Resources" / "AppIcon.icns"):
-        info.pop("CFBundleIconFile", None)
-    with (contents / "Info.plist").open("wb") as f:
-        plistlib.dump(info, f)
-    launcher = contents / "MacOS" / "launcher"
-    launcher.write_text(macos_launcher_script(exe, kiss_home), encoding="utf-8")
-    launcher.chmod(0o755)
-    # Launch Services caches bundle metadata by modification time.
-    bundle.touch()
+    with exclusive_file_lock(apps_dir / f".{bundle.name}.lock", timeout=SETUP_TIMEOUT_SECS):
+        clone = macos_bundle_browser(bundle, source) if source else None
+        if clone is None:
+            # Anything but a current clone is rebuilt from scratch, unless a
+            # window still runs from the bundle, or might: an inconclusive
+            # listing does not authorize deleting it, nor does the caller's
+            # "nothing runs", taken before the lock.
+            if in_use is not True:
+                in_use = macos_bundle_in_use(bundle)
+            if in_use is not False:
+                print(
+                    f"{bundle} may be in use; it is rewritten at the next launch.",
+                    file=sys.stderr,
+                )
+                return None
+            shutil.rmtree(bundle, ignore_errors=True)
+            if source:
+                clone = clone_macos_browser(contents, source, identifier)
+        (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+        (contents / "Resources").mkdir(exist_ok=True)
+        info = macos_bundle_plist(brand, browser_info if clone and browser_info else {})
+        if not write_icns(icon, contents / "Resources" / "AppIcon.icns"):
+            info.pop("CFBundleIconFile", None)
+        with (contents / "Info.plist").open("wb") as f:
+            plistlib.dump(info, f)
+        launcher = contents / "MacOS" / "launcher"
+        launcher.write_text(macos_launcher_script(exe, kiss_home), encoding="utf-8")
+        launcher.chmod(0o755)
+        # Launch Services caches bundle metadata by modification time.
+        bundle.touch()
     return clone
 
 

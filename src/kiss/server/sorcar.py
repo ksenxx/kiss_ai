@@ -234,6 +234,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
     ApiCommand("getHistory", handler="get_history"),
+    ApiCommand("getTaskUsage", required=("taskIds",)),
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("setChatSummary", required=("chatId", "summary")),
@@ -2173,6 +2174,12 @@ class ServerApi:
             cmd: The ``getSpendReport`` command (no fields).
             ctx: The transport context of the current call.
         """
+        from kiss.agents.sorcar.machines import load_machines
+        from kiss.server.task_update import start_remote_usage_sync
+
+        # Charge the late spend of sub-agents run on other machines in the
+        # background, as a CHATS refresh does: the panel's next poll shows it.
+        start_remote_usage_sync(self._backend._printer, await asyncio.to_thread(load_machines))
         report = await asyncio.to_thread(sidebar_panels.spend_report)
         await self._backend._reply_direct(
             ctx.endpoint, {"type": "spendReport", **report}, "getSpendReport"

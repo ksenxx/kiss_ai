@@ -32,14 +32,21 @@ exactly as the other timeout tests in this directory do, and the
 interrupt is the real ``tool_interrupt.inject_async_exception``.
 """
 
+import sys
 import threading
 import time
 import unittest
+from types import FrameType
 from typing import Any, cast
 
 import docker.errors
 
-from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, _KILL_WAIT_S, DockerManager
+from kiss.agents.sorcar.docker_manager import (
+    _EXEC_TOKEN_VAR,
+    _KILL_WAIT_S,
+    DockerManager,
+    _ExecRun,
+)
 from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
@@ -56,6 +63,37 @@ def _run_bash_recording(
         outcome["result"] = env.Bash(command, "interrupted", timeout_seconds=timeout_seconds)
     except BaseException as exc:
         outcome["error"] = exc
+
+
+def _run_bash_profiled(
+    env: DockerManager, command: str, outcome: dict[str, Any], profile: Any,
+) -> None:
+    """Thread body: run ``env.Bash`` under *profile* (``sys.setprofile``), record the outcome."""
+    sys.setprofile(profile)
+    try:
+        outcome["result"] = env.Bash(command, "stopped", timeout_seconds=30)
+    except BaseException as exc:
+        outcome["error"] = exc
+    finally:
+        sys.setprofile(None)
+
+
+def _stop_at_worker_start(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the task Stop as the exec worker's ``Thread.start()`` returns."""
+    caller = frame.f_back
+    if (
+        event == "return" and frame.f_code is threading.Thread.start.__code__
+        and caller is not None and caller.f_code is DockerManager._exec.__code__
+    ):
+        sys.setprofile(None)
+        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def _stop_inside_cancel(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the task Stop once the run is marked cancelled, before its reaper."""
+    if event == "return" and frame.f_code is _ExecRun._mark_cancelled.__code__ and arg:
+        sys.setprofile(None)
+        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
 
 
 def _wait_for_thread_count(expected: int, seconds: float) -> int:
@@ -355,6 +393,53 @@ class TestExecCancelBounded(unittest.TestCase):
             elapsed = time.monotonic() - start
             self.assertIn("timed out", result)
             self.assertLess(elapsed, 1 + _KILL_WAIT_S + 1)
+
+    def _assert_stop_kills_the_command(self, profile: Any, marker: str, sleep: str) -> None:
+        """Run a command whose side effect lands at 3 s; a Stop placed by *profile* must prevent it.
+
+        The Stop is the real injected ``KeyboardInterrupt``; ``Bash`` must
+        propagate it, and neither the command (``sleep <sleep>`` after the
+        marker) nor its side effect may outlive the call.
+        """
+        outcome: dict[str, Any] = {}
+        command = f"printf ready; sleep 3; touch /tmp/{marker}; sleep {sleep}"
+        thread = threading.Thread(
+            target=_run_bash_profiled, args=(self.env, command, outcome, profile),
+        )
+        thread.start()
+        thread.join(30)
+        # The checks below run their own commands: no Stop for them.
+        self.env.stop_event = None
+        self.env.stream_callback = None
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(outcome.get("error"), KeyboardInterrupt, outcome)
+        self._wait_until_no_process("sle", "ep " + sleep)
+        present = self.env.Bash(f"test -e /tmp/{marker} && echo present || echo absent", "")
+        self.assertEqual(present.strip(), "absent", "the command's side effect outlived the Stop")
+
+    def test_stop_as_the_worker_starts_still_kills_the_command(self) -> None:
+        """A Stop landing as the worker's ``Thread.start()`` returns cancels the exec.
+
+        The worker was started before ``_exec`` entered its protected
+        region, so a Stop delivered right there propagated without
+        ``run.cancel()``: the worker went on to create and start the
+        exec, which ran to completion with its side effects.
+        """
+        self._assert_stop_kills_the_command(_stop_at_worker_start, "s11-start-marker", "45")
+
+    def test_stop_inside_the_cancellation_still_installs_the_reaper(self) -> None:
+        """A Stop landing inside ``cancel()`` after the mark, before the reaper, is retried.
+
+        The task Stop fires once the command has printed; the verdict's
+        ``run.cancel()`` marks the run cancelled and a second injection
+        lands before the reaper thread is started.  ``cancelled`` alone
+        kills nothing: the exec kept running until the cancellation was
+        retried by the handler.
+        """
+        self.stop = threading.Event()
+        self.env.stop_event = self.stop
+        self.env.stream_callback = self._stop_once_output_arrives
+        self._assert_stop_kills_the_command(_stop_inside_cancel, "s11-reaper-marker", "46")
 
     def test_refused_start_creates_no_reaper(self) -> None:
         """(4) An ``exec_start`` the daemon rejects is propagated and leaves no reaper thread."""

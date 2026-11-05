@@ -7,11 +7,15 @@
 import io
 import os
 import struct
+import threading
+import time
 import unittest
 import zlib
 
 import pytest
 
+from kiss.core import stop_signal
+from kiss.core.models import model as model_module
 from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment, transcribe_audio
 
 
@@ -98,7 +102,6 @@ def _create_silent_wav(duration_ms: int = 500, sample_rate: int = 16000) -> byte
 
 
 class TestAttachment(unittest.TestCase):
-
     def test_supported_mime_types(self) -> None:
         assert "image/jpeg" in SUPPORTED_MIME_TYPES
         assert "image/png" in SUPPORTED_MIME_TYPES
@@ -190,12 +193,8 @@ class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
         img_att = Attachment(data=png_data, mime_type="image/png")
         audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
         video_att = Attachment(data=b"\x00" * 10, mime_type="video/webm")
-        with self.assertLogs(
-            "kiss.core.models.openai_compatible_model", level="WARNING"
-        ) as log:
-            m.initialize(
-                "Analyze all", attachments=[img_att, audio_att, video_att]
-            )
+        with self.assertLogs("kiss.core.models.openai_compatible_model", level="WARNING") as log:
+            m.initialize("Analyze all", attachments=[img_att, audio_att, video_att])
         assert any("video/webm" in msg for msg in log.output)
         content = m.conversation[-1]["content"]
         types = [p["type"] for p in content]
@@ -304,6 +303,91 @@ class TestTranscribeAudio(unittest.TestCase):
         result, count = self._run_against_local_server(self._rate_limited_handler(3))
         assert result is None
         assert count == 3
+
+    @staticmethod
+    def _slow_drip_handler(
+        cap_seconds: float,
+    ) -> tuple[type, threading.Event, threading.Event]:
+        """Build a handler whose reply drips one chunk every 0.2 s until released.
+
+        Each chunk resets the SDK's read timeout, so the reply alone never
+        ends the request.  Returns the handler, the event that releases
+        every reply (which the handler also ends itself after
+        *cap_seconds*) and the event set once the first request is being
+        answered.
+        """
+        from http.server import BaseHTTPRequestHandler
+
+        release = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            request_count = 0
+            started = threading.Event()
+
+            def do_POST(self) -> None:  # noqa: N802 - http.server API
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                Handler.request_count += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                Handler.started.set()
+                give_up = time.monotonic() + cap_seconds
+                try:
+                    while not release.wait(0.2) and time.monotonic() < give_up:
+                        self.wfile.write(b"1\r\n \r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        return Handler, release, Handler.started
+
+    def test_a_reply_that_never_ends_is_cut_at_the_whole_request_deadline(self) -> None:
+        """A peer dripping bytes forever is cut at the call's deadline, retries included."""
+        handler, release, _answering = self._slow_drip_handler(cap_seconds=20.0)
+        deadline = model_module._TRANSCRIBE_DEADLINE_SECONDS
+        model_module._TRANSCRIBE_DEADLINE_SECONDS = 2.0
+        started = time.monotonic()
+        try:
+            result, _count = self._run_against_local_server(handler)
+        finally:
+            model_module._TRANSCRIBE_DEADLINE_SECONDS = deadline
+            release.set()
+        assert result is None
+        assert time.monotonic() - started < 15
+
+    def test_a_stop_cuts_a_request_the_peer_keeps_dripping(self) -> None:
+        """A Stop while the reply drips unwinds the call with the stop error at once."""
+        handler, release, answering = self._slow_drip_handler(cap_seconds=20.0)
+        stop = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def transcribe() -> None:
+            stop_signal.set_thread_stop_event(stop)
+            try:
+                outcome["result"] = self._run_against_local_server(handler)
+            except BaseException as exc:
+                outcome["error"] = exc
+            finally:
+                stop_signal.set_thread_stop_event(None)
+
+        worker = threading.Thread(target=transcribe, daemon=True, name="stopped-transcription")
+        worker.start()
+        try:
+            assert answering.wait(15)
+            stopped_at = time.monotonic()
+            stop.set()
+            worker.join(timeout=15)
+        finally:
+            release.set()
+            worker.join(timeout=30)
+        assert isinstance(outcome.get("error"), KeyboardInterrupt), outcome
+        assert time.monotonic() - stopped_at < 15
 
     def test_auth_error_not_retried(self) -> None:
         """A deterministic 401 fails immediately without any retry."""

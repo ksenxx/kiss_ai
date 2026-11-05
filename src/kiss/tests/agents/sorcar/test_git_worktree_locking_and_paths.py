@@ -41,6 +41,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
     _git,
+    _git_common_dir,
     _race_delay,
     repo_lock,
 )
@@ -224,7 +225,8 @@ class GitOutputParsingTest(unittest.TestCase):
     """I3: git-emitted paths and config values must not be mangled."""
 
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="kiss_e_i3_"))
+        # Resolved: git reports macOS's /var/folders temp dirs as /private/var.
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss_e_i3_")).resolve()
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -247,6 +249,39 @@ class GitOutputParsingTest(unittest.TestCase):
             {b for _d, b in pairs}, {"main", "kiss/wt-a"},
         )
         self.assertEqual(_checked_out(repo), {"main", "kiss/wt-a"})
+
+    @posix_only("Windows forbids control characters and trailing spaces in names")
+    def test_repo_paths_keep_carriage_returns_and_trailing_spaces(self) -> None:
+        """A root with a CR, or a separate git dir ending in a space, resolves to itself.
+
+        ``rev-parse`` prints paths without ``-z``: translating its CR to
+        LF named the neighbour ``carriage\\nrepo``, and stripping the
+        separate git dir's trailing space put ``info/exclude`` in a
+        fresh ``metadata`` directory next to the real ``metadata ``.
+        """
+        carriage = _make_repo(self.tmp / "carriage\rrepo")
+        _make_repo(self.tmp / "carriage\nrepo")
+        self.assertEqual(GitWorktreeOps.discover_repo(carriage), carriage)
+        git_dir = self.tmp / "metadata "
+        repo = self.tmp / "separate"
+        repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main", "--separate-git-dir", str(git_dir), str(repo)],
+            capture_output=True, text=True, check=True,
+        )
+        (repo / "f.txt").write_text("a\n")
+        _run("add", "-A", cwd=repo)
+        _run("-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init", cwd=repo)
+        wt_dir = self.tmp / "linked"
+        _run("worktree", "add", "--detach", str(wt_dir), cwd=repo)
+        for tree in (repo, wt_dir):
+            common = _git_common_dir(tree)
+            self.assertIsNotNone(common)
+            assert common is not None
+            self.assertEqual(common.resolve(), git_dir.resolve())
+        GitWorktreeOps.ensure_excluded(repo)
+        self.assertIn(".kiss-worktrees/\n", (git_dir / "info" / "exclude").read_text())
+        self.assertFalse((self.tmp / "metadata").exists())
 
     def test_multiline_config_values_do_not_forge_branch_names(self) -> None:
         """A multi-line ``branch.*`` value yields no bogus section name."""
@@ -395,6 +430,121 @@ class FailedCherryPickCleanupTest(unittest.TestCase):
 
         self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), before)
         self.assertEqual((self.repo / "f.txt").read_text(), "user-edit\n")
+
+    def test_a_merge_never_overwrites_what_the_main_tree_ignores(self) -> None:
+        """Ignored main-tree files at paths the branch starts tracking are kept.
+
+        ``stash --include-untracked`` leaves ignored files where they are,
+        and both ``merge --squash`` and ``cherry-pick`` silently overwrite
+        one (or delete an ignored directory in the way of a file), so
+        every merge mode is refused up front and the tree is left as it
+        was; so is a branch switch of the main tree.
+        """
+        (self.repo / ".gitignore").write_text(".env\nbuild\nout/\nlocal.cfg\n*.log\nvendor/\n")
+        (self.repo / "local.cfg.example").write_text("EXAMPLE=1\n" * 20)
+        (self.repo / "mix").mkdir()
+        (self.repo / "mix" / "tracked.txt").write_text("tracked\n")
+        _run("add", "-A", cwd=self.repo)
+        _run("commit", "-m", "ignore local files", cwd=self.repo)
+        _run("checkout", "-b", "kiss/wt-a", cwd=self.repo)
+        (self.repo / "f.txt").write_text("a-baseline\n")
+        _run("commit", "-am", "baseline", cwd=self.repo)
+        baseline = _run("rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        (self.repo / ".gitignore").write_text("")
+        (self.repo / ".env").write_text("EXAMPLE=1\n")
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "out.txt").write_text("built\n")
+        (self.repo / "out").write_text("a file now\n")
+        # A rename git detects (``R100``, not an addition) onto an ignored path,
+        # and a file where a directory of tracked files held an ignored leaf.
+        _run("mv", "local.cfg.example", "local.cfg", cwd=self.repo)
+        _run("rm", "-q", "mix/tracked.txt", cwd=self.repo)
+        (self.repo / "mix").write_text("a file now\n")
+        (self.repo / "vendor").mkdir()
+        (self.repo / "vendor" / "inner").write_text("ours\n")
+        _run("add", "-A", cwd=self.repo)
+        _run("commit", "-m", "track local files", cwd=self.repo)
+        _run("checkout", "main", cwd=self.repo)
+        (self.repo / ".env").write_text("SECRET=local\n")
+        (self.repo / "build").write_text("ignored file\n")
+        (self.repo / "out").mkdir()
+        (self.repo / "out" / "cache.bin").write_text("ignored dir\n")
+        (self.repo / "local.cfg").write_text("SECRET=renamed onto\n")
+        (self.repo / "mix" / "debug.log").write_text("ignored leaf\n")
+        _make_repo(self.repo / "vendor")  # a nested repository git does not look into
+        (self.repo / "vendor" / "inner").write_text("theirs\n")
+        self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")  # nothing to stash
+        self.assertEqual(
+            GitWorktreeOps.ignored_collisions(self.repo, "kiss/wt-a", baseline),
+            [".env", "build/out.txt", "local.cfg", "mix", "out", "vendor/inner"],
+        )
+
+        for mode in (baseline, None):
+            with self.subTest(baseline=mode):
+                result = GitWorktreeOps.squash_merge(self.repo, "kiss/wt-a", mode)
+                self.assertEqual(result, MergeResult.CONFLICT)
+                self.assertIsNone(GitWorktreeOps.begin_conflicted_merge(
+                    self.repo, "kiss/wt-a", mode, "",
+                ))
+                self.assertEqual((self.repo / ".env").read_text(), "SECRET=local\n")
+                self.assertEqual((self.repo / "build").read_text(), "ignored file\n")
+                self.assertEqual(
+                    (self.repo / "out" / "cache.bin").read_text(), "ignored dir\n",
+                )
+                self.assertEqual((self.repo / "local.cfg").read_text(), "SECRET=renamed onto\n")
+                self.assertEqual((self.repo / "mix" / "debug.log").read_text(), "ignored leaf\n")
+                self.assertEqual((self.repo / "vendor" / "inner").read_text(), "theirs\n")
+                self.assertEqual(GitWorktreeOps.status_porcelain(self.repo), "")
+                self._assert_no_pick_in_progress()
+        ok, err = GitWorktreeOps.checkout(self.repo, "kiss/wt-a")
+        self.assertFalse(ok)
+        self.assertIn(".env", err)
+        self.assertEqual(GitWorktreeOps.current_branch(self.repo), "main")
+        self.assertEqual((self.repo / ".env").read_text(), "SECRET=local\n")
+
+    def test_a_merge_replaces_tracked_files_with_directories_and_back(self) -> None:
+        """Only ignored content is in the way: a tracked shape the branch replaces reaches git.
+
+        The directory ``shape/`` of tracked files becomes the file
+        ``shape`` and the tracked file ``f.txt`` the directory ``f.txt/``;
+        nothing the main tree ignores sits at either, so both merge modes
+        apply the replacement instead of refusing it.
+        """
+        for mode in ("baseline", "legacy"):
+            with self.subTest(mode=mode):
+                repo = _make_repo(self.tmp / mode)
+                (repo / "shape").mkdir()
+                (repo / "shape" / "old.txt").write_text("old\n")
+                _run("add", "-A", cwd=repo)
+                _run("commit", "-m", "shapes", cwd=repo)
+                _run("checkout", "-b", "kiss/wt-a", cwd=repo)
+                (repo / "g.txt").write_text("g-baseline\n")
+                _run("commit", "-am", "baseline", cwd=repo)
+                baseline = _run("rev-parse", "HEAD", cwd=repo).stdout.strip()
+                _run("rm", "-q", "shape/old.txt", "f.txt", cwd=repo)
+                (repo / "shape").write_text("a file now\n")
+                (repo / "f.txt").mkdir()
+                (repo / "f.txt" / "new.txt").write_text("a directory now\n")
+                _run("add", "-A", cwd=repo)
+                _run("commit", "-m", "replace shapes", cwd=repo)
+                _run("checkout", "main", cwd=repo)
+                self.assertEqual(GitWorktreeOps.ignored_collisions(repo, "kiss/wt-a", baseline), [])
+                # Without git's word on what is tracked (a corrupt index), every
+                # shape in the way is refused, as before.
+                index = (repo / ".git" / "index").read_bytes()
+                (repo / ".git" / "index").write_bytes(b"garbage")
+                self.assertEqual(
+                    GitWorktreeOps.ignored_collisions(repo, "kiss/wt-a", baseline),
+                    ["f.txt/new.txt", "shape"],
+                )
+                (repo / ".git" / "index").write_bytes(index)
+                result = GitWorktreeOps.squash_merge(
+                    repo, "kiss/wt-a", baseline if mode == "baseline" else None,
+                )
+                self.assertEqual(result, MergeResult.SUCCESS)
+                self.assertEqual((repo / "shape").read_text(), "a file now\n")
+                self.assertEqual((repo / "f.txt" / "new.txt").read_text(), "a directory now\n")
+                self.assertEqual(GitWorktreeOps.status_porcelain(repo), "")
 
     def test_successful_baseline_merge_still_works(self) -> None:
         """The happy path is unaffected by the new cleanup."""

@@ -744,23 +744,33 @@ def enroll_over_ssh(ssh: str, timeout: float = SSH_TIMEOUT) -> tuple[str, str]:
     ca_cert_path = client_cert_pair()[0].with_name(tls_certs.CA_CERT_FILE)
     command = ENROLL_COMMAND.replace("NAME", tls_certs.ca_label(ca_cert_path))
     try:
-        run = subprocess.run(
-            ssh_command(ssh, command=command), input=ca_cert_path.read_bytes(),
-            capture_output=True, timeout=timeout, check=False,
+        proc = popen_process_group(
+            ssh_command(ssh, command=command), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise MachineError("ssh is not installed on this machine") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise MachineError(f"ssh {ssh} did not answer in time") from exc
-    if run.returncode != 0:
+    try:
+        stdout, stderr = proc.communicate(ca_cert_path.read_bytes(), timeout=timeout)
+    except BaseException as exc:
+        # ssh's whole group, as ``SshTunnel._kill`` does: a ``ProxyCommand``
+        # of the user's ssh configuration is a child of ssh that a timeout
+        # (or a Stop) must take down with it, or it lives on, re-parented.
+        kill_process_tree(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5.0)
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise MachineError(f"ssh {ssh} did not answer in time") from exc
+        raise
+    if proc.returncode != 0:
         message = {
             1: f"no Sorcar daemon is running on {ssh} (cannot find its {LOCAL_ENDPOINT_FILE})",
             2: f"cannot store this daemon's CA on {ssh}",
             3: f"cannot enroll on {ssh}",
-        }.get(run.returncode, f"ssh {ssh} failed")
-        raise MachineError(_with_last_line(message, run.stderr))
+        }.get(proc.returncode, f"ssh {ssh} failed")
+        raise MachineError(_with_last_line(message, stderr))
     marker = "-----BEGIN CERTIFICATE-----"
-    endpoint_text, found, ca_rest = run.stdout.decode("utf-8", "replace").partition(marker)
+    endpoint_text, found, ca_rest = stdout.decode("utf-8", "replace").partition(marker)
     try:
         endpoint = json.loads(endpoint_text)
         port = urlsplit(endpoint["url"]).port

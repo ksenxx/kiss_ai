@@ -18,7 +18,19 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
-const {waitFor, settle, installXtermStub} = require('./simplify2_harness');
+const {
+  waitFor,
+  settle,
+  installXtermStub,
+  newDom,
+  loadPageScripts,
+} = require('./simplify2_harness');
+const {
+  readShimJs,
+  installFakeWebSocket,
+  frames,
+  waitForSocket,
+} = require('./transport_page_helpers');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -223,11 +235,100 @@ async function testOutputBeforeXterm() {
   assert.ok(page.terminals[0].written.includes('The shell exited.'));
 }
 
+/** The daemon's side of a fake socket's handshake: auth_ok, then the pong. */
+function handshake(sock) {
+  sock.onopen();
+  sock.fireMessage({type: 'auth_ok'});
+  const last = frames(sock)[sock.sent.length - 1];
+  if (last.type === 'ping') sock.fireMessage({type: 'pong'});
+}
+
+/** The terminalInput texts a fake socket carried. */
+function inputs(sock) {
+  return frames(sock)
+    .filter(f => f.type === 'terminalInput')
+    .map(f => f.data);
+}
+
+// Keystrokes typed while the socket is down used to join the
+// transport's reconnect batch, which goes out before main.js re-sends
+// terminalOpen: the daemon got them from a connection that did not own
+// the shell yet and dropped them.  The real chat page (transport.js,
+// api.js, main.js, terminalTab.js) over the fake WebSocket: the input
+// waits until the daemon's terminalOpened confirms the re-attach, then
+// goes out once, in order, after the terminalOpen.
+async function testInputTypedWhileDisconnectedWaitsForTheReattach() {
+  const win = newDom();
+  const sockets = [];
+  installFakeWebSocket(win, sockets);
+  const {terminals} = installXtermStub(win);
+  win.eval(readShimJs());
+  loadPageScripts(win);
+  win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
+  handshake(sockets[0]);
+  win.document.getElementById('terminal-btn').click();
+  await xtermLoaded({terminals});
+  const term = terminals[0];
+  const open = frames(sockets[0]).find(f => f.type === 'terminalOpen');
+  assert.ok(open, 'the terminal tab asked for its shell');
+  const tabId = open.tab_id;
+  const opened = attached => ({
+    type: 'terminalOpened',
+    tab_id: tabId,
+    attached,
+  });
+  sockets[0].fireMessage(opened(false));
+  term.dataCb('echo live\r');
+  assert.deepStrictEqual(inputs(sockets[0]), ['echo live\r']);
+
+  // The socket dies; the user keeps typing into the still-open terminal.
+  sockets[0].fireClose();
+  term.dataCb('printf OFFLINE\r');
+  await waitForSocket(sockets, 2);
+  const sock = sockets[1];
+  handshake(sock);
+  await settle();
+  const types = frames(sock).map(f => f.type);
+  assert.ok(types.includes('terminalOpen'), 'the reconnect re-opens the shell');
+  assert.deepStrictEqual(
+    inputs(sock),
+    [],
+    'nothing typed offline goes out before the daemon re-attached the shell',
+  );
+  sock.fireMessage(opened(true));
+  term.dataCb('echo after\r');
+  const after = frames(sock).map(f => f.type);
+  assert.ok(
+    after.indexOf('terminalOpen') < after.indexOf('terminalInput'),
+    'the held input follows the terminalOpen: ' + JSON.stringify(after),
+  );
+  assert.deepStrictEqual(inputs(sock), ['printf OFFLINE\r', 'echo after\r']);
+  assert.strictEqual(
+    sockets.flatMap(inputs).filter(d => d === 'printf OFFLINE\r').length,
+    1,
+    'the offline input is sent exactly once',
+  );
+
+  // A second outage, after which the daemon reports the shell gone: what
+  // was typed for it is not run in the fresh shell.
+  sock.fireClose();
+  term.dataCb('rm -rf stale\r');
+  await waitForSocket(sockets, 3);
+  handshake(sockets[2]);
+  await settle();
+  sockets[2].fireMessage(opened(false));
+  term.dataCb('echo fresh\r');
+  assert.deepStrictEqual(inputs(sockets[2]), ['echo fresh\r']);
+  assert.ok(term.written.includes('while this page was disconnected'));
+  win.close();
+}
+
 (async () => {
   await testOpenFitAndResize();
   await testExitRestartAndReconnectNote();
   await testDispose();
   await testOutputBeforeXterm();
+  await testInputTypedWhileDisconnectedWaitsForTheReattach();
   console.log('terminalTabView.test.js passed');
 })().catch(err => {
   console.error(err);

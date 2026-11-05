@@ -21,6 +21,8 @@ These tests verify that ``OpenAICompatibleModel`` converts such hand-off
 conversations to OpenAI format before every API call.
 """
 
+import base64
+import copy
 import json
 import threading
 from collections.abc import Generator
@@ -29,9 +31,13 @@ from typing import Any
 
 import pytest
 
+from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.core.models.model import encode_binary_attachment
 from kiss.core.models.model_info import model
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.conftest import requires_openai_api_key
+from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
 
 _ANTHROPIC_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},
@@ -91,9 +97,7 @@ class TestHandoffNormalization:
         for msg in normalized:
             content = msg.get("content")
             if isinstance(content, list):
-                assert all(
-                    b.get("type") not in ("thinking", "redacted_thinking") for b in content
-                )
+                assert all(b.get("type") not in ("thinking", "redacted_thinking") for b in content)
 
     def test_tool_use_becomes_tool_calls(self) -> None:
         m = _make_offline_model()
@@ -297,9 +301,7 @@ class TestXhighAliasHandoffWire:
     HTTP server captures the body — no mocks.
     """
 
-    def test_tools_request_is_normalized_and_alias_resolved(
-        self, capture_server: str
-    ) -> None:
+    def test_tools_request_is_normalized_and_alias_resolved(self, capture_server: str) -> None:
         """Tools path: alias → base id, Anthropic history → OpenAI messages."""
         m = model(
             "gpt-5.5-xhigh",
@@ -314,18 +316,14 @@ class TestXhighAliasHandoffWire:
         _assert_no_anthropic_blocks_on_wire(body)
         assistant = body["messages"][1]
         assert assistant["tool_calls"][0]["function"]["name"] == "add"
-        assert assistant["tool_calls"][0]["function"]["arguments"] == (
-            '{"a": 2, "b": 3}'
-        )
+        assert assistant["tool_calls"][0]["function"]["arguments"] == ('{"a": 2, "b": 3}')
         tool_msg = body["messages"][2]
         assert tool_msg["role"] == "tool"
         assert tool_msg["tool_call_id"] == "toolu_01"
         assert tool_msg["content"] == "5"
         assert body["reasoning_effort"] == "xhigh"
 
-    def test_generate_request_is_normalized_with_xhigh_effort(
-        self, capture_server: str
-    ) -> None:
+    def test_generate_request_is_normalized_with_xhigh_effort(self, capture_server: str) -> None:
         """No-tools path: thinking blocks dropped, xhigh effort still sent."""
         m = model(
             "gpt-5.5-xhigh",
@@ -389,3 +387,144 @@ class TestXhighHandoffLive:
         ]
         content, _ = m.generate()
         assert "done" in content.lower()
+
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRk0AAAAASUVORK5CYII="
+)
+_PDF = b"%PDF-1.4\nhandoff media probe\n%%EOF\n"
+
+
+def _anthropic_history_with_tool_media() -> list[dict[str, Any]]:
+    """Two tool results written by the real Anthropic writer, each carrying media.
+
+    Anthropic is the one provider whose result writer keeps a tool's
+    images/PDFs as ``image`` / ``document`` blocks *inside* the
+    ``tool_result`` block, so a history handed off from it carries the
+    bytes nowhere else.
+    """
+    old = AnthropicModel("claude-sonnet-4-5", api_key="test-key")
+    old.initialize("Read the screenshot and the report.")
+    old.conversation.append(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_shot", "name": "Read", "input": {"p": "a"}},
+                {"type": "tool_use", "id": "toolu_doc", "name": "Read", "input": {"p": "b"}},
+            ],
+        }
+    )
+    old.add_function_results_to_conversation_and_return(
+        [
+            (
+                "Read",
+                {
+                    "tool_use_id": "toolu_shot",
+                    "result": encode_binary_attachment("image/png", _PNG),
+                },
+            ),
+            (
+                "Read",
+                {
+                    "tool_use_id": "toolu_doc",
+                    "result": "Report: " + encode_binary_attachment("application/pdf", _PDF),
+                },
+            ),
+        ]
+    )
+    nested = [b["type"] for r in old.conversation[-1]["content"] for b in r["content"]]
+    assert nested == ["text", "image", "text", "document"], nested
+    return old.conversation
+
+
+def _ok_reply(request: Request) -> Reply:
+    """Answer either endpoint with a plain ``done`` message."""
+    if request.path.endswith("/responses"):
+        body: dict[str, Any] = {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 0,
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    else:
+        body = {
+            "id": "chatcmpl_1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    return Reply(json_body=body)
+
+
+def _wire_turn(items: list[dict[str, Any]]) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+    """Reduce a wire message/item list to its tool outputs and user media parts.
+
+    Returns ``(outputs, media)``: the ``(call id, text)`` of every tool
+    output in order, and every non-text part of every user message that
+    follows the last tool output (the follow-up carrying the media).
+    """
+    outputs: list[tuple[str, str]] = []
+    media: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("role") == "tool":
+            outputs.append((item["tool_call_id"], item["content"]))
+        elif item.get("type") == "function_call_output":
+            outputs.append((item["call_id"], item["output"]))
+        elif item.get("role") == "user" and isinstance(item.get("content"), list) and outputs:
+            media.extend(p for p in item["content"] if p.get("type") not in ("text", "input_text"))
+    return outputs, media
+
+
+@pytest.mark.parametrize("adapter", [OpenAICompatibleModel, OpenAICompatibleModel2])
+def test_tool_result_media_survives_the_handoff_on_the_wire(adapter: type) -> None:
+    """Images/PDFs nested in Anthropic ``tool_result`` blocks reach both OpenAI endpoints.
+
+    The tool outputs stay text-only and are followed by a user message
+    carrying the media, the way the adapters' own result writers lay a
+    turn out.
+    """
+    history = _anthropic_history_with_tool_media()
+    png_url = "data:image/png;base64," + base64.b64encode(_PNG).decode()
+    pdf_url = "data:application/pdf;base64," + base64.b64encode(_PDF).decode()
+    with ScriptedOpenAIServer(_ok_reply) as server:
+        m = adapter("gpt-4o", base_url=server.base_url, api_key="test-key")
+        m.initialize("placeholder")
+        m.conversation = copy.deepcopy(history)
+        content, _ = m.generate()
+        assert content == "done"
+        body = server.requests[-1].body
+        outputs, media = _wire_turn(body.get("messages") or body["input"])
+        m.client.close()
+    assert outputs == [
+        ("toolu_shot", "[attached image/png, 68 bytes]"),
+        ("toolu_doc", f"Report: [attached application/pdf, {len(_PDF)} bytes]"),
+    ]
+    if adapter is OpenAICompatibleModel:
+        assert media == [
+            {"type": "image_url", "image_url": {"url": png_url}},
+            {"type": "file", "file": {"file_data": pdf_url}},
+        ]
+    else:
+        assert media == [
+            {"type": "input_image", "image_url": png_url, "detail": "auto"},
+            {"type": "input_file", "filename": "attachment.pdf", "file_data": pdf_url},
+        ]

@@ -267,6 +267,11 @@ class TestRemoteTabs(RemoteTabsHarness):
         )
         result = next(f for f in frames if f["type"] == "result")
         self.assertIn(SUMMARY, json.dumps(result))
+        # The remote run's own terminal event reaches the surfaces under
+        # the tab's id: the page's finish handling (the victory sound
+        # among it) keys on exactly that frame.
+        done = next(f for f in frames if f["type"] == "task_done")
+        self.assertEqual(done["tabId"], tab)
         self.assertIn(tab, await self._remote_tabs_state(), "the remote has the tab")
 
         # Two surfaces connecting now (a reload, another window) each

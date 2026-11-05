@@ -24,6 +24,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.core.processes import run_process_group
+
 logger = logging.getLogger(__name__)
 
 HEIF_MIME_TYPES = frozenset(
@@ -99,22 +101,18 @@ def heif_to_jpeg(data: bytes) -> bytes | None:
             exe = shutil.which(tool)
             if exe is None:
                 continue
-            argv = [exe] + [
-                a.format(src=str(src), dst=str(dst)) for a in template
-            ]
+            argv = [exe] + [a.format(src=str(src), dst=str(dst)) for a in template]
             # Every candidate writes to the same path, and a converter that is
             # killed by the timeout or exits non-zero can leave a truncated
             # JPEG behind (ffmpeg and ImageMagick both encode incrementally).
             # Clearing the path first keeps the success check below about the
             # output of *this* converter only.
             dst.unlink(missing_ok=True)
+            # Its own process group: a converter that is a wrapper around a
+            # delegate process dies with it on the timeout or a Stop, instead
+            # of leaving the delegate decoding for a task that is gone.
             try:
-                subprocess.run(
-                    argv,
-                    check=True,
-                    capture_output=True,
-                    timeout=_CONVERT_TIMEOUT_S,
-                )
+                run_process_group(argv, timeout=_CONVERT_TIMEOUT_S).check_returncode()
             except (subprocess.SubprocessError, OSError):
                 logger.warning("HEIF conversion via %s failed", tool, exc_info=True)
                 continue
