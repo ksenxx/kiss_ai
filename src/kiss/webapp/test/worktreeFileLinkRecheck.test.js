@@ -14,6 +14,7 @@ const {
   send,
   click,
   answerCheckPaths,
+  stubRaf,
 } = require('./simplify2_harness');
 const {
   findLinks,
@@ -154,10 +155,57 @@ function testFailedWorktreeResultDoesNotRecheck() {
   console.log('  ok - a failed worktree_result does not recheck');
 }
 
+// 2026-11-04 W4 F1: the worktree's completion re-asks about a path
+// whose first check is still unanswered (the daemon checks the file
+// system off the loop).  The replies come in the order asked: the
+// first is the older observation and must not settle the span for
+// good -- the fresher one does.
+function testOlderReplyDoesNotSettleARecheckedLink() {
+  for (const kind of ['merge', 'discard']) {
+    const {win, posted} = makeChatPage({beforeScripts: stubRaf});
+    const tabId = win._testApi.getActiveTabId();
+    const file = path.join(tmpDir, 'verdict-' + kind + '.txt');
+    win._testApi.hideWelcome();
+    send(win, {type: 'prompt', tabId, text: 'See ' + file});
+    const checks = () =>
+      posted.filter(m => m.type === 'checkPaths' && m.paths.includes(file));
+    assert.strictEqual(checks().length, 1, 'the path is checked');
+    send(win, {
+      type: 'worktree_result',
+      tabId,
+      success: true,
+      message: kind + ' done',
+    });
+    assert.strictEqual(checks().length, 2, 'the completion rechecks');
+    const [old, fresh] = checks();
+    // A merge lands the file (the old check saw none); a discard
+    // removes the worktree copy (the old check saw it).
+    const oldExists = kind === 'discard';
+    const answer = (req, verdict) =>
+      send(win, {
+        type: 'pathsExist',
+        tabId: req.tabId,
+        workDir: req.workDir,
+        results: {[file]: verdict},
+      });
+    answer(old, oldExists);
+    answer(fresh, !oldExists);
+    assert.strictEqual(
+      findLinks(win, file).length,
+      oldExists ? 0 : 1,
+      kind + ': the fresher verdict decides the link',
+    );
+    assert.strictEqual(findMissing(win, file).length, oldExists ? 1 : 0);
+    win.close();
+  }
+  console.log('  ok - an older reply does not settle a re-asked link');
+}
+
 try {
   testMergeFlipsMissingResultLinkClickable();
   testDiscardDemotesLinkWhoseFileVanished();
   testFailedWorktreeResultDoesNotRecheck();
+  testOlderReplyDoesNotSettleARecheckedLink();
   console.log('worktreeFileLinkRecheck.test.js: all tests passed');
 } finally {
   fs.rmSync(tmpDir, {recursive: true, force: true});

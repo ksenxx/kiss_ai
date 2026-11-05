@@ -114,13 +114,13 @@ def test_from_bytes_leaves_other_formats_untouched(tmp_path: Path) -> None:
 
 
 def test_from_bytes_ignores_a_wrong_heif_label(tmp_path: Path) -> None:
-    """A mislabelled file keeps its own bytes and label."""
+    """A PNG labelled HEIC keeps its bytes and gets the label its header says."""
     png = tmp_path / "mislabelled.png"
     _write_gradient_png(png)
     data = png.read_bytes()
     att = Attachment.from_bytes(data, "image/heic")
     assert att.data == data
-    assert att.mime_type == "image/heic"
+    assert att.mime_type == "image/png"
 
 
 def test_read_tool_can_embed_a_heic_photo(heic_photo: Path) -> None:

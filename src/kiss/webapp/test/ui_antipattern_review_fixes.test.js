@@ -45,6 +45,11 @@ function dirtyQuestion(win) {
   return win.document.querySelector('[data-notification-id^="close-dirty-"]');
 }
 
+/** The id of the overwrite question for `name` pasted into `dest` on `machine`. */
+function overwriteId(machine, dest, name) {
+  return 'fs-overwrite:' + JSON.stringify([machine, dest, name]);
+}
+
 function closeControl(win) {
   return win.document.querySelector('.chat-tab.content-tab .chat-tab-close');
 }
@@ -254,10 +259,7 @@ async function main() {
     });
     const first = h.toast(
       win,
-      'fs-overwrite:' +
-        actions[0].dest +
-        '|' +
-        actions[0].dest.split('/').pop(),
+      overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
     );
     assert.ok(first, 'first question open');
     h.send(win, {
@@ -268,10 +270,7 @@ async function main() {
     });
     const second = h.toast(
       win,
-      'fs-overwrite:' +
-        actions[1].dest +
-        '|' +
-        actions[1].dest.split('/').pop(),
+      overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
     );
     assert.ok(
       second
@@ -290,10 +289,7 @@ async function main() {
     assert.strictEqual(
       h.toast(
         win,
-        'fs-overwrite:' +
-          actions[1].dest +
-          '|' +
-          actions[1].dest.split('/').pop(),
+        overwriteId('', actions[1].dest, actions[1].dest.split('/').pop()),
       ),
       null,
     );
@@ -307,10 +303,7 @@ async function main() {
     assert.strictEqual(
       h.toast(
         win,
-        'fs-overwrite:' +
-          actions[0].dest +
-          '|' +
-          actions[0].dest.split('/').pop(),
+        overwriteId('', actions[0].dest, actions[0].dest.split('/').pop()),
       ),
       null,
     );
@@ -340,8 +333,8 @@ async function main() {
         exists: true,
       });
     }
-    const first = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|foo.py');
-    const second = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|bar.py');
+    const first = h.toast(win, overwriteId('', actions[0].dest, 'foo.py'));
+    const second = h.toast(win, overwriteId('', actions[0].dest, 'bar.py'));
     assert.ok(first && second, 'both questions are open at once');
     assert.ok(
       first
@@ -358,6 +351,118 @@ async function main() {
     assert.strictEqual(resent[0].path, h.WD + '/bar.py');
     assert.strictEqual(resent[0].overwrite, true);
     assert.ok(first.isConnected, 'the other question is still open');
+    win.close();
+  });
+
+  await test('2026-11-04 W3 F3: the same clash on two machines asks one question each', () => {
+    const {win, posted} = h.makePage();
+    const entries = [
+      {name: 'a.txt', path: h.WD + '/a.txt', isDir: false},
+      // A legal file name that reads like "a.txt on gpu-box".
+      {name: 'a.txt@gpu-box', path: h.WD + '/a.txt@gpu-box', isDir: false},
+      {name: 'dest', path: h.WD + '/dest', isDir: true},
+    ];
+    h.openExplorer(win, posted, entries);
+    const copyToDest = name => {
+      h.runMenuItem(win, h.explorerRow(win, h.WD + '/' + name), 'Copy');
+      h.runMenuItem(win, h.explorerRow(win, h.WD + '/dest'), 'Paste');
+      return h
+        .ofType(posted, 'fsAction')
+        .filter(m => m.action === 'copy')
+        .pop();
+    };
+    const local = copyToDest('a.txt');
+    const localAt = copyToDest('a.txt@gpu-box');
+    const owner = local.tabId;
+    h.send(win, {type: 'tabMachine', tabId: owner, machine: 'gpu-box'});
+    h.send(win, {
+      type: 'machineWorkDirs',
+      machine: 'gpu-box',
+      workDir: h.WD,
+      recentWorkDirs: [{path: h.WD, ts: 1}],
+      error: '',
+    });
+    const list = h
+      .ofType(posted, 'listDir')
+      .filter(m => m.path === h.WD && m.machine === 'gpu-box')
+      .pop();
+    h.send(win, {
+      type: 'dirListing',
+      token: list.token,
+      path: h.WD,
+      root: h.WD,
+      entries,
+      machine: 'gpu-box',
+    });
+    const remote = copyToDest('a.txt');
+    assert.strictEqual(remote.machine, 'gpu-box');
+    for (const req of [local, localAt, remote]) {
+      h.send(win, {
+        type: 'fsResult',
+        token: req.token,
+        error: 'exists',
+        exists: true,
+        tabId: owner,
+        machine: req.machine || '',
+      });
+    }
+    const prompts = () =>
+      Array.from(win.document.querySelectorAll('.kiss-notification')).filter(
+        el => String(el.dataset.notificationId).startsWith('fs-overwrite:'),
+      );
+    assert.strictEqual(
+      prompts().length,
+      3,
+      'both machines, and the @-named file, await their answer',
+    );
+    const localPrompt = h.toast(win, overwriteId('', local.dest, 'a.txt'));
+    const remotePrompt = h.toast(
+      win,
+      overwriteId('gpu-box', remote.dest, 'a.txt'),
+    );
+    assert.ok(localPrompt && remotePrompt);
+    assert.ok(
+      h.toast(win, overwriteId('', localAt.dest, 'a.txt@gpu-box')),
+      "the @-named file's own question",
+    );
+    const n = h.ofType(posted, 'fsAction').length;
+    h.click(win, h.toastButton(localPrompt, 'Replace'));
+    const retries = h.ofType(posted, 'fsAction').slice(n);
+    assert.strictEqual(retries.length, 1);
+    assert.ok(!retries[0].machine, 'Replace retries the local copy');
+    assert.strictEqual(retries[0].overwrite, true);
+    assert.ok(remotePrompt.isConnected, "gpu-box's question is still open");
+    win.close();
+  });
+
+  await test('2026-11-04 W1 F2: an overwrite question for a file named with a newline is asked', () => {
+    const {win, posted} = h.makePage();
+    const name = 'odd\nname.py';
+    h.openExplorer(win, posted, [
+      ...FILE_ENTRIES,
+      {name, path: h.WD + '/' + name, isDir: false},
+    ]);
+    const row = Array.from(win.document.querySelectorAll('.explorer-row')).find(
+      r => r.dataset.explorerPath === h.WD + '/' + name,
+    );
+    h.runMenuItem(win, row, 'Copy');
+    h.runMenuItem(win, h.explorerRow(win, h.WD + '/src'), 'Paste');
+    const action = h.ofType(posted, 'fsAction').pop();
+    assert.strictEqual(action.path, h.WD + '/' + name, 'the newline survives the request');
+    const errors = [];
+    win.addEventListener('error', e => {
+      errors.push(String(e.error));
+      e.preventDefault();
+    });
+    h.send(win, {type: 'fsResult', token: action.token, error: 'exists', exists: true});
+    assert.deepStrictEqual(errors, [], 'no selector error');
+    const question = Array.from(win.document.querySelectorAll('.kiss-notification')).find(
+      el => el.dataset.notificationId === overwriteId('', action.dest, name),
+    );
+    assert.ok(question, 'the question is up');
+    h.click(win, h.toastButton(question, 'Replace'));
+    assert.ok(!question.isConnected, 'answered, the question goes');
+    assert.strictEqual(h.ofType(posted, 'fsAction').pop().overwrite, true);
     win.close();
   });
 
@@ -594,6 +699,229 @@ async function main() {
     });
     assert.strictEqual(inp.value, '', 'nothing restored for a foreign tab');
     win.close();
+  });
+
+  /** The drafts the page would hand a reloaded page, by tab. */
+  function persistedDrafts(win) {
+    win.dispatchEvent(new win.Event('pagehide'));
+    return (win.acquireTransport().getState() || {}).inputDrafts || {};
+  }
+
+  await test('2026-11-04 W5 F1: the run echo sent before the refusal does not retire the refused draft', async () => {
+    for (const background of [false, true]) {
+      const {win, posted} = h.makePage();
+      const tabId = win._testApi.getActiveTabId();
+      const inp = h.byId(win, 'task-input');
+      pastePng(win, 'draft.png');
+      for (let i = 0; i < 100 && h.byId(win, 'send-btn').disabled; i++) {
+        await h.sleep(10);
+      }
+      typeInto(win, inp, 'review the attached draft');
+      h.click(win, h.byId(win, 'send-btn'));
+      for (let i = 0; i < 100 && !h.ofType(posted, 'submit').length; i++) {
+        await h.sleep(10);
+      }
+      assert.strictEqual(inp.value, '', 'the composer was cleared on send');
+      if (background) win._testApi.createNewTab();
+      // The daemon echoes every run before deciding on it: the refusal
+      // (a merge in progress, say) follows the echo.
+      h.send(win, {
+        type: 'setTaskText',
+        text: 'review the attached draft',
+        tabId,
+      });
+      h.send(win, {type: 'status', running: false, tabId});
+      h.send(win, {
+        type: 'error',
+        code: 'prompt_refused',
+        text: 'merge in progress',
+        tabId,
+      });
+      if (background) win._testApi.switchToTab(tabId);
+      assert.strictEqual(
+        inp.value,
+        'review the attached draft',
+        'the text is back',
+      );
+      assert.strictEqual(
+        h.byId(win, 'file-chips').children.length,
+        1,
+        'the attachment is back',
+      );
+      win.close();
+    }
+    // An accepted run (its echo, then its `clear`) leaves no draft to
+    // restore: a later refusal of another run restores that run only.
+    const {win, posted} = h.makePage();
+    const tabId = win._testApi.getActiveTabId();
+    const inp = h.byId(win, 'task-input');
+    typeInto(win, inp, 'accepted run');
+    h.click(win, h.byId(win, 'send-btn'));
+    assert.strictEqual(h.ofType(posted, 'submit').length, 1);
+    h.send(win, {type: 'setTaskText', text: 'accepted run', tabId});
+    assert.strictEqual(
+      persistedDrafts(win)[tabId],
+      undefined,
+      'echoed: the daemon has it',
+    );
+    h.send(win, {type: 'clear', tabId});
+    h.send(win, {type: 'status', running: false, tabId});
+    typeInto(win, inp, 'refused run');
+    h.click(win, h.byId(win, 'send-btn'));
+    h.send(win, {type: 'setTaskText', text: 'refused run', tabId});
+    h.send(win, {type: 'status', running: false, tabId});
+    h.send(win, {type: 'error', code: 'prompt_refused', text: 'busy', tabId});
+    assert.strictEqual(inp.value, 'refused run');
+    win.close();
+    // A run the daemon queued as a follow-up (its echo, then its
+    // `prompt` echo, no `clear`) is accepted too: a later refused
+    // message, with files of its own, comes back, not the follow-up.
+    const queued = h.makePage();
+    const qTab = queued.win._testApi.getActiveTabId();
+    const qInp = h.byId(queued.win, 'task-input');
+    typeInto(queued.win, qInp, 'accepted queued follow-up');
+    h.click(queued.win, h.byId(queued.win, 'send-btn'));
+    h.send(queued.win, {type: 'status', running: true, tabId: qTab});
+    h.send(queued.win, {
+      type: 'setTaskText',
+      text: 'accepted queued follow-up',
+      tabId: qTab,
+    });
+    h.send(queued.win, {
+      type: 'prompt',
+      steer: true,
+      text: 'accepted queued follow-up',
+      tabId: qTab,
+    });
+    pastePng(queued.win, 'refused.png');
+    for (let i = 0; i < 100 && h.byId(queued.win, 'send-btn').disabled; i++) {
+      await h.sleep(10);
+    }
+    typeInto(queued.win, qInp, 'refused steering message');
+    h.click(queued.win, h.byId(queued.win, 'send-btn'));
+    for (
+      let i = 0;
+      i < 100 && !h.ofType(queued.posted, 'appendUserMessage').length;
+      i++
+    ) {
+      await h.sleep(10);
+    }
+    assert.strictEqual(
+      h.ofType(queued.posted, 'appendUserMessage')[0].prompt,
+      'refused steering message',
+    );
+    h.send(queued.win, {
+      type: 'error',
+      code: 'prompt_refused',
+      text: 'finished',
+      tabId: qTab,
+    });
+    assert.strictEqual(
+      qInp.value,
+      'refused steering message',
+      'the refused message is back',
+    );
+    assert.strictEqual(
+      h.byId(queued.win, 'file-chips').children.length,
+      1,
+      'with its attachment',
+    );
+    assert.strictEqual(
+      persistedDrafts(queued.win)[qTab],
+      'refused steering message',
+    );
+    queued.win.close();
+  });
+
+  await test("2026-11-04 W4 F2: an earlier message's echo keeps the newer unacknowledged one", () => {
+    const {win, posted} = h.makePage();
+    const tabId = win._testApi.getActiveTabId();
+    const inp = h.byId(win, 'task-input');
+    h.send(win, {type: 'status', running: true, tabId});
+    for (const text of ['FIRST steering message', 'SECOND steering message']) {
+      typeInto(win, inp, text);
+      h.click(win, h.byId(win, 'send-btn'));
+    }
+    assert.deepStrictEqual(
+      h.ofType(posted, 'appendUserMessage').map(m => m.prompt),
+      ['FIRST steering message', 'SECOND steering message'],
+    );
+    assert.strictEqual(persistedDrafts(win)[tabId], 'SECOND steering message');
+    // The echo names no message: it acknowledges the one it carries.
+    h.send(win, {
+      type: 'prompt',
+      steer: true,
+      text: 'FIRST steering message',
+      tabId,
+    });
+    assert.strictEqual(
+      persistedDrafts(win)[tabId],
+      'SECOND steering message',
+      "FIRST's echo leaves SECOND's copy",
+    );
+    h.send(win, {
+      type: 'prompt',
+      steer: true,
+      text: 'SECOND steering message',
+      tabId,
+    });
+    assert.strictEqual(
+      persistedDrafts(win)[tabId],
+      undefined,
+      "SECOND's echo retires it",
+    );
+    // Two messages with the same text: the daemon answers them in
+    // order, so the first echo is the first message's.
+    for (let i = 0; i < 2; i++) {
+      typeInto(win, inp, 'Please continue');
+      h.click(win, h.byId(win, 'send-btn'));
+    }
+    assert.strictEqual(h.ofType(posted, 'appendUserMessage').length, 4);
+    h.send(win, {type: 'prompt', steer: true, text: 'Please continue', tabId});
+    assert.strictEqual(
+      persistedDrafts(win)[tabId],
+      'Please continue',
+      'the second copy outlives the first echo',
+    );
+    h.send(win, {type: 'prompt', steer: true, text: 'Please continue', tabId});
+    assert.strictEqual(persistedDrafts(win)[tabId], undefined);
+    win.close();
+    // Two same-text runs submitted while idle.  The daemon echoes the
+    // first run twice (its submit acknowledgment, then again once its
+    // tab is registered) before its `clear`: the repeated echo is the
+    // first run's still, so the second run's copy outlives it until
+    // its own acknowledgment (queued as a follow-up: echo, `prompt`).
+    const idle = h.makePage();
+    const iTab = idle.win._testApi.getActiveTabId();
+    const iInp = h.byId(idle.win, 'task-input');
+    for (let i = 0; i < 2; i++) {
+      typeInto(idle.win, iInp, 'Please continue');
+      h.click(idle.win, h.byId(idle.win, 'send-btn'));
+    }
+    assert.strictEqual(h.ofType(idle.posted, 'submit').length, 2);
+    const echo = {type: 'setTaskText', text: 'Please continue', tabId: iTab};
+    for (let i = 0; i < 2; i++) {
+      h.send(idle.win, echo);
+      assert.strictEqual(
+        persistedDrafts(idle.win)[iTab],
+        'Please continue',
+        "the first run's repeated echo leaves the second copy",
+      );
+    }
+    h.send(idle.win, {type: 'clear', tabId: iTab});
+    assert.strictEqual(
+      persistedDrafts(idle.win)[iTab],
+      'Please continue',
+      'the first run started: the second copy stays',
+    );
+    h.send(idle.win, echo);
+    h.send(idle.win, {...echo, type: 'prompt', steer: true});
+    assert.strictEqual(
+      persistedDrafts(idle.win)[iTab],
+      undefined,
+      "the second run's own acknowledgment retires it",
+    );
+    idle.win.close();
   });
 
   report('ui_antipattern_review_fixes');

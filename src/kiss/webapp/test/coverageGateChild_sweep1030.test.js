@@ -15,9 +15,11 @@
 //
 // Each case runs node in its own process group with TMPDIR in a scratch
 // directory and kills the group when it is done, so a regression (an
-// endless chain of gates, a hung suite) is bounded and cleaned up.  A
-// last case checks that this harness keeps output written after the
-// process exits.
+// endless chain of gates, a hung suite) is bounded and cleaned up; the
+// hung suite's case also kills the group of the gate's guard, which the
+// gate's does not include.  Process groups are POSIX: the cases that
+// leave a process to kill are skipped on Windows.  A last case checks
+// that this harness keeps output written after the process exits.
 //
 // The gate's own CHILD_TIMEOUT_MS kill (90 s) is exercised, on a copy
 // with the timeout lowered, by runAllRetiresSuiteGroup_wave3.test.js.
@@ -32,6 +34,20 @@ const {spawn} = require('child_process');
 
 const GATE = path.join(__dirname, 'coverage_gate.js');
 const WAIT_MS = 20000;
+
+/** SIGKILL process group `pgid`; a group already gone is fine. */
+function killGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    // ESRCH: every process of the group has exited.
+  }
+}
+
+/** Resolves after `ms`, without holding the process open. */
+function delay(ms) {
+  return new Promise(settle => setTimeout(settle, ms).unref());
+}
 
 /**
  * Start node with `args` in a new process group and collect its stdout
@@ -58,11 +74,7 @@ function runGroup(args, env, until) {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // The group has exited already.
-      }
+      killGroup(child.pid);
       resolve({out, code, timedOut, closed});
     }
     function collect(chunk) {
@@ -107,10 +119,24 @@ async function testEvalGateRunsTheSuiteOnce() {
 }
 
 async function testHungSuiteOutputStreams() {
+  if (process.platform === 'win32') {
+    // runCovered runs the suite without a guard or process group there,
+    // and `process.kill` of a group throws, so the hung suite would run
+    // its full 60 s holding the gate's pipes.
+    console.log(
+      "ok - a hung suite's output streams through the gate (skipped on Windows)",
+    );
+    return;
+  }
   const {dir, env} = scratch({
-    // Hangs well past WAIT_MS; exits on its own if nothing kills it.
+    // Names its guard (its parent, the leader of its process group) and
+    // hangs well past WAIT_MS; exits on its own if nothing kills it.  It
+    // stops the guard first: a guard that cannot react to the gate's
+    // death stands for one too slow to do so before this test cleans up,
+    // so the cleanup below has to retire it itself.
     'hung.test.js':
-      "console.log('ok - first');\n" +
+      "process.kill(process.ppid, 'SIGSTOP');\n" +
+      "console.log('ok - first ' + process.ppid);\n" +
       'setTimeout(() => process.exit(3), 60000);\n',
   });
   fs.writeFileSync(
@@ -118,26 +144,37 @@ async function testHungSuiteOutputStreams() {
     `require(${JSON.stringify(GATE)}).runCovered(` +
       `${JSON.stringify(suiteArg(dir, 'hung.test.js'))}, 'hunggate');\n`,
   );
+  const res = await runGroup(
+    [path.join(dir, 'gate.js')],
+    env,
+    /ok - first \d+\n/,
+  );
+  const guard = /ok - first (\d+)\n/.exec(res.out);
+  let closed = false;
   try {
-    const res = await runGroup([path.join(dir, 'gate.js')], env, /ok - first/);
     assert.ok(
       !res.timedOut,
       "the hung suite's output did not reach the gate's stdout while it ran",
     );
     assert.strictEqual(res.code, null, 'the suite was still running');
-    // The kill reached the gate only: its guard leads its own group and
-    // kills the suite and itself when the gate dies, and node writes the
-    // guard's V8 coverage into the scratch TMPDIR just before that
-    // (`process.kill` of one's own group runs the exit hooks first).
-    // Removing the directory before then left that file behind, one
-    // directory per run; the pipes the guard inherited close with it.
-    await Promise.race([
-      res.closed,
-      new Promise(settle => setTimeout(settle, 5000).unref()),
-    ]);
   } finally {
+    // The kill reached the gate only.  Its guard leads its own group,
+    // holds the gate's pipes, and once it notices the gate is gone
+    // writes its V8 coverage into the scratch TMPDIR before killing its
+    // group (`process.kill` of one's own group runs the exit hooks
+    // first): removing the directory before that write recreated it,
+    // with the coverage file in it, one directory per run.  So kill the
+    // guard's group here and wait for the pipes to close, which only the
+    // exit of their last holder does, before removing the directory.
+    if (guard) killGroup(Number(guard[1]));
+    closed = await Promise.race([
+      res.closed.then(() => true),
+      delay(WAIT_MS).then(() => false),
+    ]);
     fs.rmSync(dir, {recursive: true, force: true});
   }
+  assert.ok(closed, "the guard and the suite released the gate's pipes");
+  assert.ok(!fs.existsSync(dir), 'nothing recreated the scratch directory');
   console.log("ok - a hung suite's output streams through the gate");
 }
 

@@ -37,6 +37,7 @@ from kiss.core.models.model_info import (
     calculate_cost,
 )
 from kiss.core.models.openai_compatible_model import (
+    OpenAICompatibleBase,
     _model_thinking_level,
     _provider_model_name,
 )
@@ -168,6 +169,33 @@ def test_strip_thinking_alias_strips_xhigh_unless_registered_under_that_name(
     assert loaded["gpt-5.6-sol-xhigh"].alias_of == "gpt-5.6-sol"
     assert loaded["gpt-5.6-sol-xhigh"].context_length == 262144  # the override's own fields
     assert _provider_model_name("gpt-5.6-sol-xhigh") == "gpt-5.6-sol"
+    # The override names the alias, so it keeps requesting the alias's effort.
+    assert loaded["gpt-5.6-sol-xhigh"].thinking == "xhigh"
+    assert _model_thinking_level("gpt-5.6-sol-xhigh") == "xhigh"
+
+
+def test_saved_endpoint_keeps_the_bundled_thinking_level_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settings-panel save of only an endpoint for a bundled model must not
+    change the effort it requests once the row replaces the catalog entry at
+    the next start: the seeded row carries the catalog's ``thinking`` level,
+    for a generated alias and for its base alike."""
+    monkeypatch.setattr(mi, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+    for name in ("gpt-5.6-sol-xhigh", "gpt-5.6-sol"):
+        assert mi.save_custom_model(name, endpoint="http://127.0.0.1:1/v1", api_key="k") is None
+    rows = json.loads((tmp_path / "MY_MODELS.json").read_text())
+    assert rows["gpt-5.6-sol-xhigh"]["thinking"] == "xhigh"
+    assert rows["gpt-5.6-sol"]["thinking"] == "high"
+    loaded = mi._load_catalog_file(mi.PACKAGE_MODEL_INFO_PATH)
+    for name in ("gpt-5.6-sol-xhigh", "gpt-5.6-sol"):
+        monkeypatch.setitem(MODEL_INFO, name, loaded[name])
+    alias = "gpt-5.6-sol-xhigh"
+    adapter = mi.model(alias, model_config=mi.custom_model_config(alias))
+    assert isinstance(adapter, OpenAICompatibleBase)
+    assert adapter._api_model_name == "gpt-5.6-sol"
+    assert adapter.model_config["reasoning_effort"] == "xhigh"
+    assert _model_thinking_level("gpt-5.6-sol") == "high"
 
 
 def test_provider_model_name_maps_alias_to_base_wire_id() -> None:

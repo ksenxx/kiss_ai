@@ -41,6 +41,7 @@ from kiss.core.kiss_error import (
     StepLimitExceededError,
 )
 from kiss.core.llm_reply import LLMReply, zero_usage
+from kiss.core.locked import locked_call
 from kiss.core.models.model import (
     Attachment,
     Model,
@@ -240,6 +241,12 @@ class NativeTurn:
             further call of the turn is refused.
         closed: Set once the turn's bridge has closed; a call that
             returns after that leaves the agent's conversation alone.
+        lock: Held to close the turn and to publish a call's result
+            (:meth:`KISSAgent._publish_native_call`), so the check of
+            ``closed`` and the writes it guards are one step: a handler
+            past the check when the Stop closes the turn publishes
+            first, never after, when the agent may be running another
+            turn or another run.
     """
 
     def __init__(self) -> None:
@@ -247,6 +254,7 @@ class NativeTurn:
         self.error: Exception | None = None
         self.ended: Verdict | None = None
         self.closed = threading.Event()
+        self.lock = threading.RLock()
 
 
 class _EmptyModelResponseError(KISSError):
@@ -550,7 +558,7 @@ class KISSAgent(Base):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.pre_step_hook: Callable[..., None] | None = None
-        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | Verdict | None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.llm_response_hook: Callable[[LLMReply], Verdict] | None = None
@@ -1165,8 +1173,20 @@ class KISSAgent(Base):
     def _execute_step(self) -> str | None:
         """Execute a single step in the ReAct loop.
 
+        An agent a tool runs inline (the merge-conflict resolver under
+        ``commit_and_merge``) runs under that tool's call: a Stop
+        accepted on its panel (:mod:`kiss.core.tool_interrupt`) is
+        checked before the model request and once the step's tool
+        results are recorded, so the enclosing call ends as interrupted
+        instead of this agent requesting on, or returning a result, after
+        the Stop reached its running tool.
+
         Returns:
             str | None: The result string if the task is finished, None otherwise.
+
+        Raises:
+            ToolCallInterrupted: When the call this agent runs inside
+                was interrupted.
         """
         start_timestamp = int(time.time())
         logger.info(
@@ -1178,6 +1198,7 @@ class KISSAgent(Base):
             f"${self.max_budget:.2f}",
             self.total_tokens_used,
         )
+        raise_if_interrupted()
 
         if self.pre_step_hook is not None:
             self.pre_step_hook(self.model)
@@ -1380,6 +1401,10 @@ class KISSAgent(Base):
         )
         if limit_error is not None:
             raise limit_error
+        # The step is in the trajectory; the enclosing call, if
+        # interrupted while the tools ran, ends before this agent's
+        # result or next request.
+        raise_if_interrupted()
 
         if finish_result is not None:
             logger.info(
@@ -1443,7 +1468,23 @@ class KISSAgent(Base):
             with self.model.native_tools_exposed(schema, execute):
                 yield
         finally:
-            turn.closed.set()
+            # Under the turn's lock: a handler publishing a call's
+            # result finishes first (see NativeTurn.lock).  The daemon's
+            # forced Stop injects KeyboardInterrupt twice; the bridge's
+            # wait above takes the first, and the second can land in
+            # this wait for the lock.  It is held and re-raised once the
+            # turn is closed, as the bridge's _close holds its own: an
+            # open turn would let that handler publish into the agent's
+            # next run.  The wait is bounded by the publication, which
+            # is in-memory work.
+            forced_stop: KeyboardInterrupt | None = None
+            while not turn.closed.is_set():
+                try:
+                    locked_call(turn.lock, turn.closed.set)
+                except KeyboardInterrupt as e:
+                    forced_stop = e
+            if forced_stop is not None:
+                raise forced_stop
 
     def _guarded_execute_tool(
         self, function_call: dict[str, Any]
@@ -1565,9 +1606,12 @@ class KISSAgent(Base):
         :meth:`~kiss.core.models.codex_mcp_bridge.ToolBridge._wait_for_calls`)
         may still return later, while the agent thread is past the turn
         and perhaps saving: ``turn.closed`` tells it to leave the
-        conversation alone, and what it counts or raises lands on its
-        own, already replaced *turn*, never on the running one (a check
-        of ``closed`` before publishing would race with the replacement).
+        conversation alone (:meth:`_publish_native_call`, which checks
+        it and publishes under ``turn.lock``, the lock the turn is
+        closed under, so the two cannot interleave), and what it counts
+        or raises lands on its own, already replaced *turn*, never on
+        the running one (a check of ``closed`` before publishing would
+        race with the replacement).
         A ``KeyboardInterrupt`` (the printer raises one under a Stop)
         must not escape either: this is the bridge's thread, not the
         task's, and the bridge records only exceptions.
@@ -1600,18 +1644,9 @@ class KISSAgent(Base):
         previous_printer = bind_printer(self.printer)
         try:
             name, response, blocked = self._guarded_execute_tool(function_call)
-            if turn.closed.is_set():
-                return name, response
-            self._mark_routine_turn(function_call, response, blocked is not None)
-            turn.calls += 1
-            self._add_message(
-                "model", render_tool_call(function_call["name"], _call_args(function_call))
+            locked_call(
+                turn.lock, self._publish_native_call, turn, function_call, name, response, blocked
             )
-            self._add_message("user", f"[{name}]: {response}")
-            if blocked is not None and blocked.ends_run:
-                turn.ended = blocked
-                return name, response
-            self._check_limits()
         except Exception as e:
             turn.error = e
             raise
@@ -1621,6 +1656,46 @@ class KISSAgent(Base):
         finally:
             bind_printer(previous_printer)
         return name, response
+
+    def _publish_native_call(
+        self,
+        turn: NativeTurn,
+        function_call: dict[str, Any],
+        name: str,
+        response: str,
+        blocked: Verdict | None,
+    ) -> None:
+        """Record a call :meth:`_execute_tool_on_helper_thread` ran, unless *turn* has closed.
+
+        Called under ``turn.lock`` (see :class:`NativeTurn`): the check
+        of ``closed`` and what it guards — the routine-turn note, the
+        trajectory, the limit check — are one step with respect to the
+        closing of the turn, so a call the turn's end abandoned never
+        writes to the agent once the turn is closed.
+
+        Args:
+            turn: The record of the turn the call belongs to.
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            name: The tool's name, as :meth:`_guarded_execute_tool` returned it.
+            response: The tool's result (a refusal included).
+            blocked: The refusing verdict when the call was not executed.
+
+        Raises:
+            KISSError: What the limit check raised.
+        """
+        if turn.closed.is_set():
+            return
+        self._mark_routine_turn(function_call, response, blocked is not None)
+        turn.calls += 1
+        self._add_message(
+            "model", render_tool_call(function_call["name"], _call_args(function_call))
+        )
+        self._add_message("user", f"[{name}]: {response}")
+        if blocked is not None and blocked.ends_run:
+            turn.ended = blocked
+            return
+        self._check_limits()
 
     def _mark_routine_turn(self, function_call: dict[str, Any], result: str, refused: bool) -> None:
         """Note whether the next model call follows a routine tool call.
@@ -1799,9 +1874,10 @@ class KISSAgent(Base):
         Returns:
             Verdict: The hook's refusing verdict (a
             :func:`~kiss.core.tool_verdict.end_run` one ends the run),
-            the guard's refusal text as a refusing verdict, or the hook's
-            allowing verdict when neither objects (its ``text``, if any,
-            is the note the call's result ends with).
+            the guard's refusal text as a refusing verdict, the guard's
+            own verdict when it returns one (an allowing one with a note
+            the call's result ends with), or the hook's allowing verdict
+            when neither objects (its ``text``, if any, is such a note).
         """
         verdict = ALLOW
         if self.tool_call_hook is not None:
@@ -1811,6 +1887,8 @@ class KISSAgent(Base):
         if self.tool_call_guard is None:
             return verdict
         text = self.tool_call_guard(name, args)
+        if isinstance(text, Verdict):
+            return text
         return verdict if text is None else Verdict(False, text)
 
     def _tool_call_refusal(self, name: str, args: dict[str, Any]) -> Verdict | None:

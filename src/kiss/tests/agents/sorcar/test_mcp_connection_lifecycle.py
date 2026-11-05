@@ -31,6 +31,8 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
@@ -41,6 +43,7 @@ from kiss.agents.sorcar.mcp_servers import (
     _child_errlog,
     _connection_key,
 )
+from kiss.core import tool_interrupt
 from kiss.core.processes import pid_alive
 
 _SERVER_SCRIPT = '''
@@ -205,6 +208,60 @@ def test_pool_is_capped(
     assert len(manager._connections) <= 2
     assert _wait_until_dead(pids[0]), "least recently used child was not reaped"
     assert _alive(pids[2])
+
+
+def _stop_as_the_eviction_pops(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook: inject the task Stop as ``_pop_surplus`` returns the connections it popped."""
+    if event == "return" and frame.f_code is MCPManager._pop_surplus.__code__ and arg:
+        sys.setprofile(None)
+        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def _connect_stopped_at_eviction(
+    manager: MCPManager, config: MCPServerConfig, errors: list[BaseException],
+) -> None:
+    """Thread body: ``connect`` with the Stop armed at the eviction's return; record the outcome."""
+    sys.setprofile(_stop_as_the_eviction_pops)
+    try:
+        manager.connect(config)
+    except BaseException as exc:  # noqa: BLE001 — the thread records any outcome
+        errors.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+def test_stop_during_eviction_still_tears_the_evicted_child_down(
+    server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A Stop landing as the eviction pops a connection must not orphan its child.
+
+    The eviction removed the surplus connections from the pool under
+    the lock and only then, on the task thread, told each one to stop:
+    a Stop delivered in between left the popped connection in no
+    registry, its maintainer parked and its child alive, invisible to
+    ``disconnect_all``.  Now each connection is told to stop before it
+    leaves the pool.
+    """
+    mgr = MCPManager(idle_timeout_s=3600, max_connections=1, health_interval_s=30)
+    try:
+        first = mgr.connect(_config(server_script, tmp_path / "old", "--n=0"))
+        assert first.session is not None, first.error
+        first_pid = _wait_for_pid_file(tmp_path / "old")
+        errors: list[BaseException] = []
+        worker = threading.Thread(
+            target=_connect_stopped_at_eviction,
+            args=(mgr, _config(server_script, tmp_path / "new", "--n=1"), errors),
+        )
+        worker.start()
+        worker.join(30)
+        assert not worker.is_alive(), "connect() did not return"
+        assert len(errors) == 1 and isinstance(errors[0], KeyboardInterrupt), errors
+        assert first.finished.wait(20) and _wait_until_dead(first_pid), (
+            "the evicted connection's child survived the Stop"
+        )
+        assert first.stop.is_set() and first.error
+    finally:
+        mgr.shutdown()
 
 
 def test_least_recently_used_is_evicted_at_the_cap(

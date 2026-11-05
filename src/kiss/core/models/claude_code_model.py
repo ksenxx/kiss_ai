@@ -786,9 +786,12 @@ class ClaudeCodeModel(CLITextModel):
         ``message_start`` and finished messages; at least 1).  The price modifiers the API
         reported per message (``speed``, ``inference_geo``, folded into
         the per-message total by :func:`_merge_usage`) are copied into a
-        ``usage`` that lacks them: the CLI's terminal ``result`` sums only
-        the counters.  ``request_usages`` lists each finished message's
-        own usage, so the per-request long-context tier can be priced.
+        ``usage`` that lacks them: the CLI's terminal ``result`` sums the
+        counters and names only the LAST message's modifiers (its usage
+        reducer copies ``speed`` / ``inference_geo`` from the newest
+        message), which say nothing about the earlier messages.
+        ``request_usages`` lists each finished message's own usage, so
+        the per-request long-context tier and modifiers can be priced.
         A later settings change or turn cannot reprice a response that
         carries these.
 
@@ -851,11 +854,12 @@ class ClaudeCodeModel(CLITextModel):
         model's list price, cache tiers included, so its usage is priced
         through :func:`calculate_cost` under the API model id the stream
         reported (falling back to the name after ``cc/``); the
-        per-request long-context tier is priced per message of a
-        multi-request turn (``request_usages``), and the fast-mode and US-only
-        inference modifiers the usage reports scale the whole turn
-        (:func:`~kiss.core.models.anthropic_model.price_modifier_factor`).
-        A model id the catalog does not
+        per-request long-context tier and the fast-mode and US-only
+        inference modifiers
+        (:func:`~kiss.core.models.anthropic_model.price_modifier_factor`)
+        are priced per message of a multi-request turn
+        (``request_usages``), each message with the modifiers its own
+        usage reports.  A model id the catalog does not
         know (new snapshot) is billed at the CLI's own ``total_cost_usd``
         estimate when the result carries one; otherwise
         :func:`calculate_cost` raises.  So is a turn whose ``modelUsage``
@@ -889,17 +893,40 @@ class ClaudeCodeModel(CLITextModel):
         if (several or not is_known_model(model)) and isinstance(reported, int | float):
             return float(reported)
         single_request = response.get("requests", 1) <= 1
-        cost = calculate_cost(model, *counts, single_request=single_request)
-        if not single_request:
-            # The summed counters bill at short-context rates; add the
-            # long-context premium of each request that crossed the
-            # threshold on its own.
-            for usage in response.get("request_usages") or []:
-                request = self.extract_input_output_token_counts_from_response({"usage": usage})
-                cost += calculate_cost(model, *request) - calculate_cost(
-                    model, *request, single_request=False
-                )
-        return cost * price_modifier_factor(response.get("usage") or {}, model)
+        turn_usage = response.get("usage") or {}
+        request_usages = [
+            usage for usage in response.get("request_usages") or [] if isinstance(usage, dict)
+        ]
+        if single_request or not request_usages:
+            return calculate_cost(
+                model, *counts, single_request=single_request
+            ) * price_modifier_factor(turn_usage, model)
+        # A multi-request turn: each listed message is priced on its own,
+        # with its own long-context tier and its own speed / inference-geo
+        # modifiers (fast mode falls back to standard speed AND standard
+        # pricing when its rate limit is hit, so one turn can mix the
+        # two: https://code.claude.com/docs/en/fast-mode#handle-rate-limits).
+        # A message whose usage lacks a modifier field inherits the
+        # turn's, which the CLI's result copies from the LAST message and
+        # the stream's merge takes from the priced one; the turn's never
+        # outranks a message's own.  Whatever the summed counters hold
+        # beyond the listed messages (a message the stream never closed)
+        # bills at short-context rates with the turn's modifiers.
+        cost = 0.0
+        listed = [0] * len(counts)
+        for usage in request_usages:
+            request = self.extract_input_output_token_counts_from_response({"usage": usage})
+            modifiers = {
+                field: usage.get(field, turn_usage.get(field)) for field in PRICE_MODIFIER_FIELDS
+            }
+            cost += calculate_cost(model, *request) * price_modifier_factor(modifiers, model)
+            listed = [have + more for have, more in zip(listed, request, strict=True)]
+        rest = [max(0, total - have) for total, have in zip(counts, listed, strict=True)]
+        if any(rest):
+            cost += calculate_cost(model, *rest, single_request=False) * price_modifier_factor(
+                turn_usage, model
+            )
+        return cost
 
     def context_tokens_from_response(self, response: Any) -> int | None:
         """Return the size of the turn's largest API request.

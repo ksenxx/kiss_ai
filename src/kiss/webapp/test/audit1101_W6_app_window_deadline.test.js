@@ -26,7 +26,9 @@
 // the clock, so a scheduling pause cannot fail a correct page (round 2,
 // F6).  Both stalled cases failed against the pre-fix page (no action
 // after the abort); the answered cases guard the existing behaviour
-// with the platform's own AbortSignal.
+// under a deadline that never expires, since a pause of 2 s between the
+// request and its answer would otherwise make a correct page take the
+// fallback (WT5 F2).
 
 const assert = require('assert');
 const fs = require('fs');
@@ -240,32 +242,42 @@ async function main() {
         res.writeHead(status, {'Content-Type': 'application/json'});
         res.end(reply);
       });
+      // Each page gets a deadline of its own, asked for but never expired.
+      async function answered(name, bounds) {
+        const control = abortControl();
+        const actions = runPage(daemon.base, name, bounds, control);
+        await firstAction(actions, WATCHDOG_MS);
+        assert.deepStrictEqual(
+          control.deadlines,
+          [2000],
+          'the deadline asked for',
+        );
+        return actions;
+      }
       try {
-        let actions = runPage(daemon.base, '', null);
-        assert.strictEqual(await firstAction(actions, WATCHDOG_MS), 'close');
-        assert.deepStrictEqual(actions, ['close']);
+        assert.deepStrictEqual(await answered('', null), ['close']);
 
         reply = '{"open":false}';
         const bounds = {left: 10, top: 20, width: 300, height: 200};
-        actions = runPage(daemon.base, '', bounds);
-        assert.strictEqual(
-          await firstAction(actions, WATCHDOG_MS),
+        assert.deepStrictEqual(await answered('', bounds), [
           'open:kiss-app-window:popup,left=10,top=20,width=300,height=200',
-        );
+          'close',
+        ]);
 
         reply = '{"open":false}';
-        actions = runPage(daemon.base, 'kiss-app-window', bounds);
-        await firstAction(actions, WATCHDOG_MS);
         // moveTo, resizeTo and replace run in one synchronous step.
-        assert.deepStrictEqual(actions, ['moveTo', 'resizeTo', 'replace:/app']);
+        assert.deepStrictEqual(await answered('kiss-app-window', bounds), [
+          'moveTo',
+          'resizeTo',
+          'replace:/app',
+        ]);
 
         status = 500;
         reply = 'boom';
-        actions = runPage(daemon.base, '', null);
-        assert.strictEqual(
-          await firstAction(actions, WATCHDOG_MS),
+        assert.deepStrictEqual(await answered('', null), [
           'open:kiss-app-window:popup,left=0,top=0,width=800,height=600',
-        );
+          'close',
+        ]);
       } finally {
         await daemon.close();
       }

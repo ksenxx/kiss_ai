@@ -590,6 +590,34 @@ class TestReclaimCleanWorktree:
         assert reclaimed == 1
         assert not wt_dir.exists()
 
+    def test_reverted_intermediate_edit_does_not_block_the_reclaim(self) -> None:
+        """An orphan whose net change merges cleanly is reclaimed on the first pass.
+
+        Its history edits ``README.md`` and reverts that edit; main has
+        since changed the file.  Replaying the commits one by one
+        conflicted on the reverted edit, and because the net change has
+        no content conflict nothing parked the worktree either: every
+        pass retried the same failing merge and the orphan stayed.
+        """
+        wt_dir = _plant_orphan_worktree(
+            self.repo, "kiss/wt-1000-reverted", with_baseline=True, dirty_kind="clean",
+        )
+        (wt_dir / "README.md").write_text("# Temporary agent edit\n")
+        assert GitWorktreeOps.commit_all(wt_dir, "temporary change")
+        (wt_dir / "README.md").write_text("# Test\n")
+        (wt_dir / "feature.txt").write_text("final feature\n")
+        assert GitWorktreeOps.commit_all(wt_dir, "revert the experiment, finish the feature")
+        (self.repo / "README.md").write_text("# Independent main work\n")
+        assert _git("commit", "-am", "main work", cwd=self.repo).returncode == 0
+
+        reclaimed = GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)
+
+        assert reclaimed == 1
+        assert not wt_dir.exists()
+        assert (self.repo / "feature.txt").read_text() == "final feature\n"
+        assert (self.repo / "README.md").read_text() == "# Independent main work\n"
+        assert not (self.repo / "baseline_marker.txt").exists()
+
 
 class TestReclaimLegacySpare:
     """A pool spare of an older release (``branch.<name>.kiss-spare=1``,

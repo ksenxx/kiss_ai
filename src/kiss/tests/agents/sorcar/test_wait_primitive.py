@@ -13,13 +13,25 @@ a registered SSH machine.
 
 from __future__ import annotations
 
+import ctypes
+import inspect
+import os
 import re
+import signal
+import subprocess
+import sys
+import threading
 import time
+from contextlib import suppress
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools, _log_matches, sleep_guard
+from kiss.core import tool_interrupt
+from kiss.core.processes import kill_process_tree, popen_process_group
 
 
 def _job_id(started: str) -> str:
@@ -80,6 +92,257 @@ def test_wait_until_still_ends_at_exit_or_deadline(tmp_path: Path) -> None:
     report = tools.bash_job(slow, action="wait", until="never", timeout_seconds=0.5)
     assert time.monotonic() - before < 5 and "running (pid" in report
     tools.bash_job(slow, action="kill")
+
+
+def _cpu_seconds(ps_time: str) -> float:
+    """Return the seconds of a ``ps`` ``time`` field (``[[dd-]hh:]mm:ss`` or ``mm:ss.hh``)."""
+    days, _, clock = ps_time.rpartition("-")
+    seconds = 0.0
+    for part in clock.split(":"):
+        seconds = seconds * 60 + float(part)
+    return seconds + float(days or 0) * 86400
+
+
+def _processes_naming(text: str) -> dict[int, float]:
+    """Return ``{pid: CPU seconds}`` of the live processes whose command line holds *text*.
+
+    ``ps`` (procps and BSD alike) rather than ``/proc``, which macOS
+    lacks; Windows has no ``ps``, so there ``Win32_Process`` is listed
+    with CPU seconds already computed.  A listing that fails raises
+    instead of reporting no process.
+    """
+    if sys.platform == "win32":
+        command = [
+            "powershell", "-NoProfile", "-Command",
+            # [double]: a process whose times are not readable reports $null;
+            # one line per process: a ``-c`` program's newlines are joined.
+            "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1:F3} {2}' -f "
+            "$_.ProcessId, [double](($_.UserModeTime + $_.KernelModeTime) / 1e7), "
+            "($_.CommandLine -replace '[\\r\\n]+', ' ') }",
+        ]
+    else:
+        command = ["ps", "-A", "-ww", "-o", "pid=,time=,args="]
+    listing = subprocess.run(command, capture_output=True, text=True, check=True)
+    found = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and text in fields[2]:
+            found[int(fields[0])] = _cpu_seconds(fields[1])
+    return found
+
+
+def _kill_naming(log: Path) -> None:
+    """Emergency cleanup: kill every live process naming *log* (``TerminateProcess`` on Windows)."""
+    for pid in _processes_naming(str(log)):
+        with suppress(OSError):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
+@pytest.mark.timeout(120)
+def test_wait_until_with_a_catastrophic_pattern_still_ends_at_the_deadline(
+    tmp_path: Path,
+) -> None:
+    """A backtracking ``until`` (2026-11-04 audit S5 F1) no longer holds the task thread.
+
+    ``(a+)+$`` against 28 ``a`` and a ``!`` keeps ``re`` busy for tens of
+    seconds (every two more ``a`` quadruple it); the wait must still end
+    at its deadline, and at a Stop, with no matcher process left behind.
+    """
+    stop = threading.Event()
+    tools = UsefulTools(stop_event=stop, work_dir=str(tmp_path))
+    job = _job_id(tools.Bash("printf '%s\\n' '" + "a" * 28 + "!'; sleep 30", "job",
+                             background=True))
+    log = tools._jobs[job].log_path
+    deadline = time.monotonic() + 10
+    while "!" not in log.read_text() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    before = time.monotonic()
+    report = tools.bash_job(job, action="wait", until=r"(a+)+$", timeout_seconds=1)
+    assert time.monotonic() - before < 8, "the regex held the wait past its deadline"
+    assert "running (pid" in report
+    assert _processes_naming(str(log)) == {}, "the matcher outlived the wait"
+    threading.Timer(0.5, stop.set).start()
+    before = time.monotonic()
+    tools.bash_job(job, action="wait", until=r"(a+)+$", timeout_seconds=30)
+    assert time.monotonic() - before < 8, "the regex held the wait past the Stop"
+    assert _processes_naming(str(log)) == {}
+    tools.bash_job(job, action="kill")
+
+
+@pytest.mark.timeout(60)
+def test_stop_at_the_matcher_launch_leaves_no_matcher_behind(tmp_path: Path) -> None:
+    """A Stop landing as the matcher comes into existence (2026-11-04 review R1) still ends it.
+
+    The runner's Stop lands at any check point of the waiting thread's
+    bytecode, including the one right after the matcher's ``Popen``
+    returned and before any handle a ``finally`` could kill is bound.
+    The hook delivers ``KeyboardInterrupt`` to that thread exactly as the
+    matcher's process appears (raised in place when the spawn runs on it,
+    injected as the runner does when it runs elsewhere) and keeps the
+    process to check that its owner killed and reaped it.
+    """
+    tools = UsefulTools(work_dir=str(tmp_path))
+    job = _job_id(tools.Bash("sleep 30", "job", background=True))
+    log = tools._jobs[job].log_path
+    waiting = threading.get_ident()
+    spawned: list[subprocess.Popen[Any]] = []
+
+    def hook(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not popen_process_group.__code__:
+            return None
+        if event == "return":
+            spawned.append(arg)
+            if threading.get_ident() == waiting:
+                raise KeyboardInterrupt("Stop at the matcher launch")
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(waiting), ctypes.py_object(KeyboardInterrupt)
+            )
+        return hook
+
+    threading.settrace(hook)
+    sys.settrace(hook)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tools.bash_job(job, action="wait", until="NEVER", timeout_seconds=30)
+    finally:
+        sys.settrace(None)
+        threading.settrace(None)  # type: ignore[arg-type]
+    try:
+        assert spawned, "no matcher was started"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (
+            spawned[0].returncode is None or _processes_naming(str(log))
+        ):
+            time.sleep(0.05)
+        assert spawned[0].returncode is not None, "the matcher was not reaped by its owner"
+        assert _processes_naming(str(log)) == {}, "the matcher outlived the Stop"
+    finally:
+        for process in spawned:
+            if process.poll() is None:
+                kill_process_tree(process)
+            process.wait(timeout=5)
+        tools.bash_job(job, action="kill")
+
+
+@pytest.mark.timeout(60)
+def test_stop_at_the_cleanup_entry_leaves_no_matcher_behind(tmp_path: Path) -> None:
+    """A Stop landing as the wait's cleanup begins (2026-11-04 review R2) still ends the matcher.
+
+    The first statement of the wait's ``finally`` tells the matcher's
+    owner to end it; a forced Stop landing right there skips the whole
+    cleanup, so the owner must end the matcher on its own.  First a real
+    ``bash_job`` tool call, interrupted through the production
+    ``interrupt_tool_call`` once the waiting thread is held at that
+    statement (the watchdog's injection lands there), which the owner
+    must learn of through the event captured on the waiting thread;
+    then, with no tool call and no task stop event, a ``KeyboardInterrupt``
+    raised there, which leaves the owner the deadline alone.  The test
+    sets the skipped notification only in its own emergency cleanup.
+    """
+    tools = UsefulTools(work_dir=str(tmp_path))
+    source, first = inspect.getsourcelines(UsefulTools._wait_for_job)
+    cleanup = first + next(i for i, line in enumerate(source) if line.strip() == "done.set()")
+    token = tool_interrupt.new_tool_call("bash_job")
+    owned: dict[str, Any] = {}
+
+    def hook(frame: FrameType, event: str, arg: Any) -> Any:
+        if frame.f_code is not UsefulTools._wait_for_job.__code__:
+            return None
+        if event == "line" and frame.f_lineno == cleanup:
+            owned.update(done=frame.f_locals["done"], owner=frame.f_locals["matcher"])
+            if tool_interrupt.current_tool_call() is None:
+                raise KeyboardInterrupt("Stop at the cleanup entry")
+            assert tool_interrupt.interrupt_tool_call(token.thread_ident, call_id=token.call_id)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:  # the watchdog's injection lands here
+                time.sleep(0.02)
+            raise AssertionError("the Stop was not injected")
+        return hook
+
+    def stopped_at_cleanup(command: str, stop: type[BaseException], timeout: float) -> None:
+        job = _job_id(tools.Bash(command, "job", background=True))
+        log = tools._jobs[job].log_path
+        owned.clear()
+        sys.settrace(hook)
+        try:
+            with pytest.raises(stop):
+                tools.bash_job(job, action="wait", until="NEVER", timeout_seconds=timeout)
+        finally:
+            sys.settrace(None)
+        try:
+            assert owned and not owned["done"].is_set(), "the Stop did not skip the cleanup"
+            owned["owner"].join(timeout=5)
+            assert not owned["owner"].is_alive(), "the matcher's owner outlived the Stop"
+            assert _nothing_names(log), "the matcher outlived the Stop"
+        finally:
+            owned["done"].set()
+            _kill_naming(log)
+            tools.bash_job(job, action="kill")
+
+    tool_interrupt.register_tool_call(token)
+    try:
+        stopped_at_cleanup("sleep 0.3", tool_interrupt.ToolCallInterrupted, 30)
+    finally:
+        tool_interrupt.unregister_tool_call(token)
+    stopped_at_cleanup("sleep 30", KeyboardInterrupt, 0.5)
+
+
+# A process that starts a matcher for its log and pattern, then lives for the given seconds.
+# It keeps the Popen: on Windows a collected Popen closes the matcher's stdin pipe at once
+# (POSIX keeps a running child's Popen alive in subprocess._active), ending the matcher.
+_OWNER = """
+import re, sys, time
+from pathlib import Path
+from kiss.agents.sorcar.useful_tools import _start_log_matcher
+matcher = _start_log_matcher(Path(sys.argv[1]), re.compile(sys.argv[2]))
+time.sleep(float(sys.argv[3]))
+"""
+
+
+def _nothing_names(log: Path) -> bool:
+    """Return whether no live process names *log* on its command line, waiting up to 3 s."""
+    deadline = time.monotonic() + 3
+    while _processes_naming(str(log)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return _processes_naming(str(log)) == {}
+
+
+def _matcher_cpu(log: Path, owner: int) -> float:
+    """Return the CPU seconds the processes naming *log* other than *owner* have used."""
+    return sum(cpu for pid, cpu in _processes_naming(str(log)).items() if pid != owner)
+
+
+@pytest.mark.timeout(90)
+def test_matcher_dies_with_its_owner(tmp_path: Path) -> None:
+    """The matcher ends once the process that started it is gone (2026-11-04 review R2).
+
+    An owner that exits while the matcher is still starting up (before
+    the old code looked up its parent), then an owner killed while the
+    matcher backtracks in ``(a+)+$`` (where no Python-level check runs
+    for hours): in both cases nothing naming the log may remain.
+    """
+    log = tmp_path / "job.log"
+    log.write_text("no match\n")
+    try:
+        owner = subprocess.run(
+            [sys.executable, "-c", _OWNER, str(log), "NEVER", "0"], timeout=30, check=False
+        )
+        assert owner.returncode == 0
+        assert _nothing_names(log), "the matcher outlived an owner that exited during its start"
+
+        log.write_text("a" * 34 + "!\n")
+        living = subprocess.Popen([sys.executable, "-c", _OWNER, str(log), r"(a+)+$", "60"])
+        try:
+            deadline = time.monotonic() + 20
+            while _matcher_cpu(log, living.pid) < 1 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert _matcher_cpu(log, living.pid) >= 1, "the matcher never backtracked"
+        finally:
+            living.kill()
+            living.wait(timeout=5)
+        assert _nothing_names(log), "the matcher outlived an owner killed while it backtracked"
+    finally:
+        _kill_naming(log)
 
 
 def test_long_foreground_sleep_is_refused(tmp_path: Path) -> None:

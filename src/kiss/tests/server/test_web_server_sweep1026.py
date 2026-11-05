@@ -38,7 +38,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from kiss.core.brand import PRODUCT_NAME
-from kiss.server.web_server import RemoteAccessServer, _cancel_task
+from kiss.server.web_server import RemoteAccessServer, _cancel_task, _save_url_file
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_local_lan_urls import _LiveServerCase
 from kiss.tests.server.test_tls_local_ca import _https_get
 
@@ -104,6 +105,61 @@ class TestUrlFileWritersOrdered(_LiveServerCase):
         self.server._active_url = self.server._local_url
         await asyncio.to_thread(self.server._write_url_file_sync)
         self.assertNotIn("tunnel", self._url_file())
+
+
+class TestUrlFileAtShutdown(_LiveServerCase):
+    """``stop_async`` removes the URL file this server wrote, and only that one.
+
+    The writers are held inside the real ``_save_url_file`` / the real
+    ``_shutdown_children`` (:class:`Pause`); nothing is replaced.
+    """
+
+    def _join_url_writers(self) -> None:
+        with self.server._url_file_lock:
+            pass
+
+    async def test_late_republish_writer_cannot_resurrect_the_file_after_stop(self) -> None:
+        """A republish in flight at shutdown finishes BEFORE the removal, not after."""
+        url_file = self.server._url_file
+        with Pause(_save_url_file.__code__, lambda loc: loc["url_file"] == url_file) as pause:
+            self.server._republish_urls()
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+            stop = asyncio.create_task(self.server.stop_async())
+            # Let the shutdown run up to its final removal: all the way
+            # when the removal ignores the held writer, else until it
+            # waits for the writer (``_tunnel_stopped`` is set just before).
+            deadline = asyncio.get_running_loop().time() + 20
+            while not self.server._tunnel_stopped and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.02)
+            await asyncio.wait({stop}, timeout=1.0)
+            pause.release()
+            await asyncio.wait_for(stop, 30)
+        await asyncio.to_thread(self._join_url_writers)
+        self.assertFalse(url_file.exists(), "the held republish resurrected the URL file")
+        # A writer admitted after the shutdown began publishes nothing.
+        await asyncio.to_thread(self.server._write_url_file_logged)
+        self.assertFalse(url_file.exists(), "a writer queued after shutdown wrote the file")
+
+    async def test_stop_leaves_a_successors_url_file_alone(self) -> None:
+        """A successor that published while the old daemon was still stopping keeps its file."""
+        url_file = self.server._url_file
+        successor = RemoteAccessServer(host=self.host, port=self.port, work_dir=tempfile.mkdtemp())
+        with Pause(
+            RemoteAccessServer._shutdown_children.__code__,
+            lambda loc: loc["self"] is self.server,
+        ) as pause:
+            stop = asyncio.create_task(self.server.stop_async())
+            self.assertTrue(await asyncio.to_thread(pause.paused.wait, 10))
+            self.assertIsNone(self.server._ws_server, "the port is free once the listener closed")
+            await successor.start_async()
+            try:
+                self.assertTrue(url_file.is_file())
+                pause.release()
+                await asyncio.wait_for(stop, 30)
+                self.assertTrue(url_file.is_file(), "the old daemon deleted the successor's file")
+            finally:
+                await successor.stop_async()
+        self.assertFalse(url_file.exists(), "the successor's own stop removes its file")
 
 
 class TestBrandedPages(_LiveServerCase):

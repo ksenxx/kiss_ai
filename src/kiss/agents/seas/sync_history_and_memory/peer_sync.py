@@ -15,14 +15,16 @@ pages whose content hash differs travel (:mod:`memory_delta`).
 
 Every machine is reached over one multiplexed ssh connection
 (:class:`SshPeer`) and the machines are worked on at once, in three
-waves: every peer is connected and asked for its clock and memory
-fingerprints; then everything is pulled from every peer into this
-machine; then this machine -- now holding the union -- is pushed to every
-peer, so one run leaves all machines equal (a star; the barrier between
-pulling and pushing is what makes it converge in one run).  Merges into
-this machine's stores are serialised by a lock: two merges into the same
-memory could otherwise each compare against the same old page and the
-older copy win the race of renames.  Every memory merge, here and on the
+waves: every peer is connected, its KISS home found (a stock install
+uses ``~/.kiss``, a branded one its brand's directory; :func:`home_probe`)
+and asked for its clock and memory fingerprints; then everything is
+pulled from every peer into this machine; then this machine -- now
+holding the union -- is pushed to every peer, so one run leaves all
+machines equal (a star; the barrier between pulling and pushing is what
+makes it converge in one run).  Merges into this machine's stores are
+serialised by a lock: two merges into the same memory could otherwise
+each compare against the same old page and the older copy win the race
+of renames.  Every memory merge, here and on the
 peers, also holds the memory's own mutation lock so no agent's write is
 lost under it (:func:`memory_delta.memory_locks`).
 
@@ -51,6 +53,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import sqlite3
 import threading
 import time
@@ -58,11 +61,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from kiss.agents.seas.sync_history_and_memory import memory_delta
 from kiss.agents.seas.sync_history_and_memory.ssh_peer import PeerError, SshPeer, control_directory
+from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE
 from kiss.agents.sorcar.machines import Machine
-from kiss.core.brand import HOME_DIR
+from kiss.core.brand import DEFAULT_BRAND, HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.scripts import sync_db
 from kiss.scripts.sync_db import PHASE_MANIFEST, PHASE_MERGE, Location, Runner, SyncError
@@ -76,6 +81,8 @@ ABANDONED_AFTER = 24 * 3600.0
 UNFINISHED_RESULT = sync_db.UNFINISHED_RESULT
 HISTORY_DB = "history.db"
 MEMORIES_DIR = "memories"
+HOME_CANDIDATES = tuple(dict.fromkeys((HOME_DIR, DEFAULT_BRAND["home_dir"])))
+"""Names a peer's KISS home may have under ``$HOME``: this install's brand, then the stock one."""
 MEMORY_DELTA_PATH = Path(memory_delta.__file__)
 MERGE_PAGES_PATH = Path(sync_db.__file__).with_name("merge_memory_pages.py")
 
@@ -87,6 +94,7 @@ class PeerReport:
     Attributes:
         name: The machine's registered name.
         ssh: Its login.
+        home: Its KISS home as a remote path (``~/.kiss``), found when it was connected.
         skew: The machine's clock minus this machine's, in seconds.
         pulled: ``sync_db`` statistics of the history pulled from it.
         pushed: ``sync_db`` statistics of the history pushed to it.
@@ -101,6 +109,7 @@ class PeerReport:
 
     name: str
     ssh: str
+    home: str = ""
     skew: float = 0.0
     pulled: dict[str, Any] = field(default_factory=dict)
     pushed: dict[str, Any] = field(default_factory=dict)
@@ -220,7 +229,8 @@ class PeerSync:
 
     Attributes:
         home: This machine's KISS home (``~/.kiss``).
-        remote_home: The peers' KISS home as a remote path (``~/.kiss``).
+        home_candidates: Directory names a peer's KISS home may have under its
+            ``$HOME``, in order of preference (:func:`home_probe`).
         dry_run: Report what would travel without changing any machine.
         reports: One :class:`PeerReport` per machine, in the order given.
         tolerance: Seconds within which two page stamps count as the same
@@ -233,7 +243,7 @@ class PeerSync:
         machines: list[Machine],
         dry_run: bool = False,
         home: Path | None = None,
-        remote_home: str = f"~/{HOME_DIR}",
+        home_candidates: tuple[str, ...] = HOME_CANDIDATES,
     ) -> None:
         """Prepare a run against *machines*; ssh machines only, the rest are reported as skipped.
 
@@ -242,10 +252,13 @@ class PeerSync:
             dry_run: Roll the history merges back and only count the memory entries
                 that would travel.
             home: This machine's KISS home; the configured one when None.
-            remote_home: The peers' KISS home.
+            home_candidates: Directory names a peer's KISS home may have, so a
+                branded install syncs with stock ones and the other way round.
         """
         self.home = home or kiss_home()
-        self.remote_home = remote_home
+        self.home_candidates = home_candidates
+        self.remote_homes: dict[str, str] = {}
+        self.daemon_ports: dict[str, int | None] = {}
         self.dry_run = dry_run
         self.lock = threading.Lock()
         self.control_dir = control_directory()
@@ -260,6 +273,7 @@ class PeerSync:
             report = PeerReport(machine.name, machine.ssh)
             self.reports.append(report)
             if machine.ssh:
+                self.daemon_ports[machine.name] = urlsplit(machine.url).port
                 self.peers.append((SshPeer(machine.name, machine.ssh, self.control_dir), report))
             else:
                 report.error = f"not an ssh machine ({machine.url}); only ssh machines are synced"
@@ -276,7 +290,7 @@ class PeerSync:
 
     def remote_db(self, peer: SshPeer) -> Location:
         """A peer's history database."""
-        return Location(f"{peer.login}:{self.remote_home}/{HISTORY_DB}")
+        return Location(f"{peer.login}:{self.remote_homes[peer.name]}/{HISTORY_DB}")
 
     def run(self) -> list[PeerReport]:
         """Sync every machine: connect to all, pull from all of them, then push the union to all.
@@ -321,8 +335,13 @@ class PeerSync:
             report.seconds = round(report.seconds + time.monotonic() - started, 2)
 
     def connect(self, peer: SshPeer, report: PeerReport) -> None:
-        """Wave one for one peer: connect, then read the peer's clock and memory fingerprints."""
+        """Wave one for one peer: connect, find its KISS home, read its clock and memory prints."""
         peer.open()
+        probe_home = home_probe(self.daemon_ports[peer.name], self.home_candidates)
+        name = peer.run(probe_home).decode("utf-8").strip()
+        if name in ("", ".", "..") or "/" in name:
+            raise PeerError(f"{peer.name} ({peer.ssh}): unexpected KISS home {name!r}")
+        report.home = self.remote_homes[peer.name] = f"~/{name}"
         before = time.time()
         probe = json.loads(peer.run(self.memory_command(peer, "probe")).decode("utf-8"))
         report.skew = round(float(probe["now"]) - (before + time.time()) / 2, 3)
@@ -442,5 +461,43 @@ class PeerSync:
     def memory_command(self, peer: SshPeer, mode: str, *args: str) -> str:
         """The remote command running :mod:`memory_delta` in *mode* on the peer's memory."""
         return peer.python_command(
-            self.script, self.shipped, [mode, f"{self.remote_home}/{MEMORIES_DIR}", *args]
+            self.script,
+            self.shipped,
+            [mode, f"{self.remote_homes[peer.name]}/{MEMORIES_DIR}", *args],
         )
+
+
+def home_probe(port: int | None, candidates: tuple[str, ...]) -> str:
+    """Return a remote command printing the name of the machine's KISS home under ``$HOME``.
+
+    A stock install keeps its state in ``~/.kiss`` and a branded one in
+    the directory its brand names (``home_dir`` of ``brand.json``), and
+    one machine may run several daemons, each with its own home, so the
+    home is not known in advance.  The home is the one of the daemon the
+    machine was registered with: the directory whose endpoint file names
+    the daemon's *port*, looked for in *candidates* first and then in
+    every other ``~/.*``.  When that daemon is not running (a stopped
+    daemon removes its endpoint file) or the port is unknown, the first
+    candidate holding a ``history.db`` wins; failing that, the first
+    that exists (a machine that has never run a task); failing that,
+    the first.  A directory with a history database beats one without
+    because syncs made before the home was probed may have left a stray
+    memory under this install's brand name on a stock machine.
+
+    Args:
+        port: The port of the daemon the machine was registered with, or None.
+        candidates: Directory names under the peer's ``$HOME``, in order of preference.
+    """
+    names = " ".join(shlex.quote(name) for name in candidates)
+    homes = " ".join(f'"$HOME"/{shlex.quote(name)}' for name in candidates)
+    script = (
+        f'for d in {homes} "$HOME"/.*; do case "$d" in */.|*/..) continue;; esac; '
+        f'grep -qs ":{port}/" "$d/{LOCAL_ENDPOINT_FILE}" && {{ basename "$d"; exit 0; }}; done; '
+        if port
+        else ""
+    ) + (
+        f'for d in {names}; do [ -f "$HOME/$d/{HISTORY_DB}" ] && {{ echo "$d"; exit 0; }}; done; '
+        f'for d in {names}; do [ -d "$HOME/$d" ] && {{ echo "$d"; exit 0; }}; done; '
+        f"echo {shlex.quote(candidates[0])}"
+    )
+    return f"sh -c {shlex.quote(script)}"

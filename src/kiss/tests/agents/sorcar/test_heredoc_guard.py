@@ -251,6 +251,15 @@ def test_guard_reads_commands_as_bash_does(tmp_path: Path) -> None:
         "cd && cat > notes.md <<EOF\nx\nEOF": _unresolved("notes.md"),
         "cat > notes.md <<EOF\nno terminator": _refusal(notes),
         "(cat <<EOF) | tee notes.md\nx\nEOF": _refusal(notes),
+        # the substitutions of an array value run
+        "values=($(cat > notes.md <<'EOF'\nx\nEOF\n))": _refusal(notes),
+        'values=(a "$(cat > notes.md <<EOF\nx\nEOF\n)" b)': _refusal(notes),
+        # an unquoted body joins a line ending in a backslash with the next
+        # before the delimiter is looked for: the first heredoc ends at ``\``, ``EOF``
+        "cat <<EOF\n\\\nEOF\ncat > notes.md <<'END'\nx\nEND": _refusal(notes),
+        # a delimiter is not expanded: ``<<$D`` ends at a ``$D`` line, and is unquoted
+        "D=EOF; cat > sub/new <<$D\nbody\n$D\ncat > notes.md <<'END'\nx\nEND": _refusal(notes),
+        "D=EOF; cat <<$D\n$(cat > notes.md <<X\nx\nX\n)\n$D": _refusal(notes),
     }
     for command, verdict in refused.items():
         assert heredoc_guard(command, cwd, os.path.lexists) == verdict, command
@@ -265,6 +274,9 @@ def test_guard_reads_commands_as_bash_does(tmp_path: Path) -> None:
         "echo a ) b; echo cost $ 5 'unterminated",
         'echo "a\\b `date` unterminated',
         "echo $((1 + 2)) \\",
+        # joined, ``x\`` and ``EOF`` are no delimiter: the rest is body
+        "cat <<EOF\nx\\\nEOF\ncat > notes.md <<'END'\nx\nEND",
+        "D=EOF; cat <<$D\nx\nEOF\ncat > notes.md <<'END'\nx\nEND",
     ):
         assert heredoc_guard(command, cwd, os.path.lexists) is None, command
     # The coding SEA's ledger gate counts every heredoc write, program output too.

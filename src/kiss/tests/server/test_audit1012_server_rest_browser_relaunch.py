@@ -28,6 +28,7 @@ roughly one close in ten here), so each test repeats its round.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -100,3 +101,49 @@ def test_reopening_right_after_the_last_tab_closed_opens_a_tab_that_stays(
         # show is left behind keeping it alive.
         _wait(lambda: service._playwright is None, f"round {round_no}: browser torn down", 30)
         assert not service._pages
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_a_context_close_queued_behind_a_reopen_leaves_the_new_browser_alone(
+    daemon: Any, page_server: str
+) -> None:
+    """A context-close teardown that runs after a reopen's launch must find its context gone.
+
+    The browser exits on its own while a lifecycle step holds the lock
+    (the close of a last tab, which makes a headed browser exit): its
+    page-close event, the reopen the user clicks right then, and its
+    context-close event queue behind the lock in that order.  The page
+    close tears the old browser down and the reopen launches a new one;
+    the context-close teardown, scheduled while its context was still
+    current, used to tear that new browser down (V9).
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
+    tab_id = _wait(lambda: _events(printer, "openBrowserTab"), "first tab", 90)[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Tall"), "loaded")
+    printer.emitted.clear()
+
+    async def exit_behind_the_lock() -> None:
+        context, page = service._context, service._pages[tab_id].page
+        assert context is not None
+        page.on("close", lambda _page: service.open(page_server, "c2"))
+        async with service._launch_lock:
+            await context.close()
+            await asyncio.sleep(0.5)  # the three lifecycle steps reach the lock
+
+    assert service._loop is not None
+    asyncio.run_coroutine_threadsafe(exit_behind_the_lock(), service._loop).result(30)
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "old tab withdrawn")
+    answered = _wait(
+        lambda: _events(printer, "openBrowserTab") or _events(printer, "browserError", connId="c2"),
+        "reopen answered",
+        90,
+    )
+    assert answered[-1]["type"] == "openBrowserTab", answered[-1]
+    new_tab = answered[-1]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=new_tab, title="Tall"), "reloaded")
+    time.sleep(2.0)
+    assert not _events(printer, "closeBrowserTab", tab_id=new_tab)
+    assert not _events(printer, "browserError")
+    assert set(service._pages) == {new_tab} and service._context is not None

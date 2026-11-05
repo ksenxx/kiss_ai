@@ -33,6 +33,7 @@ from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models import model_info
 from kiss.core.models.model_info import model as model_factory
+from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, tool_call_body
 from kiss.tests.conftest import executor_of
 
 
@@ -372,3 +373,46 @@ class TestPinnedModelDaemon:
         monkeypatch.setenv(PIN_TASK_MODEL_ENV, "0")
         assert "model-b" in set_model("model-b")
         assert agent.model_name == "model-b"
+
+
+class TestSwitchSurvivesContinuation:
+    """The next session's executor keeps the routing a switch computed."""
+
+    def test_custom_endpoint_switch_routes_the_continuation_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two sessions, two endpoints: after a switch to a ``MY_MODELS.json`` model the
+        continuation's executor, built from the agent's ``model_config``, calls the
+        custom endpoint, not the launch endpoint with the new model's name
+        (audit 2026-11-04, S2 F1).  The launch config is not carried as the
+        custom model's own, and the executor's per-session defaults are not
+        frozen into the agent's config."""
+        monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        switched = "custom-endpoint-model"
+        continue_body = tool_call_body("finish", {
+            "success": False, "is_continue": True, "summary_in_html": "<p>Continue.</p>",
+        }, 500)
+        done_body = tool_call_body("finish", {
+            "success": True, "is_continue": False, "summary_in_html": "<p>Done.</p>",
+        }, 500)
+        switch_body = tool_call_body("set_model", {"model_name": switched}, 500)
+        with serve([switch_body, done_body]) as (launch, launch_requests):
+            with serve([continue_body, done_body]) as (custom, custom_requests):
+                (tmp_path / "MY_MODELS.json").write_text(json.dumps({switched: {
+                    "endpoint": custom, "api_key": "custom-key", "context_length": 262144,
+                    "input_price_per_1M": 0.1, "output_price_per_1M": 0.4,
+                }}))
+                agent = SorcarAgent("test-switch-continuation")
+                agent.run(
+                    model_name=MODEL,
+                    model_config={"base_url": launch, "api_key": "launch-key"},
+                    prompt_template="Call set_model, continue once, then finish.",
+                    max_sub_sessions=2, max_budget=1, max_steps=10,
+                    tool_profile="control", web_tools=False, use_memory=False,
+                    work_dir=str(tmp_path), verbose=False,
+                )
+        assert [body["model"] for body in launch_requests] == [MODEL]
+        assert [body["model"] for body in custom_requests] == [switched, switched]
+        assert agent.model_name == switched
+        assert agent.model_config == {"base_url": custom, "api_key": "custom-key"}

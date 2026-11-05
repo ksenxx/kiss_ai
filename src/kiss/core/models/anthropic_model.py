@@ -7,6 +7,7 @@
 
 import base64
 import hashlib
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -524,6 +525,53 @@ def _content_as_block_list(content: Any) -> list[dict[str, Any]]:
     return list(content)
 
 
+def _add_beta(kwargs: dict[str, Any], token: str) -> None:
+    """Add *token* to the request's ``anthropic-beta`` header unless it is already there.
+
+    Bedrock's SDK client moves the header into the body's ``anthropic_beta``.
+
+    Args:
+        kwargs: Keyword arguments for the Anthropic API call, updated in place.
+        token: The beta feature name.
+    """
+    existing_headers = kwargs.get("extra_headers") or {}
+    beta_header = existing_headers.get("anthropic-beta", "")
+    if token not in beta_header:
+        merged_beta = f"{beta_header},{token}" if beta_header else token
+        kwargs["extra_headers"] = {**existing_headers, "anthropic-beta": merged_beta}
+
+
+def _check_streamed_tool_inputs(
+    raw_tool_inputs: dict[int, str], message: Any, model_name: str
+) -> None:
+    """Raise when a completed ``tool_use`` block streamed invalid JSON.
+
+    Fine-grained tool streaming sends tool input unvalidated, and the
+    SDK's partial parser silently drops a malformed trailing value, so
+    the raw text is checked strictly.  The block an output cap cut off
+    is skipped: the caller drops it.
+
+    Args:
+        raw_tool_inputs: Concatenated ``input_json_delta`` text per block index.
+        message: The final streamed message.
+        model_name: The model, named in the error.
+
+    Raises:
+        ValueError: A completed tool input is not valid JSON (retryable).
+    """
+    cut_index = len(message.content) - 1 if message.stop_reason == "max_tokens" else -1
+    for index, raw in raw_tool_inputs.items():
+        if index == cut_index or not raw.strip():
+            continue
+        try:
+            json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Anthropic model {model_name} streamed malformed JSON for a tool "
+                f"call's arguments: {exc}"
+            ) from exc
+
+
 def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dict[str, Any]]:
     """Shape the ``system`` request parameter from the merged instruction.
 
@@ -643,6 +691,7 @@ def _with_conversation_cache_breakpoint(kwargs: dict[str, Any]) -> list[dict[str
             blocks[index] = {**blocks[index], "cache_control": {"type": "ephemeral"}}
             return [*messages[:-1], {**last, "content": blocks}]
     return messages
+
 
 # Price modifiers the Anthropic API reports in the response ``usage``, as
 # factors on the catalog's standard rates (they apply to every token
@@ -1123,15 +1172,7 @@ class AnthropicModel(Model):
                     }
 
         if "thinking" in kwargs:
-            existing_headers = kwargs.get("extra_headers") or {}
-            beta_header = existing_headers.get("anthropic-beta", "")
-            beta_token = "interleaved-thinking-2025-05-14"
-            if beta_token not in beta_header:
-                merged_beta = f"{beta_header},{beta_token}" if beta_header else beta_token
-                kwargs["extra_headers"] = {
-                    **existing_headers,
-                    "anthropic-beta": merged_beta,
-                }
+            _add_beta(kwargs, "interleaved-thinking-2025-05-14")
 
         normalized_messages = checked_nonempty(
             self._normalize_conversation_for_api(self.conversation)
@@ -1147,6 +1188,14 @@ class AnthropicModel(Model):
             kwargs["system"] = _system_param(system_instruction, enable_cache)
         if tools:
             kwargs["tools"] = tools
+            # Without fine-grained tool streaming the API buffers each tool
+            # parameter until the model has finished writing it, so a large
+            # argument (a long ``finish`` summary, a ``Write`` of a big
+            # file) streams no event for minutes and trips the
+            # ``stream_stall_timeout`` watchdog on every retry.  The header,
+            # not the per-tool ``eager_input_streaming`` field, because
+            # Bedrock's Claude Sonnet 4.5 rejects the field.
+            _add_beta(kwargs, "fine-grained-tool-streaming-2025-05-14")
             if "tool_choice" not in kwargs and "thinking" not in kwargs:
                 kwargs["tool_choice"] = {"type": "any"}
 
@@ -1234,11 +1283,22 @@ class AnthropicModel(Model):
                 self.client.messages.stream(**kwargs) as stream,
                 self._watched_events(stream, "anthropic-stream-abort-watchdog") as events,
             ):
+                saw_message_stop = False
+                raw_tool_inputs: dict[int, str] = {}
                 for event in events:
                     # The SDK accumulates message_start / message_delta
                     # usage here; kept for take_partial_usage_response
                     # if the stream fails before message_stop.
                     self._rejected_response = stream.current_message_snapshot
+                    if event.type == "message_stop":
+                        saw_message_stop = True
+                    elif (
+                        event.type == "content_block_delta"
+                        and event.delta.type == "input_json_delta"
+                    ):
+                        raw_tool_inputs[event.index] = (
+                            raw_tool_inputs.get(event.index, "") + event.delta.partial_json
+                        )
                     if self.token_callback is None:
                         continue
                     # A thinking_delta only ever arrives inside a thinking
@@ -1256,8 +1316,24 @@ class AnthropicModel(Model):
                             self._invoke_token_callback(getattr(delta, "text", ""))
                     elif event.type == "content_block_stop":
                         self._close_thinking_if_open()
+                if not saw_message_stop:
+                    # The body ended (EOF) before the message's terminal
+                    # event: a gateway can close the stream cleanly before
+                    # the model is done, and the SDK's snapshot then holds
+                    # a partial parse (a tool input missing its open
+                    # string, a cut number) with no stop_reason to tell.
+                    # The same plain ``KISSError`` the OpenAI transports
+                    # raise for a stream without its terminal event; the
+                    # usage seen so far stays in ``_rejected_response``
+                    # for ``take_partial_usage_response``.
+                    raise KISSError(
+                        "Anthropic stream ended without a message_stop event, so its "
+                        "text and any tool-call arguments may be incomplete."
+                    )
+                final = stream.get_final_message()
+                _check_streamed_tool_inputs(raw_tool_inputs, final, self.model_name)
                 self._rejected_response = None
-                return stream.get_final_message()
+                return final
         except (httpx2.TimeoutException, APITimeoutError, TimeoutError) as exc:
             # The byte-level clock (httpx2 / the SDK, which is the only
             # clock BEFORE the headers arrive) or the event-level one

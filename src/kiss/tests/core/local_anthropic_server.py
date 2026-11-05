@@ -81,7 +81,7 @@ def _stream_body(turn: dict[str, Any]) -> bytes:
                     "index": 0,
                     "delta": {
                         "type": "input_json_delta",
-                        "partial_json": json.dumps(turn["arguments"]),
+                        "partial_json": turn.get("raw_json") or json.dumps(turn["arguments"]),
                     },
                 },
             ),

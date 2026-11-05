@@ -291,28 +291,33 @@ def test_tools_report_what_the_homeserver_answered(homeserver: _Homeserver) -> N
         backend.disconnect()
 
 
-class _StopAfterScheduling:
-    """Tracer raising ``KeyboardInterrupt`` as ``loop.call_soon_threadsafe`` returns.
+class _AfterScheduling:
+    """Tracer acting as ``loop.call_soon_threadsafe`` returns.
 
     That is the instant ``_run`` has handed the coroutine to the loop, the Stop
     window the review found.  With *wait_for* set the tracer first waits for
-    that event, so the Stop lands while the coroutine already runs.
+    that event, so the coroutine already runs when ``_run`` goes on; with
+    *stop* it then raises ``KeyboardInterrupt``, the injected Stop.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, wait_for: threading.Event | None) -> None:
+    def __init__(
+        self, loop: asyncio.AbstractEventLoop, wait_for: threading.Event | None, stop: bool
+    ) -> None:
         self.code = type(loop).call_soon_threadsafe.__code__
         self.wait_for = wait_for
+        self.stop = stop
         self.fired = False
 
     def __call__(self, frame: Any, event: str, arg: Any) -> Any:
-        """Trace only ``call_soon_threadsafe`` frames; raise once, on the first return."""
+        """Trace only ``call_soon_threadsafe`` frames; act once, on the first return."""
         if frame.f_code is not self.code:
             return None
         if event == "return" and not self.fired:
             self.fired = True
             if self.wait_for is not None:
                 assert self.wait_for.wait(5)
-            raise KeyboardInterrupt("injected stop")
+            if self.stop:
+                raise KeyboardInterrupt("injected stop")
         return self
 
 
@@ -334,7 +339,7 @@ def test_stop_while_scheduling_closes_the_coroutine_unstarted() -> None:
     coro = sleeper.sleep()
     try:
         previous_trace = sys.gettrace()
-        sys.settrace(_StopAfterScheduling(loop, None))
+        sys.settrace(_AfterScheduling(loop, None, stop=True))
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(coro, timeout=60)
@@ -353,10 +358,12 @@ class _Stubborn:
     """A coroutine that swallows its cancellation and finishes normally anyway."""
 
     def __init__(self) -> None:
+        self.started = threading.Event()
         self.cancelled = threading.Event()
 
     async def run(self) -> str:
         """Sleep for an hour; on cancellation set :attr:`cancelled` and return."""
+        self.started.set()
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -375,7 +382,9 @@ def test_coroutine_finishing_after_its_caller_gave_up_breaks_nothing() -> None:
     """A coroutine that outlives a timed-out ``_run`` and finishes anyway is dropped quietly.
 
     Its result has nowhere to go (the caller's future is cancelled); copying it
-    there would raise inside the loop's callback.
+    there would raise inside the loop's callback.  The timeout only starts
+    once the coroutine runs: a loop busy past 0.3 s would otherwise see the
+    future cancelled first and close the coroutine unstarted.
     """
     backend = _started_backend()
     loop = backend._loop
@@ -384,8 +393,13 @@ def test_coroutine_finishing_after_its_caller_gave_up_breaks_nothing() -> None:
     loop.set_exception_handler(functools.partial(_record_loop_error, errors))
     stubborn = _Stubborn()
     try:
-        with pytest.raises(TimeoutError):
-            backend._run(stubborn.run(), timeout=0.3)
+        previous_trace = sys.gettrace()
+        sys.settrace(_AfterScheduling(loop, stubborn.started, stop=False))
+        try:
+            with pytest.raises(TimeoutError):
+                backend._run(stubborn.run(), timeout=0.3)
+        finally:
+            sys.settrace(previous_trace)
         assert stubborn.cancelled.wait(5)
         assert backend._run(asyncio.sleep(0, result="still usable")) == "still usable"
         assert errors == []
@@ -401,7 +415,7 @@ def test_stop_after_the_coroutine_started_cancels_it() -> None:
     sleeper = _Sleeper()
     try:
         previous_trace = sys.gettrace()
-        sys.settrace(_StopAfterScheduling(loop, sleeper.started))
+        sys.settrace(_AfterScheduling(loop, sleeper.started, stop=True))
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(sleeper.sleep(), timeout=60)

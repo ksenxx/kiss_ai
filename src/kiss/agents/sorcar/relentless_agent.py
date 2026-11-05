@@ -839,7 +839,7 @@ class RelentlessAgent(Base):
         # Hooks installed on every per-session executor (see
         # :class:`~kiss.core.kiss_agent.KISSAgent`).
         self.pre_step_hook: Callable[..., None] | None = None
-        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | Verdict | None] | None = None
         self.tool_result_hook: Callable[[str, dict[str, Any], str, bool], None] | None = None
         self.context_reset_hook: Callable[[], None] | None = None
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None

@@ -184,7 +184,7 @@ def test_gemini_success_leaves_no_partial_usage(
     monkeypatch: pytest.MonkeyPatch, gemini_endpoint: tuple[str, GeminiScript]
 ) -> None:
     base_url, script = gemini_endpoint
-    script.play(_GEMINI_CHUNKS, after="close")
+    script.play([*_GEMINI_CHUNKS, chunk([], finish_reason="STOP")], after="close")
     model = _gemini_model(monkeypatch, base_url)
     text, response = model.generate()
     assert text == "hi"

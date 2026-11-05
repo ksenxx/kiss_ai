@@ -227,7 +227,9 @@ def _replace(target: Path, operation: Callable[..., Any], *args: Any) -> None:
     only deleted once the operation succeeded; if it fails, whatever
     partial *target* it left is removed and the old entry is put back,
     so a confirmed overwrite never loses the previous content when the
-    replacement itself cannot be produced.
+    replacement itself cannot be produced.  The operation must leave
+    its source intact when it fails (see :func:`_move_over`): a partial
+    *target* is disposable only while the source still holds the data.
     """
     backup = target.with_name(f".{target.name}.replaced-{uuid.uuid4().hex}")
     os.rename(target, backup)
@@ -302,8 +304,10 @@ def _paste(path: str, dest_dir: str, move: bool, overwrite: bool) -> dict[str, A
             "error": f"A file or folder {src.name} already exists",
             "exists": True,
         }
+    elif move:
+        _move_over(src, target)
     else:
-        _replace(target, _transfer, move, src)
+        _replace(target, _transfer, False, src)
     return {"ok": True, "path": str(target)}
 
 
@@ -315,6 +319,31 @@ def _transfer(move: bool, src: Path, target: Path) -> None:
         shutil.copytree(src, target, symlinks=True)
     else:
         shutil.copy2(src, target, follow_symlinks=False)
+
+
+def _move_over(src: Path, target: Path) -> None:
+    """Move *src* over the existing *target*, never losing the source's data.
+
+    Not :func:`_replace` around ``shutil.move``: when it cannot rename,
+    ``shutil.move`` copies the source and then deletes it, so a failed
+    deletion (a source whose folder entry cannot be removed, a partly
+    deleted tree) leaves the only copy of the data in *target*, which
+    the rollback would delete.  The source is instead renamed or, when
+    that is impossible, copied over the old entry (rolled back on
+    failure, the source untouched) and deleted only once *target* is
+    complete: a failed deletion then leaves the data at *target*.
+    """
+    _replace(target, _rename_or_copy, src)
+    if os.path.lexists(src):
+        _remove(src)
+
+
+def _rename_or_copy(src: Path, target: Path) -> None:
+    """Rename *src* to the not-yet-existing *target*, or copy it when no rename is possible."""
+    try:
+        os.rename(src, target)
+    except OSError:
+        _transfer(False, src, target)
 
 
 #: Stderr bytes :func:`find_in_folder` and :func:`compare_files` keep

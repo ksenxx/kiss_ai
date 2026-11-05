@@ -204,7 +204,7 @@ def gemini_request_body(
         The JSON body the local ``generateContent`` endpoint received.
     """
     base_url, script = endpoint
-    script.play([chunk([text_part("ok")])])
+    script.play([chunk([text_part("ok")], finish_reason="STOP")])
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     model = GeminiModel(_GEMINI_MODEL, api_key="test-key", model_config=config)
     model.initialize("Say ok.")

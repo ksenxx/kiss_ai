@@ -521,9 +521,14 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         # One question per clashing entry (a multi-entry paste asks once
-        # per clash): the toast id carries the destination folder (a
-        # native path, as the daemon lists it) and the entry's name.
-        overwrite_id = f"fs-overwrite:{harness.work_dir / 'dir'}|main-only.txt"
+        # per clash): the toast id carries the machine, the destination
+        # folder (a native path, as the daemon lists it) and the entry's
+        # name as a JSON tuple, written as JSON.stringify writes it.
+        overwrite_id = "fs-overwrite:" + json.dumps(
+            ["", str(harness.work_dir / "dir"), "main-only.txt"],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
         message = _answer_confirm(page, overwrite_id, accept=False)
         assert "already exists" in message
         page.wait_for_timeout(300)

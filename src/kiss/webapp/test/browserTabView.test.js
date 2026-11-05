@@ -11,8 +11,9 @@
 // first frame replacing the placeholder, viewport reports on show /
 // hide / resubscribe, and dispose: a tab hidden again before the
 // layout tick reports nothing, and a hide already retracted the
-// viewport so a later dispose does not repeat it.  jsdom lays nothing
-// out, so the screen's size is stubbed.
+// viewport so a later dispose does not repeat it, and touch: a tap is
+// a click, a gesture a second finger joined or a cancelled touch is
+// not.  jsdom lays nothing out, so the screen's size is stubbed.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -44,6 +45,14 @@ function makeView() {
 
 function keydown(win, el, key) {
   el.dispatchEvent(new win.KeyboardEvent('keydown', {key, bubbles: true}));
+}
+
+/** A touch event as the handlers read it (jsdom has no TouchEvent). */
+function touch(win, el, type, touches, changed) {
+  const e = new win.Event(type, {bubbles: true, cancelable: true});
+  e.touches = touches;
+  e.changedTouches = changed || touches;
+  el.dispatchEvent(e);
 }
 
 async function testAddressBarAndState() {
@@ -178,11 +187,38 @@ async function testHideThenDispose() {
   assert.strictEqual(sent.length, 2, 'a disposed view never reports');
 }
 
+async function testTwoFingerTouchIsNoClick() {
+  const {win, view, sent} = makeView();
+  const screen = view.el.querySelector('.browser-screen');
+  const one = {clientX: 50, clientY: 60};
+  const two = {clientX: 150, clientY: 60};
+  // A second finger joins a tap in progress (a pinch), both move, both lift.
+  touch(win, screen, 'touchstart', [one]);
+  touch(win, screen, 'touchstart', [one, two]);
+  touch(win, screen, 'touchmove', [{clientX: 40, clientY: 60}, two]);
+  touch(win, screen, 'touchend', [one], [two]);
+  touch(win, screen, 'touchend', [], [one]);
+  assert.deepStrictEqual(sent, [], 'a two-finger gesture is not a click');
+  // A cancelled touch is forgotten.
+  touch(win, screen, 'touchstart', [one]);
+  touch(win, screen, 'touchcancel', [], [one]);
+  touch(win, screen, 'touchend', [], [one]);
+  assert.deepStrictEqual(sent, [], 'a cancelled touch is not a click');
+  // A one-finger tap is a click.
+  touch(win, screen, 'touchstart', [one]);
+  touch(win, screen, 'touchend', [], [one]);
+  assert.deepStrictEqual(
+    sent.map(m => m.event.action),
+    ['mousePressed', 'mouseReleased'],
+  );
+}
+
 (async () => {
   await testAddressBarAndState();
   await testViewportAndDispose();
   await testShowHideBeforeTick();
   await testHideThenDispose();
+  await testTwoFingerTouchIsNoClick();
   console.log('browserTabView.test.js passed');
 })().catch(err => {
   console.error(err);

@@ -26,28 +26,37 @@ tool call is appended to a JSONL trajectory file for later analysis.
 
 The finish gate (config ``finish_gate``) is where the harness pushes back on a
 ``finish(success=True)`` that is not backed by evidence: the agent's own
-verifier (:data:`VERIFIER_PATH`) must exist and pass, so must the independent
-check a ``blind_verifier`` model wrote from the statement alone
-(:data:`BLIND_VERIFIER_PATH`), every quote of the summary must be text a tool
-returned during the run (:mod:`kiss.agents.seas.coding.quoted_evidence`), the
-summary must not hedge or leave a reading open (the agent's evidence gate
-refuses it), the findings of the previous review must be answered by a change
-or quoted evidence, and a configured ``reviewer`` model reads the work (then
-the diff) against the statement.  The agent is also held to an interpretation
-ledger (:data:`LEDGER_PATH`) before its first edit, gets checkpoint/rollback
-tools, background jobs, and a machine-written inventory at every context
-restart.  Each answers a way an unattended run goes wrong: a plausible
-result claimed without a check, a reading of the statement settled by
-assumption, a reviewer argued down instead of answered, an edit made after
-the last check, a context restart that forgets what was already tried.
+verifier (:data:`VERIFIER_PATH`) must exist and pass (a run of it by the agent
+that passed with nothing changed since is reused), so must the independent
+check a ``blind_verifier`` model wrote from the statement alone when one is
+configured (:data:`BLIND_VERIFIER_PATH`), and a configured ``reviewer`` model
+reads the work once against the statement, the summary and the commands named
+as evidence; the findings of that review must be answered by a change or
+quoted evidence.  A refused finish gets one more round; after it only a
+failing verifier refuses again, and the work is delivered with the open
+findings as caveats.  Before its first edit the agent is held to an
+interpretation ledger (:data:`LEDGER_PATH`), and a ``reading_check`` model of
+another family reads the statement and the ledger once and names the
+sentences it would read differently, which the agent must settle in the
+ledger first.  The agent also gets checkpoint/rollback tools, background jobs,
+and a machine-written inventory at every context restart.  Each answers a
+way an unattended run goes wrong: a plausible result claimed without a check,
+a reading of the statement settled by assumption and shared by every check
+the same model writes, a reviewer argued down instead of answered, a context
+restart that forgets what was already tried.  What the gate no longer does,
+after the measurement of 2026-11-04
+(``reports/terminal-bench-4-cost-deep-analysis-2026-11-04.html``):
+refuse on the wording of the summary, on the ``evidence`` field, on a review
+that came back blank, or on review findings past the first refused round,
+and review the same work again after an approval; those refusals cost rounds
+of work at full context and did not change what the hidden tests found.
 
 The gate trusts nothing the agent can reach from its shell: the independent
 check's script and the verified checkpoint's copies of the scripts it passed
 live on the host (the container copy of the check is rewritten before each
 run), a script runs as the argument of ``bash -c`` rather than from a file in
-the container, a checkpoint archive is restored only when its SHA-256 is the
-one recorded when it was saved, and the quotes of the summary are checked
-against the trajectory the harness itself wrote.
+the container, and a checkpoint archive is restored only when its SHA-256 is
+the one recorded when it was saved.
 """
 
 from __future__ import annotations
@@ -69,25 +78,27 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea, refuse
+from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea, allow_with_note, refuse
 from kiss.agents.seas.coding import coding_test_context as test_context
 from kiss.agents.sorcar.checkpoints import CHECKPOINT_NAME
 from kiss.agents.sorcar.coding_gate import (
-    OPEN_READING_THRESHOLD,
     REVIEW_VERDICT_LINE,
+    STOP_POLL_SECONDS,
     answered_findings,
+    call_stop_event,
+    default_effort,
     evidence_commands,
     gate_refusal,
-    leaves_a_case_open,
     numbered_items,
     result_exit_codes,
     review_findings,
     tool_result_texts,
+    verifier_decides,
 )
 from kiss.agents.sorcar.container_jobs import KILL_ALL_SCRIPT
 from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, kill_tagged_tree_script
 from kiss.agents.sorcar.edit_guards import heredoc_targets
-from kiss.agents.sorcar.evidence_gate import EvidenceGate
+from kiss.agents.sorcar.evidence_gate import writes_files
 from kiss.agents.sorcar.exec_bridge import BRIDGE_PREFIX, bridge_alive, bridge_exec
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
@@ -163,7 +174,8 @@ literal sentence beats your domain prior and beats a design note or \
 docstring that the reported symptom contradicts; when a tolerance is \
 undefined, take the strict one; when the statement describes an existing \
 structure (file names, function names, call order, output shape), keep its \
-shape. Update the ledger when you learn more; it is read by the reviewer.
+shape.{reading_note} Update the ledger when you learn more; it is read by the \
+reviewer.
 2. Look before you change. Inspect the working directory (hidden files too), \
 the files the task mentions, and the tools and versions available. In a code \
 base, find the relevant code with grep, read it and its callers, and follow \
@@ -179,9 +191,7 @@ in the task's own documentation, a library that computes the same thing) over \
 your own reimplementation of the answer. When a reference, golden data or a \
 test set exists, hold part of it out of what you tune on and check against \
 the held-out part. Keep the verifier current as your understanding improves; \
-never weaken it to make it pass. finish also runs an independent check \
-written from the statement alone by another agent; when the two disagree, \
-resolve the disagreement with evidence, not by a vote.
+never weaken it to make it pass.{blind_note}
 4. For a task that says fix, debug or repair: reproduce the symptom, locate \
 the cause, and apply the smallest change that makes the symptom disappear and \
 the existing tests pass. Do not refactor, rename, reorganise or "clean up" \
@@ -210,17 +220,17 @@ started; wait for or kill every background job.
 8. Be honest at the end. Call finish with success=True only when every \
 requirement is met and verified by a command you ran; otherwise call it with \
 success=False and a precise account of what is done and what remains. A \
-plausible result you could not check is not a success, and a summary that \
-leaves a reading open ("if the task instead means", "a judgement call") is \
-refused: resolve it with evidence first. Name your evidence in finish's \
+plausible result you could not check is not a success, and a reading the \
+summary leaves open ("if the task instead means", "a judgement call") is a \
+requirement unmet: resolve it with evidence first. Name your evidence in finish's \
 `evidence` argument: a JSON list of the commands you ran (exactly as you ran \
-them) whose exit code 0 backs the claim; a command that never ran or failed \
-is refused. finish runs your verifier, the independent check and a read-only \
-review at once and reports every failure together; you get {rounds} refused \
-rounds, after which the work is delivered with the open findings as caveats, \
-so fix everything a refusal lists before calling finish again. Each finding \
-of the review must be answered by a change or by evidence from a command, \
-not by argument.
+them) whose exit code 0 backs the claim; the reviewer reads it. finish runs \
+your verifier{blind_mention} and one read-only review at once and reports \
+every failure together. A refused finish gets one more round; after it only \
+a failing verifier refuses again (up to {rounds} rounds), and the work is \
+delivered with the open findings as caveats, so fix everything a refusal \
+lists before calling finish again. Each finding of the review must be \
+answered by a change or by evidence from a command, not by argument.
 
 # Time and effort
 The task is sized for hours of expert work and you have the whole budget \
@@ -258,13 +268,78 @@ LEDGER_VERDICT = (
     "or ordering with the value you choose, and per requirement what 'done' means. Then "
     "retry the edit."
 )
+#: Sentence of the prompt's ledger step when a ``reading_check`` model is set.
+READING_NOTE = (
+    " When you write the ledger, an independent reader of another model family names the "
+    "sentences of the statement it would read differently (the note ends the Write's "
+    "result); your first edit is refused until the ledger settles each of them."
+)
+#: Sentences of the prompt when a ``blind_verifier`` model is set: the
+#: verifier step's note and the finish step's mention of the check.
+BLIND_NOTE = (
+    " finish also runs an independent check written from the statement alone by "
+    "another agent; when the two disagree, resolve the disagreement with evidence, not "
+    "by a vote."
+)
+BLIND_MENTION = ", the independent check"
+#: The independent reading of the statement (B1 of the 2026-11-04 analysis):
+#: a model of another family than the engineer's reads the statement and the
+#: ledger once, before the first edit, and names the sentences it would read
+#: differently.  Five attempts of one model agree with each other, and the
+#: ledger, the verifier, the independent check and a same-model reviewer all
+#: start from that one reading; this is the only stage that does not.
+READING_CHECK_PROMPT = """\
+An autonomous engineer is about to solve the task below and has written the \
+interpretation ledger below: the readings they chose for the statement's ambiguous \
+sentences, the inputs they will use, the tolerances and formats they settled, and \
+what "done" means to them. You have not seen the task before and you will not see the \
+work. Read the statement on its own, then the ledger, and list only the places where \
+you would read the statement differently from the ledger, or where the statement \
+asks for something the ledger does not settle: quote the sentence of the statement, \
+then say in one sentence how you read it and what the engineer's reading would get \
+wrong (a file, a name, a format, a value, a case, an input left unused). Take the \
+statement literally. Do not restate readings you agree with, do not invent \
+requirements the statement does not make, and do not comment on the approach.
+
+Answer with the single line `NONE` when you read every sentence as the ledger does, \
+otherwise with a numbered list, one item per sentence.
+
+# Task statement
+{task}
+
+# The engineer's interpretation ledger
+```
+{ledger}
+```
+"""
+#: Model answers that mean "no different reading".
+READING_NONE = re.compile(r"^\s*`?NONE`?\.?\s*$", re.I)
+#: Edits refused for an unsettled reading, per trial.
+MAX_READING_REFUSALS = 2
+READING_VERDICT = (
+    "REFUSED: an independent reader of the task statement (model of another family, "
+    "reading the statement and your ledger) would read these sentences differently or "
+    "finds them unsettled:\n{items}\n"
+    "Before the first edit under {workdir}, settle each item in {ledger}: either adopt "
+    "the reading, or keep yours and write next to it the words of the statement that "
+    "rule the other reading out. Then retry the edit."
+)
+#: Appended to the result of the ledger's first ``Write``: the same items, before any edit.
+READING_NOTE_RESULT = (
+    "\n\nIndependent reading of the task statement (a model of another family, from the "
+    "statement and this ledger): it would read these sentences differently or finds them "
+    "unsettled:\n{items}\n"
+    "Settle each item in {ledger} before the first edit under {workdir} (an edit there is "
+    "refused until the ledger changes): adopt the reading, or keep yours and write next to "
+    "it the words of the statement that rule the other reading out."
+)
 
 #: Answer to an implicit (text-only) finish when the finish gate is on: the
 #: agent is asked for an explicit ``finish`` call, which the gate checks.
 IMPLICIT_FINISH_VERDICT = (
     "Not finished: a text reply does not end the run. Call finish explicitly with "
     "success=True only if every requirement is met and verified by a command you ran "
-    "(the gate runs your verifier, the independent check and a review), otherwise with "
+    "(the gate runs your verifier and a review), otherwise with "
     "success=False and what remains."
 )
 VERIFIER_MISSING_VERDICT = (
@@ -289,24 +364,33 @@ VERIFIER_TIMEOUT_VERDICT = (
 REVIEW_FILE_BYTES = 120_000
 #: Largest size of one changed file shown to the reviewer (longer ones are cut).
 REVIEW_ONE_FILE_BYTES = 30_000
-#: Reviews per trial: the first on the whole work, later ones on the files
-#: changed since the previous review (``max_reviews`` in the config).
-MAX_REVIEWS = 3
+#: Reviews per trial (``max_reviews`` in the config): one.  The first review
+#: tells shaky work from solid work at the first finish; the rounds that
+#: followed a re-review did not bring the refused group up to the run
+#: average and a re-review after an approval changed its verdict in 13 of
+#: 164 cases (the 2026-11-04 analysis).  A later finish is judged on the
+#: review's findings by :meth:`ContainerHarness.unanswered_verdict`.
+MAX_REVIEWS = 1
+#: Seconds a review may take.  The provider's prompt cache lives about five
+#: minutes; a gate that outlasts it makes the model call after it cost about
+#: twelve times the cached price for the same context, so the review runs at
+#: the provider's default effort and is given up at this deadline.
+REVIEW_DEADLINE = 240
 REVIEW_PROMPT = """\
 You are reviewing, read-only, the work of an autonomous engineer on the task below. \
 Nobody else will check it before it is delivered. \
 Decide whether every requirement of the task statement is demonstrably met by the \
 evidence (the engineer's summary and checklist, their interpretation ledger, their \
-verifier script and its last output, the independent check and its output, the \
-commands they name as evidence, and the files they changed). The gate runs both \
-checks itself at this finish and refuses on a failure, so judge the scripts by what \
+verifier script and its last output, the independent check and its output when there \
+is one, the commands they name as evidence, and the files they changed). The gate runs \
+the scripts itself at this finish and refuses on a failure, so judge them by what \
 they cover, not by the outputs shown, which are from their most recent run before this \
 review (none on a first finish). The evidence section lists the commands the engineer \
-names as backing the claim, each checked to have run in this session and exited 0; a \
-command is evidence of a requirement only when it tests that requirement: `echo`, \
-`cat`, a script the engineer wrote themselves, or the words of the statement prove \
-nothing about the work on their own. Do \
-not invent problems: report only a requirement that is not \
+names as backing the claim, each with the exit code of its last run in this session \
+(`never ran` for one that did not run); a command is evidence of a requirement only \
+when it ran, exited 0 and tests that requirement: `echo`, `cat`, a script the engineer \
+wrote themselves, or the words of the statement prove nothing about the work on their \
+own. Do not invent problems: report only a requirement that is not \
 met, not checked, or checked wrongly, each with the evidence that shows it. Take the \
 statement literally (exact names, formats, values, thresholds, edge cases, examples); \
 where the ledger chooses a reading, check the choice against the statement's words. \
@@ -351,7 +435,7 @@ Last output:
 {blind_output}
 ```
 
-# Commands the engineer names as evidence (each ran in this session and exited 0)
+# Commands the engineer names as evidence, with the exit code of their last run
 {evidence}
 {previous}
 # Files the engineer created or changed under {workdir}{scope}
@@ -379,34 +463,17 @@ REVIEW_VERDICT = (
     "under the finding's number, the command you ran and its output that shows the "
     "finding wrong. An argument without a change or quoted evidence does not count."
 )
-#: Failed reviews (no verdict twice, or a model error) a trial tolerates before
-#: a finish goes through without one; they do not use up ``max_reviews``.
+#: Failed reviews (no verdict, a deadline hit, or a model error) a trial
+#: tolerates before a finish goes through without one; they do not use up
+#: ``max_reviews``.  A failed review refuses nothing: a blank answer names
+#: nothing to fix, so a refusal on it changes the work by chance only.
 MAX_FAILED_REVIEWS = 2
-#: A review that produced no verdict twice (or whose model call failed): the
-#: finish is refused, not approved by silence, while another review is possible.
-REVIEW_FAILED_VERDICT = (
-    "Not finished: the independent review of the work did not complete (no verdict "
-    "came back), so it counts as neither approval nor rejection. Re-check the work "
-    "against the task statement and call finish again; the review runs again."
-)
 #: A finding the next finish neither changed code for nor answered with evidence.
 UNANSWERED_VERDICT = (
     "Not finished: these findings of the review were not answered by a change or by "
     "quoted command output:\n{findings}\n"
     "Change the work, or quote under each number the command and output that shows "
     "the finding wrong, then call finish again."
-)
-#: The finish refused once per trial for a summary that leaves a case open.
-OPEN_READING_VERDICT = (
-    "Not finished: your summary says that a symptom, scenario or requirement of the task "
-    "statement was left unhandled or settled by assumption, or that the result falls short "
-    "of what the statement asks for (infeasible, unsolvable, failing your own definition "
-    "of done). Every such admission is a requirement unmet: the statement promises an "
-    "outcome, so a result short of it means a reading or a fix is still wrong, not that "
-    "the data is. For each item: either handle the case and add a "
-    "check for it to {verifier} (a supplied input that nothing consumes yet is the usual "
-    "way in), or quote the sentence of the statement or the data that "
-    "rules it out. Then call finish again."
 )
 
 #: Where the independent check lives in the container.
@@ -456,17 +523,13 @@ BLIND_OUTPUT_CHARS = 3000
 #: Most evidence commands shown to the reviewer.
 MAX_EVIDENCE_SHOWN = 30
 #: Refused rounds of the finish gate per trial (``max_gate_rounds`` in the
-#: config).  Past them the finish is delivered with the open findings as
-#: caveats: a run refused again and again rarely recovers, and each round
-#: costs minutes of gate time and a model turn at full context.
+#: config).  The first refusal buys one round whatever refused it; a later
+#: round is refused only when the agent's own verifier refused (missing,
+#: failing or too slow), up to this cap.  Past that the finish is delivered
+#: with the open findings as caveats: the pass rate was flat against the
+#: number of refused rounds while each round cost minutes of gate time and
+#: a model turn at full context.
 MAX_GATE_ROUNDS = 3
-#: A finish whose ``evidence`` names a command that did not run or did not pass.
-EVIDENCE_VERDICT = (
-    "Not finished: the evidence named in the finish call does not hold:\n{problems}\n"
-    "The `evidence` argument is a JSON list of commands you ran in this run, exactly as you "
-    "ran them, that exited 0. Run the check again and name it as run, or drop the item, then "
-    "call finish again."
-)
 #: Shown once when a give-up passes both checks (:meth:`ContainerHarness.giveup_verdict`).
 GIVEUP_RECONSIDER_VERDICT = (
     "Not accepted yet: you called finish(success=False), but your own verifier {verifier} and "
@@ -658,8 +721,6 @@ class ContainerHarness:
         self.model_overrides: dict[str, Any] = dict(cfg.get("model_config") or {})
         self.implicit_finish_vetoed = False
         self.verifier_refusals = 0
-        #: Whether the once-per-trial refusal of a summary leaving a case open was spent.
-        self.open_reading_refused = False
         #: Whether both verifiers passed at the current finish (a verifier that
         #: failed, or was skipped because its refusals are used up, makes it false:
         #: the ``verified`` checkpoint is taken only when it is true, and a finish
@@ -669,6 +730,26 @@ class ContainerHarness:
         self.verifier_timeout = float(cfg.get("verifier_timeout", VERIFIER_TIMEOUT))
         #: ``(script, exit code, output)`` of the verifier's last run by the gate.
         self.last_verifier_run: tuple[str, int | None, str] = ("", None, "")
+        #: How many changes of the work tree the agent made (an edit under the
+        #: workdir, a writing shell command, a rollback), and the count at the
+        #: agent's own last passing run of its verifier: equal at a finish,
+        #: that run stands for the gate's (:meth:`verifier_verdict`).
+        self.changes = 0
+        self.verifier_passed_at: int | None = None
+        self.verifier_passed_snapshot: dict[str, tuple[str, str]] | None = None
+        #: Model of the independent reading of the statement (``""``: none;
+        #: config ``reading_check``, ``other`` for a model of another family
+        #: than the trial's, and no reading at all when none is configured:
+        #: a reader of the trial's own family shares its reading).  Its
+        #: items, the ledger text they were raised against, and the edits
+        #: refused for them (:meth:`reading_verdict`).
+        reading = str(cfg.get("reading_check") or "")
+        self.reading_check: str = self.resolve_side_model(reading)
+        if reading == "other" and self.reading_check == self.model_name:
+            self.reading_check = ""
+        self.reading_items: list[str] = []
+        self.reading_ledger: str | None = None
+        self.reading_refusals = 0
         #: Model of the independent check's author (``""``: no blind verifier;
         #: config ``blind_verifier``, ``same`` for the trial's model).
         blind = str(cfg.get("blind_verifier") or "")
@@ -733,13 +814,10 @@ class ContainerHarness:
         #: Inventory for a context restart: files read, commands and their exit codes.
         self.files_read: dict[str, None] = {}
         self.commands_run: list[tuple[str, str]] = []
-        #: The tool calls since the last model call, in order: ``(tool name, args)``,
-        #: ``refused`` for a call the hook refused, so the turn's results pair with
-        #: the right calls (:meth:`record_exit_codes`).
-        self.turn_commands: list[tuple[str, dict[str, Any]]] = []
-        #: Refuses once a success claimed without evidence (a hedged summary, an
-        #: unchecked final edit).
-        self.evidence = EvidenceGate(track_changes=True)
+        #: The tool calls since the last model call, in order: ``(tool name, args,
+        #: changes so far)``, ``refused`` for a call the hook refused, so the turn's
+        #: results pair with the right calls (:meth:`record_exit_codes`).
+        self.turn_commands: list[tuple[str, dict[str, Any], int]] = []
         #: Wall-clock start (the first model call), for the gate's elapsed time.
         self.started: float | None = None
         self.destructive = destructive_pattern(self.workdir)
@@ -831,12 +909,20 @@ class ContainerHarness:
         return "\n".join(lines)
 
     def system_prompt(self) -> str:
-        """The unattended-engineering prompt (replaces Sorcar's default prompt)."""
+        """The unattended-engineering prompt (replaces Sorcar's default prompt).
+
+        The sentences about the independent check and the reading check
+        are there only when a model is configured for them.
+        """
         tests = TEST_CONTEXT_NOTE if self.test_context else ""
+        blind = bool(self.blind_verifier)
         return SYSTEM_PROMPT.format(workdir=self.workdir, test_context=tests,
                                     verifier=VERIFIER_PATH, ledger=LEDGER_PATH,
                                     shell_timeout=DEFAULT_SHELL_TIMEOUT,
-                                    rounds=self.max_gate_rounds)
+                                    rounds=self.max_gate_rounds,
+                                    reading_note=READING_NOTE if self.reading_check else "",
+                                    blind_note=BLIND_NOTE if blind else "",
+                                    blind_mention=BLIND_MENTION if blind else "")
 
     def tools(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
         """The trial's toolset: the built-ins without ``decide`` and ``summary``, plus checkpoints.
@@ -974,11 +1060,14 @@ class ContainerHarness:
             ``ALLOW`` to let the call run, or ``refuse(text)`` with the text the model sees.
         """
         verdict = UNATTENDED_TOOL_VERDICTS.get(name)
+        note = None
         try:
             if name in ("Bash", "run_commands_parallel"):
                 verdict = self.shell_verdict(args)
             elif name in ("Edit", "Write") and self.finish_gate:
                 verdict = self.ledger_verdict(args)
+                if verdict is None:
+                    note = self.reading_note(name, args)
             elif name == "finish" and self.finish_gate:
                 verdict = self.finish_verdict(args)
         except Exception as error:  # a guard is optional; never end the trial on its own bug
@@ -986,14 +1075,15 @@ class ContainerHarness:
                        "error": repr(error)})
         self._log({"event": "tool_call", "turn": self.turns, "tool": name,
                    "args": _jsonable(args), "blocked": verdict is not None})
-        if verdict is None and name != "finish":
-            self.evidence.observe(name, args)
+        if verdict is None and name in ("Edit", "Write", "Bash", "run_commands_parallel"):
+            self.track_change(name, args)
         if verdict is None and name == "Read" and isinstance(args.get("file_path"), str):
             with self._lock:
                 self.files_read[posixpath.normpath(posixpath.join(self.workdir,
                                                                   args["file_path"]))] = None
         with self._lock:  # a refused call still gets a result (the refusal), so it is listed
-            self.turn_commands.append((name if verdict is None else "refused", args))
+            self.turn_commands.append((name if verdict is None else "refused", args,
+                                       self.changes))
         if name in ("Edit", "Write") and verdict is None and isinstance(args.get("file_path"), str):
             self.last_edit_turn = self.turns
             path = posixpath.normpath(posixpath.join(self.workdir, args["file_path"]))
@@ -1012,7 +1102,9 @@ class ContainerHarness:
             except Exception as error:
                 self._log({"event": "hook_error", "turn": self.turns, "hook": name,
                            "error": repr(error)})
-        return ALLOW if verdict is None else refuse(verdict)
+        if verdict is not None:
+            return refuse(verdict)
+        return allow_with_note(note) if note else ALLOW
 
     def before_shell(self, args: dict[str, Any]) -> None:
         """Remember the process table before the turn's first shell call; note kill attempts.
@@ -1257,20 +1349,25 @@ class ContainerHarness:
         return output if SHA256_HEX.fullmatch(output) else None
 
     def finish_verdict(self, args: dict[str, Any]) -> str | None:
-        """Gate a successful ``finish`` on evidence: the verifiers, the summary, a review.
+        """Gate a successful ``finish`` on evidence: the scripts and a review.
 
-        Every ``finish(success=True)`` must pass, in order: the agent's own
-        verifier (:meth:`verifier_verdict`), the independent check written
-        from the statement alone (:meth:`blind_verdict`; both run with the
-        trial's original shell, :meth:`run_script`), the commands named as
-        evidence against the exit codes they had (:meth:`evidence_field_verdict`),
-        the evidence gate (a summary that hedges or leaves a reading open, an
-        edit no command checked; once per trial), the answers to the open
-        findings of the last review (:meth:`unanswered_verdict`) and a
-        read-only review of the work (:meth:`review_verdict`, up to
-        ``max_reviews`` per trial, the later ones on the files changed since
-        the previous one).  There is no clock: a finish refused for being
-        early buys a second round that breaks as much as it fixes.
+        Every ``finish(success=True)`` must pass: the agent's own verifier
+        (:meth:`verifier_verdict`), the independent check written from the
+        statement alone when one is configured (:meth:`blind_verdict`; both
+        run with the trial's original shell, :meth:`run_script`), and a
+        read-only review of the work (:meth:`review_verdict`, ``max_reviews``
+        per trial) or, once the review is spent, the answers to its open
+        findings (:meth:`unanswered_verdict`).  The summary's wording and the
+        ``evidence`` field refuse nothing: they are the reviewer's input.
+        There is no clock: a finish refused for being early buys a second
+        round that breaks as much as it fixes.
+
+        The first refusal buys one round whatever refused it.  A later
+        round is refused only when a script refused (the verifier or the
+        independent check; a review finding left open is then a caveat of
+        the delivery), up to ``max_gate_rounds``: refused rounds past the
+        first did not raise the pass rate and cost a model turn at full
+        context each.
 
         The work tree is checkpointed (:data:`VERIFIED_CHECKPOINT`) as soon
         as both verifiers pass, whatever the later checks say, so a run that
@@ -1320,14 +1417,15 @@ class ContainerHarness:
         self.checks_passed = not skipped and not any(checks)
         if self.checks_passed:
             self.save_checkpoint(VERIFIED_CHECKPOINT, verified=True)
-        verdicts = [*checks, self.evidence_field_verdict(args), self.evidence.verdict(args),
-                    self.open_reading_verdict(args)]
-        if "review" in stages:
+        verdicts = list(checks)
+        if stages.get("review") is not None:
             verdicts.append(stages["review"])
-        else:
+        else:  # no review this round, or one that passed or failed: its findings stand
             verdicts.append(self.unanswered_verdict(args))
         open_verdicts = [v for v in verdicts if v]
-        if open_verdicts and self.gate_rounds < self.max_gate_rounds:
+        refusable = self.gate_rounds < self.max_gate_rounds and (
+            self.gate_rounds == 0 or any(checks))
+        if open_verdicts and refusable:
             self.gate_rounds += 1
             self._log({"event": "gate_round", "turn": self.turns, "round": self.gate_rounds,
                        "refusals": len(open_verdicts)})
@@ -1380,25 +1478,32 @@ class ContainerHarness:
             stages["blind"] = self.blind_verdict
         if review:
             stages["review"] = partial(self.review_verdict, args)
+        from kiss.core import stop_signal
+
         verdicts: dict[str, str | None] = {"blind": None}
         seconds: dict[str, float] = {}
+        stop = stop_signal.get_thread_stop_event()  # the run's Stop reaches every stage
         threads = [threading.Thread(target=self.run_stage, name=f"gate-{name}", daemon=True,
-                                    args=(name, stage, verdicts, seconds, failed_stage))
+                                    args=(name, stage, verdicts, seconds, failed_stage, stop))
                    for name, stage in stages.items()]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            while thread.is_alive():  # short slices: an injected Stop lands between them
+                thread.join(STOP_POLL_SECONDS)
         # past the refusal cap the two checks do not run (:attr:`checks_passed` is false)
         skipped = self.verifier_refusals >= MAX_VERIFIER_REFUSALS and not self.checks_passed
         for name in stages:
-            outcome = "fail" if verdicts[name] is not None else (
-                "skipped" if skipped and name != "review" else "pass")
-            self.gate_stage(name, seconds[name], outcome, **self.stage_fields.pop(name, {}))
+            fields = self.stage_fields.pop(name, {})
+            outcome = ("fail" if verdicts[name] is not None else
+                       "error" if "error" in fields else
+                       "skipped" if skipped and name != "review" else "pass")
+            self.gate_stage(name, seconds[name], outcome, **fields)
         return verdicts
 
     def run_stage(self, name: str, stage: Callable[[], Any], results: dict[str, Any],
-                  seconds: dict[str, float], failure: Callable[[Exception], Any]) -> None:
+                  seconds: dict[str, float], failure: Callable[[Exception], Any],
+                  stop: threading.Event | None = None) -> None:
         """Run one gate stage (a thread's body): its result into *results*, its time into *seconds*.
 
         Args:
@@ -1407,7 +1512,12 @@ class ContainerHarness:
             results: Where the stage's result goes, by name.
             seconds: Where the stage's duration goes, by name.
             failure: Makes the result of a stage that raised, from the error.
+            stop: The calling thread's stop event, bound as this thread's so
+                the run's Stop ends a model call or a script the stage makes.
         """
+        from kiss.core import stop_signal
+
+        stop_signal.set_thread_stop_event(stop)
         started = time.time()
         try:
             results[name] = stage()
@@ -1415,6 +1525,10 @@ class ContainerHarness:
             self._log({"event": "hook_error", "turn": self.turns, "hook": f"gate:{name}",
                        "error": repr(error)})
             results[name] = failure(error)
+        except BaseException:
+            # The stage was stopped (a model call raises KeyboardInterrupt on
+            # its thread's stop event): the run is ending, no verdict stands.
+            results[name] = f"Not finished: the {name} check was stopped."
         seconds[name] = time.time() - started
 
     def gate_stage(self, stage: str, seconds: float, outcome: str, **fields: Any) -> None:
@@ -1438,40 +1552,15 @@ class ContainerHarness:
         record.pop("event")
         publish("gate_stage", **record)
 
-    def evidence_field_verdict(self, args: dict[str, Any]) -> str | None:
-        """Refuse a finish whose ``evidence`` names a command that did not run or did not pass.
-
-        The ``evidence`` argument of ``finish`` is a JSON list of the commands
-        the success claim rests on; each one is looked up among the commands
-        the agent ran (:attr:`exit_codes`, from the exit codes their results
-        showed) and must have exited 0 on its last run.  A plain string is
-        one command; an empty or unparsable field is no evidence and passes
-        (the reviewer sees that none was named).  This replaces the quote
-        check of earlier gates, which compared strings and refused many
-        finishes without changing an outcome.
-
-        Args:
-            args: Arguments of the ``finish`` call.
-        """
-        raw = args.get("evidence")
-        commands = evidence_commands(raw)
-        problems = []
-        with self._lock:
-            codes = dict(self.exit_codes)
-        for command in commands:
-            code = codes.get(command.strip())
-            if code is None:
-                problems.append(f"- `{command[:200]}`: never ran as a Bash command in this run")
-            elif code != "0":
-                problems.append(f"- `{command[:200]}`: last exit code {code}")
-        self._log({"event": "evidence_field", "turn": self.turns, "commands": commands[:50],
-                   "problems": problems[:50]})
-        if not problems:
-            return None
-        return EVIDENCE_VERDICT.format(problems="\n".join(problems))
-
     def evidence_report(self, args: dict[str, Any]) -> str:
         """The commands a finish names as evidence, with their last exit code, for the reviewer.
+
+        The ``evidence`` argument of ``finish`` is a JSON list of the commands
+        the success claim rests on (a plain string is one command); each is
+        looked up among the commands the agent ran (:attr:`exit_codes`, from
+        the exit codes their results showed).  The field refuses nothing:
+        the reviewer reads it, and a command that never ran or failed is
+        shown as such.
 
         Args:
             args: Arguments of the ``finish`` call.
@@ -1481,7 +1570,7 @@ class ContainerHarness:
             return "(none named)"
         with self._lock:
             codes = dict(self.exit_codes)
-        return "\n".join(f"- `{command[:300]}` (exit {codes.get(command, 'never ran')})"
+        return "\n".join(f"- `{command[:300]}` (exit {codes.get(command.strip(), 'never ran')})"
                          for command in commands[:MAX_EVIDENCE_SHOWN])
 
     def deliver_with_findings(self, args: dict[str, Any], open_verdicts: list[str]) -> None:
@@ -1574,29 +1663,6 @@ class ContainerHarness:
         """Whether another review may run (neither the review nor the failed-review cap is hit)."""
         return self.reviews < self.max_reviews and self.failed_reviews < MAX_FAILED_REVIEWS
 
-    def open_reading_verdict(self, args: dict[str, Any]) -> str | None:
-        """Refuse once per trial a summary that admits a case of the statement is unhandled.
-
-        The decisions model reads the task statement and the finish summary
-        (:func:`leaves_a_case_open`).  A summary that admits a listed
-        symptom was left alone ("I added nothing for ...") or reports the
-        asked artifact as impossible names the requirement that then
-        fails, and a reviewer tends to let it through once a reason is
-        given; the gate does not.
-
-        Args:
-            args: Arguments of the ``finish`` call.
-        """
-        summary = str(args.get("summary_in_html", "")).strip()
-        if self.open_reading_refused or not summary:
-            return None
-        score = leaves_a_case_open(self.task_prompt, summary)
-        self._log({"event": "open_reading", "turn": self.turns, "score": score})
-        if score < OPEN_READING_THRESHOLD:
-            return None
-        self.open_reading_refused = True
-        return OPEN_READING_VERDICT.format(verifier=VERIFIER_PATH)
-
     def verifier_verdict(self) -> str | None:
         """Run the agent's own verifier; the verdict when it is missing, failing or too slow.
 
@@ -1604,8 +1670,25 @@ class ContainerHarness:
         the agent cannot make pass does not trap the run; a finish let through
         that way is not a verified one (:attr:`checks_passed`).  The script
         is read once and that text is run (:meth:`run_script`), so what the
-        reviewer sees is what ran (:attr:`last_verifier_run`).
+        reviewer sees is what ran (:attr:`last_verifier_run`).  The agent's
+        own run of the script is reused when it passed and nothing changed
+        since (:attr:`verifier_passed_at`, set by :meth:`record_exit_codes`,
+        and the files under the workdir as they were then,
+        :attr:`verifier_passed_snapshot`): the exit code it showed is what
+        a run now would show, and a third of the gated finishes came right
+        after such a run.  Such a run also stands past the refusal cap: it
+        asks for no run of the script.
         """
+        if (self.verifier_passed_at == self.changes and self.verifier_passed_snapshot is not None
+                and self.file_snapshot() == self.verifier_passed_snapshot):
+            script = self.read_container_file(VERIFIER_PATH)
+            if script:
+                self.last_verifier_run = (script, 0,
+                                          "(passed when you ran it; nothing changed since)")
+                self._log({"event": "verifier", "turn": self.turns, "exit_code": 0,
+                           "reused": True})
+                self.stage_fields["verifier"] = {"reused": True}
+                return None
         if self.verifier_refusals >= MAX_VERIFIER_REFUSALS:
             self.checks_passed = False
             return None
@@ -1614,8 +1697,6 @@ class ContainerHarness:
             self.count_refusal()
             return VERIFIER_MISSING_VERDICT.format(path=VERIFIER_PATH)
         if code == 0:
-            # The verifier just checked the final state of the work.
-            self.evidence.unchecked_change = False
             return None
         self.count_refusal()
         if code is None:
@@ -1649,34 +1730,90 @@ class ContainerHarness:
         with self._lock:
             self.verifier_refusals += 1
 
+    def review_call(self, label: str, model: str, prompt: str,
+                    event: str = "review") -> tuple[str, str, float, int, dict[str, Any]]:
+        """One non-agentic call of *model* at the provider's default effort, with a deadline.
+
+        The call runs on the calling thread under a stop event of its own
+        (:func:`~kiss.agents.sorcar.coding_gate.call_stop_event`) that fires
+        after :data:`REVIEW_DEADLINE` seconds or when the run is stopped;
+        the model clients watch the thread's stop event and end the
+        streaming call on it, so the call cannot outlive the gate's budget
+        of time, and its spend so far is still counted: a call the run's
+        Stop ends logs its spend itself as a failed *event* before the Stop
+        propagates (the caller never gets to log it).  The trial's model
+        overrides apply without their effort
+        (:func:`~kiss.agents.sorcar.coding_gate.default_effort`).
+
+        Args:
+            label: The agent's name in the logs.
+            model: The model to call.
+            prompt: The whole prompt.
+            event: The side-agent event the caller logs the call under
+                (:data:`SIDE_AGENT_EVENTS`), for the spend of a stopped call.
+
+        Returns:
+            ``(answer, error, cost, tokens, last_call)``: the answer (``""``
+            for none), the error (``""`` when the call completed; the deadline
+            when it was hit), the call's cost in USD, its tokens, and the
+            usage of the last call.
+        """
+        from kiss.core import stop_signal
+        from kiss.core.kiss_agent import KISSAgent
+
+        agent = KISSAgent(label)
+        previous = stop_signal.get_thread_stop_event()
+        done = threading.Event()
+        deadline = call_stop_event(REVIEW_DEADLINE, done)
+        stop_signal.set_thread_stop_event(deadline)
+        answer, error = "", ""
+        try:
+            answer = str(agent.run(model_name=model, prompt_template="{p}", arguments={"p": prompt},
+                                   is_agentic=False, verbose=False,
+                                   model_config=default_effort(self.model_overrides)) or "")
+        except Exception as failure:
+            error = repr(failure)
+        except BaseException:
+            if not deadline.is_set() or (previous is not None and previous.is_set()):
+                # a Stop of the run (or a real interrupt), not the deadline
+                self._log({"event": event, "turn": self.turns, "model": model, "error": "stopped",
+                           "failed": True, "cost_usd": agent.budget_used,
+                           "tokens": agent.total_tokens_used})
+                raise
+            error = f"no answer within {REVIEW_DEADLINE} s"
+        finally:
+            done.set()
+            stop_signal.set_thread_stop_event(previous)
+        return (answer, error, agent.budget_used, agent.total_tokens_used,
+                dict(agent.last_call_usage or {}))
+
     def review_verdict(self, args: dict[str, Any]) -> str | None:
         """A read-only review of the work by the ``reviewer`` model; its gaps as a verdict.
 
         The reviewer sees the task statement, the agent's summary and
-        ledger, both verifiers and their last output, and the files created
-        or changed under the workdir (:meth:`changed_files_report`); a
-        re-review also sees its previous findings and only the files changed
-        since.  It runs no commands.  Its spend is logged as a ``review``
-        event, which the trial runner adds to the trial's cost.
+        ledger, the scripts and their last output, the commands named as
+        evidence with their exit codes, and the files created or changed
+        under the workdir (:meth:`changed_files_report`); a re-review (when
+        ``max_reviews`` allows one) also sees its previous findings and only
+        the files changed since.  It runs no commands.  Its spend is logged
+        as a ``review`` event, which the trial runner adds to the trial's
+        cost.
 
-        An answer without a ``VERDICT:`` line (adaptive thinking at the
-        highest effort can use up the output cap and leave the answer
-        blank) is retried once at the provider's default
-        effort; a review that still has no verdict, or whose model call
-        fails, is logged as failed and refuses the finish
-        (:data:`REVIEW_FAILED_VERDICT`), keeping the previous findings open;
-        it does not use up a review but counts under
-        :data:`MAX_FAILED_REVIEWS`, past which the finish goes through (a
-        reviewer that never answers cannot hold the run: the work tree the
-        run ends on is what gets submitted either way, and the open
-        findings are then judged against the summary by
-        :meth:`unanswered_verdict`).  Each ``NOT DONE`` finding is kept
-        (:attr:`open_findings`) for the next finish to answer.
+        The review is one model call at the provider's default effort (the
+        trial's own effort override is not applied: at the highest effort
+        the reviewer thought for a median 399 s, past the prompt cache's
+        life, and its verdicts were no better) with :data:`REVIEW_DEADLINE`
+        seconds to answer (:meth:`review_call`).  A review without a
+        ``VERDICT:`` line, past the deadline, or whose model call failed is
+        logged as failed and refuses nothing: it keeps the previous findings
+        open, does not use up a review, and counts under
+        :data:`MAX_FAILED_REVIEWS`, past which no review is asked for again.
+        Each ``NOT DONE`` finding is kept (:attr:`open_findings`) for the
+        next finish to answer.
 
         Args:
             args: Arguments of the ``finish`` call.
         """
-        from kiss.core.kiss_agent import KISSAgent
 
         _script, code, output = self.last_verifier_run
         script = self.read_container_file(VERIFIER_PATH) or ""
@@ -1698,22 +1835,8 @@ class ContainerHarness:
             previous=previous, scope=scope, workdir=self.workdir,
             files=self.changed_files_report(self.review_snapshot if self.open_findings else None),
         )
-        answer, cost, tokens, error, last_call = "", 0.0, 0, "", {}
-        for overrides in (self.model_overrides or None, None):
-            agent = KISSAgent("Finish reviewer")
-            try:
-                answer = agent.run(model_name=self.reviewer, prompt_template="{p}",
-                                   arguments={"p": prompt}, is_agentic=False, verbose=False,
-                                   model_config=overrides)
-            except Exception as failure:
-                error = repr(failure)
-            cost += agent.budget_used
-            tokens += agent.total_tokens_used
-            last_call = dict(agent.last_call_usage or {})
-            if error or REVIEW_VERDICT_LINE.search(answer):
-                break
-            self._log({"event": "review_retry", "turn": self.turns, "model": self.reviewer,
-                       "answer": answer[:2000], "last_call": last_call})
+        answer, error, cost, tokens, last_call = self.review_call("Finish reviewer",
+                                                                  self.reviewer, prompt)
         findings = review_findings(answer)
         failed = bool(error or not REVIEW_VERDICT_LINE.search(answer))
         if failed:
@@ -1727,7 +1850,8 @@ class ContainerHarness:
         self.stage_fields["review"] = {"model": self.reviewer, "cost_usd": cost,
                                        "round": self.reviews}
         if failed:
-            return REVIEW_FAILED_VERDICT if self.review_possible() else None
+            self.stage_fields["review"]["error"] = (error or "no verdict")[:500]
+            return None
         self.review_snapshot = self.file_snapshot()
         self.open_findings = numbered_items(findings)
         if not findings:
@@ -1735,22 +1859,18 @@ class ContainerHarness:
         return REVIEW_VERDICT.format(findings=findings)
 
     def unanswered_verdict(self, args: dict[str, Any]) -> str | None:
-        """The open review findings this finish answers neither by a change nor by evidence.
+        """The open review findings this finish does not answer by quoted evidence.
 
-        A finding is answered when a file under the workdir changed since
-        the review and a re-review will judge the change (the review cap
-        leaves room for one), or when the decisions model finds the finish
-        summary quoting a command and its output for it
-        (:func:`answered_findings`).  Without the decisions model every
-        finding counts as answered.
+        Judged at a finish no review verdict came back for (none was
+        wanted, or the one asked for failed): a finding is answered when
+        the decisions model finds the finish summary quoting a command and
+        its output for it (:func:`answered_findings`).  Without the
+        decisions model every finding counts as answered.
 
         Args:
             args: Arguments of the ``finish`` call.
         """
         if not self.open_findings:
-            return None
-        if (self.review_possible() and self.review_snapshot is not None
-                and self.changed_since(self.review_snapshot)):
             return None
         summary = str(args.get("summary_in_html", ""))
         answered = answered_findings(summary, self.open_findings)
@@ -1960,30 +2080,158 @@ class ContainerHarness:
                    "cost_usd": agent.budget_used, "tokens": agent.total_tokens_used})
         return (script, not script and (not error or exhausted), agent.budget_used)
 
-    def ledger_verdict(self, args: dict[str, Any]) -> str | None:
-        """Refuse an edit under the workdir until the interpretation ledger exists.
+    def track_change(self, name: str, args: dict[str, Any]) -> None:
+        """Count a tool call that changes the work, for the verifier reuse of the gate.
 
-        At most :data:`MAX_LEDGER_REFUSALS` refusals per trial.  Edits
-        outside the workdir (the ledger and the verifier themselves, under
-        ``/tmp``) are never refused.
+        An ``Edit`` / ``Write`` under the workdir and a shell command that
+        writes files (:func:`~kiss.agents.sorcar.evidence_gate.writes_files`;
+        a write under ``/tmp``, the verifier or the ledger, is not one)
+        advance :attr:`changes`.  A call that may rewrite the verifier
+        itself (an edit of it, a shell command naming it) makes the
+        agent's last run of it stale (:attr:`verifier_passed_at`) and
+        advances the count too, so a result of that run read later in the
+        turn (:meth:`record_exit_codes`) cannot stand for the new script.
+
+        Args:
+            name: The tool called (``Edit``, ``Write``, ``Bash`` or
+                ``run_commands_parallel``).
+            args: Its arguments.
+        """
+        if name in ("Edit", "Write"):
+            path = args.get("file_path")
+            if isinstance(path, str) and posixpath.normpath(
+                    posixpath.join(self.workdir, path)) == VERIFIER_PATH:
+                self.verifier_passed_at = None
+                self.changes += 1
+            elif self.under_workdir(args):
+                self.changes += 1
+            return
+        if posixpath.basename(VERIFIER_PATH) in json.dumps(args, default=str):
+            self.verifier_passed_at = None
+            self.changes += 1
+        elif writes_files(args):
+            self.changes += 1
+
+    def under_workdir(self, args: dict[str, Any]) -> bool:
+        """Whether the ``file_path`` of an ``Edit`` / ``Write`` call is under the workdir.
+
+        Args:
+            args: Arguments of the call.
+        """
+        path = args.get("file_path")
+        if not isinstance(path, str):
+            return False
+        full = posixpath.normpath(posixpath.join(self.workdir, path))
+        root = self.workdir.rstrip("/")
+        return full == root or full.startswith(root + "/")
+
+    def ledger_verdict(self, args: dict[str, Any]) -> str | None:
+        """Refuse an edit under the workdir until the interpretation ledger exists and is read.
+
+        At most :data:`MAX_LEDGER_REFUSALS` refusals for a missing ledger
+        per trial, then the independent reading of it
+        (:meth:`reading_verdict`).  Edits outside the workdir (the ledger
+        and the verifier themselves, under ``/tmp``) are never refused.
 
         Args:
             args: Arguments of the ``Edit`` or ``Write`` call.
         """
-        if self.ledger_seen or self.ledger_refusals >= MAX_LEDGER_REFUSALS:
+        if not self.under_workdir(args):
             return None
-        path = args.get("file_path")
-        if not isinstance(path, str):
-            return None
-        full = posixpath.normpath(posixpath.join(self.workdir, path))
-        root = self.workdir.rstrip("/")
-        if not (full == root or full.startswith(root + "/")):
-            return None
-        if self.container_exec(["test", "-s", LEDGER_PATH]) is not None:
+        if not self.ledger_seen and self.ledger_refusals < MAX_LEDGER_REFUSALS:
+            if self.container_exec(["test", "-s", LEDGER_PATH]) is None:
+                self.ledger_refusals += 1
+                return LEDGER_VERDICT.format(workdir=self.workdir, ledger=LEDGER_PATH)
             self.ledger_seen = True
+        if self.reading_check and (self.reading_ledger is None or self.reading_items):
+            return self.reading_verdict()
+        return None
+
+    def read_statement(self, ledger: str) -> list[str]:
+        """The independent reading of the statement against *ledger*.
+
+        Once per trial: the ``reading_check`` model (of another family
+        than the trial's) reads the statement and the ledger
+        (:data:`READING_CHECK_PROMPT`, one non-agentic call,
+        :meth:`review_call`).  ``NONE``, a failed call or an answer
+        without items give no item.  The call's spend is logged as a
+        ``reading_check`` event (:data:`SIDE_AGENT_EVENTS`) and recorded
+        as the ``reading`` gate stage; the items and the ledger they were
+        raised against are kept (:attr:`reading_items`,
+        :attr:`reading_ledger`) for :meth:`reading_verdict`.
+
+        Args:
+            ledger: The ledger's text.
+        """
+        self.reading_ledger = ledger
+        started = time.time()
+        answer, error, cost, tokens, last_call = self.review_call(
+            "Reading check", self.reading_check,
+            READING_CHECK_PROMPT.format(task=self.task_prompt,
+                                        ledger=ledger[:REVIEW_ONE_FILE_BYTES]),
+            event="reading_check")
+        if not error and not READING_NONE.match(answer):
+            self.reading_items = numbered_items(answer)
+        self._log({"event": "reading_check", "turn": self.turns, "model": self.reading_check,
+                   "answer": answer[:8000], "items": self.reading_items, "error": error,
+                   "last_call": last_call, "cost_usd": cost, "tokens": tokens})
+        self.gate_stage("reading", time.time() - started,
+                        "error" if error else ("fail" if self.reading_items else "pass"),
+                        model=self.reading_check, cost_usd=cost, items=len(self.reading_items))
+        return self.reading_items
+
+    def reading_note(self, name: str, args: dict[str, Any]) -> str | None:
+        """The independent reading to append to the result of the ledger's first ``Write``.
+
+        The agent sees the items as soon as the ledger exists, whatever it
+        edits next (a deliverable written by a script of its own under
+        ``/tmp`` passes through no edit guard); :data:`READING_NOTE_RESULT`
+        asks it to settle them in the ledger before the first edit, which
+        :meth:`reading_verdict` then holds it to.
+
+        Args:
+            name: The tool called.
+            args: Its arguments.
+
+        Returns:
+            The note, or ``None`` when the call is not the ledger's first
+            ``Write``, no reading model is set, or the reading agrees.
+        """
+        path = args.get("file_path")
+        if (name != "Write" or not self.reading_check or self.reading_ledger is not None
+                or not isinstance(path, str)
+                or posixpath.normpath(posixpath.join(self.workdir, path)) != LEDGER_PATH):
             return None
-        self.ledger_refusals += 1
-        return LEDGER_VERDICT.format(workdir=self.workdir, ledger=LEDGER_PATH)
+        items = self.read_statement(str(args.get("content", "")))
+        if not items:
+            return None
+        return READING_NOTE_RESULT.format(items="\n".join(items), workdir=self.workdir,
+                                          ledger=LEDGER_PATH)
+
+    def reading_verdict(self) -> str | None:
+        """Refuse the first edit until the ledger settles the independent reading of the statement.
+
+        The reading is made when the ledger is first written
+        (:meth:`reading_note`) or, when it was written some other way, at
+        the first edit under the workdir (:meth:`read_statement` on the
+        ledger read from the container).  Its items refuse the edit
+        (:data:`READING_VERDICT`) until the ledger changed since they were
+        raised, at most :data:`MAX_READING_REFUSALS` times (then they are
+        dropped).
+        """
+        if self.reading_refusals >= MAX_READING_REFUSALS:
+            self.reading_items = []
+            return None
+        ledger = self.read_container_file(LEDGER_PATH) or ""
+        if self.reading_ledger is None:
+            self.read_statement(ledger)
+        elif ledger.strip() != self.reading_ledger.strip():
+            self.reading_items = []  # the ledger answered (or at least changed)
+        if not self.reading_items:
+            return None
+        self.reading_refusals += 1
+        return READING_VERDICT.format(items="\n".join(self.reading_items),
+                                      workdir=self.workdir, ledger=LEDGER_PATH)
 
     # ---- checkpoints -------------------------------------------------------
 
@@ -2021,7 +2269,7 @@ class ContainerHarness:
         error = self.restore_checkpoint(name)
         if error:
             return error
-        self.evidence.unchecked_change = True
+        self.changes += 1
         return f"Restored {self.workdir} from checkpoint {name!r}."
 
     def save_checkpoint(self, name: str, verified: bool = False) -> str:
@@ -2167,6 +2415,14 @@ class ContainerHarness:
         The turn's results come in the order of its tool calls, so they are
         paired with every call of the turn; the ``Bash``, ``bash_job`` and
         ``run_commands_parallel`` results are read (:func:`result_exit_codes`).
+        A ``Bash`` command whose exit status 0 was its run of the agent's
+        verifier (:func:`verifier_decides`), that writes no file itself and
+        that no edit, shell command or restore follows in the turn (the
+        results are read after the whole turn, so a later call could have
+        changed what the run checked) sets :attr:`verifier_passed_at` to the
+        change count of its call and :attr:`verifier_passed_snapshot` to the
+        files as they are now: the gate reuses that run while neither
+        changes (:meth:`verifier_verdict`).
 
         Args:
             new_messages: The messages added since the previous model call.
@@ -2178,12 +2434,19 @@ class ContainerHarness:
         results = [text for message in new_messages for text in tool_result_texts(message)]
         if len(results) != len(calls):
             return
-        for (name, args), text in zip(calls, results, strict=True):
+        last_change = max((at for at, (name, _args, _changes) in enumerate(calls)
+                           if name not in READ_ONLY_TOOLS), default=-1)
+        for at, ((name, args, changes), text) in enumerate(zip(calls, results, strict=True)):
             with self._lock:
                 for command, code in result_exit_codes(name, args, text, self.background_jobs):
                     self.commands_run.append((command, code))
                     del self.commands_run[:-INVENTORY_COMMANDS]
                     self.exit_codes[command.strip()] = code
+                    if (code == "0" and name == "Bash" and at == last_change
+                            and not writes_files(args)
+                            and verifier_decides(command, self.workdir, VERIFIER_PATH)):
+                        self.verifier_passed_at = changes
+                        self.verifier_passed_snapshot = self.file_snapshot()
 
     def inventory(self) -> str:
         """The machine-written state block appended to a continuation session's first message.
@@ -2414,11 +2677,15 @@ class ContainerHarness:
 
 #: Entries of the restart inventory.
 INVENTORY_COMMANDS = 40
+#: Tool calls that change no file under the workdir (``refused`` is the
+#: record of a call the hook refused): a verifier run followed in its turn
+#: only by these is still what the gate would see (:meth:`ContainerHarness.record_exit_codes`).
+READ_ONLY_TOOLS = frozenset({"Read", "checkpoint", "finish", "refused"})
 INVENTORY_FILES = 60
 #: First line of a continuation session's prompt (``CONTINUATION_PROMPT``).
 CONTINUATION_MARKER = "# Task Progress (Continuation "
 #: Side agents of the gate whose spend the trial runner adds to the trial's cost.
-SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written"})
+SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written", "reading_check"})
 
 
 def changed_paths(baseline: dict[str, tuple[str, str]],

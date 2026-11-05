@@ -1103,6 +1103,34 @@ class TestReviewRegressions:
             shutil.rmtree(src)
             shutil.rmtree(dest)
 
+    @posix_only("directory permission bits")
+    def test_failed_overwrite_move_keeps_the_moved_data(self, harness) -> None:
+        # A source that cannot be renamed is copied and then deleted; when
+        # that deletion fails the complete copy at the destination is the
+        # only copy of the data and must survive the failure.
+        if is_root():
+            pytest.skip("root is not denied by directory permissions")
+        root = harness.plain_dir
+        sealed = root / "sealed"
+        src = sealed / "payload"
+        src.mkdir(parents=True)
+        (src / "unique.txt").write_text("UNIQUE SOURCE DATA\n")
+        dest = root / "dest3"
+        (dest / "payload").mkdir(parents=True)
+        (dest / "payload" / "old.txt").write_text("old\n")
+        sealed.chmod(0o555)  # ``payload`` is writable, its entry in ``sealed`` is not removable
+        try:
+            result = fs_action("move", str(src), dest=str(dest), overwrite=True)
+            assert result["error"].startswith("move failed"), result
+            assert (dest / "payload" / "unique.txt").read_text() == "UNIQUE SOURCE DATA\n"
+            assert sorted(p.name for p in (dest / "payload").iterdir()) == ["unique.txt"]
+            assert sorted(p.name for p in dest.iterdir()) == ["payload"]
+            assert src.is_dir()
+        finally:
+            sealed.chmod(0o755)
+            shutil.rmtree(sealed)
+            shutil.rmtree(dest)
+
     def test_rename_onto_a_descendant_or_across_folders_is_refused(
         self, harness,
     ) -> None:

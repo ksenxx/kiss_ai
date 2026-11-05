@@ -90,8 +90,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
+import io
 import json
 import re
+import tokenize
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -684,17 +687,51 @@ def _drop_spans(
     return edits
 
 
-def _entry_starts(sub: ast.Dict, data: bytes, offsets: list[int]) -> list[int]:
-    """Return where each entry of the dict *sub* starts: its key, or the ``**`` of an unpack."""
+def _byte_offset(position: tuple[int, int], data: bytes, offsets: list[int]) -> int:
+    """Return the byte offset in *data* of the ``(row, column)`` token *position*
+    (:mod:`tokenize` counts characters, ``ast`` and *offsets* UTF-8 bytes)."""
+    row, column = position
+    line = data[offsets[row - 1]:offsets[row]].decode("utf-8")
+    return offsets[row - 1] + len(line[:column].encode("utf-8"))
+
+
+def _entry_spans(
+    literal: ast.Dict | ast.List, data: bytes, offsets: list[int],
+) -> tuple[list[int], list[int]]:
+    """Return where each entry of the dict or list *literal* starts and ends in *data*.
+
+    An entry runs from its key (the ``**`` of an unpack) to the end of
+    its value, parentheses included: the AST spans leave those out
+    (``**(settings)``, ``"timeout": (5.0)``), so each span is widened
+    over the ``(`` and ``)`` tokens around it.
+    """
+    tokens = [
+        (_byte_offset(tok.start, data, offsets), _byte_offset(tok.end, data, offsets), tok.string)
+        for tok in tokenize.tokenize(io.BytesIO(data).readline)
+        if tok.type not in (tokenize.NL, tokenize.COMMENT)
+        and literal.lineno <= tok.start[0] <= (literal.end_lineno or 0)
+    ]
+    token_starts = [token[0] for token in tokens]
+    token_ends = [token[1] for token in tokens]
+    entries = (
+        zip(literal.keys, literal.values, strict=True) if isinstance(literal, ast.Dict)
+        else ((element, element) for element in literal.elts)
+    )
     starts: list[int] = []
-    for key, value in zip(sub.keys, sub.values, strict=True):
-        start = _span(key or value, offsets)[0]
+    ends: list[int] = []
+    for key, value in entries:
+        index = bisect.bisect_left(token_starts, _span(key or value, offsets)[0])
+        while tokens[index - 1][2] == "(":
+            index -= 1
         if key is None:
-            start = len(data[:start].rstrip())
-            assert data[start - 2:start] == b"**", data[start - 2:start]
-            start -= 2
-        starts.append(start)
-    return starts
+            index -= 1
+            assert tokens[index][2] == "**", tokens[index]
+        starts.append(tokens[index][0])
+        index = bisect.bisect_left(token_ends, _span(value, offsets)[1])
+        while index + 1 < len(tokens) and tokens[index + 1][2] == ")":
+            index += 1
+        ends.append(tokens[index][1])
+    return starts, ends
 
 
 def _removed_lock_names(tree: ast.Module) -> dict[ast.List, set[int]]:
@@ -822,8 +859,7 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     ``ALLOW`` and its
     literal string ``refuse(<the literal>)``, with ``from
     kiss.agents.seas.base.base_sea import ...`` of the names the
-    script does not import yet inserted after its last top-level
-    import.
+    script does not import yet inserted after its leading imports.
     """
     lines = data.splitlines(keepends=True)
     offsets = [0]
@@ -856,14 +892,12 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
         }
         if not indexes:
             continue
-        starts = _entry_starts(sub, data, offsets)
-        ends = [_span(value, offsets)[1] for value in sub.values]
+        starts, ends = _entry_spans(sub, data, offsets)
         for start, end, new, run in _drop_spans(sub, starts, ends, indexes, offsets, "{}"):
             keys = ", ".join(repr(cast(ast.Constant, sub.keys[i]).value) for i in run)
             edits.append((start, end, new, f"drop {keys}"))
     for locked, indexes in _removed_lock_names(tree).items():
-        starts = [_span(element, offsets)[0] for element in locked.elts]
-        ends = [_span(element, offsets)[1] for element in locked.elts]
+        starts, ends = _entry_spans(locked, data, offsets)
         for start, end, new, run in _drop_spans(locked, starts, ends, indexes, offsets, "[]"):
             names = ", ".join(repr(cast(ast.Constant, locked.elts[i]).value) for i in run)
             edits.append((start, end, new, f"unlock {names}"))
@@ -882,11 +916,16 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
     }
     missing = sorted(needed - imported)
     if missing:
-        last_import = max(
-            (node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)),
-            key=lambda node: node.end_lineno or 0, default=None,
-        )
-        at = offsets[last_import.end_lineno or 0] if last_import is not None else 0
+        # After the leading imports (and the module docstring): an import
+        # after the class would leave the class's new base undefined.
+        at = 0
+        for index, statement in enumerate(tree.body):
+            docstring = index == 0 and isinstance(statement, ast.Expr) and isinstance(
+                statement.value, ast.Constant
+            ) and isinstance(statement.value.value, str)
+            if not docstring and not isinstance(statement, ast.Import | ast.ImportFrom):
+                break
+            at = offsets[statement.end_lineno or 0]
         import_line = f"from kiss.agents.seas.base.base_sea import {', '.join(missing)}\n"
         edits.append((at, at, import_line, f"import {', '.join(missing)}"))
     return edits

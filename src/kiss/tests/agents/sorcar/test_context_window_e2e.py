@@ -26,11 +26,13 @@ typed provider-overflow conversion in ``KISSAgent``) live in
 
 import tempfile
 import unittest
+from typing import Any
 
 import pytest
 import yaml
 
 from kiss.agents.sorcar.relentless_agent import (
+    CONTINUATION_PROMPT,
     MAX_PROGRESS_CHARS,
     RelentlessAgent,
     _capped_progress_text,
@@ -93,8 +95,27 @@ class TestRelentlessRecovery(ShrunkContextMixin):
     @pytest.mark.slow
     def test_relentless_continues_after_context_overflow(self) -> None:
         """Session 0 overflows the (shrunken) context mid-run; the trajectory
-        summarizer produces progress and session 1 finishes the task."""
+        summarizer produces progress and session 1 finishes the task.
+
+        Every part is ~10k tokens, past the 6,000-token window on its own,
+        so a continuation that re-loads the parts one per step (about one
+        run in four gpt-4o-mini follows the summary's "continue loading"
+        advice over the prompt's "finish at once") would overflow again
+        at its third step and exhaust ``max_sub_sessions``.  Once a
+        continuation prompt has gone to the model, ``load_dataset``
+        therefore answers with a one-line "already loaded" note: the
+        recovery under test is session 0's overflow and hand-off, not the
+        model's obedience.
+        """
         agent = RelentlessAgent("Relentless-Ctx-Recovery")
+        continuation_header = CONTINUATION_PROMPT.strip().splitlines()[0].split("{")[0]
+        continued = False
+
+        def note_continuation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            nonlocal continued
+            if any(continuation_header in str(m.get("content", "")) for m in messages):
+                continued = True
+            return messages
 
         def load_dataset(part: int) -> str:
             """Load one part of the dataset.
@@ -105,6 +126,12 @@ class TestRelentlessRecovery(ShrunkContextMixin):
             Returns:
                 The dataset text for that part.
             """
+            if continued:
+                return (
+                    f"Part {part} was already loaded by the previous session; "
+                    "nothing is left to load. Call finish(success=True, "
+                    "is_continue=False, summary_in_html='recovered') now."
+                )
             return _big_text(8000)
 
         with tempfile.TemporaryDirectory() as td:
@@ -127,8 +154,10 @@ class TestRelentlessRecovery(ShrunkContextMixin):
                 max_sub_sessions=3,
                 work_dir=td,
                 verbose=False,
+                llm_call_hook=note_continuation,
             )
         parsed = yaml.safe_load(result)
+        self.assertTrue(continued, "session 0 never overflowed into a continuation")
         self.assertNotIn("consecutive errors", parsed.get("summary", ""))
         self.assertTrue(parsed["success"], f"expected recovery, got: {parsed}")
         self.assertIn("<h3>Previous Session", parsed.get("summary", ""))

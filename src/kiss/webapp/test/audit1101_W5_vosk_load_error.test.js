@@ -32,7 +32,7 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
-const {micBtn} = require('./voice_page_helpers');
+const {micBtn, makeVoskWindow} = require('./voice_page_helpers');
 
 const {test, report} = makeRunner();
 
@@ -93,22 +93,6 @@ function fakeWorkerClass(workers, loadError) {
 }
 
 /** The REAL media/vosk.js in a bare window with a hand-played Worker. */
-function makeVoskWindow() {
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
-    runScripts: 'dangerously',
-    url: 'https://localhost/',
-  });
-  const win = dom.window;
-  const workers = [];
-  win.Worker = fakeWorkerClass(workers, null);
-  if (typeof win.URL.createObjectURL !== 'function') {
-    win.URL.createObjectURL = () => 'blob:fake-worker-url';
-  }
-  win.eval(fs.readFileSync(path.join(MEDIA, 'vosk.js'), 'utf8'));
-  assert.ok(win.Vosk && win.Vosk.createModel, 'vosk.js must export Vosk');
-  return {win, workers};
-}
-
 /** Count the 'error' listeners registered on the page-side Model. */
 function modelErrorListeners(win) {
   const counts = [];
@@ -159,25 +143,6 @@ function installVoiceStubs(win, cfg, workers) {
   if (typeof win.URL.createObjectURL !== 'function') {
     win.URL.createObjectURL = () => 'blob:fake-vosk-worker';
   }
-  win.AudioContext = class FakeAudioContext {
-    constructor() {
-      this.sampleRate = 16000;
-      this.state = 'running';
-      this.destination = {};
-    }
-    resume() {
-      return Promise.resolve();
-    }
-    close() {
-      return Promise.resolve();
-    }
-    createMediaStreamSource() {
-      return {connect: () => {}, disconnect: () => {}};
-    }
-    createScriptProcessor() {
-      return {connect: () => {}, disconnect: () => {}, onaudioprocess: null};
-    }
-  };
   win.__VOICE__ = Object.assign({}, FALLBACK_CFG, cfg || {});
   win.localStorage.setItem('kissVoiceEnabled', '0');
 }
@@ -187,7 +152,7 @@ async function main() {
     "W5 F1: the worker's {event:'error'} load failure rejects createModel " +
       'with the reason, hard-terminates the Worker and drops the listeners',
     async () => {
-      const {win, workers} = makeVoskWindow();
+      const {win, workers} = makeVoskWindow(fakeWorkerClass);
       const modelListeners = modelErrorListeners(win);
       let rejection = null;
       const p = win.Vosk.createModel(MODEL_URL);
@@ -247,7 +212,7 @@ async function main() {
     'W5 F1: every load-failure retry frees its own Worker, and a model ' +
       'that loaded keeps its Worker through a later protocol error',
     async () => {
-      const {win, workers} = makeVoskWindow();
+      const {win, workers} = makeVoskWindow(fakeWorkerClass);
       const modelListeners = modelErrorListeners(win);
       for (let attempt = 0; attempt < 3; attempt++) {
         let rejected = 0;

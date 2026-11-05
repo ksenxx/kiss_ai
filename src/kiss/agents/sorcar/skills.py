@@ -40,10 +40,12 @@ from the catalog entirely.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import logging
 import os
 import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +59,36 @@ from kiss.core.config import kiss_home
 logger = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n((?:.*\n)*?)---[^\S\n]*\n?")
+
+# Non-blocking, so a FIFO named SKILL.md cannot park the opener (see
+# ``_read_regular_file``); binary on Windows, where the CRT would
+# otherwise translate the bytes before the text layer does.
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _read_regular_file(path: Path) -> str:
+    """Return the UTF-8 text of *path*, which must be a regular file.
+
+    ``Path.read_text`` on a FIFO (or a device) named ``SKILL.md``
+    blocks in ``open`` with no deadline and no bytecode boundary where
+    the runner's Stop could land, and every agent's tool setup runs
+    discovery.  The type is checked on the open descriptor, so a
+    symlink to a regular file still reads while one to a FIFO is
+    refused.
+
+    Raises:
+        OSError: *path* is missing, unreadable or not a regular file.
+        UnicodeDecodeError: The content is not UTF-8.
+    """
+    fd = os.open(path, _OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    with open(fd, encoding="utf-8-sig") as file:
+        return file.read()
 
 
 def claude_config_dir() -> Path:
@@ -86,7 +118,7 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
         the file is unreadable.
     """
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        text = _read_regular_file(path)
     except (OSError, UnicodeDecodeError):
         logger.debug("unreadable definition file: %s", path, exc_info=True)
         return None

@@ -208,6 +208,51 @@ async function main() {
     },
   );
 
+  await test(
+    'W8 F1: Select All leaves text the page hides (`hidden`, display:none, ' +
+      'visibility:hidden) out of the copy, as it does script text',
+    async () => {
+      const {win, copies} = makeWindow(
+        '<p id="one">One</p><span hidden>H</span><p style="display:none">D</p>' +
+          '<p style="visibility:hidden">V</p><p id="two">Two</p>',
+      );
+      menu(win, win.document.body, 'select-all');
+      menu(win, win.document.body, 'copy');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepStrictEqual(copies, ['One\nTwo']);
+      // visibility is inherited: a visible child of an invisible parent shows.
+      const seen = makeWindow(
+        '<p style="visibility:hidden">V<b style="visibility:visible">Seen</b>W</p>',
+      );
+      menu(seen.win, seen.win.document.body, 'select-all');
+      menu(seen.win, seen.win.document.body, 'copy');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepStrictEqual(seen.copies, ['Seen']);
+      // Text the page hides after Select All stays out of the copy too:
+      // a stretch of one text node (whose parent is hidden) and one of
+      // several (whose common ancestor, or an ancestor above it, is).
+      const html =
+        '<p id="one">One</p><script>var hidden = 1;</script>' +
+        '<div id="outer"><div id="wrap"><p>Two</p><p>Three</p></div></div>';
+      for (const [target, style, expected] of [
+        ['one', 'display:none', ['TwoThree']],
+        ['wrap', 'display:none', ['One']],
+        ['outer', 'visibility:hidden', ['One']],
+      ]) {
+        const later = makeWindow(html);
+        menu(later.win, later.win.document.body, 'select-all');
+        later.win.document.getElementById(target).setAttribute('style', style);
+        menu(later.win, later.win.document.body, 'copy');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepStrictEqual(
+          later.copies,
+          expected,
+          target + ' hidden after Select All',
+        );
+      }
+    },
+  );
+
   report('audit1101_W6_select_all_cache');
 }
 

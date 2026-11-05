@@ -278,7 +278,10 @@ def test_proc_descendants_sees_multi_level_tree() -> None:
 
 
 @posix_only("the shell's $$/$! are OS pids and the kill is a POSIX killpg")
-def test_interrupted_command_job_kills_tree(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "tail", ["while true; do echo tick; sleep 0.05; done", "wait"], ids=["chatty", "quiet"],
+)
+def test_interrupted_command_job_kills_tree(tmp_path: Path, tail: str) -> None:
     """A Stop landing in ``_run_command_job``'s wait must kill the command tree.
 
     ``cron_job("run_now")`` runs ``_execute_job`` on the cron agent's
@@ -287,15 +290,15 @@ def test_interrupted_command_job_kills_tree(tmp_path: Path) -> None:
     the same way).  Before the fix only a ``TimeoutExpired`` killed the
     tree: the interrupt propagated out of ``communicate`` and the
     command, in its own process group, ran on unattended.  The command
-    here records the shell's and a background child's pids and prints
-    a line every 50 ms, so ``communicate``'s selector loop keeps
-    returning to Python bytecode where the interrupt can land.
+    here records the shell's and a background child's pids, then either
+    prints a line every 50 ms, so ``communicate``'s selector loop keeps
+    returning to Python bytecode where the interrupt can land, or sits
+    quietly in ``wait``: a single ``communicate(timeout=300)`` then slept
+    in its selector for the whole job timeout and the Stop stayed
+    pending until then, so the wait must be taken in short slices.
     """
     pid_file = tmp_path / "pids"
-    command = (
-        f"sleep 300 & echo $$ $! > {pid_file.as_posix()}; "
-        "while true; do echo tick; sleep 0.05; done"
-    )
+    command = f"sleep 300 & echo $$ $! > {pid_file.as_posix()}; {tail}"
     outcome: dict[str, Any] = {}
 
     def run() -> None:

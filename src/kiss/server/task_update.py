@@ -25,6 +25,7 @@ task's; its spend is attributed to the task.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import threading
 import time
@@ -206,10 +207,13 @@ def _charge_locked(
     steps: int,
     epoch: Any,
     tab_id: str,
+    on_uncharged: Callable[[], None] | None = None,
 ) -> None:
     """Charge the spend to the row or the live agent (``TASK_USAGE_LOCK`` held).
 
-    See :func:`charge_side_channel_usage` for the arguments.
+    See :func:`charge_side_channel_usage` for the arguments;
+    *on_uncharged*, when given, runs before the error propagates if the
+    row update fails (nothing was charged).
     """
     from kiss.agents.sorcar.persistence import (
         _add_late_task_usage,
@@ -217,7 +221,12 @@ def _charge_locked(
     )
     from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
 
-    updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
+    try:
+        updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
+    except Exception:
+        if on_uncharged is not None:
+            on_uncharged()
+        raise
     _race_delay()  # test hook: widens the row-check-to-bank window
     if not updated and not running:
         # No row for the task (its run persists none, or has not
@@ -292,6 +301,170 @@ def _charge_locked(
         _append_chat_event(dict(event), task_id=row_id)
     if updated and printer is not None:
         printer.broadcast({"type": "tasks_updated"})
+
+
+REMOTE_USAGE_WINDOW_S = 7 * 86400.0
+"""How long after its fold a sub-agent run on another machine is still asked for late spend."""
+
+REMOTE_USAGE_FULL_SWEEP_S = 3600.0
+"""Least seconds between the syncs that ask for every recorded sub-agent, however old.
+
+A sub-agent's row can be charged long after its dispatch (an ``/ask``
+about an old task); the syncs between sweeps ask only for those of the
+last :data:`REMOTE_USAGE_WINDOW_S` seconds, so a busy history costs the
+machines one full pass an hour at most.
+"""
+
+_last_full_sweep: dict[str, float] = {}
+"""When each machine (by name) last got a full sweep (epoch seconds)."""
+
+REMOTE_USAGE_BATCH = 500
+"""The most task ids one ``getTaskUsage`` request carries (the machine answers for 500)."""
+
+REMOTE_USAGE_NESTED_INTERVAL_S = 60.0
+"""Least seconds between the syncs another daemon's ``getTaskUsage`` starts here.
+
+Such a request starts a sync of this daemon's own remote sub-agents (a
+nested dispatch: the asking daemon's next request sees their late
+spend), which asks the machines in turn; the interval keeps two daemons
+registered with each other from asking each other without end.
+"""
+
+_remote_sync_lock = threading.Lock()
+"""Held by the one remote-usage sync running (:func:`start_remote_usage_sync`)."""
+
+_last_sync_started = 0.0
+"""When the last remote-usage sync started (epoch seconds; set with the lock held)."""
+
+
+def start_remote_usage_sync(printer: Any, machines: list[Any], min_interval: float = 0.0) -> None:
+    """Run :func:`sync_remote_subtask_usage` for each of *machines* on a thread of its own.
+
+    Called on every first-page refresh of the CHATS panel and every
+    Spend refresh, which must not wait on the machines, and, with
+    *min_interval* :data:`REMOTE_USAGE_NESTED_INTERVAL_S`, when another
+    daemon asks for usage (``getTaskUsage``).  A call that comes while a
+    sync still runs, or within *min_interval* seconds of the last one's
+    start, starts none: a later one catches up.
+    """
+    global _last_sync_started
+    if not machines or not _remote_sync_lock.acquire(blocking=False):
+        return
+    if min_interval > 0 and time.time() - _last_sync_started < min_interval:
+        _remote_sync_lock.release()
+        return
+    _last_sync_started = time.time()
+    try:
+        threading.Thread(
+            target=_sync_machines, args=(printer, machines), name="remote-usage-sync", daemon=True,
+        ).start()
+    except RuntimeError:  # pragma: no cover — thread exhaustion
+        _remote_sync_lock.release()
+
+
+def _sync_machines(printer: Any, machines: list[Any]) -> None:
+    """Sync each of *machines* in turn, then let the next sync start."""
+    try:
+        for machine in machines:
+            sync_remote_subtask_usage(printer, machine)
+    finally:
+        _remote_sync_lock.release()
+
+
+def sync_remote_subtask_usage(printer: Any, machine: Any) -> None:
+    """Charge local parents the spend their sub-agents on *machine* got after the fold.
+
+    A ``run_agent(machine=...)`` sub-agent's row lives on the machine;
+    the local parent folds the totals the dispatch returns with and
+    records them (``remote_subtasks``,
+    :func:`~kiss.agents.sorcar.persistence._record_remote_subtask`).
+    Once the dispatch returned, nothing reaches this daemon from that
+    run any more: its stream is unbound, and on the machine a late
+    charge to the row (an ``/ask`` answer or task update finishing
+    after it) stops at the parent, which has no row there.  So the
+    machine is asked (``getTaskUsage``) for the current totals of the
+    sub-agents recorded in the last :data:`REMOTE_USAGE_WINDOW_S`
+    seconds (every recorded one, at most once per
+    :data:`REMOTE_USAGE_FULL_SWEEP_S`), and each one's growth over its record is charged to its
+    parent (:func:`charge_remote_subtask_usage`).  A machine that
+    cannot be reached, or an older daemon that does not know the
+    command, charges nothing now; a later sync catches up.
+    """
+    from kiss.agents.sorcar.machines import MachineError, link_for
+    from kiss.agents.sorcar.persistence import _remote_subtask_ids
+
+    now = time.time()
+    full = now - _last_full_sweep.get(machine.name, 0.0) >= REMOTE_USAGE_FULL_SWEEP_S
+    ids = _remote_subtask_ids(machine.name, 0.0 if full else now - REMOTE_USAGE_WINDOW_S)
+    # In batches of the most task ids one getTaskUsage answers for, so no
+    # record is left out however many there are.
+    for start in range(0, len(ids), REMOTE_USAGE_BATCH):
+        batch = ids[start:start + REMOTE_USAGE_BATCH]
+        try:
+            reply = link_for(machine).request(
+                {"type": "getTaskUsage", "taskIds": batch}, "taskUsage", errors=True,
+            )
+        except MachineError as exc:
+            log.info("late spend of the sub-agents on %s not synced: %s", machine.name, exc)
+            return
+        tasks = reply.get("tasks")
+        if not isinstance(tasks, dict):
+            return
+        for task_id in batch:
+            usage = tasks.get(task_id)
+            if isinstance(usage, dict):
+                charge_remote_subtask_usage(printer, task_id, usage)
+    if full:  # only a sweep that reached the end counts: a failed one is retried
+        _last_full_sweep[machine.name] = now
+
+
+def charge_remote_subtask_usage(printer: Any, task_id: str, usage: dict[str, Any]) -> None:
+    """Charge the parent of *task_id*, a sub-agent on another machine, its spend not yet folded.
+
+    *usage* is the machine's report of the sub-agent's row: cumulative
+    ``cost``, ``tokens`` and ``steps`` and their split by model
+    (``models``).  Its growth over the recorded totals
+    (:func:`~kiss.agents.sorcar.persistence._advance_remote_subtask`,
+    which moves the record up in the same step, so a report seen twice
+    charges once and one equal to the fold charges nothing) goes to
+    the parent the way a side channel's spend does
+    (:func:`charge_side_channel_usage`): banked on its live agent while
+    it runs, else added to its row and its finished ancestors'.
+    Failures are logged, never raised.
+    """
+    try:
+        locked_call(TASK_USAGE_LOCK, _charge_remote_locked, printer, task_id, usage)
+    except Exception:
+        log.warning("late spend of remote sub-agent %s not charged", task_id, exc_info=True)
+
+
+def _charge_remote_locked(printer: Any, task_id: str, usage: dict[str, Any]) -> None:
+    """:func:`charge_remote_subtask_usage` with ``TASK_USAGE_LOCK`` held."""
+    from kiss.agents.sorcar.persistence import (
+        _advance_remote_subtask,
+        _restore_remote_subtask,
+        _safe_float,
+        _safe_int,
+    )
+
+    owed = _advance_remote_subtask(
+        task_id, _safe_float(usage.get("cost")), _safe_int(usage.get("tokens")),
+        _safe_int(usage.get("steps")), usage.get("models"),
+    )
+    if owed is None:
+        return
+    parent_id, cost, tokens, steps, models = owed
+    if cost <= 0 and tokens <= 0 and steps <= 0:
+        return
+    state = agent_state.get(parent_id)
+    _charge_locked(
+        printer, state.agent if state is not None else None, parent_id, cost, tokens, steps,
+        None, "",
+        # Not charged: take the advance back, so the next report owes it again.
+        on_uncharged=functools.partial(
+            _restore_remote_subtask, task_id, cost, tokens, steps, models,
+        ),
+    )
 
 
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:

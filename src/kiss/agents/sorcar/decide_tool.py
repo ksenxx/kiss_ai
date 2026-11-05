@@ -231,6 +231,7 @@ def make_decide_tool(
     agent: Any,
     model_name: str = DEFAULT_DECISIONS_MODEL,
     model_config: dict[str, Any] | None = None,
+    on_usage: Callable[[float, int], None] | None = None,
 ) -> Callable[[str, str], str]:
     """Build the ``decide`` tool bound to *agent*'s task accounting.
 
@@ -241,6 +242,9 @@ def make_decide_tool(
         model_name: The ``"dec": true`` catalog model to call.
         model_config: Optional :class:`DecisionsModel` settings; ``base_url``
             and ``api_key`` override the OpenRouter defaults.
+        on_usage: Called with each call's ``(cost_usd, tokens)``, a charged
+            reply the tool rejected included, for a caller without an
+            agent that accounts for the spend itself (the task classifier).
 
     Returns:
         The ``decide(state, questions)`` tool callable.
@@ -251,6 +255,8 @@ def make_decide_tool(
 
     def attribute(cost: float, tokens: int) -> None:
         """Fold one call's spend into *agent*'s task accounting (no step)."""
+        if on_usage is not None:
+            on_usage(cost, tokens)
         if agent is not None and (cost > 0 or tokens > 0):
             from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 

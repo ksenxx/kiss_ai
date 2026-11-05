@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
+from types import FrameType
 from typing import Any, cast
 
 import pytest
@@ -309,6 +312,81 @@ class TestChatSorcarAgent:
         assert not (self.repo / "new.txt").exists()
 
         agent.discard()
+
+
+_WT_PROPERTIES = ("_repo_root", "_wt_branch", "_original_branch", "_wt_dir", "_wt_work_dir")
+
+
+class _PausedPropertyReader(threading.Thread):
+    """Reads one worktree property, pausing right after the property's first ``_wt`` lookup."""
+
+    def __init__(self, agent: SorcarAgent, property_name: str) -> None:
+        super().__init__(name=f"reader-{property_name}", daemon=True)
+        self.agent = agent
+        self.getter_code = getattr(SorcarAgent, property_name).fget.__code__
+        self.property_name = property_name
+        self.paused = threading.Event()
+        self.release = threading.Event()
+        self.outcome: object = None
+
+    def _trace(self, frame: FrameType, event: str, arg: object) -> Any:
+        if (
+            event == "return"
+            and frame.f_code is SorcarAgent._wt.fget.__code__  # type: ignore[attr-defined]
+            and arg is not None
+            and frame.f_back is not None
+            and frame.f_back.f_code is self.getter_code
+            and not self.paused.is_set()
+        ):
+            self.paused.set()
+            self.release.wait(30)
+        return self._trace
+
+    def run(self) -> None:
+        sys.settrace(self._trace)
+        try:
+            self.outcome = getattr(self.agent, self.property_name)
+        except Exception as exc:
+            self.outcome = exc
+        finally:
+            sys.settrace(None)
+
+
+def test_worktree_properties_survive_a_merge_between_lookup_and_dereference() -> None:
+    """Each derived worktree property reads one ``_wt`` snapshot.
+
+    The server's worktree action reads ``_repo_root`` on its own thread
+    while the task thread may be merging: a property that looked ``_wt``
+    up once for the check and again for the value raised
+    ``AttributeError`` when the merge removed the entry in between
+    (audit 2026-11-04, S2 F3).  Every reader here is paused between the
+    two moments by a real clean ``commit_and_merge``.
+    """
+    tmpdir = tempfile.mkdtemp()
+    agent = SorcarAgent("test-wt-snapshot")
+    try:
+        agent.work_dir = str(_make_repo(Path(tmpdir) / "repo"))
+        assert agent.create_worktree().startswith("Created worktree")
+        wt = agent._wt
+        assert wt is not None
+        expected = [wt.repo_root, wt.branch, wt.original_branch, wt.wt_dir,
+                    SorcarAgent._wt_work_dir_of(wt)]
+        readers = [_PausedPropertyReader(agent, name) for name in _WT_PROPERTIES]
+        for reader in readers:
+            reader.start()
+        for reader in readers:
+            assert reader.paused.wait(30), f"{reader.property_name} never looked _wt up"
+        assert "Successfully merged" in agent.commit_and_merge()
+        assert agent._wt is None
+        for reader in readers:
+            reader.release.set()
+            reader.join(30)
+            assert not reader.is_alive()
+        assert [reader.outcome for reader in readers] == expected
+    finally:
+        if agent._wt_pending:
+            agent.discard()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 

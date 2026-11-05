@@ -265,12 +265,14 @@ def undivided_work(tasks: Sequence[str]) -> str:
     Pieces under ``tmp/`` (:func:`is_scratch_piece`) do not count, nor
     do pieces every task of a fan-out of three or more names (shared
     instructions: a file to read, a command to run; with two tasks
-    "every" is "both", and the check would be void).  A piece two tasks
-    share is no overlap when it is a directory of which both name a
-    more specific piece (``src/x/`` with ``src/x/a.py`` and
-    ``src/x/b.py``); one task working on the whole directory while the
-    other works on a file in it is an overlap.  Every overlapping pair
-    is reported at once, so one refusal shows all there is to divide.
+    "every" is "both", and the check would be void).  A directory a
+    task names a more specific piece under is context for that piece,
+    not a claim on the directory (``src/x/`` with ``src/x/a.py`` in one
+    task and with ``src/x/b.py`` in the other is no overlap); a piece
+    two tasks claim, and a directory one task claims whole while the
+    other claims a piece under it (``src/x/`` with ``src/x/b.py`` or
+    ``src/x/nested/``), are overlaps.  Every overlapping pair is
+    reported at once, so one refusal shows all there is to divide.
 
     Args:
         tasks: The task texts of one ``run_agent`` / ``run_parallel`` call.
@@ -294,14 +296,15 @@ def undivided_work(tasks: Sequence[str]) -> str:
                 + (" (pieces every task names, and tmp/ paths, do not count)" if pieces[i]
                    else "")
             )
+    claimed = [{p for p in found if not any(_under(q, p) for q in found)} for found in counted]
     overlaps = []
-    for i, first in enumerate(counted):
-        for j in range(i + 1, len(counted)):
-            shared = sorted(
-                piece for piece in first & counted[j]
-                if not (any(_under(p, piece) for p in first)
-                        and any(_under(p, piece) for p in counted[j]))
-            )
+    for i, first in enumerate(claimed):
+        for j in range(i + 1, len(claimed)):
+            shared = sorted({
+                a if a == b or _under(b, a) else b
+                for a in first for b in claimed[j]
+                if a == b or _under(a, b) or _under(b, a)
+            })
             if shared:
                 overlaps.append(
                     f"tasks {i + 1} and {j + 1} of the fan-out both name {', '.join(shared[:3])}"

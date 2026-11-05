@@ -15,6 +15,10 @@ window, which is deterministic: the snapshot is taken before the first
 embedding and every write after it.
 """
 
+import sqlite3
+import threading
+import time
+from contextlib import closing
 from pathlib import Path
 
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
@@ -48,3 +52,47 @@ def test_sync_started_before_a_rebuild_skips_its_stale_writes(tmp_path: Path) ->
     # The rebuilt index is complete and consistent: a further sync changes nothing.
     assert fast.sync().unchanged == 2
     assert [hit.name for hit in fast.search("Newly recreated version", k=1)] == ["a"]
+
+
+def test_clear_during_an_open_write_transaction_breaks_neither_side(tmp_path: Path) -> None:
+    """A clear racing another sync's open transaction fails neither it nor the rebuild.
+
+    SQLite names a connection's rollback journal after the database path.
+    ``clear()`` unlinked the file, so a transaction still open on the
+    old file and the rebuild's transactions on the new one shared one
+    journal: the first commit removed the other's journal and that
+    commit failed with ``disk I/O error``.
+    """
+    memory = MemoryDir(tmp_path / "memory")
+    memory.write("a", "Original version")
+    index = VectorIndex(memory, embed=hashed_embedding)
+    index.sync()
+    opened = threading.Event()
+    errors: list[BaseException] = []
+
+    def hold_a_transaction() -> None:
+        """Another process's sync, mid-transaction on the index for 0.3 s."""
+        with closing(sqlite3.connect(index.path, timeout=30.0)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("UPDATE pages SET stat_key = 'racing'")
+            opened.set()
+            time.sleep(0.3)
+            try:
+                writer.commit()
+            except sqlite3.Error as exc:
+                errors.append(exc)
+
+    thread = threading.Thread(target=hold_a_transaction, daemon=True)
+    thread.start()
+    assert opened.wait(10)
+    # Meanwhile the index is cleared and rebuilt.
+    index.clear()
+    memory.write("b", "Second page")
+    fresh = VectorIndex(memory, embed=hashed_embedding)
+    report = fresh.sync()
+    thread.join(10)
+    assert errors == []
+    assert (report.added, report.updated, report.removed) == (2, 0, 0)
+    assert fresh.sync().unchanged == 2
+    assert [hit.name for hit in index.search("Second page", k=1)] == ["b"]
+    assert not Path(f"{index.path}-journal").exists()

@@ -120,13 +120,16 @@ def test_a_run_parallel_result_over_the_ceiling_is_a_digest(
             TaskResult(text="<p>Could not: " + "x" * 300 + "</p>", success=False, cost=0.0,
                        tokens=0, steps=0), 60.0),
         "Started the sub-task as job agent-0123abcd; agent_job(job_id) collects its result.",
+        # a dispatch that could not run: its error is final, not a job to collect
+        agent_dispatch.format_dispatch_result("Error: the sorcar daemon is not running.", 60.0),
     ]
     digest = digest_agent_results(entries, "tmp/tool-out/ab12cd-agents.txt")
     lines = digest.splitlines()
     assert lines[0] == (
-        "3 sub-tasks; the whole result is in tmp/tool-out/ab12cd-agents.txt, this is its digest:"
+        "4 sub-tasks; the whole result is in tmp/tool-out/ab12cd-agents.txt, this is its digest:"
     )
-    assert lines[1] == "[1/3] ok: Done Fixed a.py."
-    assert lines[2].startswith("[2/3] FAILED: Could not: xxx") and lines[2].endswith("...")
+    assert lines[1] == "[1/4] ok: Done Fixed a.py."
+    assert lines[2].startswith("[2/4] FAILED: Could not: xxx") and lines[2].endswith("...")
     assert len(lines[2]) < 220
-    assert lines[3].startswith("[3/3] running (job agent-0123abcd): Started the sub-task as job")
+    assert lines[3].startswith("[3/4] running (job agent-0123abcd): Started the sub-task as job")
+    assert lines[4] == "[4/4] FAILED: Error: the sorcar daemon is not running."

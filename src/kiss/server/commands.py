@@ -39,6 +39,7 @@ from kiss.agents.sorcar.persistence import (
     _set_chat_summary,
     _set_task_favorite,
     _task_tree,
+    _task_usage,
 )
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
@@ -250,9 +251,13 @@ def request_generation(cmd: dict[str, Any]) -> int:
     (``myModelsData`` for another client's edit, ``machines`` for a
     registry change) echoes it to the requester, so a pushed frame, or
     the late answer to an earlier request, never passes for the
-    answer.  A page's command carries none, and its reply stays as it
-    was.  Echoed to the requester only: links count from 0 each, so
-    another link's number may be the same.
+    answer.  A page stamps some of its requests the same way (its
+    machine adds, since two unnamed adds pend under one key and the
+    subpanel tells their answers apart by generation; its history and
+    model-list requests); a command that carries none gets its reply
+    unstamped, as before.  Echoed to the requester only: links and
+    pages count from 0 each, so another client's number may be the
+    same.
     """
     return _parse_int(cmd.get("generation", 0)) or 0
 
@@ -358,6 +363,7 @@ class _CommandsMixin:
         browser_tabs: BrowserTabService
 
         def _tab_chat_id_locked(self, tab_id: str) -> str: ...
+        def _tab_view_locked(self, tab_id: str) -> tuple[str, str]: ...
         def _tab_model_locked(self, tab_id: str) -> str: ...
         def _broadcast_tabs_state(self) -> None: ...
         def _publish_tabs_state(self) -> None: ...
@@ -425,7 +431,7 @@ class _CommandsMixin:
         def _get_input_history(self, conn_id: str = "", since: float = 0.0) -> None: ...
         def _get_adjacent_task(
             self, chat_id: str, task_id: str | None, direction: str,
-            tab_id: str = "",
+            tab_id: str = "", *, view: tuple[str, str] | None = None,
         ) -> None: ...
         def _commit_main_tree(
             self, tab_id: str, work_dir: str = "", reply_to: str = "",
@@ -1028,6 +1034,37 @@ class _CommandsMixin:
             work_dir if isinstance(work_dir, str) else "",
         )
 
+    def _cmd_get_task_usage(self, cmd: dict[str, Any]) -> None:
+        """Send the totals of the listed tasks to the requesting connection only.
+
+        Asked by a daemon whose tasks ran these as sub-agents here
+        (``run_agent(machine=...)``), to charge their local parents the
+        spend added after the fold
+        (:func:`~kiss.server.task_update.sync_remote_subtask_usage`).  The
+        ``taskUsage`` reply maps each listed task that has a row to its
+        ``cost``, ``tokens``, ``steps`` and per-model split
+        (:func:`~kiss.agents.sorcar.persistence._task_usage`).  Then a
+        sync of this daemon's own remote sub-agents starts in the
+        background, at most once a minute
+        (:data:`~kiss.server.task_update.REMOTE_USAGE_NESTED_INTERVAL_S`):
+        in a nested dispatch the late spend of a sub-agent's own remote
+        sub-agents reaches the asking daemon's next request.
+        """
+        from kiss.agents.sorcar.machines import load_machines
+        from kiss.server.task_update import (
+            REMOTE_USAGE_NESTED_INTERVAL_S,
+            start_remote_usage_sync,
+        )
+
+        ids = cmd.get("taskIds")
+        task_ids = [i for i in ids if isinstance(i, str)][:500] if isinstance(ids, list) else []
+        self._broadcast_to_conn(
+            {"type": "taskUsage", "tasks": _task_usage(task_ids)}, cmd.get("connId", ""),
+        )
+        start_remote_usage_sync(
+            self.printer, load_machines(), min_interval=REMOTE_USAGE_NESTED_INTERVAL_S,
+        )
+
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
         task_id = _opt_str(cmd.get("taskId"))
@@ -1095,7 +1132,7 @@ class _CommandsMixin:
         """
         task_id = _opt_str(cmd.get("taskId"))
         if task_id:
-            self._delete_history(cmd, "the task", _task_tree(task_id), "", _delete_task, task_id)
+            self._delete_history(cmd, "the task", _task_tree, "", _delete_task, task_id)
 
     def _cmd_delete_chat(self, cmd: dict[str, Any]) -> None:
         """Delete a chat — all its tasks, their events and its title — from history.db.
@@ -1105,15 +1142,13 @@ class _CommandsMixin:
         """
         chat_id = _opt_str(cmd.get("chatId"))
         if chat_id:
-            self._delete_history(
-                cmd, "the chat", _chat_task_tree(chat_id), chat_id, _delete_chat, chat_id,
-            )
+            self._delete_history(cmd, "the chat", _chat_task_tree, chat_id, _delete_chat, chat_id)
 
     def _delete_history(
         self,
         cmd: dict[str, Any],
         what: str,
-        task_ids: list[str],
+        tree: Callable[[str], list[str]],
         chat_id: str,
         delete: Callable[[str], int],
         key: str,
@@ -1127,20 +1162,29 @@ class _CommandsMixin:
         check cannot lose its freshly inserted row.  The database
         delete itself runs outside the lock.
 
+        The ids the delete would remove (``tree(key)``) are read only
+        once admissions are barred: a sub-task admitted after an
+        earlier read is known to the check only through its parent,
+        which that read may not have named yet (a child that finished
+        meanwhile), while ``delete`` removes the tree as it is then.
+
         Args:
             cmd: The ``deleteTask`` / ``deleteChat`` command (for the refusal notice).
             what: What the refusal notice names ("the task" / "the chat").
-            task_ids: The persisted task ids the delete would remove.
+            tree: ``persistence._task_tree`` or ``_chat_task_tree``: the
+                persisted task ids the delete of *key* would remove.
             chat_id: The chat being deleted, or ``""`` for a single task.
             delete: ``persistence._delete_task`` or ``_delete_chat``.
-            key: The task or chat id passed to *delete*.
+            key: The task or chat id passed to *tree* and *delete*.
         """
         with self._state_lock:
-            if _any_running(task_ids, chat_id):
-                self._refuse_delete_while_running(cmd, what)
-                return
             self._history_deletes += 1
         try:
+            task_ids = tree(key)
+            with self._state_lock:
+                if _any_running(task_ids, chat_id):
+                    self._refuse_delete_while_running(cmd, what)
+                    return
             delete(key)
             self._input_history_cut = time.time()
         finally:
@@ -1790,13 +1834,17 @@ class _CommandsMixin:
         would watch their message disappear from the input box with
         no effect on the running agent.
 
-        The append is silently ignored only when neither the tab nor
-        any peer tab the viewer is subscribed to has a live task —
-        attempting to queue a follow-up against a truly idle tab
-        would be a no-op (no pre-step hook to drain it).  We also
-        echo the queued prompt back to every viewer of the tab as a
-        ``prompt`` event so the user sees their queued message in
-        the chat surface.
+        The append is refused only when neither the tab nor any peer
+        tab the viewer is subscribed to has a live task — attempting
+        to queue a follow-up against a truly idle tab would be a no-op
+        (no pre-step hook to drain it).  The refusal is an ``error``
+        with ``code: "prompt_refused"`` addressed to the tab (the page
+        cleared its composer on submit and restores the text from
+        it), without :meth:`_refuse_run`'s ``status running:false``:
+        the run's own end already lowered the tab, and a successor
+        run may have raised it again.  We also echo the queued prompt
+        back to every viewer of the tab as a ``prompt`` event so the
+        user sees their queued message in the chat surface.
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
@@ -1819,11 +1867,16 @@ class _CommandsMixin:
                         owner = candidate
                         break
             if owner is None:
-                logger.debug(
-                    "appendUserMessage dropped: tab %s has no "
-                    "live task and is not a viewer of one",
-                    tab_id,
-                )
+                # Addressed only: a message that names no tab (an API
+                # client's) has no composer to put the text back into.
+                if tab_id:
+                    self.printer.broadcast({
+                        "type": "error",
+                        "code": "prompt_refused",
+                        "text": "The task finished before your message reached it;"
+                        " it is back in the composer.",
+                        "tabId": tab_id,
+                    })
                 return
             # ``/ask <question>`` is a live side-channel Q&A over the
             # running task's persisted events: routed to a background
@@ -1847,6 +1900,12 @@ class _CommandsMixin:
             # and drop its spend.
             owner_agent = owner.agent
             owner_task = _persisted_task_id(owner_agent)
+            # The agent's id counts only when it is the owner's own
+            # registry key (see ``_queue_prompt_on_owner``): an agent
+            # carried over from the tab's previous task still names
+            # THAT task's row until the new run allocates its own.
+            if owner_task != owner.task_id:
+                owner_task = ""
             # An empty ``owner_task`` means the running task has not
             # allocated its ``task_history`` row yet (the narrow
             # window between ``run()`` entry and ``_add_task``): the
@@ -2182,17 +2241,21 @@ class _CommandsMixin:
         (C2/C3 fix) — only a ``_tab_chat_views`` association.  Resolve the chat id from the
         registry entry when one exists, falling back to the
         chat-viewer map, and never CREATE a registry entry here:
-        navigation is a read-only view operation.
+        navigation is a read-only view operation.  The tab's view is
+        captured in the same lock hold and fences the reply (review
+        2026-11-04 R2): a task selected meanwhile drops the request.
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
             chat_id = self._tab_chat_id_locked(tab_id)
+            view = self._tab_view_locked(tab_id)
         task_id = _opt_str(cmd.get("taskId"))
         self._get_adjacent_task(
             chat_id,
             task_id,
             cmd.get("direction", "prev"),
             tab_id,
+            view=view,
         )
 
     def _run_autocommit_job(self, tab_id: str, job: Callable[[], None]) -> None:
@@ -2806,6 +2869,7 @@ class _CommandsMixin:
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
+        "getTaskUsage": _cmd_get_task_usage,
         "setFavorite": _cmd_set_favorite,
         "setChatSummary": _cmd_set_chat_summary,
         "deleteTask": _cmd_delete_task,

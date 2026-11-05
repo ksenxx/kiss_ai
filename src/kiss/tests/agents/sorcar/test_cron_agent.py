@@ -47,6 +47,7 @@ from kiss.agents.sorcar.cron_agent import (
 )
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS
 from kiss.core.config import kiss_home
+from kiss.tests.server.pause import Pause
 
 
 @pytest.fixture(autouse=True)
@@ -380,6 +381,39 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
             assert load_jobs() == []
         finally:
             cron_agent._cron_dir().chmod(0o700)
+
+
+def _seeding_a_default(frame_locals: dict[str, Any]) -> bool:
+    """Whether the ``_create_or_ensure`` call entered is the seed of the first default."""
+    return bool(frame_locals["name"] == cron_agent.DEFAULT_JOBS[0]["name"])
+
+
+def test_seed_keeps_user_job_created_while_seeding() -> None:
+    """A job the user creates under a default's name while seeding runs stands alone.
+
+    The seed's by-name look-up and its insertion must be one store
+    transaction: held at the entry of ``_create_or_ensure`` after a
+    look-up that saw no such job, the seeding thread must not add an
+    active default beside the job ``cron_job("create")`` put under that
+    name meanwhile (and paused), which is the user's own and stands as
+    it is.
+    """
+    names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
+    outcome: list[list[str]] = []
+    worker = threading.Thread(target=lambda: outcome.append(cron_agent.seed_default_jobs()))
+    with Pause(cron_agent._create_or_ensure.__code__, _seeding_a_default) as held:
+        worker.start()
+        assert held.paused.wait(30), "seeding never reached the store transaction"
+        mine = _create(cron_job(
+            "create", name=names[0], command="printf mine", schedule="every 2h",
+        ))
+        assert yaml.safe_load(cron_job("pause", job_id=mine["id"])) == {"pause": mine["id"]}
+        held.release()
+        worker.join(30)
+    assert not worker.is_alive() and outcome == [names]
+    same_name = [(j["id"], j["enabled"]) for j in load_jobs() if j["name"] == names[0]]
+    assert same_name == [(mine["id"], False)]
+    assert [j["name"] for j in load_jobs() if j["name"] != names[0]] == [names[1]]
 
 
 def test_jobs_follow_the_daemon_between_brand_homes(

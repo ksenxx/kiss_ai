@@ -164,6 +164,16 @@ function fanoutPanel(win, root) {
   );
 }
 
+function key(win, el, name) {
+  el.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: name,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
 async function run() {
   await test('the export holds one hidden section per sub-agent', () => {
     const html = exportFanoutChat();
@@ -466,6 +476,32 @@ async function run() {
       'the chat comes back on screen',
     );
     assert.strictEqual(tabsOf(win)[0].getAttribute('aria-selected'), 'true');
+  });
+
+  await test('keyboard activation and close keep the focus in the strip', () => {
+    const win = makeSharePage(exportFanoutChat());
+    const doc = win.document;
+    tabsOf(win)[0].focus();
+    key(win, doc.activeElement, 'ArrowRight');
+    assert.strictEqual(doc.activeElement, tabsOf(win)[1]);
+    // Enter rebuilds the strip: the activated tab's successor keeps the
+    // focus, so the arrows still work (it used to fall to the body).
+    key(win, doc.activeElement, 'Enter');
+    assert.ok(!sectionByTask(win, 'sub-1').hasAttribute('hidden'));
+    assert.strictEqual(doc.activeElement, tabsOf(win)[1], 'the activated tab');
+    key(win, doc.activeElement, 'ArrowRight');
+    assert.strictEqual(doc.activeElement, tabsOf(win)[2]);
+    // Enter on a close button: the selected tab takes the focus.
+    tabsOf(win)[2].querySelector('.chat-tab-close').focus();
+    key(win, doc.activeElement, 'Enter');
+    assert.ok(sectionByTask(win, 'sub-2').hasAttribute('hidden'));
+    assert.strictEqual(doc.activeElement, tabsOf(win)[1], 'the selected tab');
+    // A strip repaint from elsewhere (a panel folding) leaves the focus.
+    const header = fanoutPanel(win).querySelector('.collapse-header');
+    header.focus();
+    click(header);
+    assert.strictEqual(tabsOf(win).length, 1, 'the fold closed the tabs');
+    assert.strictEqual(doc.activeElement, header);
   });
 
   await test('a run_agent child gets an always-open orphan tab', () => {

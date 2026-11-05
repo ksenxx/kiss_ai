@@ -49,7 +49,13 @@ from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.relentless_agent import _ledger_totals
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _ClassifierSpend
 from kiss.agents.sorcar.task_classifier import TaskClassification
-from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, text_body
+from kiss.tests.agents.sorcar.local_model_server import (
+    MODEL,
+    finish_body,
+    serve,
+    text_body,
+    tool_call_body,
+)
 from kiss.tests.server.parallel_agent_harness import CapturePrinter, IsolatedKissHome
 
 SEEDED = _ClassifierSpend("classifier:seeded", 0.25, 123, 2)
@@ -97,7 +103,7 @@ def _persisted_usage(task_id: str) -> list[tuple[str, float]]:
 
 def _zero_session_run(
     env: IsolatedKissHome,
-    printer: CapturePrinter,
+    printer: CapturePrinter | None,
     *,
     seed_classifier: bool = False,
     agent: ChatSorcarAgent | None = None,
@@ -200,6 +206,76 @@ def test_a_review_charged_after_the_rows_final_save_reaches_the_row(
     assert after["steps"] == before["steps"] + 1
     assert _persisted_usage(task_id)[-1] == ("usage_info", pytest.approx(after["cost"]))
     assert agent.usage_snapshot() == (0.0, 0, 0)
+
+
+def test_a_review_charged_after_the_rows_final_save_reaches_the_row_headless(
+    env: IsolatedKissHome,
+) -> None:
+    """A CLI run (a persisted row, no server printer) gets the daemon's late-charge policy.
+
+    The ledger-only fallback left a stopped headless task's late review
+    spend out of its finished row (audit 2026-11-04, S2 F2): the row and
+    its transcript now get it, the stop's second charge of the attempt
+    counts once, and the next task's ledger stays clean.
+    """
+    agent = _zero_session_run(env, None)
+    task_id = agent.last_task_id
+    before = _row(task_id)
+    assert before["end_ts"] > 0
+    gate = agent._coding_gate
+    agent.reset_usage()
+    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
+    _charge_of(gate)(0.5, 500, 1, "finish-review:late")
+    after = _row(task_id)
+    assert after["cost"] == pytest.approx(before["cost"] + 0.5)
+    assert after["tokens"] == before["tokens"] + 500
+    assert after["steps"] == before["steps"] + 1
+    assert _persisted_usage(task_id)[-1] == ("usage_info", pytest.approx(after["cost"]))
+    assert agent.usage_snapshot() == (0.0, 0, 0)
+
+
+def test_a_headless_review_charged_while_the_row_is_unfinished_is_in_its_final_save(
+    env: IsolatedKissHome,
+) -> None:
+    """End to end, no printer: a real review charged mid-run lands in the row's final totals.
+
+    The row is unfinished when the review's charge arrives, so the spend
+    is banked on the run's ledger, which the final save reads: the row
+    carries every call the scripted endpoint answered, the review's
+    among them (the gate refuses the unchecked finish; every later call,
+    the review's included, gets the repeated 5000-token answer).  The
+    charge's failure branch (a database error under the lock) is not
+    reachable with a real database and is left untested.
+    """
+    env.write_config(coding_gate_reviewer=MODEL, classify_tasks=False, use_memory=False)
+    script = [
+        tool_call_body(
+            "Write", {"file_path": str(env.repo / "hello.py"), "content": "print(42)\n"}, 500
+        ),
+        finish_body("<p>Implemented hello.py.</p>"),
+        text_body("No findings.\nVERDICT: OK", 4000, 1000),
+    ]
+    agent = ChatSorcarAgent("audit1102-headless-review")
+    with serve(script) as (url, requests):
+        agent.run(
+            model_name=MODEL,
+            model_config={"base_url": url, "api_key": "local"},
+            prompt_template="Create hello.py then finish.",
+            max_sub_sessions=1,
+            max_budget=1,
+            max_steps=5,
+            tool_profile="shell+edit",
+            web_tools=False,
+            use_memory=False,
+            work_dir=str(env.repo),
+            verbose=False,
+        )
+    reviews = [b for b in requests if "You are reviewing" in str(b["messages"][-1]["content"])]
+    assert len(reviews) == 1 and len(requests) > 2
+    row = _row(agent.last_task_id)
+    assert row["end_ts"] > 0
+    assert (row["tokens"], row["steps"]) == (5700 + 5000 * (len(requests) - 2), len(requests))
+    assert row["cost"] == pytest.approx(agent.usage_snapshot()[0]) and row["cost"] > 0
 
 
 # --- findings 2 and 3: the cleanup's fold and final save complete under a second Stop ----

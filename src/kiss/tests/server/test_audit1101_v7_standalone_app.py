@@ -16,6 +16,9 @@
    first build next to one) each get a scratch directory of their own:
    with the shared ``AppIcon.iconset`` one's cleanup deleted the
    other's inputs.
+4. Two launcher writers at once (V9) are serialized: one that listed
+   the processes before the other built the clone and a window started
+   from it deleted that clone, executables and all, under the window.
 
 The tools are stubs on ``PATH``; the files, threads and processes are
 real.  The macOS paths run on Linux too: nothing in them is platform
@@ -25,7 +28,10 @@ specific but the tools' names.
 from __future__ import annotations
 
 import os
+import plistlib
+import shutil
 import stat
+import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -264,3 +270,129 @@ def test_concurrent_icon_conversions_keep_their_scratch_directories(
     assert results == {"first.png": True, "second.png": True}
     assert icns.read_text() == "icns"
     assert list(icns.parent.iterdir()) == [icns], "a scratch directory was left behind"
+
+
+# ``ps``: a slow one.  Lists the processes at once (the real ``ps``),
+# then delivers the listing only once ``<stub>.gate`` exists.
+_SLOW_PS = (
+    'listing=$(PATH=/usr/bin:/bin ps "$@")\n: > "$0.started"\n'
+    'while [ ! -e "$0.gate" ]; do sleep 0.01; done\n'
+    'printf "%s\\n" "$listing"\n'
+)
+
+
+def _start_window(exe_copy: Path) -> tuple[subprocess.Popen[bytes], int]:
+    """Run the clone's executable (a copy of ``sleep``); it and the executable's inode."""
+    window = subprocess.Popen(
+        [str(exe_copy), "60"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return window, exe_copy.stat().st_ino
+
+
+def _browser_bundle(root: Path, version: str) -> Path:
+    """A browser bundle of *version* under *root*: a copy of ``sleep`` and a versioned helper."""
+    browser = root / f"Chromium-{version}.app" / "Contents" / "MacOS" / "Chromium"
+    browser.parent.mkdir(parents=True)
+    # copy, not copy2: macOS marks /bin/sleep "restricted", a file flag
+    # copystat may not set (EPERM).
+    shutil.copy(shutil.which("sleep") or "/bin/sleep", browser)
+    (browser.parents[1] / "Frameworks").mkdir()
+    (browser.parents[1] / "Frameworks" / f"helper-v{version}").write_text(f"helper {version}")
+    with (browser.parents[1] / "Info.plist").open("wb") as f:
+        plistlib.dump({"CFBundleVersion": version, "CFBundleShortVersionString": version}, f)
+    return browser
+
+
+def test_concurrent_launcher_writers_keep_the_clone_a_window_runs_from(
+    bin_dir: Path, tmp_path: Path
+) -> None:
+    """Two writers at once: a stale process listing cannot delete the other's live clone.
+
+    Writer B lists the processes (nothing runs from the bundle) and is
+    held in that ``ps``; writer A, told nothing ran, starts meanwhile.
+    Serialized, A waits for B, which builds the clone, and keeps it.
+    Unserialized, A built the clone while B's listing was in flight, a
+    window started from it, and B then deleted it under the window.
+    """
+    ps = _stub(bin_dir, "ps", _SLOW_PS)
+    browser = _browser_bundle(tmp_path, "1")
+    apps = tmp_path / "Applications"
+    bundle = apps / f"{BRAND['product_name']}.app"
+    exe_copy = bundle / "Contents" / "MacOS" / "Chromium"
+    icon, exe, state = tmp_path / "icon.png", tmp_path / "kiss-app", tmp_path / "state"
+    results: dict[str, Path | None] = {}
+    errors: list[BaseException] = []
+
+    def write(name: str, in_use: bool | None) -> None:
+        try:
+            results[name] = standalone_app.write_macos_launcher(
+                apps, BRAND, icon, exe, state, browser, in_use
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported by the assertions below
+            errors.append(exc)
+
+    writer_b = threading.Thread(target=write, args=("B", None))
+    writer_a = threading.Thread(target=write, args=("A", False))
+    window, inode = None, 0
+    try:
+        writer_b.start()
+        assert _wait_until(Path(f"{ps}.started").exists), "writer B never listed the processes"
+        writer_a.start()
+        writer_a.join(1.0)
+        if not writer_a.is_alive():  # not serialized: the window starts from A's clone
+            window, inode = _start_window(exe_copy)
+        Path(f"{ps}.gate").touch()
+        for writer in (writer_b, writer_a):
+            writer.join(10)
+            assert not writer.is_alive()
+        if window is None:
+            window, inode = _start_window(exe_copy)
+        assert errors == []
+        assert results == {"A": exe_copy, "B": exe_copy}
+        assert window.poll() is None
+        assert exe_copy.stat().st_ino == inode, "the executable the window runs from was replaced"
+        assert (bundle / "Contents" / "Frameworks" / "helper-v1").is_file()
+    finally:
+        Path(f"{ps}.gate").touch()
+        if window is not None:
+            window.kill()
+            window.wait(10)
+
+
+def test_a_stale_not_in_use_hint_cannot_delete_a_live_clone_of_another_browser(
+    tmp_path: Path,
+) -> None:
+    """A "nothing runs" listing taken before the clone was built does not authorize deleting it.
+
+    ``main()`` lists the processes once, before the writer's lock.  Writer
+    A then builds the clone and a window starts from it; writer B, given
+    that stale listing, targets an updated browser, so A's clone is not
+    current for it.  The clone is nonetheless the one the window runs
+    from: B must find that out again under the lock and leave it alone.
+    """
+    apps = tmp_path / "Applications"
+    bundle = apps / f"{BRAND['product_name']}.app"
+    icon, exe, state = tmp_path / "icon.png", tmp_path / "kiss-app", tmp_path / "state"
+    stale_hint = standalone_app.macos_bundle_in_use(bundle)
+    assert stale_hint is False
+    clone = standalone_app.write_macos_launcher(
+        apps, BRAND, icon, exe, state, _browser_bundle(tmp_path, "1")
+    )
+    assert clone is not None
+    window, inode = _start_window(clone)
+    try:
+        assert _wait_until(lambda: standalone_app.macos_bundle_in_use(bundle) is True)
+        updated = _browser_bundle(tmp_path, "2")
+        assert standalone_app.write_macos_launcher(
+            apps, BRAND, icon, exe, state, updated, in_use=stale_hint
+        ) is None
+        assert window.poll() is None
+        assert clone.stat().st_ino == inode, "the executable the window runs from was replaced"
+        assert (bundle / "Contents" / "Frameworks" / "helper-v1").is_file()
+        assert standalone_app.macos_bundle_browser(bundle, updated) is None
+    finally:
+        window.kill()
+        window.wait(10)

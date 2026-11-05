@@ -374,13 +374,19 @@ def test_manager_without_tokens_refuses_interactive_login(
 
 
 def test_manager_refreshes_expired_tokens(server: _AuthMCPServer, home: Path) -> None:
-    server.provider.expires_in = 1
     _login(server)
-    server.provider.expires_in = 3600
     storage = FileTokenStorage("authdemo", server.url)
     assert storage.get_oauth_metadata() is not None
-    old = storage._read()["tokens"]["access_token"]
-    time.sleep(1.5)  # the access token expires; the refresh token stays valid
+    tokens = storage._read()["tokens"]
+    old = tokens["access_token"]
+    # The access token expires, on the server and in the stored record;
+    # the refresh token stays valid.  Expired after the login: a 1 s
+    # lifetime from the start let a slow (Windows, loaded) login's own
+    # check see the token already expired.
+    server.provider.access[old] = server.provider.access[old].model_copy(
+        update={"expires_at": int(time.time()) - 1}
+    )
+    storage.put("tokens", {**tokens, "expires_in": 0})
     manager = MCPManager()
     try:
         conn = manager.connect(_cfg(server))

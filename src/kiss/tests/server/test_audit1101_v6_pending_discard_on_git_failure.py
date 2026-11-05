@@ -149,6 +149,34 @@ def test_unreadable_history_keeps_the_worktree_and_its_modified_file(tmp_path: P
     assert wt.wt_dir.exists()
 
 
+def test_index_only_work_is_listed_and_kept(tmp_path: Path) -> None:
+    """Staged text whose working file is back at the base (``MM``): listed, never discarded."""
+    wt = _repo_with_worktree(tmp_path)
+    (wt.wt_dir / "tracked.txt").write_text("UNIQUE STAGED WORK\n")
+    _git(wt.wt_dir, "add", "tracked.txt")
+    (wt.wt_dir / "tracked.txt").write_text("base\n")
+    assert _git(wt.wt_dir, "status", "--porcelain").stdout == "MM tracked.txt\n"
+    # The working tree equals the base: only the index holds the work.
+    assert _git(wt.wt_dir, "diff", "--name-only", "main").stdout == ""
+    server, events = _server_with_pending(wt, "staged-tab")
+    agent = agent_state.find_by_tab("staged-tab").agent  # type: ignore[union-attr]
+    assert agent is not None
+
+    assert server._get_worktree_changed_files("staged-tab") == ["tracked.txt"]
+    # Post-task path (the runner discards when nothing was presented),
+    # then the session-resume path (which discards itself).
+    assert server._present_pending_worktree("staged-tab", discard_if_empty=False) is True
+    presented = server._present_pending_worktree("staged-tab")
+
+    assert presented is True
+    assert wt.wt_dir.exists(), "the worktree directory was deleted"
+    assert _git(wt.wt_dir, "show", ":tracked.txt").stdout == "UNIQUE STAGED WORK\n"
+    assert _branch_exists(wt.repo_root, "task-work")
+    assert agent.worktrees == [wt], "the worktree is no longer pending"
+    done = [e for e in events if e["type"] == "worktree_done"]
+    assert [e["changedFiles"] for e in done] == [["tracked.txt"], ["tracked.txt"]]
+
+
 def test_a_verified_clean_worktree_is_still_auto_discarded(tmp_path: Path) -> None:
     """Control: a readable worktree without changes is discarded as before."""
     wt = _repo_with_worktree(tmp_path)

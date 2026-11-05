@@ -274,8 +274,9 @@ def test_channel_flag_is_fixable_and_fix_rewrites_the_base_class(tmp_path: Path)
 
 def test_fix_rewrites_aliased_and_attribute_bases_and_keeps_dict_unpacks(tmp_path: Path) -> None:
     """The base may be imported under an alias or named as ``base_sea.BaseSea``; a dropped
-    entry next to a ``**`` unpack leaves the unpack intact; adjacent removed entries
-    are one edit."""
+    entry next to a ``**`` unpack leaves the unpack intact, parentheses included; the new
+    base's import lands in the leading import section, not after a trailing import;
+    adjacent removed entries are one edit."""
     dotted = write_sea(tmp_path, """from kiss.agents.seas.base import base_sea
 
 
@@ -304,6 +305,9 @@ class Sea(B):
 
     def settings(self, settings):
         return settings | {"kind": "worker", **EXTRA, "allow_fan_out": False}
+
+
+import os  # a legal trailing import must not pull the base's import after the class
 """, "aliased")
     assert [line.split(": ", 1)[1] for line in fix_sea(aliased)] == [
         "import WorkerSea", "class base BaseSea -> WorkerSea",
@@ -311,11 +315,40 @@ class Sea(B):
     ]
     text = aliased.read_text(encoding="utf-8")
     assert "class Sea(WorkerSea):" in text
-    assert "from kiss.agents.seas.base.base_sea import WorkerSea\n" in text
+    assert text.startswith(
+        "from kiss.agents.seas.base.base_sea import BaseSea as B\n"
+        "from kiss.agents.seas.base.base_sea import WorkerSea\n"
+    )
     assert "return settings | {**EXTRA}" in text
     assert lint_all([aliased]) == []
     assert sea_settings_of(aliased)["timeout"] == 5
     assert sea_settings_of(aliased)["use_memory"] is False
+
+    # The AST spans of ``**(settings)`` and ``(False)`` leave out their parentheses.
+    parenthesized = write_sea(tmp_path, DESCRIPTION + """
+    def settings(self, settings):
+        return {**(settings), "allow_fan_out": False, "timeout": (5.0), "is_parallel": (
+            False  # one worker at a time
+        ), **  # the base settings again
+        (settings)}
+""", "parenthesized")
+    assert [line.split(": ", 1)[1] for line in fix_sea(parenthesized)] == [
+        "drop 'allow_fan_out'", "drop 'is_parallel'",
+    ]
+    text = parenthesized.read_text(encoding="utf-8")
+    assert (
+        'return {**(settings), "timeout": (5.0), **  # the base settings again\n'
+        "        (settings)}\n"
+    ) in text
+    assert lint_all([parenthesized]) == []
+    assert sea_settings_of(parenthesized)["timeout"] == 5.0
+    trailing = write_sea(tmp_path, DESCRIPTION + """
+    def settings(self, settings):
+        return {**(settings), "is_parallel": (False)}
+""", "trailing")
+    assert [line.split(": ", 1)[1] for line in fix_sea(trailing)] == ["drop 'is_parallel'"]
+    assert "return {**(settings)}" in trailing.read_text(encoding="utf-8")
+    assert lint_all([trailing]) == []
 
     adjacent = write_sea(tmp_path, DESCRIPTION + """
     def settings(self, settings):
