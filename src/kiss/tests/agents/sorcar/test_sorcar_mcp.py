@@ -379,6 +379,83 @@ def test_wrapper_docstring_carries_schema_descriptions() -> None:
     assert params["limit"].default is None
 
 
+def test_wrapper_declares_the_structured_input_schema() -> None:
+    """The model sees the tool's arrays, objects, enums and null unions, not strings.
+
+    The wrapper reduced every property to a Python type and let the
+    model converter regenerate its schema: arrays and objects became
+    ``{"type": "string"}``, enums, nested properties and ``null``
+    unions vanished, so models sent strings where the server required
+    structured input.  The declared schema keeps that structure under
+    the sanitized parameter names, and leaves out the keywords the
+    providers' tool declarations reject (``$schema``,
+    ``additionalProperties``, ``title``).  A ``oneOf`` union is
+    declared as ``anyOf``: Gemini's declaration schema knows no
+    ``oneOf`` and refused the whole tool before any request, where the
+    string the property used to fall back to went through.
+    """
+    from google.genai import types
+    from mcp.types import Tool
+
+    from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
+    from kiss.core.models.model_info import model
+
+    tool = Tool(
+        name="file",
+        description="File findings.",
+        inputSchema={
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}},
+                        "required": ["id"],
+                        "additionalProperties": False,
+                    },
+                },
+                "severity": {"type": "string", "enum": ["low", "high"], "title": "Severity"},
+                "max-age": {"type": ["integer", "null"], "description": "Days"},
+                "query": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+            },
+            "required": ["findings", "query"],
+        },
+    )
+    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool, "srv")
+    schema = model(DEFAULT_DECISIONS_MODEL)._function_to_openai_tool(wrapper)["function"]
+    assert schema["description"] == "File findings."
+    assert schema["parameters"] == {
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"],
+                },
+            },
+            "severity": {"type": "string", "enum": ["low", "high"]},
+            "max_age": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "Days"},
+            "query": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+        },
+        "required": ["findings", "query"],
+    }
+    assert inspect.signature(wrapper).parameters["max_age"].annotation is int
+    # The declaration Gemini builds from it, as ``generate_and_process_with_tools`` does.
+    declaration = types.FunctionDeclaration(
+        name=schema["name"], description=schema["description"], parameters=schema["parameters"],
+    )
+    assert declaration.parameters is not None
+    assert declaration.parameters.properties is not None
+    query_members = declaration.parameters.properties["query"].any_of
+    assert query_members is not None
+    assert [m.type for m in query_members] == ["INTEGER", "STRING"]
+
+
 
 def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     """Tokens and client info persist to a 0600 file and clear()."""

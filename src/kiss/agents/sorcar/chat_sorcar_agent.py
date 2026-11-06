@@ -762,6 +762,7 @@ class ChatSorcarAgent(SorcarAgent):
         _history_prompt: str | None = None,
         _open_bare_path: bool = True,
         _start_ms: int = 0,
+        compaction: bool = True,
     ) -> str:
         """Run the agent with chat-session context management.
 
@@ -841,6 +842,10 @@ class ChatSorcarAgent(SorcarAgent):
             _start_ms: The run's start as a ms epoch, when the caller
                 stamped it before calling (the daemon's ``<task>``
                 block); 0 (default) dates the run at row allocation.
+            compaction: Whether the run compacts its context (see
+                :meth:`SorcarAgent.run`): False never compacts, True (the
+                default) compacts while the global Compaction setting is
+                on.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1104,6 +1109,7 @@ class ChatSorcarAgent(SorcarAgent):
                 system_prompt_hook=system_prompt_hook,
                 tools_hook=tools_hook,
                 task_begun=True,
+                compaction=compaction,
             )
             parsed = _parse_result(result)
             result_summary = _result_summary_text(result, parsed)

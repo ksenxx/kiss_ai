@@ -84,6 +84,8 @@ def test_background_jobs_in_a_container() -> None:
         python_only = jobs.bash_job(job_id, "wait", timeout_seconds=60, until="(?i)ready")
         assert time.monotonic() - t0 < 30, python_only
         assert python_only.startswith("Error: until is not a valid grep -E regex: grep: ")
+        # Only a wait reads the pattern: a tail with one is a tail, not a check of it.
+        assert "status: running" in jobs.bash_job(job_id, "tail", until="[")
         assert jobs.bash_job(job_id, "dance").startswith("Error: action must be one of")
 
         # The job outlives a timed-out foreground command: the deadline sweep

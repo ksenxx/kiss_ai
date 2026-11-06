@@ -364,6 +364,31 @@ def test_rmtree_force_removes_read_only_trees_and_tolerates_absence(tmp_path: Pa
     # reproducible as this user without a test double, so it is not covered.
 
 
+@posix_only("directory write bits deny the unlink of a link only on POSIX")
+@pytest.mark.skipif(is_root(), reason="root is never denied the unlink")
+def test_rmtree_force_unlinks_links_without_following_them(tmp_path: Path) -> None:
+    """A symlink in a read-only directory is unlinked, not followed: its
+    target outside the tree keeps its mode, and a dangling link (whose
+    referent cannot be chmod'ed at all) is removed too, so the tree goes."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    outside.chmod(0o640)
+    tree = tmp_path / "tree"
+    for name, target in (("a", outside), ("b", tmp_path / "missing")):
+        folder = tree / name
+        folder.mkdir(parents=True)
+        (folder / "link").symlink_to(target)
+        folder.chmod(stat.S_IREAD | stat.S_IEXEC)  # no write bit: the unlink is denied
+    try:
+        rmtree_force(tree)
+    finally:
+        for folder in tree.glob("*") if tree.exists() else ():
+            folder.chmod(stat.S_IRWXU)
+    assert not tree.exists()
+    assert outside.read_text() == "keep"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o640
+
+
 def test_rmtree_force_reports_other_failures(tmp_path: Path) -> None:
     """A path that is a plain file is not a tree: the error propagates unchanged."""
     plain = tmp_path / "plain.txt"

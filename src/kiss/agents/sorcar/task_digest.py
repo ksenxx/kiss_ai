@@ -63,6 +63,10 @@ _OVERVIEW_SUMMARIES_HEAD = 2
 _OVERVIEW_SUMMARIES_TAIL = 10
 _OVERVIEW_ASK_ANSWERS = 3
 _OVERVIEW_TAIL_ENTRIES = 30
+# A fan-out of hundreds of sub-agents would otherwise fill the whole
+# context (:data:`MAX_CONTEXT_CHARS`) with child lines alone.
+_CHILDREN_HEAD = 2
+_CHILDREN_TAIL = 20
 MAX_PAGE = 400
 # Character budget of :func:`context` (~15-20k tokens): the whole
 # context fits a single cheap model call next to the question.
@@ -194,7 +198,8 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
 
     Returns:
         ``(entries, spend)`` where *spend* is the text of the last
-        ``usage_info`` event (``""`` when none was recorded).
+        ``usage_info`` event (``""`` when none was recorded); a textless
+        one (a late charge's totals) is formatted from its fields.
     """
     entries: list[Entry] = []
     stream = _StreamBuffer()
@@ -207,7 +212,7 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
             continue
         stream.flush(entries)
         if kind == "usage_info":
-            spend = str(ev.get("text") or spend)
+            spend = str(ev.get("text") or "") or _totals_spend(ev) or spend
         elif kind == "prompt":
             text = str(ev.get("text") or "").strip()
             if seen_prompt and not text.startswith("/ask"):
@@ -233,6 +238,23 @@ def digest_events(events: list[dict[str, Any]]) -> tuple[list[Entry], str]:
                 entries.append(Entry(kind.upper(), str(text)))
     stream.flush(entries)
     return entries, spend
+
+
+def _totals_spend(ev: dict[str, Any]) -> str:
+    """Return the spend line of a textless ``usage_info`` from its totals, or ``""``.
+
+    A late charge (persisted after the run by
+    :func:`~kiss.agents.sorcar.sorcar_agent._append_late_usage_events`)
+    carries an empty ``text`` and the authoritative ``cost_usd``,
+    ``total_tokens`` and ``total_steps``.
+    """
+    if ev.get("cost_usd") is None:
+        return ""
+    return (
+        f"Steps: {int(ev.get('total_steps') or 0)}, "
+        f"Total tokens: {int(ev.get('total_tokens') or 0):,}, "
+        f"Budget: ${float(ev['cost_usd']):.4f}"
+    )
 
 
 def _event_ms(ev: dict[str, Any]) -> int:
@@ -457,15 +479,22 @@ def _summary_section(indexed: list[tuple[int, Entry]]) -> list[str]:
     :data:`_OVERVIEW_SUMMARIES_TAIL`, with a line counting the omitted
     ones between them when there are more.
     """
-    head, tail = _OVERVIEW_SUMMARIES_HEAD, _OVERVIEW_SUMMARIES_TAIL
-    omitted = len(indexed) - head - tail
-    if omitted <= 0:
-        return [_summary_line(i, e) for i, e in indexed]
-    return [
-        *(_summary_line(i, e) for i, e in indexed[:head]),
-        f"... {omitted} earlier summaries omitted (see run_transcript) ...",
-        *(_summary_line(i, e) for i, e in indexed[-tail:]),
-    ]
+    return _head_and_tail(
+        [_summary_line(i, e) for i, e in indexed],
+        _OVERVIEW_SUMMARIES_HEAD, _OVERVIEW_SUMMARIES_TAIL,
+        "earlier summaries omitted (see run_transcript)",
+    )
+
+
+def _head_and_tail(lines: list[str], head: int, tail: int, omitted: str) -> list[str]:
+    """Return *lines* whole, or the first *head* and last *tail* around a count of the rest.
+
+    The count line reads ``... <n> <omitted> ...``.
+    """
+    gone = len(lines) - head - tail
+    if gone <= 0:
+        return lines
+    return [*lines[:head], f"... {gone} {omitted} ...", *lines[-tail:]]
 
 
 def _children_section(task: dict[str, Any], with_side_channel_count: bool) -> list[str]:
@@ -483,7 +512,11 @@ def _children_section(task: dict[str, Any], with_side_channel_count: bool) -> li
             f"; plus {len(children) - len(workers)} side-channel /ask or task-update "
             "runs not listed"
         )
-    return ["", title + ") ==", *([_child_line(c) for c in workers] or ["(none)"])]
+    lines = _head_and_tail(
+        [_child_line(c) for c in workers], _CHILDREN_HEAD, _CHILDREN_TAIL,
+        "earlier sub-agent tasks omitted",
+    )
+    return ["", title + ") ==", *(lines or ["(none)"])]
 
 
 def overview(task_id: str) -> str:

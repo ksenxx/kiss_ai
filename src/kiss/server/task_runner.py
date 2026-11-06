@@ -1197,17 +1197,31 @@ class _TaskRunnerMixin:
                 # user setup (SEA getters) may execute.
                 client_task_id = _client_task_id_of(cmd)
                 raise KeyboardInterrupt("run cancelled before start")
+            # The run's start status goes out BEFORE the agent-script
+            # overrides below: they are untrusted user code of unbounded
+            # duration, and the worker thread is already installed (the
+            # chat is busy), so every surface must show the tab running
+            # from here on — the tab header's spinner reads nothing but
+            # this event.  The client's run token is a client field the
+            # scripts never rewrite.
+            client_task_id = _client_task_id_of(cmd)
+            status_start: dict[str, Any] = {
+                "type": "status",
+                "running": True,
+                "tabId": tab_id,
+                "startTs": start_ms,
+            }
+            if client_task_id:
+                status_start["taskId"] = client_task_id
+            self.printer.broadcast(status_start)
             # Agent-script overrides (wire field ``seaPath``) rewrite the
             # run command's parameter fields, so they run FIRST — before
             # any field is read, including the ``chatId`` that
             # ``_resolve_run_state`` below consumes.  The script is
             # untrusted user code, so it executes here on the task's worker
-            # thread, never on the dispatch loop.  A
-            # broken script must still fail the task with the
-            # status-running → result → status-end guarantees of the try
-            # below, so the raise is deferred until after the start status.
-            sea_error: SeaError | None = None
-            overridden_fields: set[str] = set()
+            # thread, never on the dispatch loop.  A broken script fails
+            # the task through the handler below, with the start status
+            # already out: result, then the end status.
             # Decided on the task text as SUBMITTED: a cron prompt job
             # carries its unattended preamble there, and the SEA a
             # ``/xxx`` prompt turns into may replace the text (the
@@ -1219,11 +1233,7 @@ class _TaskRunnerMixin:
                 str(cmd.get("prompt", "")) + str(cmd.get("appendToPrompt") or "")
             )
             cmd["cronJob"] = bool(cmd.get("cronJob")) or cmd["_unattended"]
-            try:
-                overridden_fields = self._apply_sea(cmd)
-            except SeaError as exc:
-                sea_error = exc
-            client_task_id = _client_task_id_of(cmd)
+            overridden_fields = self._apply_sea(cmd)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
             # finally below would miss and skip the end-of-run cleanup.
@@ -1292,17 +1302,6 @@ class _TaskRunnerMixin:
                     # That ``clear`` wipes the transcript again, so the
                     # run's notice (dropped attachments) must follow it.
                     self._broadcast_run_notice(cmd, tab_id)
-            status_start: dict[str, Any] = {
-                "type": "status",
-                "running": True,
-                "tabId": tab_id,
-                "startTs": start_ms,
-            }
-            if client_task_id:
-                status_start["taskId"] = client_task_id
-            self.printer.broadcast(status_start)
-            if sea_error is not None:
-                raise sea_error
             self._run_task_inner(cmd)
         except BaseException as exc:
             if state is None:
@@ -2222,6 +2221,15 @@ class _TaskRunnerMixin:
             # ``useWebTools`` no config fallback is read here.
             _raw_memory = cmd.get("useMemory")
             _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
+            # Per-run context compaction: the ``compaction`` wire field
+            # (``compaction`` on ``kiss.server.sorcar.run``, a SEA's
+            # ``compaction`` setting, a ``run_agent`` option).  Only an
+            # explicit ``False`` turns it off: absent or malformed is
+            # the agent's default (on), and the daemon's global
+            # Compaction setting (``DEFAULT_CONFIG.tool_output_compaction``,
+            # mirrored from the persisted ``compaction`` key) is read by
+            # the agent itself at every step.
+            _agent_compaction = cmd.get("compaction") is not False
             # Tool profile (``run(tool_profile=...)`` / an agent
             # script's ``tool_profile()``): absent or malformed means
             # the agent's usual choice.  An unknown name is rejected
@@ -2337,6 +2345,7 @@ class _TaskRunnerMixin:
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
                         live_browser=self.browser_tabs,
                         use_memory=_agent_memory,
+                        compaction=_agent_compaction,
                         model_config=_effective_config,
                         tools_hook=_tools_hook,
                         append_basic_tools=_append_basic_tools,

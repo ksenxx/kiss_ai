@@ -26,6 +26,7 @@ const {
   openChatsPage: makePage,
   chatHeader,
 } = require('./history_helpers');
+const {key} = require('./ui_antipattern_harness');
 
 /** Chat `chatId`'s panel in the Chats list, or null. */
 function group(win, chatId) {
@@ -36,10 +37,6 @@ function group(win, chatId) {
 
 function title(win, chatId) {
   return chatHeader(win, chatId).querySelector(':scope > .history-chat-title');
-}
-
-function key(win, el, k) {
-  el.dispatchEvent(new win.KeyboardEvent('keydown', {key: k, bubbles: true}));
 }
 
 async function testRenameBoxSurvivesChangedRows() {

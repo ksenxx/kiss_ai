@@ -49,7 +49,13 @@ from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.useful_tools import resolve_tool_path
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.processes import SIGKILL, kill_process_tree, popen_process_group
+from kiss.core.processes import (
+    IS_WINDOWS,
+    SIGKILL,
+    kill_process_tree,
+    popen_process_group,
+    signal_unreaped_child,
+)
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
 
@@ -223,6 +229,8 @@ _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (
 
 
 _CLOSE_WATCHDOG_SECS = 15.0
+# How long a killed Playwright driver is given to exit so it can be reaped.
+_DRIVER_REAP_SECS = 5.0
 
 
 def _wait_pid_exit(pid: int, timeout: float) -> bool:
@@ -361,15 +369,46 @@ def _driver_is_dead(playwright: Any) -> bool:
     return proc is not None and proc.returncode is not None
 
 
+def _kill_driver_process(playwright: Any) -> int | None:
+    """Send SIGKILL to the Node driver behind a sync *playwright*; return the pid to reap.
+
+    The driver is this process's child and is signalled only while it
+    is still an unreaped one (:func:`kiss.core.processes.signal_unreaped_child`):
+    asyncio's ``Process.kill`` signals the bare pid, which, once the
+    loop's child watcher has reaped the driver, may belong to another
+    process.  On Windows the kill goes through the process handle and
+    there is nothing to reap.
+
+    Returns:
+        The driver's pid while it is this process's unreaped child
+        (signalled now, or exited already), else None: reaped, Windows,
+        or another Playwright layout.
+    """
+    try:
+        proc = playwright._impl_obj._connection._transport._proc
+    except AttributeError:  # another Playwright layout
+        logger.debug("Could not find the Playwright driver", exc_info=True)
+        return None
+    pid = int(proc.pid)
+    if proc.returncode is not None:
+        return None
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        proc.kill()
+        return None
+    try:
+        return pid if signal_unreaped_child(pid, SIGKILL) else None
+    except OSError:  # no descriptor for the pidfd: the driver stays rather than a stranger risked
+        logger.warning("Could not kill the Playwright driver (pid %d)", pid, exc_info=True)
+        return None
+
+
 def _kill_driver(playwright: Any, deadline_secs: float) -> None:
     """Watchdog timer body: kill the Node driver whose raw input to an attached Chrome hung.
 
     The browser is the user's own Chrome, which is never signalled.  The
     driver's exit fails the blocked call instead (its request dies with
     the driver's pipe), and :func:`_driver_is_dead` lets the next call
-    discard the driver and say how to reconnect.  ``Process.kill`` polls
-    the child first and skips one already reaped (Popen's guard against
-    signalling a recycled pid).
+    discard the driver and say how to reconnect.
 
     Args:
         playwright: The sync Playwright whose driver to kill.
@@ -379,10 +418,42 @@ def _kill_driver(playwright: Any, deadline_secs: float) -> None:
         "Raw input to the attached Chrome is hung after %.0fs; killing the Playwright driver",
         deadline_secs,
     )
+    _kill_driver_process(playwright)
+
+
+def _stop_playwright(playwright: Any) -> None:
+    """Stop a sync *playwright*; kill and reap its Node driver when ``stop()`` cannot run.
+
+    ``stop()`` runs only on the thread that started Playwright: from any
+    other (the atexit hook, or the daemon's close, of a tool created on
+    a pool worker) it raises ``greenlet.error``, and its request never
+    reaches the driver -- closing the driver's stdin is left to the event
+    loop, which no longer turns.  Each such close left a ``node
+    run-driver`` process alive until the daemon exited.  The driver is
+    killed here instead and reaped (the loop's child watcher never runs
+    again either, so a zombie would stay); the Chromium it launched is
+    the caller's business (:meth:`WebUseTool._kill_browser_process`).
+
+    Args:
+        playwright: The sync Playwright to stop.
+    """
     try:
-        playwright._impl_obj._connection._transport._proc.kill()
-    except (AttributeError, ProcessLookupError):  # already gone, or another Playwright layout
-        logger.debug("Could not kill the Playwright driver", exc_info=True)
+        playwright.stop()
+        return
+    except Exception:  # noqa: BLE001 - greenlet.error off the starting thread
+        logger.warning("Stopping the Playwright driver failed; killing it", exc_info=True)
+    pid = _kill_driver_process(playwright)
+    if pid is None:
+        return
+    deadline = time.monotonic() + _DRIVER_REAP_SECS
+    while time.monotonic() < deadline:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return
+        except ChildProcessError:  # reaped by the loop's child watcher after all
+            return
+        time.sleep(0.05)
+    logger.warning("Killed Playwright driver (pid %d) did not exit", pid)
 
 
 class _TimerGuard:
@@ -2081,8 +2152,12 @@ class WebUseTool:
         actionability checks (visible, stable, enabled, receives events)
         still apply; when the chosen point is not hittable within 5 s
         (e.g. the gap between two lines of a wrapped link) the plain
-        centre click is used, exactly as before.  An element without a
-        rendered box is clicked the plain way straight away.
+        centre click is used, exactly as before.  Only a ``trial`` click
+        (the checks without the press) is bounded that way: a click's
+        own timeout also covers the navigation it starts, and a slow
+        form submission must not be submitted again at the centre.  The
+        real click is issued once.  An element without a rendered box is
+        clicked the plain way straight away.
 
         Args:
             locator: Playwright locator of the element.
@@ -2106,15 +2181,15 @@ class WebUseTool:
             try:
                 if hover_only:
                     locator.hover(position=position, timeout=5000)
-                else:
-                    locator.click(position=position, delay=press_ms, timeout=5000)
-                return
+                    return
+                locator.click(position=position, trial=True, timeout=5000)
             except api.TimeoutError:
                 logger.debug("point not hittable; falling back to centre click", exc_info=True)
+                position = None
         if hover_only:
             locator.hover()
         else:
-            locator.click(delay=press_ms)
+            locator.click(position=position, delay=press_ms)
 
     def _glide_onto(self, locator: Any) -> dict[str, float] | None:
         """Scroll *locator* into view and glide the pointer onto it.
@@ -2462,19 +2537,27 @@ class WebUseTool:
         tree = self._get_ax_tree()
         return f"{notice}\n\n{tree}" if notice else tree
 
-    def _adopt_new_tab(self, pages_before: int) -> None:
+    def _adopt_new_tab(self, pages_before: list[Any]) -> None:
         """Switch to the tab the last action opened, if it opened one.
 
         A click on, or Enter over, a ``target="_blank"`` link (or a form
         submitting to one) opens a new tab; the agent's attention moves
         there, as a person's would, and so does the challenge handling.
+        Only a tab the current page opened counts: the context is shared
+        with the tabs of other tasks and the user (the Browser tab, an
+        attached Chrome), and one of theirs appearing meanwhile is not
+        this action's.
 
         Args:
-            pages_before: How many tabs the context had before the action.
+            pages_before: The tabs the context had before the action.
         """
-        pages = self._context.pages
-        if len(pages) > pages_before:
-            self._adopt_page(pages[-1])
+        opened = [
+            page
+            for page in self._context.pages
+            if page not in pages_before and page.opener() is self._page
+        ]
+        if opened:
+            self._adopt_page(opened[-1])
             self._wait_for_stable()
 
     def _user_sees_page(self) -> bool:
@@ -2597,9 +2680,12 @@ class WebUseTool:
                     suffix = " (active)" if page == self._page else ""
                     try:
                         title = self._page_title(page)
-                    except web_stealth.playwright_api().TimeoutError:
+                    except (TimeoutError, web_stealth.playwright_api().TimeoutError):
                         # One unresponsive tab must not make the whole
                         # listing fail; the agent needs it to switch away.
+                        # The built-in TimeoutError is the serialization
+                        # deadline of ``_read_page``, Playwright's the
+                        # wait's.
                         logger.debug("Exception caught", exc_info=True)
                         title = "(unresponsive)"
                     lines.append(f"  [{i}] {title} - {page.url}{suffix}")
@@ -2665,7 +2751,7 @@ class WebUseTool:
                 self._page.wait_for_timeout(300)
                 return self._get_ax_tree()
 
-            pages_before = len(self._context.pages)
+            pages_before = self._context.pages
             self._human_click(locator)
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
@@ -2692,7 +2778,7 @@ class WebUseTool:
         try:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
-            pages_before = len(self._context.pages)
+            pages_before = self._context.pages
             self._human_click(locator)
             # Typing spends up to 115 ms per character (260 ms per space)
             # legitimately, so the deadline scales with the text.
@@ -2731,7 +2817,7 @@ class WebUseTool:
             return err
         try:
             self._require_responsive_renderer()
-            pages_before = len(self._context.pages)
+            pages_before = self._context.pages
             with self._input_hang_watchdog():
                 self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
@@ -3373,10 +3459,7 @@ class WebUseTool:
             "Browser closed." (always, even if nothing was open)."""
         self._close_browser_only(keep_live_tab=True)
         if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:  # pragma: no cover — Playwright stop rarely fails
-                logger.debug("Exception caught", exc_info=True)
+            _stop_playwright(self._playwright)
         self._playwright = None
         atexit.unregister(self.close)
         if self._ephemeral_dir:

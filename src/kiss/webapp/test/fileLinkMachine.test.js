@@ -137,23 +137,6 @@ function testHomeTabSendsNoMachine() {
   console.log('  ok - a tab of this machine sends no machine stamp');
 }
 
-function testReissueAfterReconnectKeepsTheMachine() {
-  const wv = makeDomPage();
-  send(wv.win, {type: 'prompt', text: 'see src/box.py please', tabId: BOX_TAB});
-  send(wv.win, {type: 'text_end', tabId: BOX_TAB});
-  assert.strictEqual(checks(wv.posted).length, 1);
-  // The daemon goes away before answering and comes back: the check
-  // is re-issued, still stamped with the machine.
-  send(wv.win, {type: 'daemonStatus', connected: false});
-  send(wv.win, {type: 'daemonStatus', connected: true});
-  const sent = checks(wv.posted);
-  assert.strictEqual(sent.length, 2, 'the unanswered check is re-issued');
-  assert.strictEqual(sent[1].machine, 'box');
-  assert.deepStrictEqual(sent[1].paths, ['src/box.py']);
-  wv.close();
-  console.log('  ok - re-issued checks keep the machine stamp');
-}
-
 /**
  * Pick *name* ('' = this machine) in the chat header's machine
  * drop-down, as a user would: this only says where the tab's NEXT task
@@ -218,6 +201,7 @@ function testLinksFollowTheBindingNotTheDropDown() {
     'box',
     'the re-issued check names the box, not the drop-down pick',
   );
+  assert.deepStrictEqual(reissued[1].paths, ['src/box.py']);
   answer(wv.win, reissued[1]);
   const link = linkFor(wv.win, 'src/box.py');
   assert.ok(link, "the box's reply promoted the link");
@@ -267,7 +251,6 @@ function testHomeTabLinksIgnoreADropDownPick() {
 
 testBoundTabLineSuffixKeepsTheMachine();
 testHomeTabSendsNoMachine();
-testReissueAfterReconnectKeepsTheMachine();
 testLinksFollowTheBindingNotTheDropDown();
 testHomeTabLinksIgnoreADropDownPick();
 console.log('\nAll fileLinkMachine tests passed.');

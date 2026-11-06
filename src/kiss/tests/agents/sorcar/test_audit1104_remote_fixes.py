@@ -1,7 +1,9 @@
 """Cost audit 2026-11-04: the gaps found in the remote sub-agent accounting.
 
 * A late remote charge whose parent update fails is not acknowledged:
-  the record is taken back, so the next sync charges it.
+  the record's advance and the charge are one transaction, so the
+  record stays where it was (a daemon killed in between included) and
+  the next sync charges it.
 * A sync asks for every recorded sub-agent, in batches of 500, instead
   of the newest 500 only.
 * A remote child mirrored into the local history counts once, by its
@@ -13,8 +15,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import uuid
 from types import SimpleNamespace
@@ -46,15 +52,49 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
         parent, child = self._dispatch()
         self._late_charge_on_the_machine(child, 0.25)
         report = self._report(child)
-        with mock.patch.object(th, "_add_late_task_usage", side_effect=RuntimeError("db")):
+        with mock.patch.object(th, "_add_usage_locked", side_effect=RuntimeError("db")):
             charge_remote_subtask_usage(None, child, report)  # logged, not raised
         self.assertEqual(_row(parent), (3.0, 300, 5))
-        # the uncharged report's split is taken back with its totals
+        # the uncharged report's split is rolled back with its totals
         self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 2.0})
         charge_remote_subtask_usage(None, child, report)
         self.assertEqual(_row(parent), (3.25, 325, 6))
         charge_remote_subtask_usage(None, child, report)
         self.assertEqual(_row(parent), (3.25, 325, 6))
+
+    def test_a_daemon_killed_between_the_advance_and_the_charge_loses_no_spend(self) -> None:
+        """The record's advance and the parent's charge are one transaction: a daemon that
+        dies between them (here at the parent's row update) leaves the record where it
+        was, so the next sync charges the report instead of owing nothing."""
+        parent, child = self._dispatch()
+        self._late_charge_on_the_machine(child, 0.25)
+        report = self._report(child)
+        th._get_db()  # keeps the WAL sidecars alive across the other process's death
+        script = textwrap.dedent(f"""
+            import os
+            import sqlite3
+            from kiss.agents.sorcar import persistence as th
+            from kiss.server.task_update import charge_remote_subtask_usage
+
+            def die_at_the_parent_update(action, table, *_):
+                if action == sqlite3.SQLITE_UPDATE and table == "task_history":
+                    os._exit(0)  # the daemon dies with the parent's charge unwritten
+                return sqlite3.SQLITE_OK
+
+            th._get_db().set_authorizer(die_at_the_parent_update)
+            charge_remote_subtask_usage(None, {child!r}, {report!r})
+            raise SystemExit("the parent's row was never updated")
+            """)
+        done = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=120,
+            env={**os.environ, "KISS_HOME": str(th._KISS_DIR),
+                 "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(_row(parent), (3.0, 300, 5))  # died before the charge...
+        charge_remote_subtask_usage(None, child, report)  # ...so the next sync owes it
+        self.assertEqual(_row(parent), (3.25, 325, 6))
+        self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 1.75, FABLE: 0.5})
 
     def test_every_record_is_asked_for_in_batches(self) -> None:
         parent = _task(OPUS, 1.0, 100, 1)

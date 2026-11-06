@@ -229,3 +229,68 @@ def test_stop_while_waiting_on_a_quiet_pipe_kills_and_reaps_the_child() -> None:
         kill_process_tree(proc)  # pipe EOF releases a wait the Stop could not
         worker.join(10)
         proc.wait(10)
+
+
+class _ThreadStartStop:
+    """Profile hook parking the worker as it enters the ``Thread.start`` of its timer.
+
+    ``run_capped`` has started its child by then; the Stop is injected
+    while the worker is parked and is raised the moment the hook
+    returns, i.e. from inside ``timer.start()``.
+    """
+
+    def __init__(self) -> None:
+        self.parked = threading.Event()
+        self.resume = threading.Event()
+        self.proc: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event != "call" or frame.f_code is not threading.Thread.start.__code__:
+            return
+        proc = _stack_local(frame, "proc")
+        if not isinstance(proc, subprocess.Popen):
+            return
+        sys.setprofile(None)
+        self.proc = proc
+        self.parked.set()
+        self.resume.wait(30)
+
+
+def test_stop_while_starting_the_timer_kills_and_reaps_the_child() -> None:
+    """A Stop landing between the spawn and the read loop still takes the child down.
+
+    ``Thread.start`` blocks on the new thread's ``_started`` event, so
+    an injected Stop is delivered right there; the setup ran before the
+    ``try`` whose handler kills and reaps the child, which was left
+    running (its whole 60 s) with its stdout pipe open.
+    """
+    raised: list[BaseException] = []
+    stop = _ThreadStartStop()
+
+    def body() -> None:
+        sys.setprofile(stop)
+        try:
+            run_capped(_py("import time; time.sleep(60)"), limit=1000, timeout=60)
+        except BaseException as exc:  # the injected Stop is the expected outcome
+            raised.append(exc)
+        finally:
+            sys.setprofile(None)
+
+    worker = threading.Thread(target=body, daemon=True)
+    worker.start()
+    assert stop.parked.wait(30), "the worker never started its timer"
+    proc = stop.proc
+    assert proc is not None
+    try:
+        assert inject(worker) == 1
+        stop.resume.set()
+        worker.join(10)
+        assert not worker.is_alive(), "the task thread hung after the Stop"
+        assert isinstance(raised[0], KeyboardInterrupt)
+        # The child sleeps for a minute: an exit status now means the
+        # except handler killed and reaped it.
+        assert proc.returncode is not None
+    finally:
+        kill_process_tree(proc)
+        worker.join(10)
+        proc.wait(10)

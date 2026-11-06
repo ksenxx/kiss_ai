@@ -44,9 +44,16 @@ const {makeRunner} = require('./ui_antipattern_harness');
 const {test, report} = makeRunner();
 const pages = [];
 
-/** A page whose file pickers are captured instead of opened natively. */
+/**
+ * A page whose file pickers are captured instead of opened natively and
+ * whose FileReader reads are observed: `reads` holds one promise per
+ * read the page started, settled on its `loadend`, so a negative check
+ * ("the file went nowhere") can wait for the real end of every read
+ * instead of a fixed sleep.  The platform reader itself is untouched.
+ */
 function pageWithPicker() {
   const pickers = [];
+  const reads = [];
   const page = makePage({
     beforeScripts(w) {
       const click = w.HTMLInputElement.prototype.click;
@@ -57,10 +64,27 @@ function pageWithPicker() {
         }
         return click.call(this);
       };
+      const readAsDataURL = w.FileReader.prototype.readAsDataURL;
+      w.FileReader.prototype.readAsDataURL = function (...args) {
+        reads.push(
+          new Promise(resolve => this.addEventListener('loadend', resolve)),
+        );
+        return readAsDataURL.apply(this, args);
+      };
     },
   });
   pages.push(page.win);
-  return Object.assign(page, {pickers});
+  return Object.assign(page, {pickers, reads});
+}
+
+/**
+ * Resolve once every read the page started has ended and the awaited
+ * chain behind it (prepareAttachment -> fillAttachmentSlot -> chips) has
+ * run: the moment a leaked file would be on screen.
+ */
+async function readsSettled(page) {
+  await Promise.all(page.reads);
+  await sleep(0);
 }
 
 function pick(win, picker, name) {
@@ -169,7 +193,7 @@ async function main() {
       'A was closed remotely',
     );
     pick(win, picker, 'A-private.pdf');
-    await sleep(20);
+    await readsSettled(page);
     assert.deepStrictEqual(chipNames(win), [], "BUG: A's file appeared in B");
     byId(win, 'task-input').value = 'Task intended for B';
     byId(win, 'send-btn').click();
@@ -190,7 +214,10 @@ async function main() {
     const picker = openPickerIn(page, first);
     api.switchToTab(second);
     pick(win, picker, 'A-private.pdf');
-    await sleep(20);
+    // The read ends while B is still on screen: a slot that landed in
+    // whichever chat is active when it completes would show here.
+    await readsSettled(page);
+    assert.strictEqual(page.reads.length, 1, 'setup: the file was read');
     assert.deepStrictEqual(chipNames(win), [], "BUG: A's file appeared in B");
     api.switchToTab(first);
     await waitFor(
@@ -293,6 +320,33 @@ async function main() {
     assert.strictEqual(boxValues(win).name, '');
   });
 
+  await test("A20-3: another command's refusal leaves the pending save alone", () => {
+    const {win, posted} = makePage();
+    pages.push(win);
+    editAndSave(win, posted);
+    // The daemon stamps a refused mutation with the command it answers
+    // (commands.py _send_error_to_sender): a promptlet add refused
+    // while this save awaits its answer is not the save's refusal.
+    send(win, {
+      type: 'error',
+      command: 'addTrick',
+      text: 'That promptlet is already in MY_INJECTION.md',
+    });
+    assert.strictEqual(
+      editVisible(win),
+      false,
+      "another command's refusal reopens no editor",
+    );
+    // The save's own refusal still brings the draft back.
+    send(win, {
+      type: 'error',
+      command: 'saveMyModel',
+      text: "A custom model named 'concurrent-model' already exists",
+    });
+    assert.strictEqual(editVisible(win), true, 'the refused edit is back');
+    assert.deepStrictEqual(boxValues(win), DRAFT);
+  });
+
   await test('F2: a refusal landing on a newer edit leaves that edit alone', () => {
     const {win, posted} = makePage();
     pages.push(win);
@@ -313,6 +367,47 @@ async function main() {
     assert.strictEqual(editVisible(win), true);
     assert.strictEqual(boxValues(win).name, 'other', 'the newer edit stays');
     assert.strictEqual(boxValues(win).endpoint, 'https://other-draft/v1');
+  });
+
+  await test('F2 (F10): two saves in flight: the first refusal brings back the first draft, not the second', () => {
+    const {win, posted} = makePage();
+    pages.push(win);
+    editAndSave(win, posted);
+    // Before the daemon answers that save, the list (another surface's
+    // change) shows a second model, which the user edits and saves as
+    // it is: two saves await their answers, in order.
+    const other = {
+      name: 'other',
+      endpoint: 'https://o/v1',
+      api_key: 'k',
+      headers: '',
+    };
+    send(win, {type: 'myModelsData', models: [OLD, other]});
+    assert.strictEqual(editVisible(win), false, 'nothing acknowledged yet');
+    win.document.querySelectorAll('.custom-model-edit-btn')[1].click();
+    byId(win, 'custom-model-save-btn').click();
+    const second = posted.filter(m => m.type === 'saveMyModel').pop();
+    assert.strictEqual(second.originalName, other.name, 'setup: second save');
+    // The first save is refused: its draft comes back, not the second's.
+    send(win, {
+      type: 'error',
+      text: "A custom model named 'concurrent-model' already exists",
+    });
+    assert.strictEqual(editVisible(win), true, 'BUG: the first draft is not back');
+    assert.deepStrictEqual(
+      boxValues(win),
+      DRAFT,
+      "BUG: the second save's draft came back instead of the refused one",
+    );
+    // The second save is acknowledged by the list: the editor on the
+    // first draft is left alone.
+    send(win, {type: 'myModelsData', models: [OLD, other]});
+    assert.strictEqual(editVisible(win), true);
+    assert.deepStrictEqual(boxValues(win), DRAFT);
+    byId(win, 'custom-model-save-btn').click();
+    const retry = posted.filter(m => m.type === 'saveMyModel').pop();
+    assert.strictEqual(retry.originalName, OLD.name, 'Save retries the rename');
+    assert.strictEqual(retry.name, DRAFT.name);
   });
 
   await test('F1 (round 2): a refused edit leaves a newer Add draft typed since alone', () => {

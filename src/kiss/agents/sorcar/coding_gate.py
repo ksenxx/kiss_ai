@@ -26,12 +26,15 @@ benchmark container: :class:`CodingGate`, which
 :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` installs on every run
 with the edit tools, and the readers of shell results both the gate and
 the SEA use.  A run is a *coding run* once an ``Edit`` or ``Write`` targets
-a code file (:func:`is_code_file`), a writing shell command names one
-(:func:`names_code_file`), or the verifier exists; a run that writes only
-prose is not gated.  The verifier is ``verify.sh`` in the task's scratch
-directory, the path the system prompt gives the agent (How to Work, rule
-3).  The gate runs it with the run's own shell: a subprocess in the work
-dir (:func:`run_on_host`), or the task's container.  When the agent writes
+a code file (:func:`is_code_file`), a shell command changes one (the
+files it changes, :func:`~kiss.agents.sorcar.evidence_gate.file_changes`:
+``cp a.py b.py``, ``sed -i ... x.py``, ``python gen.py > out.py``, not a
+read of one or a write under the scratch directory), or the verifier
+exists; a run that writes only prose is not gated.  The verifier is
+``verify.sh`` in the task's scratch directory, the path the system prompt
+gives the agent (How to Work, rule 3).  The gate runs it with the run's
+own shell: a subprocess in the work dir (:func:`run_on_host`), or the
+task's container.  When the agent writes
 the ledger the prompt asks for (``ledger.md`` in the scratch directory),
 the reviewer model reads the task and the ledger once and names the
 sentences it would read differently; the answer joins the ``Write``'s
@@ -361,11 +364,10 @@ HOST_EXIT_PREFIX = re.compile(r"^Error \(exit code (-?\d+)\):", re.MULTILINE)
 STARTED_JOB = re.compile(r"(?:^Started|left running as) background job (\w+)", re.MULTILINE)
 #: The status line of a ``bash_job`` report showing the job's exit: ``status:
 #: exited N`` (the container tool) or ``Job <id>: exited with code N`` (the
-#: host tool).  Only that line counts: the command echo and the log lines of
-#: the report may say ``exited 0`` while the job runs.
+#: host tool).  Only that line counts, read where the report puts it (its
+#: first line, after the container report's echo of the command): the
+#: command and the log lines of the report may say ``exited 0`` themselves.
 JOB_EXITED = re.compile(r"^(?:status|Job \w+): exited (?:with code )?(-?\d+)$", re.MULTILINE)
-#: The line that opens the log section of a ``bash_job`` report (both tools).
-JOB_LOG_SECTION = re.compile(r"^--- last \d+ log lines ---$", re.MULTILINE)
 #: The outcome of one command of a ``run_commands_parallel`` report:
 #: ``[i/N] exit 0 in 1.2s``, ``[i/N] TIMED OUT``, ``[i/N] killed by signal 9``.
 _PARALLEL_STATUS = r"\[(\d+)/\d+\] (?:exit (-?\d+)|(TIMED OUT)|killed by signal (\d+))"
@@ -405,6 +407,9 @@ FOLLOWUP_NOT_MADE = re.compile(r"^.* was not made: the \w+ did not go through\.$
 #: The tools that run a sub-task: a read-only review (:func:`dispatches_review`)
 #: or work that may change files.
 DISPATCH_TOOLS = frozenset({"run_agent", "run_parallel"})
+#: The tool that restores the files of a checkpoint: a change of the work it
+#: does not name file by file (:meth:`CodingGate.restored`).
+ROLLBACK_TOOL = "rollback"
 #: A ``run_agent`` result for a sub-task left running (``wait="false"``, or
 #: its timeout passed), with the job id ``agent_job`` takes.
 STARTED_AGENT_JOB = re.compile(r"\bas job (agent-\w+)\b")
@@ -554,21 +559,6 @@ def is_code_file(path: Any) -> bool:
         return False
     name = posixpath.basename(path.replace("\\", "/"))
     return name in CODE_FILE_NAMES or posixpath.splitext(name)[1].lower() in CODE_SUFFIXES
-
-
-def names_code_file(args: dict[str, Any]) -> bool:
-    """Whether a shell call changes a code file (:func:`is_code_file`).
-
-    A command that changes one (``cp a.py b.py``, ``sed -i ... x.py``,
-    ``python gen.py > out.py``) changes code as an ``Edit`` of it would;
-    one that reads one (``cat install.sh``), names one in text, or
-    writes one under the scratch directory (``gh api ... > tmp/x/pages.json``)
-    does not (:func:`~kiss.agents.sorcar.evidence_gate.file_changes`).
-
-    Args:
-        args: The ``Bash`` / ``run_commands_parallel`` call's arguments.
-    """
-    return any(is_code_file(path) for path in file_changes(args))
 
 
 def tool_result_texts(message: Any) -> list[str]:
@@ -736,9 +726,12 @@ def result_exit_codes(name: str, args: dict[str, Any], text: str,
             return [(command, "background")]
         return [(command, bash_exit_code(text))]
     if name == "bash_job":
-        command = jobs.get(str(args.get("job_id", "")))
-        exited = JOB_EXITED.search(JOB_LOG_SECTION.split(text, maxsplit=1)[0])
-        return [] if command is None or exited is None else [(command, exited.group(1))]
+        job_id = str(args.get("job_id", ""))
+        command = jobs.get(job_id)
+        if command is None:
+            return []
+        exited = JOB_EXITED.match(text.removeprefix(f"Job {job_id}: {command}\n"))
+        return [] if exited is None else [(command, exited.group(1))]
     if name == "run_commands_parallel":
         if INTERRUPTED.match(text):
             return [(command, "interrupted") for command in shell_commands(args)]
@@ -830,7 +823,8 @@ def numbered_items(findings: str) -> list[str]:
     return items
 
 
-def answered_findings(summary: str, findings: list[str]) -> list[bool] | None:
+def answered_findings(summary: str, findings: list[str],
+                      on_usage: Callable[[float, int], None] | None = None) -> list[bool] | None:
     """Whether *summary* answers each of *findings* with evidence, per the decisions model.
 
     One :func:`~kiss.agents.sorcar.decide_tool.make_decide_tool` call asks
@@ -843,6 +837,8 @@ def answered_findings(summary: str, findings: list[str]) -> list[bool] | None:
     Args:
         summary: The finish summary.
         findings: The open findings (:func:`numbered_items`).
+        on_usage: Called with the call's ``(cost USD, tokens)`` (the gate
+            charges it to the run), or ``None``.
     """
     from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 
@@ -853,7 +849,7 @@ def answered_findings(summary: str, findings: list[str]) -> list[bool] | None:
     questions = {f"f{i}": {"type": "noul", "instructions": ANSWER_QUESTION.format(finding=f)}
                  for i, f in enumerate(findings)}
     try:
-        decide = make_decide_tool(None)
+        decide = make_decide_tool(None, on_usage=on_usage)
         answers = json.loads(decide(summary, json.dumps(questions)))["answers"]
     except Exception:
         return None
@@ -1134,6 +1130,8 @@ class CodingGate:
         charge: Attributes a review attempt's spend ``(budget USD, tokens,
             model calls, key)`` to the run, once per key (a stop makes the
             gate retry it with the same key); ``None`` leaves it uncounted.
+            A ``decide`` call of the gate (:func:`answered_findings`) is
+            charged with its model as the ``model`` keyword too.
         model_config: The run's model overrides; its ``coding_gate: False``
             (a SEA's setting, ``/sync`` says it) declares the run not a
             coding run, whatever it changes.  The reviewer runs without
@@ -1146,7 +1144,7 @@ class CodingGate:
 
     def __init__(self, shell: Shell, work_dir: str, scratch_dir: str,
                  reviewer: str | None = None,
-                 charge: Callable[[float, int, int, str], None] | None = None,
+                 charge: Callable[..., None] | None = None,
                  model_config: dict[str, Any] | None = None,
                  verifier_timeout: int = VERIFIER_TIMEOUT,
                  custom_tools: frozenset[str] = frozenset()) -> None:
@@ -1189,7 +1187,7 @@ class CodingGate:
         #: :meth:`fingerprint` of the work then), read when ``agent_job``
         #: reports them.
         self.jobs: dict[str, tuple[bool, int, str | None]] = {}
-        #: The fingerprint of the work at the dispatch being observed.
+        #: The fingerprint of the work at the dispatch or rollback being observed.
         self.dispatch_fingerprint: str | None = None
         #: :attr:`changes` when the agent's own run of the verifier last passed
         #: (the exit-code ledger); equal to :attr:`changes` at a finish, that
@@ -1199,8 +1197,8 @@ class CodingGate:
         #: the finish summary (:data:`MERGED_CAVEATS`).
         self.merge_caveats: list[str] = []
         self.merge_rounds = 0
-        #: A sub-task that may have changed files ran: the diff decides
-        #: :meth:`coding_run`.
+        #: A sub-task that may have changed files, or a rollback, ran: the
+        #: diff decides :meth:`coding_run`.
         self.delegated = False
         #: The files written with ``Edit`` / ``Write``, in order (the diff of a run outside git).
         self.written_files: list[str] = []
@@ -1242,17 +1240,14 @@ class CodingGate:
         """The verifier's path as the verdicts name it (``./tmp/<task-id>/verify.sh``)."""
         return "./" + self.verifier_relative
 
-    def relative(self, path: str, dot: bool = False) -> str:
-        """*path* relative to the work dir when it is inside it (``./``-prefixed with *dot*).
+    def relative(self, path: str) -> str:
+        """*path* relative to the work dir when it is inside it.
 
         Args:
             path: An absolute or relative path.
-            dot: Whether to prefix a path inside the work dir with ``./``.
         """
         relative = os.path.relpath(path, self.work_dir) if os.path.isabs(path) else path
-        if relative.startswith(".."):
-            return path
-        return "./" + relative if dot else relative
+        return path if relative.startswith("..") else relative
 
     def move(self, work_dir: str, fresh_base: bool = False) -> None:
         """Follow the agent into *work_dir* (a worktree, or the checkout after its merge).
@@ -1291,7 +1286,8 @@ class CodingGate:
             if self.is_verifier(str(args.get("file_path", ""))):
                 self.verifier_passed_at = None  # the verifier itself changes: its last run is stale
             return  # a scratch note (tmp/PROGRESS.md, a probe): no change of the work
-        if name in EDIT_TOOLS or name in SHELL_TOOLS or name in DISPATCH_TOOLS:
+        if name in EDIT_TOOLS or name in SHELL_TOOLS or name in DISPATCH_TOOLS or (
+                name == ROLLBACK_TOOL):
             self.resolve_base()
         if name in EDIT_TOOLS:
             path = args.get("file_path")
@@ -1319,6 +1315,8 @@ class CodingGate:
             self.dispatch_fingerprint = None
             if not dispatches_review(args) and not str(args.get("machine", "")).strip():
                 self.dispatch_fingerprint = self.fingerprint()
+        elif name == ROLLBACK_TOOL:
+            self.dispatch_fingerprint = self.fingerprint()
 
     def resolve_base(self) -> None:
         """Record the run's base commit, repository root and untracked files, once.
@@ -1371,22 +1369,6 @@ class CodingGate:
         """Whether *path* (as an ``Edit`` / ``Write`` names it) is the agent's verifier."""
         return os.path.normpath(os.path.join(self.work_dir, path)) == os.path.normpath(
             self.verifier_path)
-
-    def scan(self, command: str) -> list[SimpleCommand]:
-        """The simple commands of the shell *command*, started in the work dir.
-
-        Args:
-            command: The command as the agent ran it.
-        """
-        return simple_commands(command, bash_path(os.path.abspath(self.work_dir)))
-
-    def runs_verifier(self, command: str) -> bool:
-        """Whether the shell *command* runs the agent's verifier (:func:`verifier_command`).
-
-        Args:
-            command: The command as the agent ran it.
-        """
-        return verifier_command(self.scan(command), self.verifier_path) is not None
 
     def verifier_decides(self, command: str) -> bool:
         """Whether an exit status 0 of the shell *command* means its run of the verifier passed.
@@ -1500,6 +1482,8 @@ class CodingGate:
                 self.last_verifier_run = (0, text)
         if name in DISPATCH_TOOLS or name == "agent_job":
             self.subtask(name, args, text)
+        elif name == ROLLBACK_TOOL:
+            self.restored()
         elif name in self.custom_tools:
             self.follow_head()
 
@@ -1546,6 +1530,20 @@ class CodingGate:
                     self.gate_rounds = 0
                     self.open_findings = []
         elif fingerprint is None or self.fingerprint() != fingerprint:
+            self.delegated = True
+            self.changed()
+
+    def restored(self) -> None:
+        """Read the result of a ``rollback``: the files it rewrote or deleted are a change.
+
+        Told, as for a sub-task (:meth:`subtask`), by the work's
+        :meth:`fingerprint` before and after it: a rollback that failed
+        or restored nothing (the files already matched the checkpoint)
+        changed no file.  The verifier that passed before a change is not
+        reused (:meth:`changed`), and the diff decides :meth:`coding_run`,
+        since the files restored need not be ones an ``Edit`` named.
+        """
+        if self.dispatch_fingerprint is None or self.fingerprint() != self.dispatch_fingerprint:
             self.delegated = True
             self.changed()
 
@@ -1957,6 +1955,21 @@ class CodingGate:
         if self.charge is not None and (spent > 0 or used > 0 or calls > 0):
             self.charge(spent, used, calls, key)
 
+    def _charge_decide(self, cost: float, tokens: int) -> None:
+        """Charge one ``decide`` call of :func:`answered_findings` to the run, under its model.
+
+        A failed charge is logged, never raised: it must not cost the call's answer.
+        """
+        from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
+
+        if self.charge is None or (cost <= 0 and tokens <= 0):
+            return
+        try:
+            self.charge(cost, tokens, 0, f"decide:{uuid.uuid4().hex}",
+                        model=DEFAULT_DECISIONS_MODEL)
+        except Exception:
+            logger.warning("coding gate: decide spend not charged", exc_info=True)
+
     def side_call(self, label: str, prompt: str, key: str) -> tuple[str, str, float, int]:
         """One non-agentic call of the reviewer model, charged to the run, with a deadline.
 
@@ -2123,7 +2136,8 @@ class CodingGate:
         """
         if not self.open_findings:
             return None
-        answered = answered_findings(str(args.get("summary_in_html", "")), self.open_findings)
+        answered = answered_findings(str(args.get("summary_in_html", "")), self.open_findings,
+                                     self._charge_decide)
         if answered is None:
             return None
         unanswered = [f for f, ok in zip(self.open_findings, answered, strict=True) if not ok]
@@ -2188,8 +2202,8 @@ class CodingGate:
         if not self.merge_caveats:
             return
         summary = str(args.get("summary_in_html", ""))
-        answered = answered_findings(summary, self.merge_caveats) or [False] * len(
-            self.merge_caveats)
+        answered = answered_findings(summary, self.merge_caveats, self._charge_decide) or [
+            False] * len(self.merge_caveats)
         open_verdicts = [v for v, ok in zip(self.merge_caveats, answered, strict=True) if not ok]
         self.merge_caveats = []
         if not open_verdicts:

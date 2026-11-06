@@ -37,12 +37,15 @@ from __future__ import annotations
 
 import gc
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import weakref
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,6 +54,7 @@ from kiss.tests.lock_injection import (
     INJECTIONS,
     Contender,
     Hammered,
+    ignore_thread_interrupt,
     inject,
     lock_is_free,
 )
@@ -67,6 +71,18 @@ class _Peer(threading.Thread):
     def run(self) -> None:
         while not self.stop.is_set():
             self.call()  # type: ignore[operator]
+
+
+class _OwnRounds:
+    """Calls *driver*, counting the rounds completed through this object alone."""
+
+    def __init__(self, driver: _TaskRow) -> None:
+        self.driver = driver
+        self.completed = 0
+
+    def __call__(self) -> None:
+        self.driver()
+        self.completed += 1
 
 
 class _TaskRow:
@@ -231,27 +247,231 @@ def _hammer_contended(driver: _TaskRow | _Events | _Reconnect) -> None:
     assert not leaked, f"an interrupt leaked {leaked}"
 
 
-def run_hammer(name: str) -> None:
-    """Child-process body: hammer the path *name*, check its writes landed and no lock leaked."""
+def _redirect_home() -> None:
+    """Point persistence at a fresh database under a temporary home."""
     home = Path(tempfile.mkdtemp(prefix="audit1013-persist-"))
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
     persistence._DB_PATH = home / "history.db"
     persistence._db_conn = None
+
+
+def run_hammer(name: str) -> None:
+    """Child-process body: hammer the path *name*, check its writes landed and no lock leaked."""
+    _redirect_home()
     driver = _DRIVERS[name]()
     _hammer_contended(driver)
     driver.verify()
     _check_connections_closable()
 
 
+def _run_in_child(call: str) -> None:
+    """Run the module-level *call* (``"f(args)"``) in a child process; it must exit 0."""
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import {__name__} as m; m.{call}"],
+        capture_output=True, text=True, timeout=240, check=False,
+    )
+    assert proc.returncode == 0, f"{call}: {proc.stderr[-3000:]}"
+
+
 @pytest.mark.parametrize("path", sorted(_DRIVERS))
 def test_persistence_lock_paths(path: str) -> None:
     """No persistence site a task thread runs leaks a lock under injection."""
-    proc = subprocess.run(
-        [sys.executable, "-c", f"import {__name__} as m; m.run_hammer({path!r})"],
-        capture_output=True, text=True, timeout=240, check=False,
-    )
-    assert proc.returncode == 0, f"{path}: {proc.stderr[-3000:]}"
+    _run_in_child(f"run_hammer({path!r})")
+
+
+def run_two_stops(second: str) -> None:
+    """Child-process body: a stop in a fetch, then a second one while the first unwinds.
+
+    The first stop lands between a SELECT's execute and its fetch, so
+    the interrupted frames hold a half-read cursor.  The second lands
+    at *second*: ``"teardown"`` is inside ``_RWLock._teardown``'s
+    repair loop, where the two stops and the interrupted frames end up
+    in a reference cycle that keeps the cursor and its read snapshot
+    alive (garbage collection is off, as on any thread between
+    collections); ``"rollback"`` is on the way to ``_immediate_txn``'s
+    ``ROLLBACK``, which the stop would skip.  Either way the thread's
+    next ``BEGIN IMMEDIATE`` must go through, instead of "database is
+    locked" (``SQLITE_BUSY_SNAPSHOT``) or "cannot start a transaction
+    within a transaction".
+    """
+    _redirect_home()
+    driver = _TaskRow()
+    rounds = _OwnRounds(driver)  # the worker's rounds alone: the peer shares the driver
+    worker = Hammered(rounds)
+    fired = [False, False]
+    rounds_at_stop = [0, 0]
+
+    def stop_now(index: int) -> bool:
+        ready = rounds.completed > 2 if index == 0 else fired[0]
+        if ready and threading.current_thread() is worker and not fired[index]:
+            rounds_at_stop[index] = rounds.completed
+            fired[index] = True
+            return True
+        return False
+
+    def recovered() -> bool:
+        """The worker itself completed 100 rounds after the second stop."""
+        return fired[1] and rounds.completed >= rounds_at_stop[1] + 100
+
+    original_fetchone = persistence._LockedCursor.fetchone
+    original_drop = persistence._RWLock._drop_writer_ref
+    original_execute = persistence._LockedConnection.execute
+
+    def fetchone_with_first_stop(self: persistence._LockedCursor) -> Any:
+        if stop_now(0):
+            raise KeyboardInterrupt
+        return original_fetchone(self)
+
+    def drop_with_second_stop(self: persistence._RWLock, ref: Any) -> None:
+        if second == "teardown" and stop_now(1):
+            raise KeyboardInterrupt
+        original_drop(self, ref)
+
+    def execute_with_second_stop(
+        conn: persistence._LockedConnection, sql: str, parameters: Any = (), /,
+    ) -> Any:
+        if second == "rollback" and sql == "ROLLBACK" and stop_now(1):
+            raise KeyboardInterrupt
+        return original_execute(conn, sql, parameters)
+
+    persistence._LockedCursor.fetchone = fetchone_with_first_stop  # type: ignore[method-assign]
+    persistence._RWLock._drop_writer_ref = drop_with_second_stop  # type: ignore[method-assign]
+    persistence._LockedConnection.execute = execute_with_second_stop  # type: ignore[method-assign]
+    unexpected = _UnexpectedErrors()
+    threading.excepthook = unexpected
+    gc.collect()
+    gc.disable()
+    peer = _Peer(driver)
+    peer.start()
+    worker.start()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and worker.is_alive() and not recovered():
+        time.sleep(0.01)
+    worker.stop.set()
+    peer.stop.set()
+    worker.join(20.0)
+    peer.join(20.0)
+    gc.enable()
+    assert fired == [True, True], fired
+    assert not unexpected.errors, unexpected.errors
+    assert not worker.is_alive() and not peer.is_alive(), "a thread hung"
+    assert recovered(), (rounds.completed, rounds_at_stop)
+
+
+@pytest.mark.parametrize("second", ["teardown", "rollback"])
+def test_a_second_stop_while_the_first_unwinds_keeps_the_connection_writable(second: str) -> None:
+    """The thread writes on after two stops, the second in the lock's repair or the rollback."""
+    _run_in_child(f"run_two_stops({second!r})")
+
+
+def run_stop_inside_token_callback() -> None:
+    """Child-process body: a stop landing in a token callback blocked on the mutex.
+
+    ``_drop_writer_ref`` runs as a token's weakref callback on whatever
+    thread dropped the token.  Blocked on the lock's mutex, that thread
+    receives a pending stop the moment its ``acquire`` returns; the
+    mutex must not stay its own afterwards (every later reader and
+    writer would wait on it for good).
+    """
+    threading.excepthook = ignore_thread_interrupt
+    lock = persistence._rw_lock
+    token = persistence._Token()  # alive throughout: a dead plain ref cannot be hashed
+    with lock._cond:
+        callback = threading.Thread(
+            target=lock._drop_writer_ref, args=(weakref.ref(token),), daemon=True,
+        )
+        callback.start()
+        time.sleep(0.2)  # the callback thread is parked in ``acquire``
+        assert inject(callback) == 1
+    callback.join(5.0)
+    assert not callback.is_alive(), "the callback thread hung"
+    assert lock_is_free(lock._mutex), "the stopped callback kept the mutex"
+
+
+def test_a_stop_in_a_token_callback_releases_the_mutex() -> None:
+    """A token callback that takes a stop on its acquire leaves the mutex free."""
+    _run_in_child("run_stop_inside_token_callback()")
+
+
+def _connect(path: Path) -> persistence._LockedConnection:
+    conn = persistence._LockedConnection(path, check_same_thread=False, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _orphan_half_read_cursor(conn: sqlite3.Connection) -> None:
+    """Leave a half-read cursor of *conn* reachable only through a reference cycle.
+
+    The table must hold two rows at least: reading the last row steps
+    the statement to its end, which resets it and ends the snapshot.
+    """
+    cursor = conn.execute("SELECT x FROM t")
+    cursor.fetchone()
+    holder: list[object] = [cursor]
+    holder.append(holder)
+
+
+def test_a_stale_snapshot_retry_replays_every_executemany_row(tmp_path: Path) -> None:
+    """After an orphaned half-read cursor, ``executemany`` inserts every parameter set, once.
+
+    SQLite takes the first set before the write that finds the snapshot
+    stale, so a retry over the same iterator would skip it.
+    """
+    a = _connect(tmp_path / "snapshot.db")
+    b = _connect(tmp_path / "snapshot.db")
+    gc.disable()  # the orphan lives until the retry collects it
+    try:
+        a.execute("CREATE TABLE t (x INTEGER)")
+        a.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+        _orphan_half_read_cursor(a)
+        b.execute("INSERT INTO t VALUES (3)")  # a's snapshot is stale from here on
+        a.executemany("INSERT INTO t VALUES (?)", iter([(10,), (11,)]))
+        rows = a.execute("SELECT x FROM t ORDER BY x").fetchall()
+        assert rows == [(1,), (2,), (3,), (10,), (11,)], rows
+    finally:
+        gc.enable()
+        a.close()
+        b.close()
+
+
+def test_a_snapshot_gone_stale_after_a_written_row_is_not_replayed(tmp_path: Path) -> None:
+    """An autocommit ``executemany`` failing after its first row raises; no row is written twice.
+
+    Each parameter set commits on its own, so a commit elsewhere in
+    between (here from the trace callback, right before the second
+    set) makes the second one fail with ``SQLITE_BUSY_SNAPSHOT`` while
+    an orphaned half-read cursor keeps the read snapshot.  A retry
+    that replayed the sets once the orphan is collected would write
+    the first one twice.
+    """
+    a = _connect(tmp_path / "snapshot.db")
+    b = _connect(tmp_path / "snapshot.db")
+    inserts = [0]
+
+    def commit_on_b_before_the_second_set(sql: str) -> None:
+        if sql.startswith("INSERT"):
+            inserts[0] += 1
+            if inserts[0] == 2:
+                b.execute("INSERT INTO t VALUES (3)")
+
+    gc.disable()
+    try:
+        a.execute("CREATE TABLE t (x INTEGER)")
+        a.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+        _orphan_half_read_cursor(a)
+        a.set_trace_callback(commit_on_b_before_the_second_set)
+        with pytest.raises(sqlite3.OperationalError) as info:
+            a.executemany("INSERT INTO t VALUES (?)", [(10,), (11,)])
+        assert info.value.sqlite_errorcode == sqlite3.SQLITE_BUSY_SNAPSHOT
+        a.set_trace_callback(None)
+        gc.collect()  # frees the orphan: the read below sees b's commit
+        rows = a.execute("SELECT x FROM t ORDER BY x").fetchall()
+        assert rows == [(1,), (2,), (3,), (10,)], rows
+    finally:
+        gc.enable()
+        a.close()
+        b.close()
 
 
 if __name__ == "__main__":

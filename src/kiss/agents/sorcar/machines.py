@@ -1150,19 +1150,24 @@ class MachineLink:
         self._health = health if health is not None else LinkHealth()
         self._retired = False
         # Stream handshakes in flight (:meth:`open_connection`), which
-        # run outside the lock; :meth:`retire` waits for them.
+        # run outside the lock; :meth:`retire` waits for them.  Counted
+        # under a lock of their own: the request lock is held for a
+        # whole exchange, which a stream must not wait behind.
         self._dialing = 0
-        self._idle = threading.Condition(self._lock)
+        self._idle = threading.Condition(threading.RLock())
 
     def _check_available(self) -> None:
         """Raise the error a retired or backed-off link answers with, if any.
 
         Drops the socket first when the host has slept since the last
         check (:func:`forget_after_sleep`): the socket is dead and so is
-        the back-off a failed poll during the sleep may have left.
+        the back-off a failed poll during the sleep may have left.  The
+        drop takes the lock (re-entered by a caller holding it); the
+        checks themselves read without it, like the machine's other
+        lanes read :class:`LinkHealth`.
         """
         if forget_after_sleep():
-            self._drop()
+            locked_call(self._lock, self._drop)
         if self._retired:
             raise self._retired_error()
         if time.monotonic() < self._health.retry_at:
@@ -1537,7 +1542,7 @@ class MachineLink:
             # say) are stale: drained first, they can neither pass for
             # this request's answer nor delay it.
             self._drain_buffered(deadline)
-            send(self._ws, json.dumps(frame), timeout=_remaining(deadline))
+            send(self._ws, json.dumps(frame), timeout=_send_budget(deadline))
             sent = True
             if not reply_type:
                 return {}
@@ -1646,30 +1651,40 @@ class MachineLink:
         (it needs the tab's task events).  The caller owns the returned
         socket and closes it.
 
-        The handshake runs outside the link's lock (only the
-        availability check takes it, as it may drop the shared socket
-        after a sleep): a stream connects beside a request in flight
-        on the shared socket, and two streams to the machine (a chat
-        tab's and the machine's view stream, opened together by a
-        bind) connect at the same time instead of one after the other.
+        The handshake runs outside the link's lock (the availability
+        check takes it only to drop the shared socket after a sleep,
+        and the handshake is counted under the dial lock, where
+        :meth:`retire` is checked for again): a stream
+        connects beside a request in flight on the shared socket, and
+        two streams to the machine (a chat tab's and the machine's view
+        stream, opened together by a bind) connect at the same time
+        instead of one after the other.
 
         Raises:
             MachineError: When the daemon is unreachable or rejects the
                 password (the link backs off as after a failed request).
         """
-        locked_call(self._lock, self._start_dial)
+        self._check_available()
+        locked_call(self._idle, self._start_dial)
         try:
             return self._dial(timeout, stream=True)
         finally:
-            locked_call(self._lock, self._end_dial)
+            locked_call(self._idle, self._end_dial)
 
     def _start_dial(self) -> None:
-        """Count a stream handshake in, once the link is available (under the lock)."""
-        self._check_available()
+        """Count a stream handshake in, unless the link is retired (under the dial lock).
+
+        The check is under the lock :meth:`retire` waits under, after
+        the one :meth:`_check_available` made without it: a handshake
+        counted in is one the retirement waits for, and one the
+        retirement has stopped waiting for never starts.
+        """
+        if self._retired:
+            raise self._retired_error()
         self._dialing += 1
 
     def _end_dial(self) -> None:
-        """Count a stream handshake out and wake a waiting :meth:`retire` (under the lock)."""
+        """Count a stream handshake out and wake a waiting :meth:`retire` (under the dial lock)."""
         self._dialing -= 1
         self._idle.notify_all()
 
@@ -1706,13 +1721,36 @@ class MachineLink:
         )
 
     def _dials_done(self) -> bool:
-        """Whether no stream handshake is in flight (under the lock)."""
+        """Whether no stream handshake is in flight (under the dial lock)."""
         return self._dialing == 0
 
 
 def _remaining(deadline: float) -> float:
     """Seconds left before the monotonic *deadline* (a small positive floor)."""
     return max(0.001, deadline - time.monotonic())
+
+
+#: The least a request's command write waits, whatever is left of the
+#: request's budget.  The write itself takes microseconds (a frame into
+#: the kernel's buffer), but the helper thread that performs it
+#: (``local_endpoint.send``) may wait longer than a spent budget's
+#: floor for a core on a loaded box; a write that lost that race is no
+#: daemon that stopped reading, and reporting it as one closed a sound
+#: socket and hid the reply's ``no <reply> within <N>s`` (full-suite
+#: run of 2026-11-05, a zero *timeout*).  The request's deadline still
+#: bounds the reply (:meth:`MachineLink._exchange` checks it before
+#: every read); the handshake's ``auth`` frame keeps the handshake's
+#: own budget, which :meth:`MachineLink._dial` promises.
+_SEND_FLOOR = 1.0
+
+
+def _send_budget(deadline: float) -> float:
+    """Seconds a command's write gets: the time to *deadline*, :data:`_SEND_FLOOR` at least.
+
+    Args:
+        deadline: The request's monotonic deadline.
+    """
+    return max(_SEND_FLOOR, deadline - time.monotonic())
 
 
 _links: dict[tuple[str, str, str, str, str], MachineLink] = {}

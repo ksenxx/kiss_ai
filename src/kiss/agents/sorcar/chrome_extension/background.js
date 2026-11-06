@@ -147,7 +147,10 @@ function tabInfo(t) {
 // deadline must not run the injection once it recovers, nor the CSP
 // fallback's debugger attach).
 function pastDeadline(limit) {
-  return Date.now() >= limit.at;
+  // `expired` is set by the timer that answered "exceeded": a timer may
+  // fire a fraction of a millisecond before Date.now() reaches `at`, and
+  // the answered command must never pass this check again.
+  return limit.expired === true || Date.now() >= limit.at;
 }
 
 function deadlineError(limit) {
@@ -354,10 +357,12 @@ const KISS_SNAPSHOT_JS = `(function () {
   // every descendant a candidate too; the innermost-wins pass below
   // collapses those).
   var cands = [];
-  var styles = new Map();
   walk(document, function (el) {
     var cs = getComputedStyle(el);
-    styles.set(el, cs);
+    // Hidden elements are no candidates at all: a hidden text-bearing
+    // descendant (a collapsed label inheriting the cursor) would
+    // otherwise suppress its visible clickable ancestor below.
+    if (cs.visibility === 'hidden' || cs.display === 'none' || !el.getClientRects().length) return;
     if (el.matches(SEL)) {
       var role = el.getAttribute('role');
       if (role && !ROLES[role]) return;
@@ -399,7 +404,7 @@ const KISS_SNAPSHOT_JS = `(function () {
   });
   var candSet = new Set(cands);
   var ICON_TAGS = { path: 1, svg: 1, i: 1, img: 1, span: 1 };
-  var innermost = cands.filter(function (el) {
+  var els = cands.filter(function (el) {
     if (suppressed.has(el)) return false;
     // A textless icon-ish leaf under a surviving clickable is noise: the
     // ancestor is the same click target with a better (or equal) label.
@@ -409,11 +414,6 @@ const KISS_SNAPSHOT_JS = `(function () {
       }
     }
     return true;
-  });
-  var els = innermost.filter(function (el) {
-    if (!el.getClientRects().length) return false;
-    var cs = styles.get(el);
-    return cs.visibility !== 'hidden' && cs.display !== 'none';
   });
   var lines = [];
   var shown = Math.min(els.length, MAX);
@@ -568,8 +568,12 @@ const COMMANDS = {
     return tabInfo(await chrome.tabs.get(args.tabId));
   },
 
-  async activate_tab(args) {
+  // The deadline is rechecked before every focus mutation that follows an
+  // await: a command answered "exceeded" has released the focus queue, and
+  // resuming into the next command's tab would steal its focus.
+  async activate_tab(args, limit) {
     const tab = await chrome.tabs.update(args.tabId, { active: true });
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.windows.update(tab.windowId, { focused: true });
     return tabInfo(tab);
   },
@@ -594,9 +598,11 @@ const COMMANDS = {
     return runInteraction(args, KISS_TYPE_JS, `, ${JSON.stringify(args.text)}`, limit);
   },
 
-  async screenshot(args) {
+  async screenshot(args, limit) {
     const tab = await chrome.tabs.get(args.tabId);
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.windows.update(tab.windowId, { focused: true });
+    if (pastDeadline(limit)) throw deadlineError(limit);
     await chrome.tabs.update(args.tabId, { active: true });
     await new Promise((r) => setTimeout(r, 250)); // let the tab paint
     return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }); // data URL
@@ -619,6 +625,7 @@ function withDeadline(promise, onTimeout, limit) {
     promise.finally(() => clearTimeout(timer)),
     new Promise((_, reject) => {
       timer = setTimeout(() => {
+        limit.expired = true;
         if (onTimeout) onTimeout();
         reject(new Error(`command exceeded its ${limit.ms / 1000}s deadline`));
       }, Math.max(limit.at - Date.now(), 0));

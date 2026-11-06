@@ -820,7 +820,9 @@ class TestThreadContinuations:
         }
         runner._prune_stale_threads()
         assert runner._threads_to_process() == ["1266434234230768927"]
-        assert "2026-01-01T00:00:00Z" not in load_channel_state(state_path)["threads"]
+        # The pruned state was saved: a missing file would load as the
+        # default (empty) state, so the surviving key is asserted too.
+        assert list(load_channel_state(state_path)["threads"]) == ["1266434234230768927"]
 
     def test_pruning_runs_without_thread_poll_support(self, tmp_path: Path) -> None:
         """Stale entries are pruned on ticks of poll-less backends too."""

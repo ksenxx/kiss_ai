@@ -166,7 +166,6 @@ class TestThinkingScaleDispatch:
         import kiss.scripts.update_models as mod
 
         for name in (
-            "gemini-3.6-flash",
             "glm-4.6",
             "glm-5.2",
             "openrouter/qwen/qwen3-235b-a22b-thinking-2507",
@@ -257,9 +256,7 @@ class TestDetectThinkingLevelGateHolds:
     @pytest.mark.parametrize(
         "name",
         [
-            "gemini-3.6-flash",
             "gemini-3.6-pro",
-            "gemini-3-5-flash",
             "openrouter/google/gemini-3.6-flash",
             "openrouter/~google/gemini-latest",
         ],
@@ -267,7 +264,7 @@ class TestDetectThinkingLevelGateHolds:
     def test_gemini_and_google_are_gated_out(
         self, gate_probe: _RecordingModelStub, name: str
     ) -> None:
-        """Gemini uses ``thinking_budget`` — never probe with effort."""
+        """``-pro`` Gemini and OpenRouter Google routes are never probed with effort."""
         import kiss.scripts.update_models as mod
 
         assert mod.detect_thinking_level(name) is None

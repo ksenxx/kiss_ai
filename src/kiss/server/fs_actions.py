@@ -114,7 +114,9 @@ def fs_action(
             return find_in_folder(path, query)
         if action == "compare":
             return compare_files(path, dest)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError: an embedded NUL byte, which pathlib's exists()
+        # answers False to and the creating call then refuses.
         return {"error": f"{action} failed: {exc}"}
     return {"error": f"Unknown file action: {action}"}
 
@@ -122,7 +124,7 @@ def fs_action(
 def _safe_name(name: str) -> str:
     """Validate a new-entry name: no empty segments, no ``..``."""
     parts = name.replace("\\", "/").split("/")
-    if any(p in ("", ".", "..") for p in parts):
+    if "\0" in name or any(p in ("", ".", "..") for p in parts):
         raise OSError("invalid name")
     return "/".join(parts)
 
@@ -137,6 +139,12 @@ def _new_entry(parent: str, name: str, is_dir: bool) -> dict[str, Any]:
     except OSError:
         return {"error": f"Not a valid name: {name!r}"}
     target = Path(parent) / rel
+    # The caller confined *parent*; a nested name must not leave it
+    # through a symlinked intermediate folder that mkdir/touch would
+    # follow (the missing tail of the name resolves lexically).
+    real_parent = os.path.realpath(parent)
+    if os.path.commonpath([os.path.realpath(target.parent), real_parent]) != real_parent:
+        return {"error": f"Not inside the folder: {rel}"}
     if target.exists() or target.is_symlink():
         return {"error": f"A file or folder {rel} already exists", "exists": True}
     if is_dir:

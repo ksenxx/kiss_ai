@@ -106,6 +106,10 @@ function testPlusOnUsedChatOpensATabWhenNoneIsNew() {
 
   const fresh = activeId(win);
   assert.notStrictEqual(fresh, boot, 'a tab opens');
+  assert.strictEqual(
+    win._testApi.openTabs().find(t => t.id === fresh).title,
+    'new chat',
+  );
   assert.ok(
     posted.some(m => m.type === 'newChat' && m.tabId === fresh),
     'the tab is registered with the daemon',

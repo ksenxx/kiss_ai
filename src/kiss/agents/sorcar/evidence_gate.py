@@ -335,15 +335,23 @@ def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
         starts = starts or ["."]
         if "-delete" in argv:
             return [] if all(_in_scratch(cwd, s) for s in starts) else [program, *starts]
-        for index, word in enumerate(argv):
-            if word in _FIND_EXEC:
-                rest = [w for w in argv[index + 1:] if w not in (";", "+")]
-                files = [s for w in rest for s in (starts if w == "{}" else [w])]
-                if word in ("-execdir", "-okdir"):
-                    cwd = (posixpath.join(cwd, starts[0]) if cwd is not None
-                           and all(_in_scratch(cwd, s) for s in starts) else None)
-                return _program_changes(files, cwd)
-        return []
+        changes: list[str] = []
+        index = 0
+        while index < len(argv):
+            word = argv[index]
+            index += 1
+            if word not in _FIND_EXEC:
+                continue
+            # The clause's command runs up to its ``;`` or ``+``; every clause counts.
+            end = next((i for i in range(index, len(argv)) if argv[i] in (";", "+")), len(argv))
+            files = [s for w in argv[index:end] for s in (starts if w == "{}" else [w])]
+            clause_cwd = cwd
+            if word in ("-execdir", "-okdir"):
+                clause_cwd = (posixpath.join(cwd, starts[0]) if cwd is not None
+                              and all(_in_scratch(cwd, s) for s in starts) else None)
+            changes.extend(_program_changes(files, clause_cwd))
+            index = end + 1
+        return changes
     if program in SHELLS:
         script = _shell_script(argv[1:])
         if script is None:

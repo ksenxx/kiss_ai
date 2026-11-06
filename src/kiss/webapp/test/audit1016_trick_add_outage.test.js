@@ -91,9 +91,33 @@ function testRejectionStillShowsWithoutOutage() {
   console.log('  ok - a rejection without an outage shows under the box');
 }
 
+function testAnotherCommandsRefusalIsNotTheAdds() {
+  // The daemon stamps a refused mutation with the command it answers
+  // (commands.py _send_error_to_sender): a custom-model save refused
+  // while the add awaits its answer is not the add's rejection, and
+  // the add goes on waiting for its own.
+  const {win} = makePage();
+  const doc = win.document;
+  win.__TRICKS__ = [];
+  doc.getElementById('tricks-btn').click();
+  submitAdd(win, 'Echo promptlet');
+  send(win, {
+    type: 'error',
+    command: 'saveMyModel',
+    text: "A custom model named 'x' already exists",
+  });
+  assert.strictEqual(addErrorText(doc), '', "another command's refusal is not shown under the box");
+  const duplicate = 'That promptlet is already in MY_INJECTION.md';
+  send(win, {type: 'error', command: 'addTrick', text: duplicate});
+  assert.strictEqual(addErrorText(doc), duplicate, 'the add is still awaiting its own');
+  win.close();
+  console.log("  ok - another command's refusal leaves the pending add waiting");
+}
+
 try {
   testOutageDropsThePendingAdd();
   testRejectionStillShowsWithoutOutage();
+  testAnotherCommandsRefusalIsNotTheAdds();
 } catch (e) {
   console.error(e && e.stack ? e.stack : e);
   process.exit(1);

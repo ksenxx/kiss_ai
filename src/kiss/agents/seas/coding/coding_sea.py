@@ -1873,8 +1873,13 @@ class ContainerHarness:
         if not self.open_findings:
             return None
         summary = str(args.get("summary_in_html", ""))
-        answered = answered_findings(summary, self.open_findings)
-        self._log({"event": "findings_answered", "turn": self.turns, "answered": answered})
+        spent: list[tuple[float, int]] = []
+        answered = answered_findings(summary, self.open_findings,
+                                     lambda cost, tokens: spent.append((cost, tokens)))
+        # A side-agent record (SIDE_AGENT_EVENTS): the decisions call's spend is
+        # outside the daemon's accounting, like the reviewer's.
+        self._log({"event": "findings_answered", "turn": self.turns, "answered": answered,
+                   "cost_usd": sum(c for c, _ in spent), "tokens": sum(t for _, t in spent)})
         if answered is None:
             return None
         unanswered = [f for f, ok in zip(self.open_findings, answered, strict=True) if not ok]
@@ -2685,7 +2690,8 @@ INVENTORY_FILES = 60
 #: First line of a continuation session's prompt (``CONTINUATION_PROMPT``).
 CONTINUATION_MARKER = "# Task Progress (Continuation "
 #: Side agents of the gate whose spend the trial runner adds to the trial's cost.
-SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written", "reading_check"})
+SIDE_AGENT_EVENTS = frozenset({"review", "blind_verifier_written", "reading_check",
+                               "findings_answered"})
 
 
 def changed_paths(baseline: dict[str, tuple[str, str]],
@@ -2727,8 +2733,9 @@ def append_user_text(message: dict[str, Any], note: str) -> None:
 def review_usage(trajectory_path: Path, since: int = 0) -> tuple[float, int]:
     """``(USD, tokens)`` spent by the gate's side agents logged in *trajectory_path*.
 
-    The reviewer and the blind verifier's author are model calls outside
-    the daemon's accounting (:data:`SIDE_AGENT_EVENTS`), so the trial runner
+    The reviewer, the blind verifier's author, the reading check and the
+    decisions model's findings check are model calls outside the daemon's
+    accounting (:data:`SIDE_AGENT_EVENTS`), so the trial runner
     adds their spend to the trial's cost from the log.  The log is
     append-only: a runner that reuses a trial directory passes the file's
     size before its run as *since* so earlier runs' reviews are not counted

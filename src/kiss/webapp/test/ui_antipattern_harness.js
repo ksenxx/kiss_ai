@@ -91,6 +91,11 @@ function key(win, el, name, extra) {
   );
 }
 
+// The two forms a keydown inside an IME composition takes (`extra` for
+// `key`): the standard flag, and the legacy keyCode 229 some browsers
+// send instead.  Neither is a submit.
+const IME_FORMS = [{isComposing: true}, {keyCode: 229}];
+
 /**
  * Bring a workspace section of the task-info panel (meta-explorer /
  * meta-scm) on screen: expand it if it is collapsed.  An expanded
@@ -314,6 +319,7 @@ module.exports = {
   keyboardClick,
   rightClick,
   key,
+  IME_FORMS,
   byId,
   showSection,
   ofType,

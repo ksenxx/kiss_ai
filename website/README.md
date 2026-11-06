@@ -33,7 +33,7 @@ LLM/coding-assistant indexing") and verified live:
   `openrouter/anthropic/claude-fable-5.1-max`, as `bestrouter_sea.py` and
   `orbestrouter_sea.py` do, "through a non-blocking run_agent" (the `/sync`
   row, rewritten in the same window, is identical in both),
-  the `/discover`, `/devtools` and
+  the `/discover`, `/devtools`, `/install` and
   `/sync_history_and_memory` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA
   "applies and evaluates improvements to each SEA" where the page now
@@ -64,8 +64,8 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  26 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
-  `/forget`, `/git_extract_knowledge`, `/good_morning`, `/machine`, `/merge`,
+  27 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/devtools`, `/discover`,
+  `/forget`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,
   `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/write`,

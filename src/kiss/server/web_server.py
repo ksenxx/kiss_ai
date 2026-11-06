@@ -665,7 +665,8 @@ def _share_subagent_entries(
                     "events": with_synthesized_events(events, row),
                     "metrics": task_metrics_from_session(row),
                 }
-                used += len(json.dumps(entry).encode("utf-8"))
+                # ``json.dumps`` escapes to ASCII: its length is the byte size.
+                used += len(json.dumps(entry))
                 if used > max_bytes:
                     return out, used, True
                 out.append(entry)
@@ -1745,6 +1746,47 @@ def _find_cloudflared_forwarding_to(local_port: int) -> list[tuple[int, int]]:
     return found
 
 
+def _cloudflared_origin_port(pid: int) -> int | None:
+    """Return the loopback port the quick tunnel *pid* forwards to.
+
+    Reads the process's argv (``ps``) and parses its ``--url`` like
+    :func:`_quick_tunnel_argv_ports`.  ``None`` when the origin cannot
+    be told — a named tunnel (``run`` in the argv: its origin is
+    configured in the dashboard), no loopback ``--url``, an argv that
+    does not parse, or no ``ps`` (Windows) — so the caller adopts the
+    process as before.
+
+    Args:
+        pid: The process recorded in the pidfile.
+
+    Returns:
+        The ``--url`` port, or ``None`` when unknown.
+    """
+    if sys.platform == "win32":  # pragma: no cover — Windows only
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+    except Exception:
+        return None
+    args = result.stdout.split()[1:]
+    if not args or args[0] != "tunnel" or "run" in args:
+        return None
+    for i, arg in enumerate(args[:-1]):
+        if arg == "--url":
+            try:
+                target = urlsplit(args[i + 1])
+                return target.port if target.hostname in _LOOPBACK_HOSTS else None
+            except ValueError:
+                return None
+    return None
+
+
 def _quick_tunnel_argv_ports(args: list[str], local_port: int) -> int | None:
     """Return the ``--metrics`` port of a quick-tunnel argv aimed at *local_port*.
 
@@ -1836,7 +1878,10 @@ def _try_adopt_existing_cloudflared(
     the metrics ``/ready`` endpoint reports ``readyConnections > 0``,
     and re-discovers the public URL via the ``/quicktunnel`` endpoint
     (falling back to the URL recorded in the pidfile when the metrics
-    endpoint doesn't expose one — e.g. named tunnels).
+    endpoint doesn't expose one — e.g. named tunnels).  A recorded
+    quick tunnel whose ``--url`` port is not *local_port* (the daemon's
+    port changed) is declined and terminated instead
+    (:func:`_cloudflared_origin_port`): its public URL reaches nothing.
 
     When the pidfile yields nothing (missing, malformed, dead pid, or a
     live process that had to be declined) and *local_port* is given,
@@ -1878,17 +1923,31 @@ def _try_adopt_existing_cloudflared(
         metrics_port = data.get("metrics_port")
         if isinstance(metrics_port, int):
             recorded_pid = pid
-            if _is_pid_alive(pid):
+            if not _is_pid_alive(pid):
+                logger.info(
+                    "cloudflared pidfile points to dead pid %d; ignoring",
+                    pid,
+                )
+            elif (
+                local_port is not None
+                and (origin := _cloudflared_origin_port(pid)) not in (None, local_port)
+            ):
+                # The daemon's port changed since the tunnel was
+                # spawned: adopted, its public URL would reach a port
+                # nobody listens on, and the watchdog (which checks
+                # readiness, not the origin) would keep it forever.
+                logger.info(
+                    "cloudflared pid %d forwards to local port %s, not %d; "
+                    "not adopting",
+                    pid, origin, local_port,
+                )
+                _terminate_declined_cloudflared(pid)
+            else:
                 adopted = _adopt_cloudflared_candidate(
                     pid, metrics_port, data.get("url"),
                 )
                 if adopted is not None:
                     return adopted
-            else:
-                logger.info(
-                    "cloudflared pidfile points to dead pid %d; ignoring",
-                    pid,
-                )
     if local_port is None:
         return None
     for pid, metrics_port in _find_cloudflared_forwarding_to(local_port):
@@ -2022,9 +2081,10 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
         cannot be parsed still counts as ``False`` because a 503
         from ``/ready`` is by definition "not ready".
         ``None`` if the endpoint is unreachable, replies with a
-        non-503 HTTP error, the response is not valid JSON, or the
-        value is non-numeric — callers should treat this as "no
-        information" and *not* count it toward an unhealthy streak.
+        non-503 HTTP error, the response is not valid JSON, is not an
+        object carrying ``readyConnections``, or the value is
+        non-numeric — callers should treat this as "no information"
+        and *not* count it toward an unhealthy streak.
     """
     not_ready_status = 503
     try:
@@ -2048,8 +2108,10 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
     except Exception:
         return None
     try:
-        return int(data.get("readyConnections", 0)) > 0
-    except (TypeError, ValueError):
+        # A 200 body without the field (or not an object) is no
+        # confirmed zero: it must not count toward an unhealthy streak.
+        return int(data["readyConnections"]) > 0
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -2634,13 +2696,14 @@ def _snapshot_active_tabs() -> list[str]:
 
     Snapshots the agent-state registry under its lock before iterating
     so a concurrent worker thread mutating it cannot race the iterator.
-    The lock is a :class:`threading.RLock`, so re-entry from the same
-    thread is safe even when called from a signal handler that
-    interrupted a lock holder.  Falls back to a best-effort unlocked
-    snapshot if the lock itself is unusable (e.g. during interpreter
-    shutdown), and skips malformed entries rather than propagating, so
-    callers — the shutdown-signal logger and the ``activeTasksQuery``
-    handler — always get a usable (possibly partial) report.
+    Never call it from a signal handler: the handler's thread may hold
+    a lock the registry-lock holder is waiting for (see
+    :meth:`RemoteAccessServer._handle_shutdown_signal`).  Falls back to
+    a best-effort unlocked snapshot if the lock itself is unusable
+    (e.g. during interpreter shutdown), and skips malformed entries
+    rather than propagating, so callers — the update barrier and the
+    ``activeTasksQuery`` handler — always get a usable (possibly
+    partial) report.
 
     Liveness is :meth:`AgentState.busy`, not ``is_task_active`` alone:
     a worker that ``_cmd_run`` has started but that has not yet raised
@@ -4788,11 +4851,7 @@ def _compare_versions(a: str, b: str) -> int:
     n = max(len(ta), len(tb))
     ta = ta + (0,) * (n - len(ta))
     tb = tb + (0,) * (n - len(tb))
-    if ta > tb:
-        return 1
-    if ta < tb:
-        return -1
-    return 0
+    return (ta > tb) - (ta < tb)
 
 
 def _fetch_latest_version() -> str | None:
@@ -5171,6 +5230,9 @@ class RemoteAccessServer:
         # process" and the start could publish a live one afterwards.
         self._tunnel_lock = threading.Lock()
         self._tunnel_stopped = False
+        # ``_detach_tunnel`` ran: a spawn that publishes afterwards hands
+        # its cloudflared to the next daemon instead (see there).
+        self._tunnel_detached = False
         self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -5542,7 +5604,11 @@ class RemoteAccessServer:
         nobody is served while no password is set (403).  A wrong
         non-empty password counts toward the per-IP lockout shared
         with the handshake (429 while it holds); a credential-less
-        request, every page's first fetch, does not.
+        request, every page's first fetch, does not.  The private
+        daemon (:attr:`local_only`) serves nobody: it admits only
+        token-authenticated local clients, and an HTTP request carries
+        no token, so the loopback admission would hand the owner's
+        trajectories to every user of the machine.
 
         Args:
             connection: The connection the request arrived on.
@@ -5551,6 +5617,11 @@ class RemoteAccessServer:
         Returns:
             The refusal response, or ``None`` for an admitted requester.
         """
+        if self._local_only:
+            return _http_response(
+                403, "application/json; charset=utf-8",
+                b'{"error": "This private server serves no trajectory data"}',
+            )
         ip = self._client_ip(connection)
         if _connection_peer_is_loopback(connection) and sorcar_api.is_loopback_ip(ip):
             return None
@@ -5714,6 +5785,14 @@ class RemoteAccessServer:
         # ``link``: a daemon-link peer, told only global events and the
         # replies to its own requests (see ``WebPrinter.add_client``).
         conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex, "link": auth.link}
+        # Every command of the connection, from a remote browser or a
+        # local client alike, goes to the code API's ``dispatch`` with
+        # this one context: the API layer validates it against the
+        # catalog and stamps it (``connId``, tab registration); nothing
+        # is routed here.
+        ctx = sorcar_api.ApiContext(
+            endpoint=websocket, conn_state=conn_state, is_local=is_local,
+        )
         self._printer.bind_conn(conn_state["conn_id"], websocket)
         # The standalone app's popup window (kiss-app on macOS) marks
         # its connection; the daemon quits a browser whose popup closed.
@@ -5754,9 +5833,7 @@ class RemoteAccessServer:
                     await websocket.close()
                     break
                 try:
-                    await self._dispatch_client_command(
-                        cmd, websocket, conn_state, is_local,
-                    )
+                    await self._server_api.dispatch(cmd, ctx)
                 except websockets.exceptions.ConnectionClosed:
                     raise
                 except Exception:
@@ -5880,45 +5957,6 @@ class RemoteAccessServer:
             conn_state.pop("rotated_from", None)
             return False
         return password_accepted(client_pw, rotated_from)
-
-    async def _dispatch_client_command(
-        self,
-        cmd: dict[str, Any],
-        endpoint: ServerConnection,
-        conn_state: dict[str, Any],
-        is_local: bool,
-    ) -> None:
-        """Hand one parsed client command to the server's code API.
-
-        The single per-message entry point of :meth:`_ws_handler` for
-        remote browsers and local clients alike, so the two kinds of
-        peer cannot drift in behaviour.  This method owns NO routing: it wraps the connection's
-        transport state into a :class:`kiss.server.sorcar.ApiContext`
-        and calls :meth:`kiss.server.sorcar.ServerApi.dispatch`, which
-        validates the command against the API catalog, applies the
-        per-connection stamping (``connId``, tab registration — see
-        the invariant documentation on :class:`ServerApi`), and
-        invokes the API method the command's catalog entry names, with
-        this server as the backend.
-
-        Args:
-            cmd: The parsed JSON command dictionary.
-            endpoint: The client's :class:`ServerConnection`, used
-                for direct replies.
-            conn_state: Per-connection mutable state holding the
-                connection's unique ``conn_id``.  Each browser tab
-                owns exactly one connection, and the API layer's
-                stamping of ``connId`` is what guarantees the
-                per-tab autocomplete isolation invariant.
-            is_local: Whether the connection authenticated with the
-                local token (see :meth:`kiss.server.sorcar.ServerApi.authenticate`).
-        """
-        ctx = sorcar_api.ApiContext(
-            endpoint=endpoint,
-            conn_state=conn_state,
-            is_local=is_local,
-        )
-        await self._server_api.dispatch(cmd, ctx)
 
     def _bootstrap_events(self) -> list[dict[str, Any]]:
         """The events a ``ready`` answers with: ``tricksData``,
@@ -6588,7 +6626,10 @@ class RemoteAccessServer:
         spawned = await loop.run_in_executor(
             None, self._spawn_update_models, conn_id,
         )
-        if spawned is not None:
+        # ``stop_async`` cancels only the watcher that exists when it
+        # runs; a spawn still in flight then must not install one on
+        # the stopped server's loop (the updater is detached by design).
+        if spawned is not None and not self._shutdown_initiated:
             self._update_models_watch_task = asyncio.create_task(
                 self._watch_update_models_exit(spawned, conn_id),
             )
@@ -7324,7 +7365,7 @@ class RemoteAccessServer:
                     # the saved page's task info (taskPanelInfoHTML).
                     "metrics": task_metrics_from_session(row),
                 }
-                budget -= len(json.dumps(entry).encode("utf-8"))
+                budget -= len(json.dumps(entry))  # ASCII: length == byte size
                 if budget < 0:
                     truncated = True
                     break
@@ -8294,20 +8335,15 @@ class RemoteAccessServer:
             idle and is launching the installer is left alone: the
             update is under way and the single-flight guard in
             :meth:`_handle_run_update` covers any concurrent request.
-            The armed generation is cleared under
-            :data:`agent_state.STATE_LOCK`, the lock the idle check
-            (:meth:`_arm_update_barrier_if_idle`) reads it under.  Both
-            run on the event loop, so a Cancel lands either while the
-            poller sleeps (cancelled there, it never checks again) or
-            after its verdict (the generation is consumed and this call
-            stands down).  Task threads hold that lock for the few
-            milliseconds of a run admission or a refusal broadcast; the
-            loop waits those out here as :meth:`_set_update_barrier`
-            does.
+            The armed generation is touched on the event loop only
+            (here, the arming handler and the idle check
+            :meth:`_arm_update_barrier_if_idle`), so a Cancel lands
+            either while the poller sleeps (cancelled there, it never
+            checks again) or after its verdict (the generation is
+            consumed and this call stands down); no lock is needed.
         """
-        with agent_state.STATE_LOCK:
-            was_armed = self._update_when_idle_armed != 0
-            self._update_when_idle_armed = 0
+        was_armed = self._update_when_idle_armed != 0
+        self._update_when_idle_armed = 0
         if not was_armed:
             return False
         task = self._update_when_idle_task
@@ -8883,6 +8919,10 @@ class RemoteAccessServer:
             # means "no per-run override" and the agent resolves the
             # persisted ``use_memory`` setting itself.
             "useMemory": cmd.get("useMemory"),
+            # Same contract for context compaction: only an explicit
+            # ``false`` turns it off for the run; the global Compaction
+            # setting is read by the agent itself.
+            "compaction": cmd.get("compaction"),
             "_notice": notice,
         }
         await self._run_cmd(run_cmd)
@@ -8941,11 +8981,11 @@ class RemoteAccessServer:
         attempt = 0
         max_attempts = max(1, retries)
         while attempt < max_attempts:
-            self._tunnel_metrics_port = _pick_free_local_port()
+            metrics_port = self._tunnel_metrics_port = _pick_free_local_port()
             base_argv = [
                 "cloudflared", "tunnel",
                 "--metrics",
-                f"127.0.0.1:{self._tunnel_metrics_port}",
+                f"127.0.0.1:{metrics_port}",
                 *args,
             ]
             try:
@@ -8994,6 +9034,19 @@ class RemoteAccessServer:
                         raise RuntimeError(
                             "tunnel stopped while cloudflared was starting",
                         )
+                    if self._tunnel_detached:
+                        # ``_detach_tunnel`` already ran (graceful
+                        # shutdown while this spawn was in flight) and
+                        # reset the bookkeeping: the dying daemon must
+                        # not own the child — its stderr pipe would die
+                        # with the process — so hand it to the next
+                        # daemon the way ``_detach_tunnel`` does:
+                        # pidfile (the port of the argv) + drain shim.
+                        _save_cloudflared_pidfile(proc.pid, metrics_port, None)
+                        self._spawn_stderr_drain_shim(proc)
+                        raise RuntimeError(
+                            "tunnel detached while cloudflared was starting",
+                        )
                     self._tunnel_proc = proc
                     self._tunnel_started_at = time.monotonic()
                     self._tunnel_adopted_pid = None
@@ -9036,7 +9089,7 @@ class RemoteAccessServer:
         # thread must not overwrite it with a stale (dead) ``Popen``
         # whose stderr pipe would then outlive ``stop_async``.
         with self._tunnel_lock:
-            if self._tunnel_stopped and last_proc is not None:
+            if (self._tunnel_stopped or self._tunnel_detached) and last_proc is not None:
                 _reap_proc(last_proc)
                 raise RuntimeError(
                     "tunnel stopped while cloudflared was starting",
@@ -9976,11 +10029,20 @@ class RemoteAccessServer:
         ``$KISS_HOME/remote-url.json``: a sibling kiss-web that has
         already taken over may have overwritten it, and removing it
         would briefly leave ``kiss-web --url`` with no URL.
+
+        Sets :attr:`_tunnel_detached` under :attr:`_tunnel_lock` (the
+        counterpart of :meth:`_stop_tunnel`'s ``_tunnel_stopped``): a
+        :meth:`_spawn_cloudflared` still in flight on an executor
+        thread then hands its child to the pidfile and a drain shim
+        itself instead of publishing it into this dying daemon, where
+        no later detach would find it.
         """
-        proc = self._tunnel_proc
-        if proc is not None and proc.poll() is None:
-            self._spawn_stderr_drain_shim(proc)
-        self._reset_tunnel_proc_state()
+        with self._tunnel_lock:
+            self._tunnel_detached = True
+            proc = self._tunnel_proc
+            if proc is not None and proc.poll() is None:
+                self._spawn_stderr_drain_shim(proc)
+            self._reset_tunnel_proc_state()
         self._reset_tunnel_backoff_state()
 
     @staticmethod
@@ -10277,8 +10339,8 @@ class RemoteAccessServer:
                 "server again",
                 self.port, self.port,
             )
-            # Local clients may have been pointed at a non-loopback
-            # address meanwhile: publish the loopback one.  Off the
+            # No endpoint was published while the alias was missing
+            # (``_write_local_endpoint_file``): publish it now.  Off the
             # loop: the endpoint lock may be waited for (bounded, 5 s).
             await asyncio.to_thread(self._write_local_endpoint_file)
 
@@ -10292,13 +10354,28 @@ class RemoteAccessServer:
         exists (the layout :func:`_generate_self_signed_cert` produces),
         else the certificate itself (a self-signed certificate is its
         own trust anchor).
+
+        Publishes nothing while no listener is reachable over loopback
+        (a LAN-only listener whose ``127.0.0.1`` alias another process
+        holds): a same-machine client is a non-loopback peer on the LAN
+        address, where plaintext is refused and the token never
+        honoured, so that endpoint could only fail.
+        :meth:`_watchdog_reclaim_loopback` publishes once the alias is
+        bound.
         """
+        host, port = _bound_loopback(self._ws_loopback_server, self._ws_server)
+        if not sorcar_api.is_loopback_ip(host.strip("[]")):
+            logger.warning(
+                "No loopback listener: local clients cannot reach this daemon "
+                "until 127.0.0.1:%d is reclaimed; the endpoint file is not written",
+                port,
+            )
+            return
         if self._ssl_certfile and self._ssl_keyfile:
             sibling_ca = Path(self._ssl_certfile).parent / tls_certs.CA_CERT_FILE
             ca_path = str(sibling_ca) if sibling_ca.is_file() else self._ssl_certfile
         else:
             ca_path = str(_tls_dir() / tls_certs.CA_CERT_FILE)
-        host, port = _bound_loopback(self._ws_loopback_server, self._ws_server)
         local_endpoint.write_endpoint(
             self._local_endpoint_file,
             local_endpoint.LocalEndpoint(
@@ -10535,18 +10612,22 @@ class RemoteAccessServer:
     def _broadcast_current_sea_commands(self) -> None:
         """Broadcast the registry's current SEA slash-command list (worker thread).
 
-        The event is rebuilt while the registry changed during its slow
-        usage read: a rescan published meanwhile has broadcast the newer
-        list inline, and this one, sent last, must not take it back.
+        The registry is re-read after every send and the event rebuilt
+        and re-sent while it changed: a rescan published during the slow
+        usage read, or between the last check and the send, has
+        broadcast the newer list inline, and the older one sent after
+        it must not be the last word.  The check comes after the send
+        so no publish can slip in between them.
         """
         from kiss.agents.sorcar import sea_commands
 
         names = sea_commands.list_commands()
-        event = sea_commands_event(names)
-        while (current := sea_commands.list_commands()) != names:
+        while True:
+            self._printer.broadcast(sea_commands_event(names))
+            current = sea_commands.list_commands()
+            if current == names:
+                return
             names = current
-            event = sea_commands_event(names)
-        self._printer.broadcast(event)
 
     def _stop_sea_command_watcher(self) -> None:
         """Unsubscribe from the SEA registry and stop its poller.
@@ -10639,9 +10720,15 @@ class RemoteAccessServer:
     ) -> None:
         """React to a catchable termination signal (SIGTERM / SIGHUP).
 
-        Logs the signal alongside a snapshot of in-flight agent tasks
-        (via :func:`_snapshot_active_tabs`, which is signal-safe) and
-        current memory.  For ``SIGTERM`` the *first* invocation starts
+        Logs the signal and current memory.  The in-flight tasks are
+        NOT listed here: the handler runs on the event-loop thread,
+        which may be inside a ``WebPrinter._ws_lock`` section, while a
+        worker holding ``agent_state.STATE_LOCK`` (a status broadcast
+        under the server's state lock) waits for that same lock — a
+        registry snapshot taken here would wait for the worker, the
+        worker for this thread, and the daemon would never shut down.
+        :meth:`_stop_active_agent_tasks` logs the swept tasks instead,
+        off this thread.  For ``SIGTERM`` the *first* invocation starts
         the :meth:`_shutdown_on_sigterm` thread, which stops the
         in-flight agent worker threads and then unwinds the event loop
         deterministically (via :meth:`_request_loop_shutdown`) so
@@ -10671,12 +10758,10 @@ class RemoteAccessServer:
                 directly).
         """
         sig_name = signal.Signals(signum).name
-        active_tabs = _snapshot_active_tabs()
         logger.warning(
-            "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
+            "Signal %s received: pid=%d rss=%.1fMB",
             sig_name,
             os.getpid(),
-            ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
         if signum in _SHUTDOWN_SIGNALS:
@@ -10970,6 +11055,15 @@ class RemoteAccessServer:
         if not active:
             return
 
+        # Signal first: the pre-emptive persistence below waits for the
+        # history write lock and, behind another writer, for SQLite's
+        # busy timeout; the workers must already be stopping meanwhile.
+        # Its rewrite touches only rows still at the creation sentinel,
+        # so a worker that finishes its cleanup first is never clobbered.
+        for _tab_id, _state, stop_event, _thread in active:
+            if stop_event is not None:
+                stop_event.set()
+
         try:
             from kiss.agents.sorcar.persistence import (
                 _shutdown_persist_in_flight_results,
@@ -10989,10 +11083,6 @@ class RemoteAccessServer:
             len(active),
             ", ".join(tab_id for tab_id, _, _, _ in active),
         )
-
-        for _tab_id, _state, stop_event, _thread in active:
-            if stop_event is not None:
-                stop_event.set()
 
         deadline = time.monotonic() + timeout
         for tab_id, state, _stop_event, thread in active:

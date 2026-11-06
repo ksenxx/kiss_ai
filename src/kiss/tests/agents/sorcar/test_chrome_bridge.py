@@ -27,19 +27,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import linecache
 import os
 import queue
 import re
 import socket
+import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from websockets.client import ClientProtocol
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
+from websockets.uri import parse_uri
 
 from kiss.agents.sorcar import chrome_bridge
 from kiss.agents.sorcar.chrome_bridge import (
@@ -299,6 +304,197 @@ def test_ping_pong(bridge: ChromeBridge) -> None:
         assert peer.next_command() == {"type": "pong"}
     finally:
         peer.close()
+
+
+class StalledPeer:
+    """An authenticated extension socket that reads only when the test says so.
+
+    Driven by hand over a raw socket with websockets' sans-I/O client
+    protocol (the threaded client reads on its own and would answer, or
+    fail on, whatever arrives): after the handshake nothing drains the
+    socket, as behind an extension whose service worker stalled.
+    """
+
+    def __init__(self, bridge: ChromeBridge):
+        self.sock = socket.socket()
+        # An explicit size pins the buffer: the kernel grows an unpinned
+        # one while the pipe fills, and a write that found it full fits
+        # a moment later.
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+        self.sock.connect(("127.0.0.1", bridge.port))
+        self.proto = ClientProtocol(parse_uri(f"ws://127.0.0.1:{bridge.port}"))
+        self.events: deque[Any] = deque()
+        self.proto.send_request(self.proto.connect())
+        self._flush()
+        assert self._next_event().status_code == 101
+        assert self.proto.handshake_exc is None
+        nonce = self.recv_json()["nonce"]
+        self.send_json({"type": "hello", "proof": _proof(bridge.token, nonce)})
+        assert self.recv_json()["type"] == "hello_ok"
+        assert bridge.wait_for_extension(5)
+
+    def _flush(self) -> None:
+        for data in self.proto.data_to_send():
+            self.sock.sendall(data)
+
+    def _next_event(self) -> Any:
+        # ``events_received`` hands over every event parsed so far and
+        # forgets them: one read can carry the handshake response and the
+        # challenge frame together, so the events are queued.
+        while not self.events:
+            self.proto.receive_data(self.sock.recv(65536))
+            self.events.extend(self.proto.events_received())
+        return self.events.popleft()
+
+    def recv_json(self) -> dict[str, Any]:
+        return dict(json.loads(self._next_event().data))
+
+    def send_json(self, obj: dict[str, Any]) -> None:
+        self.proto.send_text(json.dumps(obj).encode())
+        self._flush()
+
+    def fill_pipe(self, bridge: ChromeBridge) -> None:
+        """Fill the kernel buffers from the bridge's socket towards this peer.
+
+        The next write of a single byte on the bridge's side then blocks in
+        ``sendall``: the state a stalled extension leaves the bridge in.
+        The writes go through a non-blocking duplicate of the bridge's
+        socket (``MSG_DONTWAIT`` does not exist on Windows, and macOS
+        still blocks a large send that finds the buffer partly full).  The
+        flag is shared with the bridge's socket, so the writes start only
+        once the bridge's reader is parked in a blocking ``recv``
+        (:func:`_wait_until_reader_parked`), and the socket is blocking
+        again before this returns.  Filled in
+        rounds: this peer's kernel still opens its window a little after
+        a write found no room (its window updates ride delayed acks, at
+        most 200 ms apart), so a round ends only when a one-byte probe
+        still finds the pipe full after that.
+        """
+        conn = bridge._conn
+        assert conn is not None
+        conn.ws.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)  # pinned too
+        _wait_until_reader_parked(conn.ws.recv_events_thread)
+        with conn.ws.socket.dup() as sock:
+            sock.setblocking(False)
+            try:
+                while True:
+                    try:
+                        sock.send(b"\0" * 65536)
+                        continue
+                    except BlockingIOError:
+                        time.sleep(0.3)
+                    try:
+                        sock.send(b"\0")
+                    except BlockingIOError:
+                        return
+            finally:
+                sock.setblocking(True)
+
+    def abort(self) -> None:
+        """Close with data unread: the bridge's blocked write fails at once."""
+        self.sock.close()
+
+
+def _reader_at_recv(reader: threading.Thread) -> bool:
+    """Whether websockets' *reader* thread is on the ``socket.recv`` line of ``recv_events``."""
+    frame = sys._current_frames().get(reader.ident or 0)
+    return (
+        frame is not None
+        and frame.f_code.co_name == "recv_events"
+        and "socket.recv(" in linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+    )
+
+
+def _wait_until_reader_parked(reader: threading.Thread) -> None:
+    """Wait until websockets' *reader* thread is blocked in its socket ``recv``.
+
+    On the ``recv`` line in two samples 50 ms apart, with nothing
+    arriving: the thread is inside the call, which chose to block when
+    it was entered, so a non-blocking flag set afterwards cannot reach it.
+    """
+    deadline = time.monotonic() + 10
+    while True:
+        if _reader_at_recv(reader):
+            time.sleep(0.05)
+            if _reader_at_recv(reader):
+                return
+        assert time.monotonic() < deadline, "the bridge's reader never blocked in recv"
+        time.sleep(0.01)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="only Linux's loopback keeps a pipe full once fill_pipe's probe found it so: "
+    "macOS keeps opening room for seconds under load, and Windows still completes a "
+    "small blocking send, so the pong is written instead of stalling",
+)
+def test_a_pong_the_extension_stopped_reading_is_cut_and_the_connection_dropped(
+    bridge: ChromeBridge,
+) -> None:
+    """A peer that still pings but no longer drains its socket must not wedge the bridge.
+
+    The reply to its ping blocks in ``sendall`` with the send lock held, as
+    behind a stalled extension.  Bounded like a command's write, the pong is
+    cut by its watchdog, the connection is dropped and a fresh extension
+    connection works.  Unbounded, every later command failed as "busy"
+    while the bridge still reported the extension as connected.
+    """
+    stalled = StalledPeer(bridge)
+    try:
+        stalled.fill_pipe(bridge)
+        stalled.send_json({"type": "ping"})
+        assert _eventually(lambda: not bridge.extension_connected, timeout=10.0)
+        peer = ExtensionPeer(bridge.port, bridge.token, responder=lambda cmd: "answered")
+        try:
+            assert bridge.call("list_tabs", timeout=5) == "answered"
+        finally:
+            peer.close()
+    finally:
+        stalled.abort()
+
+
+def test_stop_does_not_wait_for_a_peer_that_stopped_reading(bridge: ChromeBridge) -> None:
+    """``stop()`` shuts the live socket down before closing it, as the timeout path does.
+
+    A bare close writes a close frame and waits for the peer's, up to
+    websockets' 10 s close_timeout: a peer that stopped reading held the
+    daemon's shutdown for that long.
+    """
+    stalled = StalledPeer(bridge)
+    stopper = threading.Thread(target=bridge.stop)
+    try:
+        stalled.fill_pipe(bridge)
+        stopper.start()
+        stopper.join(5)
+        assert not stopper.is_alive(), "stop() waited for the peer"
+        assert not bridge.extension_connected
+    finally:
+        stalled.abort()
+        stopper.join(30)
+
+
+def test_a_handshake_in_flight_cannot_connect_a_stopped_bridge() -> None:
+    """The extension's hello lands after ``stop()``: the stopped bridge must not keep it.
+
+    Closing the listener does not end an accepted handshake; published,
+    the connection would keep the extension away from any live bridge.
+    """
+    b = ChromeBridge(port=0, write_config=False)
+    b.start()
+    ws = connect(f"ws://127.0.0.1:{b.port}")
+    try:
+        nonce = json.loads(ws.recv(timeout=5))["nonce"]
+        b.stop()
+        ws.send(json.dumps({"type": "hello", "proof": _proof(b.token, nonce)}))
+        ws.send(json.dumps({"type": "ping"}))
+        with pytest.raises(ConnectionClosed):
+            while True:
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg.get("type") != "pong", "a stopped bridge serves the extension"
+        assert not b.extension_connected
+    finally:
+        ws.close()
+        b.stop()
 
 
 def test_call_without_extension(bridge: ChromeBridge) -> None:

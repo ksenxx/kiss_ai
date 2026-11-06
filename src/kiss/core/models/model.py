@@ -54,6 +54,8 @@ from kiss.core.models.stream_abort import (
 from kiss.core.processes import (
     _REAP_GRACE_SECONDS,
     SIGKILL,
+    exit_status_unreaped,
+    exited_unreaped,
     kill_process_group,
     popen_process_group,
 )
@@ -2170,12 +2172,14 @@ def _python_type_to_json_schema(python_type: Any) -> dict[str, Any]:
             return _python_type_to_json_schema(non_none_args[0])
         return {"anyOf": [_python_type_to_json_schema(a) for a in non_none_args]}
 
-    if origin is list:
+    # The bare ``list``/``dict`` have no origin: they are the unparameterised
+    # collections, not the string fallback below.
+    if origin is list or python_type is list:
         if args:
             return {"type": "array", "items": _python_type_to_json_schema(args[0])}
         return {"type": "array"}
 
-    if origin is dict:
+    if origin is dict or python_type is dict:
         return {"type": "object"}
 
     type_mapping: dict[type, dict[str, str]] = {
@@ -2333,7 +2337,7 @@ class CLITextModel(Model):
         text stream to the callbacks as they arrive, minus the raw
         ``tool_calls`` JSON, so the block is never rendered in the chat
         panel.  Adapters shape the turn through :meth:`_text_tools` and
-        :meth:`_tool_call_text`.
+        :meth:`_parse_tool_calls`.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
@@ -2349,7 +2353,7 @@ class CLITextModel(Model):
             # then billed through take_partial_usage_response().
             self._rejected_response = response
         self._rejected_response = None
-        function_calls = _parse_text_based_tool_calls(self._tool_call_text(content))
+        function_calls = self._parse_tool_calls(content)
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
         return function_calls, content, response
@@ -2364,13 +2368,13 @@ class CLITextModel(Model):
         """
         return function_map
 
-    def _tool_call_text(self, content: str) -> str:
-        """Return the text of a finished turn that is parsed for ``tool_calls``.
+    def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
+        """Return the ``tool_calls`` a finished turn made, parsed from its text.
 
         Args:
             content: The turn's assistant text.
         """
-        return content
+        return _parse_text_based_tool_calls(content)
 
     def _emit_as_thinking(self, text: str) -> None:
         """Forward *text* to the token callback wrapped in a thinking block.
@@ -2466,6 +2470,9 @@ class CLITextModel(Model):
 # Longest wait for a child that already closed stdout to exit on its own.
 # Bounded by the run's own deadline, so a short timeout stays short.
 _EXIT_GRACE_SECONDS = 10.0
+# How often an exit wait that must not reap the child (see
+# :meth:`_CLIProcess.wait_for_exit`) looks again.
+_EXIT_POLL_SECONDS = 0.01
 # How often a blocked reader re-checks the thread's stop signal.
 _STOP_POLL_SECONDS = 0.1
 
@@ -2796,7 +2803,7 @@ class _CLIProcess:
                 self._writer_cancel.set()
                 raise
             writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
-            if not writer.is_alive() or self._proc.poll() is not None:
+            if not writer.is_alive() or exited_unreaped(self._proc):
                 return
 
     def _raise_for_caller(self) -> None:
@@ -2877,7 +2884,7 @@ class _CLIProcess:
                 while view:
                     if (
                         self._writer_cancel.is_set()
-                        or self._proc.poll() is not None
+                        or exited_unreaped(self._proc)
                         or time.monotonic() >= self._deadline
                     ):
                         break
@@ -2989,6 +2996,13 @@ class _CLIProcess:
         down nor a tool call of the child that hit a fatal limit
         meanwhile must be answered with a successful turn.
 
+        The status is read without reaping the child (see
+        :func:`exit_status_unreaped`): the child's pid is also its
+        group's id, which :meth:`close` is yet to signal, and the kernel
+        keeps that id reserved for the group only while the child is a
+        zombie or a member of the group lives.  Reaped here, the id could
+        be handed to another session leader before the SIGKILL.
+
         Returns:
             The exit status, or ``None`` when the child outlived the wait.
 
@@ -3000,10 +3014,11 @@ class _CLIProcess:
         wait_until = time.monotonic() + min(remaining, _EXIT_GRACE_SECONDS)
         while True:
             self._raise_for_caller()
-            slice_ = min(wait_until - time.monotonic(), _STOP_POLL_SECONDS)
-            status = self._reap(max(slice_, 0.0))
-            if status is not None or slice_ <= 0:
+            status = exit_status_unreaped(self._proc)
+            left = wait_until - time.monotonic()
+            if status is not None or left <= 0:
                 return status
+            time.sleep(min(left, _EXIT_POLL_SECONDS))
 
     def stderr_text(self) -> str:
         """Return everything the child wrote to stderr.
@@ -3065,15 +3080,18 @@ class _CLIProcess:
         SIGTERM, and it may ignore SIGTERM, so the grace period is always
         followed by a SIGKILL of the group (a group that is already gone
         only raises ``ProcessLookupError``, which :meth:`_signal_tree`
-        swallows).
+        swallows).  The child is reaped only after that last signal:
+        until then it is at worst a zombie, which keeps its pid reserved
+        as the group's id (see :func:`kill_process_group`), so neither
+        signal can reach a stranger's group that recycled it.
         """
         proc = self._proc
         self._signal_tree(signal.SIGTERM)
-        if proc.poll() is None:
-            self._reap(_REAP_GRACE_SECONDS)
+        grace_over = time.monotonic() + _REAP_GRACE_SECONDS
+        while not exited_unreaped(proc) and time.monotonic() < grace_over:
+            time.sleep(_EXIT_POLL_SECONDS)
         self._signal_tree(SIGKILL)
-        if proc.poll() is None:
-            self._reap(_REAP_GRACE_SECONDS)
+        self._reap(_REAP_GRACE_SECONDS)
         self._writer_cancel.set()
         if self._writer is not None and self._writer.is_alive():
             self._writer.join()

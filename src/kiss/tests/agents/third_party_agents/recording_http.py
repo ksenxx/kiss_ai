@@ -157,6 +157,18 @@ class RecordingServer(ThreadedHTTPServer):
         headers = self.requests[index]["headers"]
         return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
 
+    def paths(self, method: str | None = None) -> list[str]:
+        """Return the paths of the recorded requests, in order.
+
+        Args:
+            method: Keep only the requests made with this HTTP method
+                (default: every request).
+
+        Returns:
+            The ``path`` of each matching recorded request.
+        """
+        return [r["path"] for r in self.requests if method is None or r["method"] == method]
+
 
 @overload
 def serve_recording(handler: type) -> Iterator[RecordingServer]: ...

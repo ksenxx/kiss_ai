@@ -72,6 +72,7 @@ from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.core import tool_interrupt
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.tool_schema import tool_schema
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -902,8 +903,8 @@ class MCPManager:
 
     Runs a private asyncio event loop on a daemon thread; every server
     gets one long-lived task that owns its transport + session.  The
-    synchronous facade (:meth:`get_tools`, :meth:`call_tool`) is what
-    the agent tool wrappers use.
+    synchronous facade (:meth:`connect_all`, :meth:`call_tool`) is what
+    :func:`make_mcp_tools` and the agent tool wrappers use.
     """
 
     _instance: MCPManager | None = None
@@ -1143,7 +1144,34 @@ class MCPManager:
             self._loop.call_soon_threadsafe(conn.stop.set)
             popped.append(conn)
             del self._connections[key]
+            # Still owned until its transport has unwound: a
+            # ``disconnect_all`` meanwhile must wait for the teardown
+            # (and ``shutdown`` not stop the loop underneath it), or a
+            # stdio child needing the SDK's SIGTERM outlives the manager.
+            if conn.task is not None:
+                self._orphans.append(conn)
+                self._forget_when_done(conn, conn.task)
         return popped
+
+    def _forget_when_done(self, conn: _Connection, task: Any) -> None:
+        """Drop *conn* from ``_orphans`` once *task* finishes, however it finishes.
+
+        The done callback is registered on the manager loop, never on
+        the calling task thread: ``add_done_callback`` takes the
+        future's condition with a plain ``with``, and a Stop landing
+        right after its ``__enter__`` (CPython gh-74174) would leave
+        that condition held by a thread that then dies, so the loop's
+        own completion of *task* would hang on it for good.  The loop
+        thread receives no injections.
+
+        Args:
+            conn: The orphaned connection.
+            task: ``conn.task``, the connection's maintainer.
+        """
+        self._loop.call_soon_threadsafe(
+            task.add_done_callback,
+            functools.partial(locked_call, self._lock, self._forget_orphan, conn),
+        )
 
     def _reap_straggler(self, conn: _Connection, task: Any) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
@@ -1159,12 +1187,7 @@ class MCPManager:
             conn: The timed-out connection whose task may be stuck.
             task: ``conn.task``, the connection's maintainer.
         """
-        # A future that already finished runs the callback right here,
-        # on the task thread, so it takes the manager lock through
-        # ``locked_call`` like every other task-reachable section.
-        task.add_done_callback(
-            functools.partial(locked_call, self._lock, self._forget_orphan, conn),
-        )
+        self._forget_when_done(conn, task)
         # The cancel raises ``CancelledError`` at the task's stuck
         # ``await`` so the transport context unwinds and its child dies;
         # a task whose own handshake deadline already started that
@@ -1344,8 +1367,11 @@ class MCPManager:
         manager, so a later :meth:`instance` call builds a fresh manager
         with a live loop instead of scheduling work on a stopped one
         (which would silently never run and time out every connect).
-        Idempotent: concurrent or repeated calls after the first are
-        no-ops.
+        Once the loop thread has stopped, the loop is closed (its
+        selector and self-pipe descriptors released) and this manager's
+        ``atexit`` hook withdrawn, so rebuilt managers leak neither
+        descriptors nor the old manager object.  Idempotent: concurrent
+        or repeated calls after the first are no-ops.
         """
         with MCPManager._instance_lock:
             if MCPManager._instance is self:
@@ -1360,6 +1386,9 @@ class MCPManager:
         self.disconnect_all()
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self._loop.close()
+        atexit.unregister(self.shutdown)
 
 
 def _result_text(result: Any) -> str:
@@ -1444,10 +1473,80 @@ def _pick[T](registry: dict[str, T], server: str) -> T | None:
 def _json_schema_to_annotation(prop: Any) -> type:
     """Map one inputSchema property to the Python annotation for kiss."""
     if isinstance(prop, dict):
-        ann = _JSON_TO_PY.get(str(prop.get("type", "")))
+        kind = prop.get("type", "")
+        if isinstance(kind, list):  # a union: its first non-null member
+            kind = next((k for k in kind if k != "null"), "")
+        ann = _JSON_TO_PY.get(str(kind))
         if ann is not None:
             return ann
     return str
+
+
+#: JSON-schema ``type`` names every provider's tool declaration accepts.
+_JSON_TYPES = frozenset(_JSON_TO_PY) | {"null"}
+
+
+def _declared_schema(prop: Any) -> dict[str, Any]:
+    """Reduce one MCP ``inputSchema`` node to the keywords every provider accepts.
+
+    Keeps ``type`` (a union list becomes ``anyOf``), ``description``, a
+    string ``enum`` and ``required``, and recurses into ``properties``,
+    ``items`` and the union members of ``anyOf`` and ``oneOf``, both
+    declared as ``anyOf`` (the one union keyword Gemini's declaration
+    schema knows; the model picks a member either way).  Every other
+    keyword (``$schema``, ``$ref``/``$defs``, ``additionalProperties``,
+    ``title``, ``default``, ``format``, bounds, ...) is left out:
+    Gemini's declaration schema rejects keywords it does not know, and
+    the model needs the argument structure, not the validation extras.
+    A node left without a type (a ``$ref``, a malformed schema) declares
+    an object when it has properties, an array when it has items, and
+    a string otherwise, as every provider wants a typed node.
+
+    Args:
+        prop: The schema node (a property, ``items`` or union member).
+
+    Returns:
+        The reduced JSON schema of the node.
+    """
+    if not isinstance(prop, dict):
+        return {"type": "string"}
+    out: dict[str, Any] = {}
+    kind = prop.get("type")
+    if isinstance(kind, list):
+        members = [{"type": k} for k in kind if k in _JSON_TYPES]
+        if members:
+            out["anyOf"] = members
+    elif kind in _JSON_TYPES:
+        out["type"] = kind
+    if isinstance(prop.get("description"), str):
+        out["description"] = prop["description"]
+    enum = prop.get("enum")
+    if isinstance(enum, list) and enum and all(isinstance(v, str) for v in enum):
+        out["enum"] = enum
+    props = prop.get("properties")
+    if isinstance(props, dict):
+        out["properties"] = {str(k): _declared_schema(v) for k, v in props.items()}
+        required = prop.get("required")
+        if isinstance(required, list):
+            out["required"] = [r for r in required if isinstance(r, str) and r in props]
+    if "items" in prop:
+        out["items"] = _declared_schema(prop["items"])
+    union = [
+        member for key in ("anyOf", "oneOf") if isinstance(prop.get(key), list)
+        for member in prop[key]
+    ]
+    if union:
+        out["anyOf"] = [_declared_schema(member) for member in union]
+    if not out.keys() & {"type", "anyOf"}:
+        out["type"] = "object" if "properties" in out else "array" if "items" in out else "string"
+    return out
+
+
+def _admits_null(schema: dict[str, Any]) -> bool:
+    """Whether the reduced *schema* accepts ``null`` (itself or through ``anyOf``)."""
+    return schema.get("type") == "null" or any(
+        _admits_null(member) for member in schema.get("anyOf", ())
+    )
 
 
 def _one_line(text: str) -> str:
@@ -1493,8 +1592,11 @@ def make_mcp_tool_wrapper(
     """Wrap one MCP tool as a kiss-compatible Python function.
 
     The wrapper's ``__signature__`` and docstring are synthesized from
-    the MCP ``inputSchema`` so kiss's docstring/signature-based schema
-    builder reproduces the tool's parameters faithfully; calling it
+    the MCP ``inputSchema``, and the schema itself is declared on the
+    wrapper (:func:`~kiss.core.tool_schema.tool_schema`, reduced by
+    :func:`_declared_schema`, under the Python parameter names) so the
+    model sees the tool's arrays, objects, enums and null unions
+    instead of the strings a type round trip would leave; calling it
     forwards to :meth:`MCPManager.call_tool`.
 
     Args:
@@ -1518,13 +1620,23 @@ def make_mcp_tool_wrapper(
 
     entries: list[tuple[bool, inspect.Parameter, str]] = []
     param_map: dict[str, tuple[str, bool]] = {}
+    declared_props: dict[str, Any] = {}
+    declared_required: list[str] = []
     used_names: set[str] = set()
     for prop_name in props:
         prop = props[prop_name]
         ann = _json_schema_to_annotation(prop)
         is_required = prop_name in required
         py_name = _python_param_name(str(prop_name), used_names)
-        param_map[py_name] = (str(prop_name), is_required)
+        declared_props[py_name] = _declared_schema(prop)
+        if is_required:
+            declared_required.append(py_name)
+        # ``None`` is forwarded as ``null`` only where the schema admits
+        # it: models send ``null`` for optionals they leave unused, which
+        # a server would reject for a non-nullable property.
+        param_map[py_name] = (
+            str(prop_name), is_required or _admits_null(declared_props[py_name]),
+        )
         param = inspect.Parameter(
             py_name,
             kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -1544,8 +1656,8 @@ def make_mcp_tool_wrapper(
     def wrapper(**kwargs: Any) -> str:
         arguments: dict[str, Any] = {}
         for py_name, value in kwargs.items():
-            original, is_required = param_map.get(py_name, (py_name, True))
-            if value is None and not is_required:
+            original, keep_none = param_map.get(py_name, (py_name, True))
+            if value is None and not keep_none:
                 continue
             arguments[original] = value
         return manager.call_tool(connection_key, tool_name, arguments)
@@ -1561,7 +1673,14 @@ def make_mcp_tool_wrapper(
     wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
         params, return_annotation=str,
     )
-    return wrapper
+    return tool_schema(
+        parameters={
+            "type": "object",
+            "properties": declared_props,
+            "required": declared_required,
+        },
+        description=description,
+    )(wrapper)
 
 
 # Names of the agent's built-in tools ("cron_job" is built in only to

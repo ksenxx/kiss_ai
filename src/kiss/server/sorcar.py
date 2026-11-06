@@ -95,7 +95,9 @@ import logging
 import math
 import secrets
 import time
-from collections.abc import Callable, Coroutine
+from collections import Counter
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
@@ -767,8 +769,11 @@ class ServerApi:
         # the machine's lock (made on first use) hands itself on first
         # come, first served, so two ``setWorkDir`` for one machine
         # apply, and answer, in the order they were sent, while an
-        # unreachable machine holds up no other machine's.
+        # unreachable machine holds up no other machine's.  The names
+        # come off the wire, so a lock is dropped with its last user
+        # (``_machine_lock``) instead of living for the daemon's life.
         self._machine_locks: dict[str, asyncio.Lock] = {}
+        self._machine_lock_users: Counter[str] = Counter()
         # The subpanel forward in flight per (connection, command,
         # machine): a poll repeated while its predecessor is still
         # waiting on the machine is dropped (see ``_spawn_panel_reply``).
@@ -2052,6 +2057,27 @@ class ServerApi:
         """
         self._spawn_reply(self._reply_machine_action(ctx.endpoint, cmd))
 
+    @asynccontextmanager
+    async def _machine_lock(self, machine: str) -> AsyncIterator[None]:
+        """Hold the lock that serialises the round trips to *machine*.
+
+        The lock (``_machine_locks``, made on first use) is dropped with
+        its last user: an ``asyncio.Lock`` does not tell whether anyone
+        waits for it, so its users are counted beside it.
+
+        Args:
+            machine: The machine name the request names (as sent).
+        """
+        self._machine_lock_users[machine] += 1
+        try:
+            async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+                yield
+        finally:
+            self._machine_lock_users[machine] -= 1
+            if not self._machine_lock_users[machine]:
+                del self._machine_lock_users[machine]
+                del self._machine_locks[machine]
+
     async def _reply_machine_action(self, endpoint: Any, cmd: dict[str, Any]) -> None:
         """Apply the ``machineAction`` *cmd* and send the fresh ``machines`` reply to *endpoint*.
 
@@ -2070,7 +2096,7 @@ class ServerApi:
             machine = name.strip() or default_name(address)
         except ValueError:  # a malformed address: the action refuses it below
             machine = ""
-        async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+        async with self._machine_lock(machine):
             try:
                 error = await asyncio.to_thread(
                     sidebar_panels.machine_action,
@@ -2121,7 +2147,7 @@ class ServerApi:
             command: The command being answered (for the reply log).
         """
         try:
-            async with self._machine_locks.setdefault(machine, asyncio.Lock()):
+            async with self._machine_lock(machine):
                 if work_dir is None:
                     reply = await asyncio.to_thread(sidebar_panels.machine_work_dirs, machine)
                 else:
@@ -2554,14 +2580,34 @@ class ServerApi:
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
         )
 
-    def _signin_reply(self, conn_id: str) -> Callable[[dict[str, Any], bool], None]:
-        """A :data:`kiss.server.signin.Reply` for the window of *conn_id*."""
+    def _signin_reply(
+        self, conn_id: str, attempt: str = ""
+    ) -> Callable[[dict[str, Any], bool], None]:
+        """A :data:`kiss.server.signin.Reply` for the window of *conn_id*.
+
+        Args:
+            conn_id: The window that clicked.
+            attempt: The click's token (the ``attempt`` of its
+                ``signinLogin`` / ``signinPaste``), echoed on the
+                window's own answers (``signinUrl``, ``signinError``)
+                so the page tells them from an earlier click's; the
+                broadcast ``signinDone`` is every window's and carries
+                none.  Empty: nothing is echoed.
+        """
         printer = self._backend._printer
 
         def reply(event: dict[str, Any], everyone: bool) -> None:
+            if attempt and not everyone:
+                event = {**event, "attempt": attempt}
             broadcast_to_conn(printer, event, "" if everyone else conn_id)
 
         return reply
+
+    @staticmethod
+    def _signin_attempt(cmd: dict[str, Any]) -> str:
+        """The ``attempt`` token of a sign-in command, ``""`` when it sent none."""
+        attempt = cmd.get("attempt")
+        return attempt if isinstance(attempt, str) else ""
 
     async def signin_login(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Service a click on a provider button of the sign-in window.
@@ -2573,11 +2619,13 @@ class ServerApi:
         window ``signinError`` when it fails.
 
         Args:
-            cmd: The ``signinLogin`` command with the ``provider`` id.
+            cmd: The ``signinLogin`` command with the ``provider`` id
+                and, from a page that tells its clicks apart, the
+                click's ``attempt`` token.
             ctx: The transport context of the current call; supplies
                 the ``conn_id`` the URL and errors are stamped with.
         """
-        reply = self._signin_reply(ctx.conn_state["conn_id"])
+        reply = self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))
         await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply)
 
     async def signin_paste(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -2588,12 +2636,13 @@ class ServerApi:
         gets a ``signinError`` saying to start over.
 
         Args:
-            cmd: The ``signinPaste`` command with the pasted ``text``.
+            cmd: The ``signinPaste`` command with the pasted ``text``
+                (and the click's ``attempt`` token, echoed on the error).
             ctx: The transport context of the current call.
         """
         if not await asyncio.to_thread(self.signin.paste, str(cmd["text"])):
             error = "No sign-in is in progress: click a button to start one."
-            self._signin_reply(ctx.conn_state["conn_id"])(
+            self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))(
                 {"type": "signinError", "error": error}, False
             )
 

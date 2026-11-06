@@ -42,14 +42,19 @@ from pathlib import Path
 #: exponentially.  The blanks after a separator stop at a newline, which is
 #: a separator of its own: letting them run across newlines made every
 #: newline of a blank-line command swallow the rest of the text and
-#: backtrack through it, quadratic in the command length.
+#: backtrack through it, quadratic in the command length.  An
+#: assignment's value and the directory prefix stop at a separator too
+#: (``_UNSEPARATED``), where the next command may start: as ``\S*`` they
+#: ran from every separator of ``:;:;:;...`` to the end of the text and
+#: backtracked through it, quadratic again.
 _END = r"(?=\s|$|[;&|)\"'>#])"
 _WORD = r"[^\s;&|<>()#][^\s;&|<>()]*"
 _ARGS = r"(?:" + _WORD + r"[ \t]+)*"
 _ARGS_LAZY = r"(?:" + _WORD + r"[ \t]+)*?"
+_UNSEPARATED = r"[^\s;&|()]*"
 _CMD = (
-    r"(?:^|[;&|(\n])[^\S\n]*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?"
-    r"(?:\S*/)?"
+    r"(?:^|[;&|(\n])[^\S\n]*(?:\w+=" + _UNSEPARATED + r"[ \t]+)*"
+    r"(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?(?:" + _UNSEPARATED + r"/)?"
 )
 #: A path operand: quoted on both sides or not at all, so ``"/work backup"`` is
 #: not read as ``/work``; the ``{path}`` placeholder takes the path pattern.

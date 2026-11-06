@@ -77,6 +77,10 @@ class OpenTabOutcome(enum.Enum):
     FULL = "full"
     """The registry is at its hard cap; the tab was refused."""
 
+    REPLAYED = "replayed"
+    """The open's ``ack`` token was already decided (a page's transport
+    re-sent a batch whose confirmation was lost); nothing changed."""
+
     def __bool__(self) -> bool:
         return self is OpenTabOutcome.OPENED
 
@@ -86,6 +90,12 @@ _MAX_TITLE_CHARS = 200
 _MAX_TABS = 512
 """Hard cap on registered tabs so a buggy client cannot grow the
 registry (and every ``tabs_state`` broadcast) without bound."""
+
+_MAX_DECIDED_ACKS = 4096
+"""How many ``openTab`` ``ack`` tokens :meth:`TabRegistry.open_tab`
+remembers (oldest forgotten first): a page re-sends an open whose
+confirmation its connection lost on its next connection, so the
+memory must span the opens every page makes between the two."""
 
 
 def _clean_str(value: Any, max_len: int = 0) -> str:
@@ -214,6 +224,11 @@ class TabRegistry:
         # (generation 0), which a live capture can never equal.
         self._generations: dict[str, int] = {}
         self._generation_counter = 0
+        # The ``ack`` tokens of the opens already decided (insertion
+        # ordered, so the oldest is forgotten first), see
+        # :attr:`OpenTabOutcome.REPLAYED`.  In memory only: a token is
+        # unique to one page, which replays within one daemon's life.
+        self._decided_acks: dict[str, None] = {}
         self._load()
 
     def _load(self) -> None:
@@ -490,7 +505,7 @@ class TabRegistry:
         return self._clock_locked()
 
     def open_tab(
-        self, tab_id: str, title: str = "", work_dir: str = "",
+        self, tab_id: str, title: str = "", work_dir: str = "", ack: str = "",
     ) -> OpenTabOutcome:
         """Register a new tab (no-op when it already exists).
 
@@ -498,22 +513,38 @@ class TabRegistry:
             tab_id: The shared tab identifier.
             title: Initial tab title.
             work_dir: The tab's pinned working directory, if any.
+            ack: The client command's acknowledgment token, if it sent
+                one.  An open is decided once per token: a second open
+                carrying a token already decided is the page's transport
+                re-sending a batch whose confirmation it lost, not a new
+                open, so it must not bring back a tab another surface
+                closed in between.
 
         Returns:
             The :class:`OpenTabOutcome`, decided atomically under the
             registry lock: :attr:`~OpenTabOutcome.OPENED` (truthy)
             when a new tab was appended, :attr:`~OpenTabOutcome.EXISTS`
             when the id is already registered (also returned for a
-            blank id — nothing to open, nothing to reject), and
-            :attr:`~OpenTabOutcome.FULL` when the hard cap refused it.
+            blank id — nothing to open, nothing to reject),
+            :attr:`~OpenTabOutcome.FULL` when the hard cap refused it,
+            and :attr:`~OpenTabOutcome.REPLAYED` when *ack* was already
+            decided (the registry is left as it is).
         """
         tab_id = _clean_str(tab_id)
         if not tab_id:
             return OpenTabOutcome.EXISTS
-        return locked_call(self._lock, self._open_tab_locked, tab_id, title, work_dir)
+        return locked_call(self._lock, self._open_tab_locked, tab_id, title, work_dir, ack)
 
-    def _open_tab_locked(self, tab_id: str, title: str, work_dir: str) -> OpenTabOutcome:
+    def _open_tab_locked(
+        self, tab_id: str, title: str, work_dir: str, ack: str,
+    ) -> OpenTabOutcome:
         """Under ``_lock``: the body of :meth:`open_tab`."""
+        if ack:
+            if ack in self._decided_acks:
+                return OpenTabOutcome.REPLAYED
+            self._decided_acks[ack] = None
+            if len(self._decided_acks) > _MAX_DECIDED_ACKS:
+                del self._decided_acks[next(iter(self._decided_acks))]
         if self._find_locked(tab_id) is not None:
             return OpenTabOutcome.EXISTS
         if len(self._tabs) >= _MAX_TABS:

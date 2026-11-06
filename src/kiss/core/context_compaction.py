@@ -399,9 +399,10 @@ def compaction_target_tokens(
         target_fraction: ``Config.compaction_target_fraction`` of the window.
 
     Returns:
-        The larger of *start_tokens* and the fraction of the window.
+        The larger of *start_tokens* and the fraction of the window
+        (*start_tokens* when the window is unknown).
     """
-    if window_tokens is None or not 0.0 < target_fraction <= 1.0:
+    if window_tokens is None:
         return start_tokens
     return max(start_tokens, int(window_tokens * target_fraction))
 

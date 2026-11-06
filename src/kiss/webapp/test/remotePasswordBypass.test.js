@@ -12,6 +12,7 @@ const {JSDOM, VirtualConsole} = require('jsdom');
 const {fakeIntervals, sleep} = require('./simplify2_harness');
 const {
   installFakeWebSocket,
+  installFakeTimers,
   readShimJs,
   bootShim,
   ok,
@@ -539,7 +540,8 @@ async function run() {
       // The page keeps its state: no reload.  main.js hears
       // `connected: true` and re-sends `ready` itself, which is what
       // resyncs it with the server.  The flushed batch is followed by
-      // a `ping` whose `pong` confirms the server took it.
+      // a `ping` whose `pong` confirms the server took it; until then
+      // the status names the batch as unconfirmed.
       assert.strictEqual(reloads.length, 0, 'a re-auth never reloads the page');
       const types = s2.sent.map(d => JSON.parse(d).type);
       assert.deepStrictEqual(
@@ -550,8 +552,17 @@ async function run() {
       );
       assert.deepStrictEqual(
         plain(statusFrames),
-        [{type: 'daemonStatus', connected: true}],
-        'the app is told the socket is back, after the flush',
+        [
+          {
+            type: 'daemonStatus',
+            connected: true,
+            unconfirmed: [
+              {type: 'saveConfig', config: {edited: 'during the outage'}},
+            ],
+          },
+        ],
+        'the app is told the socket is back, after the flush, and which ' +
+          'commands the server has not confirmed yet',
       );
       s2.fireMessage({type: 'pong'});
       assert.ok(
@@ -595,6 +606,7 @@ async function run() {
       assert.deepStrictEqual(plain(statusFrames[statusFrames.length - 1]), {
         type: 'daemonStatus',
         connected: true,
+        unconfirmed: [],
       });
       ok('re-auth after a lost session resyncs in place, never reloads');
     } catch (err) {
@@ -817,11 +829,7 @@ async function run() {
     // Record the shim's timers instead of sleeping across the 1 s
     // lockout: the reconnect it arms is fired by hand below, so the
     // check does not depend on the wall clock under a loaded runner.
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
+    const timers = installFakeTimers(window);
     bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
@@ -903,11 +911,7 @@ async function run() {
 
   {
     const {window, sockets} = page({noModal: true});
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
+    const timers = installFakeTimers(window);
     bootShim(window);
     const sock = sockets[0];
     sock.fireOpen();
@@ -1270,12 +1274,7 @@ async function run() {
     // (every 15 s; the server sends a heartbeat frame every 15 s) must
     // drop a socket that has been silent for 45 s and reconnect.
     const {window, sockets, statuses, appFrames} = page({noOverlay: true});
-    const timers = [];
-    window.setTimeout = function (fn, ms) {
-      timers.push({fn, ms});
-      return timers.length;
-    };
-    window.clearTimeout = function () {};
+    const timers = installFakeTimers(window);
     let now = 1000000;
     window.Date.now = () => now;
     bootShim(window);
@@ -2471,12 +2470,7 @@ async function run() {
       const sockets = [];
       installFakeWebSocket(window, sockets, {connecting: true});
       window.name = name;
-      const timers = [];
-      window.setTimeout = function (fn, ms) {
-        timers.push({fn, ms});
-        return timers.length;
-      };
-      window.clearTimeout = function () {};
+      const timers = installFakeTimers(window);
       bootShim(window);
       const delays = [];
       for (let i = 0; i < 10; i++) {

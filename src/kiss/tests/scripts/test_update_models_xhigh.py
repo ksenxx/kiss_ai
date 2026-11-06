@@ -10,7 +10,7 @@ populated end-to-end by update_models.py:
 1. ``_build_entry`` emits a ``thinking`` key in the JSON entry when the
    level is set, and omits it otherwise.
 2. ``detect_thinking_level`` short-circuits to ``None`` for backends that
-   don't accept ``reasoning_effort`` (codex/*, cc/*, gemini-*) and for
+   don't accept ``reasoning_effort`` (codex/*, cc/*) and for
    variants known to reject it (``-pro``, ``-chat-latest``, ``-image``) and
    for unrelated prefixes (Together, OpenRouter non-OpenAI), so we never
    waste an API call on them.
@@ -19,7 +19,11 @@ populated end-to-end by update_models.py:
 """
 
 from kiss.core.models.model_info import MODEL_INFO
-from kiss.scripts.update_models import _build_entry, get_current_model_info
+from kiss.scripts.update_models import (
+    _build_entry,
+    _write_entry_with_thinking_split,
+    get_current_model_info,
+)
 from kiss.scripts.update_models import detect_thinking_level as _probe
 
 
@@ -92,8 +96,46 @@ def test_thinking_probe_runs_for_claude_models(monkeypatch):
     assert seen == ["max"]
 
 
-def test_thinking_probe_skipped_for_gemini_models():
-    """Google Gemini does not accept reasoning_effort."""
+def test_gemini_probe_creates_thinking_level_aliases(monkeypatch):
+    """A direct ``gemini-*`` model is probed on the low/medium/high scale
+    and a ``high`` verdict materializes the ``-low``/``-medium``/``-high``
+    aliases, each pointing back at the base model."""
+    seen: list[str] = []
+
+    class _Stub:
+        def __init__(self, name, model_config=None, **kw):
+            assert model_config is not None
+            seen.append(model_config["reasoning_effort"])
+
+        def initialize(self, *a, **kw):
+            pass
+
+        def generate(self):
+            return "hi", None
+
+    monkeypatch.setattr("kiss.core.models.model_info.model", _Stub)
+    level = _probe("gemini-4-argon")
+    assert level == "high"
+    assert seen == ["high"]
+
+    data: dict[str, dict] = {}
+    entry = _build_entry(ctx=1048576, inp=2.0, out=12.0, thinking=level)
+    _write_entry_with_thinking_split(data, "gemini-4-argon", entry)
+    assert sorted(data) == [
+        "gemini-4-argon",
+        "gemini-4-argon-high",
+        "gemini-4-argon-low",
+        "gemini-4-argon-medium",
+    ]
+    assert data["gemini-4-argon"]["thinking"] == "high"
+    assert "alias_of" not in data["gemini-4-argon"]
+    for alias_level in ("low", "medium", "high"):
+        alias = data[f"gemini-4-argon-{alias_level}"]
+        assert alias == {**entry, "thinking": alias_level, "alias_of": "gemini-4-argon"}
+
+
+def test_thinking_probe_skipped_for_gemini_pro_models():
+    """``-pro`` variants, Gemini 2.5 Pro included, are never probed."""
     assert _probe("gemini-2.5-pro") is None
 
 

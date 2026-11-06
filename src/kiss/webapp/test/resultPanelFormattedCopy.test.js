@@ -176,7 +176,10 @@ function testFormattedTextFromNodeBranches() {
     '<ul><li>top<ul><li>nested</li></ul></li></ul>' +
     '<script>bad()</script>' +
     '<div class="panel-copy-btn">chrome</div>' +
-    '<ol start="x"><li>fallback-one</li></ol>';
+    '<ol start="x"><li>fallback-one</li></ol>' +
+    '<ol reversed><li>second</li><li>first</li></ol>' +
+    '<ol start="5" reversed><li>five</li><li>four</li></ol>' +
+    '<ol><li value="4">four</li><li>five</li><li value="x">six</li></ol>';
   const text = fmt(el).replace(/^\n+|\n+$/g, '');
   assert.ok(text.includes('a\nb'), '<br> becomes a newline; got: ' + text);
   assert.ok(text.includes('---'), '<hr> becomes a rule line');
@@ -187,6 +190,14 @@ function testFormattedTextFromNodeBranches() {
   assert.ok(
     text.includes('1. fallback-one'),
     'a non-numeric ol start falls back to 1; got: ' + text,
+  );
+  // The numbers the browser shows: a reversed list counts down from its
+  // item count (or its start), an li value restarts the count.
+  assert.ok(text.includes('2. second\n1. first'), 'reversed; got: ' + text);
+  assert.ok(text.includes('5. five\n4. four'), 'reversed start; got: ' + text);
+  assert.ok(
+    text.includes('4. four\n5. five\n6. six'),
+    'li value restarts the count; got: ' + text,
   );
   win.close();
 }

@@ -443,13 +443,29 @@
           if (state.disposed || entry.renderTask !== task) return;
           entry.renderTask = null;
           entry.renderedScale = scale;
-          if (entry.canvas) entry.canvas.remove();
           entry.canvas = canvas;
-          entry.box.appendChild(canvas);
+          entry.box.replaceChildren(canvas);
         },
-        () => {
+        err => {
           // Cancelled by a newer render or by dispose: nothing to show.
-          if (entry.renderTask === task) entry.renderTask = null;
+          if (state.disposed || entry.renderTask !== task) return;
+          // The draw itself failed (a decoder error): say so in the
+          // page's box, in place of a blank or an older zoom's canvas.
+          // That canvas is gone with its scale: a return to that zoom
+          // draws again rather than finding the note still there.
+          entry.renderTask = null;
+          entry.canvas = null;
+          entry.renderedScale = 0;
+          entry.box.replaceChildren(
+            el(
+              'div',
+              'content-binary-note',
+              'Cannot display page ' +
+                (Number(entry.box.dataset.pageIndex) + 1) +
+                ': ' +
+                String(err),
+            ),
+          );
         },
       );
     }

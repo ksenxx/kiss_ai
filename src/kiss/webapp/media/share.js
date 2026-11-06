@@ -217,18 +217,6 @@
   }
 
   /**
-   * Show or hide *sectionEl* (also syncing the [hidden] attribute the
-   * page CSS keys on).
-   *
-   * @param {Element} sectionEl A .share-task section.
-   * @param {boolean} show Whether it may be visible.
-   */
-  function setSectionShown(sectionEl, show) {
-    if (show) sectionEl.removeAttribute('hidden');
-    else sectionEl.setAttribute('hidden', '');
-  }
-
-  /**
    * Select the root chat tab (*taskId* null) or a sub-agent's tab:
    * swap which sections are on screen, repaint the strip, and put the
    * reader back at the top — the shared page's switchToTab.
@@ -240,10 +228,11 @@
     const sections = document.querySelectorAll('.share-task');
     for (let i = 0; i < sections.length; i++) {
       const s = sections[i];
+      // The [hidden] attribute is what the page CSS keys on.
       if (s.classList.contains('share-subagent')) {
-        setSectionShown(s, s.getAttribute('data-task-id') === taskId);
+        s.toggleAttribute('hidden', s.getAttribute('data-task-id') !== taskId);
       } else {
-        setSectionShown(s, taskId === null);
+        s.toggleAttribute('hidden', taskId !== null);
       }
     }
     renderShareTabBar();
@@ -438,7 +427,7 @@
       if (activeSubTab === open) activeClosed = true;
       const section = subagentSection(open);
       if (!section) continue;
-      setSectionShown(section, false);
+      section.toggleAttribute('hidden', true);
       // A sub-agent tab the chat page reopens replays its transcript
       // with the fan-outs collapsed; fold this section's the same
       // way, so reopening the tab never resurrects grandchild tabs

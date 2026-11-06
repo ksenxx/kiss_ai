@@ -249,6 +249,11 @@
       };
       return lastPress.count;
     }
+    // The pointerdown whose button is still down on the remote page: a
+    // pointer the browser cancels after a press (the OS took the
+    // device, a native drag began) gets no pointerup, so the release
+    // is sent on pointercancel instead, from where it was pressed.
+    let pressed = null;
     screen.addEventListener('pointerdown', e => {
       if (e.pointerType === 'touch') return;
       screen.focus();
@@ -258,14 +263,26 @@
         } catch (_e) {}
       }
       flushMove();
+      pressed = e;
       mouse('mousePressed', e, {clickCount: clickCountFor(e)});
       e.preventDefault();
     });
     screen.addEventListener('pointerup', e => {
       if (e.pointerType === 'touch') return;
       flushMove();
+      pressed = null;
       mouse('mouseReleased', e, {clickCount: lastPress.count || 1});
       e.preventDefault();
+    });
+    screen.addEventListener('pointercancel', e => {
+      if (e.pointerType === 'touch' || !pressed) return;
+      flushMove();
+      const press = pressed;
+      pressed = null;
+      mouse('mouseReleased', press, {
+        clickCount: lastPress.count || 1,
+        buttons: 0,
+      });
     });
     screen.addEventListener('pointermove', e => {
       if (e.pointerType === 'touch') return;

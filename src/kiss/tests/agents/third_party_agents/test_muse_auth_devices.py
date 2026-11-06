@@ -244,7 +244,7 @@ def lan_api_server() -> Any:
     ip = _local_ip()
     if not ip:
         pytest.skip("machine has no non-loopback IPv4 address")
-    server = _DeviceApiServer(("0.0.0.0", 0), _DeviceApiHandler)
+    server = _DeviceApiServer((ip, 0), _DeviceApiHandler)
     server.lan_ip = ip  # type: ignore[attr-defined]
     with serving(server):
         yield server

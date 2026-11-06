@@ -141,11 +141,22 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         by), because it is where both windows' tasks run."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
+        # Each window's pick is acknowledged (``reply``) before the other
+        # window's goes out: the two connections are served by two
+        # handlers on the thread pool, so nothing else orders B's
+        # adoption after A's and before A's ``getConfig`` (full-suite
+        # run of 2026-11-05: A's reply still named ``dir_a``).
         await self._send(
-            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a), "reply": True},
+        )
+        await self._drain_until(
+            reader_a, self._config_data_with_work_dir(str(self.dir_a)),
         )
         await self._send(
-            writer_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
+            writer_b, {"type": "setWorkDir", "workDir": str(self.dir_b), "reply": True},
+        )
+        await self._drain_until(
+            reader_b, self._config_data_with_work_dir(str(self.dir_b)),
         )
 
         await self._send(writer_a, {"type": "getConfig"})

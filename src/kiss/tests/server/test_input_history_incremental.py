@@ -104,12 +104,14 @@ class TestIncrementalInputHistory:
         self._seed()
         self.server._handle_command({"type": "getInputHistory", "since": 20.0})
         self.server._handle_command({"type": "getInputHistory", "since": "20"})
-        for bad in ("abc", None, True, float("nan"), -5, 0):
+        # ``10**400`` is a valid JSON integer a client may send; it
+        # overflows ``float`` and must count as malformed, not raise.
+        for bad in ("abc", None, True, float("nan"), -5, 0, 10**400):
             self.server._handle_command({"type": "getInputHistory", "since": bad})
         replies = self._replies()
         assert [r["tasks"] for r in replies[:2]] == [["second task"], ["second task"]]
         assert all(r["since"] == 20.0 for r in replies[:2])
-        assert len(replies) == 8
+        assert len(replies) == 9
         for whole in replies[2:]:
             assert whole["tasks"] == ["second task", "steer one", "first task"]
             assert "since" not in whole

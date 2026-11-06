@@ -62,6 +62,18 @@ class TestFastModelFor:
         assert get_fast_model() == "claude-sonnet-5-5"
         assert get_fast_model() in MODEL_INFO
 
+    def test_zai_key_returns_glm_air(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A Z.AI-only install gets a Z.AI fast model, not a CLI or "No model"."""
+        self._set_key(monkeypatch, "ZAI_API_KEY")
+        assert get_fast_model() == "glm-4.5-air"
+        assert get_fast_model() in MODEL_INFO
+
+    def test_moonshot_key_returns_kimi_k2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A Moonshot-only install gets a Moonshot fast model, not a CLI or "No model"."""
+        self._set_key(monkeypatch, "MOONSHOT_API_KEY")
+        assert get_fast_model() == "kimi-k2.5"
+        assert get_fast_model() in MODEL_INFO
+
     def test_no_keys_returns_cli_or_no_model_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

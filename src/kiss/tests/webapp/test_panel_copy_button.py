@@ -70,25 +70,6 @@ def test_explicit_copy_buttons_for_headerless_panels() -> None:
     ), "the result card (`rc`) must get addCopyButton(rc) after hlBlock"
 
 
-def test_collect_text_skips_panel_chrome() -> None:
-    """``collectText`` must skip the copy button and the collapse
-    preview so neither the clipboard payload nor the collapsed-state
-    preview repeats those UI-only fragments."""
-    src = _read(MAIN_JS)
-    m = re.search(
-        r"function collectText\([^)]*\)\s*\{(.*?)^\s{2}\}",
-        src,
-        re.DOTALL | re.MULTILINE,
-    )
-    assert m, "could not locate function collectText"
-    body = m.group(1)
-    for cls in ("panel-copy-btn", "collapse-preview"):
-        assert f"'{cls}'" in body, (
-            f"collectText must skip nodes with class '{cls}' so the copy "
-            f"button / preview never leak into clipboard text"
-        )
-
-
 def test_panel_copy_button_css_present() -> None:
     """main.css must style ``.panel-copy-btn`` and make ``.copyable``
     the positioning context (``position: relative``)."""

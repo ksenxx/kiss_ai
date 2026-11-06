@@ -181,6 +181,12 @@ def test_text_answers_are_compressed_and_hashed_media_kept(daemon: RemoteDaemon)
         assert (status, body, headers["cache-control"]) == (200, original, IMMUTABLE)
         assert "content-encoding" not in headers and headers["vary"] == "Accept-Encoding"
     assert get(daemon.port, main_js.group(1), "gzip;q=junk")[1]["content-encoding"] == "gzip"
+    # ``*`` admits every coding not listed (RFC 9110 12.5.3) -- gzip
+    # included -- unless a ``gzip`` member of its own refuses it.
+    for accept in ("*", "br, *;q=0.5", "*, gzip;q=junk"):
+        assert get(daemon.port, main_js.group(1), accept)[1]["content-encoding"] == "gzip", accept
+    for accept in ("*;q=0", "gzip;q=0, *", "*, gzip;q=0"):
+        assert "content-encoding" not in get(daemon.port, main_js.group(1), accept)[1], accept
     # The coding list may come as several header lines.
     conn = http.client.HTTPConnection("127.0.0.1", daemon.port, timeout=30)
     conn.putrequest("GET", main_js.group(1), skip_accept_encoding=True)

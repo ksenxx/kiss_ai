@@ -250,11 +250,14 @@
     while (node) {
       if (inHiddenSource(node, body)) {
         range = addRange(sel, range, ranges);
-      } else {
-        if (!range) {
-          range = doc.createRange();
-          range.setStart(node, 0);
-        }
+      } else if (range) {
+        range.setEnd(node, node.length);
+      } else if (node.data.trim()) {
+        // A stretch starts at visible text: whitespace alone first (the
+        // newline before an inline <script>) would be the one Range
+        // Chromium keeps, whose rendered text is empty.
+        range = doc.createRange();
+        range.setStart(node, 0);
         range.setEnd(node, node.length);
       }
       node = walker.nextNode();
@@ -287,30 +290,113 @@
   }
 
   /**
-   * The text *range* covers now, read text node by text node so a
-   * hidden source inserted into it since Select All stays out, as it
-   * would have then, and so does text the page has hidden since, by
+   * The text *range* covers now, as rendered (what the native Copy of
+   * the selection gives): a block boundary is a line break, two for a
+   * paragraph, a <br> one, table cells are tab-separated and source
+   * whitespace collapses as the CSS `white-space` it renders under
+   * says (kept whole under `pre` / `pre-wrap` / `break-spaces`, its
+   * line breaks alone under `pre-line`).  Read text node by text node
+   * so a hidden source inserted into it since Select All stays out, as
+   * it would have then, and so does text the page has hidden since, by
    * any ancestor up to the document.
    */
   function rangeText(doc, range) {
-    const root = range.commonAncestorContainer;
-    if (root.nodeType === 3 /* TEXT_NODE */) {
-      if (inHiddenSource(root, doc)) return '';
-      return root.data.slice(range.startOffset, range.endOffset);
-    }
-    const walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
-    let text = '';
-    let node = walker.nextNode();
-    while (node) {
-      if (range.intersectsNode(node) && !inHiddenSource(node, doc)) {
-        text += node.data.slice(
-          node === range.startContainer ? range.startOffset : 0,
-          node === range.endContainer ? range.endOffset : node.length,
-        );
+    const out = {text: '', breaks: 0, edge: 'line'};
+    renderRangeNode(doc, range, range.commonAncestorContainer, out);
+    return out.text;
+  }
+
+  /**
+   * Append *node*'s rendered text within *range* to `out.text`.
+   * `out.breaks` counts the line breaks block boundaries owe since the
+   * last text (paid before the next); `out.edge` says how `out.text`
+   * ends: 'line' at a line start (nothing yet, a line break, a cell's
+   * tab), 'space' after a collapsible space, '' otherwise.
+   */
+  function renderRangeNode(doc, range, node, out) {
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      if (!range.intersectsNode(node) || inHiddenSource(node, doc)) return;
+      let t = node.data.slice(
+        node === range.startContainer ? range.startOffset : 0,
+        node === range.endContainer ? range.endOffset : node.length,
+      );
+      const ws = whiteSpaceOf(doc, node);
+      const kept = ws === 'pre' || ws === 'pre-wrap' || ws === 'break-spaces';
+      if (ws === 'pre-line') {
+        t = t
+          .replace(/[\t ]*(?:\r\n|[\n\r])[\t ]*/g, '\n')
+          .replace(/[\t ]+/g, ' ');
+      } else if (!kept) {
+        t = t.replace(/[\t\n\r ]+/g, ' ');
       }
-      node = walker.nextNode();
+      // Collapsing crosses text nodes: a collapsible space is dropped
+      // at a line start and after another collapsible space, and one
+      // before a line break goes with it; a preserved space stays.
+      if (t[0] === '\n') endLine(out);
+      else if (!kept && t[0] === ' ' && out.edge) t = t.slice(1);
+      if (!t) return;
+      // Line breaks owed by block boundaries are paid before text only,
+      // so a stretch never starts or ends with them.
+      if (out.text) {
+        for (let i = 0; i < out.breaks; i++) out.text += '\n';
+      }
+      out.breaks = 0;
+      out.text += t;
+      const last = t[t.length - 1];
+      out.edge = last === '\n' ? 'line' : last === ' ' && !kept ? 'space' : '';
+      return;
     }
-    return text;
+    const win = doc.defaultView;
+    const isEl = node.nodeType === 1;
+    if (isEl && (!range.intersectsNode(node) || isHiddenSource(node))) return;
+    const tag = isEl ? String(node.tagName || '').toLowerCase() : '';
+    if (tag === 'br') {
+      if (out.text) {
+        endLine(out);
+        out.text += '\n';
+      }
+      return;
+    }
+    const display = isEl && win ? win.getComputedStyle(node).display : '';
+    const block =
+      display !== '' && !/^inline/.test(display) && display !== 'contents';
+    if (display === 'table-cell' && out.text && out.breaks === 0) {
+      endLine(out);
+      out.text += '\t';
+    } else if (block) {
+      endLine(out);
+      out.breaks = Math.max(out.breaks, tag === 'p' ? 2 : 1);
+    }
+    for (let i = 0; i < node.childNodes.length; i++) {
+      renderRangeNode(doc, range, node.childNodes[i], out);
+    }
+    if (block && display !== 'table-cell') {
+      endLine(out);
+      out.breaks = Math.max(out.breaks, tag === 'p' ? 2 : 1);
+    }
+  }
+
+  /** A line of `out.text` ends here: its collapsible space, if any, goes. */
+  function endLine(out) {
+    if (out.edge === 'space') out.text = out.text.slice(0, -1);
+    out.edge = 'line';
+  }
+
+  /**
+   * The CSS `white-space` the text node *node* renders under: the
+   * computed value of the nearest ancestor that has one (a browser
+   * answers at the parent, the value being inherited; jsdom reports
+   * the declaring element only), 'normal' when none does.
+   */
+  function whiteSpaceOf(doc, node) {
+    const win = doc.defaultView;
+    let el = node.parentNode;
+    while (win && el && el.nodeType === 1) {
+      const ws = win.getComputedStyle(el).whiteSpace;
+      if (ws) return ws;
+      el = el.parentNode;
+    }
+    return 'normal';
   }
 
   function closestTag(node, tag) {
@@ -331,7 +417,14 @@
       const tag = String(el.tagName || '').toLowerCase();
       if (tag === 'textarea') return el;
       if (tag === 'input') return el;
-      if (el.isContentEditable) return el;
+      if (el.isContentEditable) {
+        // The editing host, not a formatting child that only inherits
+        // the editability: Select All and Paste act on the whole field.
+        while (el.parentNode && el.parentNode.isContentEditable) {
+          el = el.parentNode;
+        }
+        return el;
+      }
       el = el.parentNode;
     }
     return null;
@@ -364,7 +457,15 @@
       text: sel,
     });
     if (isWritable(editable)) {
-      items.push({id: 'paste', label: 'Paste', key: mod + 'V', enabled: true});
+      // An opaque origin (the sandboxed preview iframe) may not read the
+      // clipboard: the row is shown disabled, its shortcut still pastes.
+      const loc = doc.location;
+      items.push({
+        id: 'paste',
+        label: 'Paste',
+        key: mod + 'V',
+        enabled: !loc || String(loc.origin) !== 'null',
+      });
     }
     if (link) {
       // The resolved property, not the raw attribute: a relative href would
@@ -443,6 +544,10 @@
     }
     return pending.then(
       text => {
+        // The read was asynchronous (the browser may have asked the user
+        // first): a field the page made read-only, disabled or removed
+        // meanwhile is left alone, as the native paste would leave it.
+        if (!isWritable(el) || !doc.contains(el)) return false;
         const value = String(text || '');
         // `number` / `email` inputs expose no selection API (selectionStart
         // is null, setRangeText throws InvalidStateError) but they do keep
@@ -471,22 +576,32 @@
   }
 
   /**
-   * The keyboard model of every context menu (this one and the sidebar
-   * trees' treeContextMenu.js): Escape closes, Up / Down move between
-   * the enabled *items* (wrapping), Home / End jump to the ends, Enter /
-   * Space run the focused item.
+   * The keyboard model of every menu (this context menu, the sidebar
+   * trees' treeContextMenu.js, and main.js's tab menu and content menu
+   * bar): Up / Down move between the enabled *items* (wrapping), Home /
+   * End jump to the ends, Enter / Space run the focused item, Escape
+   * closes through *close* and Tab leaves the menu through *onLeave*
+   * with the browser's own focus move.  A caller that handles Escape or
+   * Tab elsewhere passes no *close* / *onLeave*, and the key passes
+   * through untouched.
    *
    * @param {KeyboardEvent} e The keydown event.
    * @param {Array<HTMLElement>} items The menu's enabled items.
-   * @param {Function} close Closes the menu.
+   * @param {?Function} close Closes the menu on Escape.
+   * @param {?Function} [onLeave] Closes the menu on Tab.
+   * @returns {boolean} Whether the key belonged to the model.
    */
-  function menuKeyNav(e, items, close) {
-    if (e.key === 'Escape') {
+  function menuKeyNav(e, items, close, onLeave) {
+    if (e.key === 'Escape' && close) {
       e.preventDefault();
       close();
-      return;
+      return true;
     }
-    if (!items.length) return;
+    if (!items.length) return false;
+    if (e.key === 'Tab' && onLeave) {
+      onLeave();
+      return true;
+    }
     const idx = items.indexOf(items[0].ownerDocument.activeElement);
     let next = -1;
     if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
@@ -495,13 +610,18 @@
     else if (e.key === 'End') next = items.length - 1;
     if (next >= 0) {
       e.preventDefault();
-      items[next].focus({preventScroll: true});
-      return;
+      // The menus are position: fixed and clamped into the viewport, so
+      // this scrolls nothing but a dropdown's own overflow (the content
+      // menu bar's, which brings the focused row into view).
+      items[next].focus();
+      return true;
     }
     if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
       e.preventDefault();
       items[idx].click();
+      return true;
     }
+    return false;
   }
 
   /**
@@ -777,6 +897,9 @@
     selectAll.toString() +
     rangesText.toString() +
     rangeText.toString() +
+    renderRangeNode.toString() +
+    endLine.toString() +
+    whiteSpaceOf.toString() +
     closestTag.toString() +
     editableTarget.toString() +
     isMac.toString() +

@@ -312,6 +312,6 @@ function guardSuite(suite) {
   gate.resume();
 }
 
-module.exports = {runCovered, measure, gateRegions};
+module.exports = {runCovered, measure, gateRegions, killGroup};
 
 if (require.main === module) guardSuite(process.argv[2]);

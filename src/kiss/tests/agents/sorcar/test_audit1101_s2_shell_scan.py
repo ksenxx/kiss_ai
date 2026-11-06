@@ -20,8 +20,18 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.edit_guards import HEREDOC_VERDICT, heredoc_guard, heredoc_targets
-from kiss.agents.sorcar.shell_scan import simple_commands
+from kiss.agents.sorcar.edit_guards import (
+    HEREDOC_UNRESOLVED_VERDICT,
+    HEREDOC_VERDICT,
+    heredoc_guard,
+    heredoc_targets,
+)
+from kiss.agents.sorcar.shell_scan import (
+    MAX_NESTING,
+    TOO_DEEP_VERDICT,
+    TooDeepError,
+    simple_commands,
+)
 from kiss.agents.sorcar.useful_tools import UsefulTools, sleep_guard
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.tests.conftest import posix_only
@@ -113,4 +123,96 @@ def test_a_heredoc_rewrite_hidden_in_a_parameter_expansion_is_refused_by_the_bas
     command = "unset S2_UNSET; : \"${S2_UNSET:-$(cat > f <<'EOF'\nREPLACEMENT\nEOF\n)}\""
     result = UsefulTools(work_dir=str(tmp_path)).Bash(command, "hidden rewrite", timeout_seconds=5)
     assert result == HEREDOC_VERDICT.format(path=target)
+    assert target.read_text() == "ORIGINAL\n"
+
+
+def test_a_scan_past_the_nesting_limit_refuses_rather_than_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-05 A09-1 (astra): the commands past ``MAX_NESTING`` levels are unread,
+    so a guard's scan raises :class:`TooDeepError` and the Bash tool runs nothing, instead of
+    returning the commands before the nesting and letting the rewrite after it through.  The
+    gate's optimistic reading ends with the commands found so far, as before."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 0)
+    target = tmp_path / "tracked.txt"
+    target.write_text("ORIGINAL\n")
+    rewrite = "; cat > tracked.txt <<'EOF'\nREPLACEMENT\nEOF"
+    command = "( " * (MAX_NESTING + 1) + ": " + ") " * (MAX_NESTING + 1) + rewrite
+    with pytest.raises(TooDeepError) as raised:
+        simple_commands(command, "/w")
+    assert str(raised.value) == TOO_DEEP_VERDICT
+    assert TOO_DEEP_VERDICT.startswith("REFUSED: the command did not run: ")
+    with pytest.raises(TooDeepError):
+        heredoc_guard(command, "/w", lambda path: True)
+    with pytest.raises(TooDeepError):
+        UsefulTools(work_dir=str(tmp_path)).Bash(command, "too deep", timeout_seconds=5)
+    assert target.read_text() == "ORIGINAL\n"
+    assert simple_commands(command, "/w", optimistic=True) == []
+    # At the limit the whole command is read, and the rewrite in it is refused.
+    within = "( " * MAX_NESTING + ": " + ") " * MAX_NESTING + rewrite
+    assert _programs(within) == [":", "cat"]
+    assert heredoc_guard(within, "/w", lambda path: True) == HEREDOC_VERDICT.format(
+        path="/w/tracked.txt")
+
+
+def test_nested_expansions_count_toward_the_nesting_limit() -> None:
+    """Audit 2026-11-05 A09-7 (astra): ``${x:-${x:-...}}`` 600 deep raised ``RecursionError``
+    out of the scanner, since only groups counted toward ``MAX_NESTING``; every nested
+    expansion counts now, so a scan ends with the limit's own error, and ``MAX_NESTING``
+    levels of any mix are read whole."""
+    nested = "echo " + "${S2_UNSET:-" * 600 + "x" + "}" * 600
+    with pytest.raises(TooDeepError):
+        simple_commands(nested, "/w")
+    assert [c.program() for c in simple_commands(nested, "/w", optimistic=True)] == ["echo"]
+    unterminated = "echo " + "${S2_UNSET:-" * MAX_NESTING  # ends with the text, as before
+    assert _programs(unterminated) == ["echo"]
+    with pytest.raises(TooDeepError):
+        simple_commands(unterminated + "${S2_UNSET:-", "/w")
+    within = "echo " + "${S2_UNSET:-" * MAX_NESTING + "x" + "}" * MAX_NESTING + " tail"
+    assert _bash(within).split() == ["x", "tail"]
+    [simple] = simple_commands(within, "/w")
+    assert [word.text for word in simple.words] == ["echo", within[5:-5], "tail"]
+    assert not simple.words[1].literal
+    half = MAX_NESTING // 2
+    mixed = "echo " + '"${S2_UNSET:-$(echo ' * half + "x" + ')}"' * half
+    assert _bash(mixed).split() == ["x"]
+    assert _programs(mixed) == ["echo"] * (half + 1)
+    with pytest.raises(TooDeepError):
+        simple_commands("echo " + '"${S2_UNSET:-$(echo ' * half + "${x:-x}", "/w")
+
+
+def test_a_cd_after_and_is_not_trusted_past_its_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-05 A09-2 (astra): in ``false && cd tmp; cat > f <<EOF`` the ``cd`` runs
+    only when ``false`` succeeds, so past the ``;`` the directory is unknown and the guard
+    refuses the copy, rather than check ``tmp/f`` while bash writes ``f``; the rest of the
+    and-list still knows the directory, as the gate's optimistic reading does throughout."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 0)
+    body = "<<'EOF'\nREPLACEMENT\nEOF"
+    command = f"false && cd tmp; cat > tracked.txt {body}"
+    assert [c.cwd for c in simple_commands(command, "/w")] == ["/w", "/w", None]
+    assert [c.cwd for c in simple_commands(command, "/w", optimistic=True)] == [
+        "/w", "/w", "/w/tmp"]
+    unresolved = HEREDOC_UNRESOLVED_VERDICT.format(path="tracked.txt")
+    assert heredoc_guard(command, "/w", lambda path: False) == unresolved
+    for text, cwd in (
+        (f"false && cd tmp\ncat > f {body}", None),
+        (f"false && pushd tmp; cat > f {body}", None),
+        (f"false && cd tmp || cat > f {body}", None),
+        (f"false && {{ cd tmp; }}; cat > f {body}", None),
+        (f"cd tmp && cd sub; cat > f {body}", None),
+        (f"false && cd tmp && cat > f {body}", "/w/tmp"),
+        (f"false && cd tmp && {{ cat > f {body}\n}}", "/w/tmp"),
+        (f"cd tmp && cat > f {body}", "/w/tmp"),
+        (f"cd tmp && false; cat > f {body}", "/w/tmp"),
+        (f"false && (cd tmp); cat > f {body}", "/w"),
+        (f"false && cd tmp & cat > f {body}", "/w"),
+        (f"false && echo; cat > f {body}", "/w"),
+    ):
+        assert next(c.cwd for c in simple_commands(text, "/w") if c.program() == "cat") == cwd, text
+    target = tmp_path / "tracked.txt"
+    target.write_text("ORIGINAL\n")
+    result = UsefulTools(work_dir=str(tmp_path)).Bash(command, "conditional cd", timeout_seconds=5)
+    assert result == unresolved
     assert target.read_text() == "ORIGINAL\n"

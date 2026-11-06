@@ -34,6 +34,16 @@ an untouched page whatever ``--autoplay-policy`` says (measured on
 1243), so that path is exercised by the jsdom suite
 ``test/victorySound.test.js`` with the rejection the browser would
 give.
+
+Under full-suite load Chromium drops requests in flight with
+``net::ERR_NETWORK_CHANGED`` whenever a host interface appears or
+goes away (other jobs' Docker containers add and remove veth links
+all the time).  A navigation that dies that way is retried as the
+sync tests do with ``conftest.goto_retrying_network_change``; a
+clip download cut short that way is the page's own business: it
+fetches the clip again on a fresh player (``startVictoryPlayer``),
+so a finish may leave a second clip player that never started
+beside the one that played.
 """
 
 from __future__ import annotations
@@ -44,6 +54,7 @@ import time
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
@@ -109,15 +120,47 @@ class TestVictorySoundLive(RemoteTabsHarness):
     """The served page plays the jingle to its end when its remote task finishes."""
 
     async def _open_page(self, browser: Browser) -> tuple[Page, MediaLog]:
-        """A fresh, untouched page on the served webapp and its media log."""
+        """A fresh, untouched page on the served webapp and its media log.
+
+        The navigation is made up to three times while it fails with
+        ``net::ERR_NETWORK_CHANGED`` (see the module docstring): a
+        ``goto`` raising it, or a page whose script died of it and
+        whose self-reload (``media/assetLoadGuard.js``) was cut the
+        same way, so it ends on Chromium's error page or never shows
+        its input.  Any other failure propagates unchanged.
+        """
         context = await browser.new_context(
             ignore_https_errors=True, service_workers="block",
             viewport={"width": 1280, "height": 900},
         )
         page = await context.new_page()
         log = await MediaLog.attach(context, page)
-        await page.goto(f"https://127.0.0.1:{self.server.port}/")
-        await page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        failures: list[str] = []
+
+        def note_failed_request(request: Any) -> None:
+            failures.append(f"{request.url} ({request.resource_type}): {request.failure}")
+
+        page.on("requestfailed", note_failed_request)
+        url = f"https://127.0.0.1:{self.server.port}/"
+        for attempt in range(3):
+            failures.clear()
+            try:
+                await page.goto(url)
+                if page.url.startswith("chrome-error://"):
+                    raise PlaywrightError(f"{url} ended on {page.url}")
+                await page.wait_for_selector("#task-input", state="visible", timeout=30000)
+            except PlaywrightError as exc:
+                network_changed = "net::ERR_NETWORK_CHANGED" in str(exc) or any(
+                    "net::ERR_NETWORK_CHANGED" in failure for failure in failures
+                )
+                if not network_changed or attempt == 2:
+                    raise AssertionError(
+                        f"{url}: {exc} (page at {page.url}; failed requests: {failures})",
+                    ) from exc
+                await asyncio.sleep(1.0)
+                continue
+            break
+        page.remove_listener("requestfailed", note_failed_request)
         await page.wait_for_function(
             "() => [...document.querySelectorAll('#chat-machine option')]"
             ".some(o => o.value === 'box')",
@@ -137,6 +180,23 @@ class TestVictorySoundLive(RemoteTabsHarness):
         await page.keyboard.type(prompt)
         await page.keyboard.press("Enter")
         await self._run_until_idle(tab)
+
+    def _assert_sounded(self, log: MediaLog, count: int, url: str) -> None:
+        """*count* finishes sounded on *log*'s page, each once.
+
+        *count* clip players played to their end, every one of them
+        created for the clip's *url*; any other clip player never
+        started (``kLoad`` without ``kPlay``): its download was cut
+        short (``ERR_NETWORK_CHANGED``, see the module docstring) and
+        the page fetched the clip again on one of those that played.
+        """
+        played = log.played_to_the_end()
+        self.assertEqual(len(played), count, log.events)
+        for pid in log.players_of(CLIP):
+            loaded = next(ev for ev in log.events[pid] if ev.get("event") == "kLoad")
+            self.assertEqual(loaded["url"], f"https://127.0.0.1:{self.server.port}{url}")
+            if pid not in played:
+                self.assertNotIn("kPlay", log.names(pid), log.events)
 
     async def test_remote_task_finish_plays_the_jingle(self) -> None:
         """Typed task on "box": one clip player, played to its end under the
@@ -158,10 +218,7 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 # 1. The typed task: the typing is the gesture the policy wants.
                 await self._type_task_for_box(page, tab, "Say hello")
                 await log.wait_played(1)
-                players = log.players_of(CLIP)
-                self.assertEqual(len(players), 1, log.events)
-                loaded = next(ev for ev in log.events[players[0]] if ev.get("event") == "kLoad")
-                self.assertEqual(loaded["url"], f"https://127.0.0.1:{self.server.port}{url}")
+                self._assert_sounded(log, 1, url)
 
                 # 2. A page opened to watch shows the same chat (tabs are
                 #    shared across surfaces) and sounds the next finish
@@ -170,7 +227,8 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 await self._type_task_for_box(page, tab, "Say hello again")
                 await log.wait_played(2)
                 await watch_log.wait_played(1)
-                self.assertEqual(len(watch_log.players_of(CLIP)), 1, watch_log.events)
+                self._assert_sounded(log, 2, url)
+                self._assert_sounded(watch_log, 1, url)
 
                 # 3. Muted on the first page, the way the user does it:
                 #    "..." > Settings > the box.  Per page: the watcher
@@ -182,8 +240,10 @@ class TestVictorySoundLive(RemoteTabsHarness):
                     await page.evaluate("localStorage.getItem('kissVictorySound')"), "off",
                 )
                 await page.click("#settings-panel-close")
+                muted_players = len(log.players_of(CLIP))
                 await self._type_task_for_box(page, tab, "Say hello a third time")
                 await watch_log.wait_played(2)
-                self.assertEqual(len(log.players_of(CLIP)), 2, "muted: no new player")
+                self._assert_sounded(watch_log, 2, url)
+                self.assertEqual(len(log.players_of(CLIP)), muted_players, "muted: no new player")
             finally:
                 await browser.close()

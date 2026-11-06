@@ -37,7 +37,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -143,6 +145,56 @@ class TestFinalResultsJournal:
         assert [r["success"] for r in row] == [None, 0]
         # The journal survives the sweep (entries are fresh).
         assert finished_id in th._load_final_results(self._sidecar())
+
+    def test_sweep_keeps_a_result_a_peers_prune_folds_into_the_sidecar_mid_read(self) -> None:
+        """A spill a peer's prune folds into the sidecar while the sweep reads is not lost.
+
+        The sweep reads the journal without the journal lock.  A peer's
+        prune (under it) merges the spill files into a new sidecar and
+        deletes them; a sweep that had listed a spill and read the old
+        sidecar then found the spill gone, skipped it (a missing journal
+        file reads as empty) and labelled the task "process killed" for
+        good.  ``sys.settrace`` is thread-local: it parks only the
+        sweep's thread, at the spill's read, while the prune runs.
+        """
+        task_id = self._add_sentinel_task("result in a spill")
+        sidecar = self._sidecar()
+        record = {"task_id": task_id, "result": "<p>spilled</p>", "success": 1, "ts": time.time()}
+        spill = th._spill_journal_lines(sidecar, [json.dumps(record) + "\n"])
+        self._simulate_wal_loss(task_id)
+        parked, resume = threading.Event(), threading.Event()
+        journal_lines = th._journal_lines.__code__
+
+        def trace(frame, event, arg):  # type: ignore[no-untyped-def]
+            if (
+                frame.f_code is journal_lines and event == "call"
+                and frame.f_locals.get("path") == spill and not parked.is_set()
+            ):
+                parked.set()
+                assert resume.wait(timeout=15)
+            return None
+
+        swept: list[int] = []
+
+        def sweep() -> None:
+            sys.settrace(trace)
+            try:
+                swept.append(th._recover_orphaned_tasks(set()))
+            finally:
+                sys.settrace(None)
+                th._close_thread_db()
+
+        thread = threading.Thread(target=sweep, daemon=True)
+        thread.start()
+        assert parked.wait(timeout=15), "the sweep never reached the spill"
+        th._prune_final_results_journal(sidecar)  # the peer's prune
+        assert not os.path.exists(spill)
+        resume.set()
+        thread.join(30)
+        assert not thread.is_alive(), "the sweep did not finish"
+
+        assert swept == [1]
+        assert self._row_result(task_id) == "<p>spilled</p>"
 
     def test_last_journal_entry_wins(self) -> None:
         """A re-saved result supersedes the earlier journal entry."""

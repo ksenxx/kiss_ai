@@ -22,9 +22,9 @@ const {
   send,
   click,
   byId,
-  showSection,
   ofType,
   makeRunner,
+  openExplorer,
   WD,
 } = require('./ui_antipattern_harness');
 
@@ -38,21 +38,6 @@ function makePage() {
       fakeMatchMedia(win, true);
     },
     extraScripts: ['contentContextMenu.js', 'treeContextMenu.js'],
-  });
-}
-
-/** Open the Explorer on WD and answer its root listing. */
-function openExplorer(win, posted) {
-  send(win, {type: 'configData', config: {work_dir: WD}});
-  showSection(win, 'meta-explorer');
-  const list = ofType(posted, 'listDir');
-  const req = list[list.length - 1];
-  send(win, {
-    type: 'dirListing',
-    token: req.token,
-    path: req.path,
-    root: req.path,
-    entries: [],
   });
 }
 
@@ -74,7 +59,7 @@ function answerPickerListing(win, posted) {
 async function run() {
   await test("another surface's pick keeps the Add Folder dialog open and lists it", async () => {
     const {win, posted} = makePage();
-    openExplorer(win, posted);
+    openExplorer(win, posted, []);
     send(win, {
       type: 'configData',
       config: {
@@ -115,7 +100,7 @@ async function run() {
 
   await test("another surface's pick keeps the Open Folder dialog and its listing", async () => {
     const {win, posted} = makePage();
-    openExplorer(win, posted);
+    openExplorer(win, posted, []);
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
     assert.ok(!picker.hidden, 'the open-folder dialog is open');

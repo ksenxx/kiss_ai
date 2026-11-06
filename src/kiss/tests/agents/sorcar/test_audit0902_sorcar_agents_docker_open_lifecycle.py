@@ -14,10 +14,16 @@ daemon (the tests skip when none is running):
   the newest one) and its temp dir was never removed.
 * **Failed start leaks the shared volume dir.**  ``open()`` creates
   the host temp dir BEFORE ``containers.run``; when the daemon rejects
-  the container (here: an invalid port binding) the exception
+  the container (here: a relative working directory) the exception
   propagated with the temp dir left on disk and recorded on the
   manager, so ``close()`` — which returns early when no container is
   open — never cleaned it up either.
+* **A retried close deleted a mounted directory.**  A ``close()``
+  whose stop and removal failed kept the container's name and the
+  shared directory; the next ``close()`` retried the removal and then
+  deleted the directory whether or not the retry succeeded, and
+  ``open()`` deleted it too before starting a replacement container.
+  The running container lost the files it still mounted.
 """
 
 from __future__ import annotations
@@ -116,17 +122,61 @@ def test_close_without_shared_volume_and_unremovable_dir() -> None:
         remove_new_image_containers(client, before)
 
 
+def test_close_keeps_the_shared_dir_while_the_container_cannot_be_removed() -> None:
+    """The directory a container still mounts survives every retry until the container is gone.
+
+    After ``open()`` the SDK handle and the manager's client are pointed
+    at a port nothing listens on, so the stop, the remove and the by-name
+    retry of each ``close()`` fail with a real connection refused while
+    the container runs on with the directory mounted.  The failed-start
+    branch of ``open()`` (a discard failing right after a refused start)
+    needs a daemon that fails a remove right after refusing a start, which
+    no real daemon arranges; it keeps the directory by the same rule.
+    """
+    client = docker.from_env()
+    before = image_container_ids(client)
+    manager = DockerManager(IMAGE)
+    manager.open()
+    owned, shared = manager.container, manager.host_shared_path
+    assert owned is not None and shared is not None
+    with open(os.path.join(shared, "important.txt"), "w", encoding="utf-8") as fh:
+        fh.write("mounted\n")
+    unreachable = docker.DockerClient(
+        base_url="tcp://127.0.0.1:1", version=client.api.api_version,
+    )
+    owned.client = manager.client = unreachable
+    try:
+        manager.close()
+        assert manager.container is None and manager.container_name == owned.name
+        manager.close()  # the retry fails again: the directory must stay mounted
+        assert manager.container_name == owned.name
+        assert manager.host_shared_path == shared, "a mounted directory was deleted"
+        with pytest.raises(KISSError, match="could not be removed"):
+            manager.open()
+        assert manager.container_name == owned.name and manager.host_shared_path == shared
+        running = client.containers.get(owned.id or "")
+        assert running.exec_run("cat /testbed/important.txt").output == b"mounted\n"
+    finally:
+        manager.client = client  # the daemon is reachable again
+        manager.close()
+        remove_new_image_containers(client, before)
+    assert manager.container_name is None and manager.host_shared_path is None
+    assert not os.path.exists(shared)
+    with pytest.raises(docker.errors.NotFound):
+        client.containers.get(owned.id or "")
+
+
 def test_failed_open_removes_shared_volume_dir(manager: DockerManager) -> None:
     """A rejected ``containers.run`` must not leak the host temp dir."""
-    manager.ports = {8000: 70000}  # invalid host port -> daemon rejects create
-    with pytest.raises(docker.errors.APIError):
+    manager.workdir = "relative"  # not absolute -> daemon rejects create
+    with pytest.raises(docker.errors.APIError, match="absolute path"):
         manager.open()
     assert manager.container is None
     assert manager.host_shared_path is None, (
         f"shared volume dir leaked: {manager.host_shared_path}"
     )
     # The manager is reusable once the cause is fixed.
-    manager.ports = None
+    manager.workdir = "/"
     manager.open()
     assert manager.host_shared_path is not None
     assert os.path.isdir(manager.host_shared_path)

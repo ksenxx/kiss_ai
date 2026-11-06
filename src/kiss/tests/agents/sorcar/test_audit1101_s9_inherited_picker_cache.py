@@ -22,14 +22,17 @@ Real files, the real loader and registry; nothing is mocked.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import sea_commands, sea_settings
 from kiss.core.config import kiss_home
 from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
 
@@ -41,10 +44,12 @@ def _reset_sea_commands() -> Iterator[None]:
         yield
 
 
-def _write_parent(parent: Path, registers: bool) -> None:
+def _write_parent(parent: Path, registers: bool | str, cls: str = "Parent") -> None:
+    """Write the base SEA class *cls* whose ``register_as_model`` returns the expression
+    *registers*."""
     parent.write_text(
         "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
-        "class Parent(BaseSea):\n"
+        f"class {cls}(BaseSea):\n"
         "    def register_as_model(self):\n"
         f"        return {registers}\n",
         encoding="utf-8",
@@ -176,6 +181,242 @@ def test_a_parent_edited_while_the_child_loads_is_re_read(tmp_path: Path) -> Non
     assert sea_commands.load_sea(child).register_as_model() is True
     sea_commands.refresh_registry()
     assert sea_commands.model_sea(name) == child, "the old verdict is cached under the new parent"
+
+
+def test_a_parent_imported_the_ordinary_way_is_re_read_once_edited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``from parent import Parent`` instead of ``sea_class``: Python keeps the module once
+    imported, so the re-executed child derived from the parent's old class while its verdict
+    was stamped with the parent's new revision, and the picker never followed the edit."""
+    folder = tmp_path / "seas"
+    module = f"parent_{uuid.uuid4().hex[:8]}"  # sys.modules is process-wide: a fresh name
+    parent = tmp_path / f"{module}.py"
+    name = "importedpicker"
+    child = folder / name / f"{name}_sea.py"
+    child.parent.mkdir(parents=True)
+    child.write_text(
+        f"from {module} import Parent\n\n\n"
+        "class Child(Parent):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, module, raising=False)
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+
+    _write_parent(parent, False)
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) is None
+    stamp = child.stat()
+
+    # Only the parent changes, in both directions.
+    _write_parent(parent, True)
+    sea_commands.refresh_registry()
+    assert (child.stat().st_mtime_ns, child.stat().st_size) == (stamp.st_mtime_ns, stamp.st_size)
+    assert sea_commands.model_sea(name) == child, "the child still derives from the old parent"
+    assert sea_commands.model_seas()[name] == child
+    assert sea_commands.load_sea(child).register_as_model() is True
+
+    _write_parent(parent, False)
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) is None, "the picker still offers the child"
+    assert sea_commands.load_sea(child).register_as_model() is False
+
+    # A parent mid-edit: the child is no entry while it is broken, and
+    # its repair alone brings the child back.
+    parent.write_text("class Parent(:\n", encoding="utf-8")
+    assert sea_commands.model_sea(name) is None
+    _write_parent(parent, True)
+    assert sea_commands.model_sea(name) == child, "the repaired parent was not re-read"
+
+    # An edit that keeps the size within the same second: the bytecode
+    # ``import`` cached for the earlier revision passes Python's
+    # whole-second mtime and size check, so a re-import ran it instead
+    # of the current source and the new revision was stamped as read.
+    second = (parent.stat().st_mtime_ns // 1_000_000_000) * 1_000_000_000
+    _write_parent(parent, "1 == 1")
+    os.utime(parent, ns=(second + 100_000_000, second + 100_000_000))
+    assert sea_commands.model_sea(name) == child
+    _write_parent(parent, "1 == 0")
+    os.utime(parent, ns=(second + 200_000_000, second + 200_000_000))
+    assert parent.read_text(encoding="utf-8").endswith("return 1 == 0\n")
+    assert sea_commands.model_sea(name) is None, "the parent's old bytecode was re-run"
+    assert sea_commands.model_sea(name) is None, "the stale verdict was cached"
+
+
+@pytest.mark.parametrize(
+    ("encoding", "prefix", "header"),
+    [
+        ("utf-8", b"\xef\xbb\xbf", "# a byte-order mark ahead, as Windows editors write it\n"),
+        ("latin-1", b"", "# coding: latin-1\n# caf\xe9\n"),
+    ],
+    ids=["utf-8-bom", "latin-1-cookie"],
+)
+def test_an_imported_parent_is_re_read_in_the_source_encoding_import_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    prefix: bytes,
+    header: str,
+) -> None:
+    """A parent with a UTF-8 byte-order mark or a ``coding`` cookie: ``import`` reads it as
+    Python source (the mark skipped, the cookie honoured), but its re-execution ran the text
+    decoded as UTF-8 (the mark is then ``U+FEFF``, a syntax error; latin-1 bytes do not
+    decode), so the refresh failed where the import succeeded and the picker cached a false
+    verdict for a child whose fresh load registers."""
+    folder = tmp_path / "seas"
+    module = f"parent_{uuid.uuid4().hex[:8]}"
+    parent = tmp_path / f"{module}.py"
+    name = "encodedpicker"
+    child = folder / name / f"{name}_sea.py"
+    child.parent.mkdir(parents=True)
+    child.write_text(
+        f"from {module} import Parent\n\n\nclass Child(Parent):\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, module, raising=False)
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+
+    def write_parent(registers: bool) -> None:
+        """The plain parent, in *encoding* behind *prefix* and *header*."""
+        _write_parent(parent, registers)
+        parent.write_bytes(prefix + (header + parent.read_text(encoding="utf-8")).encode(encoding))
+
+    write_parent(True)
+    sea_commands.refresh_registry()
+    assert sea_commands.load_sea(child).register_as_model() is True
+    assert sea_commands.model_sea(name) == child, "the parent's re-execution rejected its source"
+    assert sea_commands.model_sea(name) == child, "the false verdict was cached"
+    assert sea_commands.model_seas()[name] == child
+
+    # An edit of such a parent is followed too, in both directions.
+    write_parent(False)
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) is None, "the picker still offers the child"
+    write_parent(True)
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) == child, "the picker lost the re-enabled child"
+
+
+def test_an_imported_grandparent_edit_re_reads_the_unchanged_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Leaf(Middle)``, ``Middle(Grand)``, both imported the ordinary way, only ``Grand``
+    edited: the grandparent's module was re-executed but not the unchanged parent's, whose
+    class still derived from the old grandparent, so the re-executed leaf inherited the old
+    verdict under the grandparent's new stamp.  Every module deriving from a re-executed one
+    is re-executed too, root first, before the leaf runs again."""
+    folder = tmp_path / "seas"
+    tag = uuid.uuid4().hex[:8]
+    grand, middle = tmp_path / f"grand_{tag}.py", tmp_path / f"middle_{tag}.py"
+    name = "chainpicker"
+    leaf = folder / name / f"{name}_sea.py"
+    leaf.parent.mkdir(parents=True)
+    middle.write_text(
+        f"from grand_{tag} import Grand\n\n\nclass Middle(Grand):\n    pass\n", encoding="utf-8"
+    )
+    leaf.write_text(
+        f"from middle_{tag} import Middle\n\n\nclass Leaf(Middle):\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+
+    _write_parent(grand, False, "Grand")
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea(name) is None
+    stamps = (middle.stat().st_mtime_ns, leaf.stat().st_mtime_ns)
+
+    for registers in (True, False, True):
+        _write_parent(grand, registers, "Grand")
+        sea_commands.refresh_registry()
+        expected = leaf if registers else None
+        assert sea_commands.model_sea(name) == expected, "the leaf derives from the old parent"
+        assert sea_commands.model_sea(name) == expected, "the stale verdict was cached"
+        assert sys.modules[f"middle_{tag}"].Middle().register_as_model() is registers
+    assert (middle.stat().st_mtime_ns, leaf.stat().st_mtime_ns) == stamps
+
+
+def test_two_threads_re_reading_one_imported_parent_re_execute_it_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two children import the same edited parent and are queried at once: the parent's
+    re-execution is serialised per file, so the second thread waits for it and then finds
+    the re-executed module instead of running the parent a second time."""
+    folder = tmp_path / "seas"
+    module = f"parent_{uuid.uuid4().hex[:8]}"
+    parent = tmp_path / f"{module}.py"
+    ready, resume, runs = tmp_path / "ready", tmp_path / "resume", tmp_path / "runs"
+    names = ("firsttwin", "secondtwin")
+    for name in names:
+        child = folder / name / f"{name}_sea.py"
+        child.parent.mkdir(parents=True)
+        child.write_text(
+            f"from {module} import Parent\n\n\nclass Child(Parent):\n    pass\n", encoding="utf-8"
+        )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, module, raising=False)
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    (kiss_home() / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
+
+    def write_parent(registers: bool, blocking: bool) -> None:
+        """The parent counts its executions in ``runs``; *blocking* makes it wait for ``resume``."""
+        wait = (
+            f"Path({str(ready)!r}).touch()\n"
+            "for _ in range(1000):\n"
+            f"    if Path({str(resume)!r}).exists():\n"
+            "        break\n"
+            "    time.sleep(0.01)\n"
+        )
+        parent.write_text(
+            "import time\n"
+            "from pathlib import Path\n"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+            f"with Path({str(runs)!r}).open('a') as f:\n"
+            "    f.write('run\\n')\n"
+            + (wait if blocking else "")
+            + "\n\nclass Parent(BaseSea):\n"
+            "    def register_as_model(self):\n"
+            f"        return {registers}\n",
+            encoding="utf-8",
+        )
+
+    write_parent(False, blocking=False)
+    sea_commands.refresh_registry()
+    assert not set(names) & set(sea_commands.model_seas())
+    before = runs.read_text(encoding="utf-8").count("run")
+
+    write_parent(True, blocking=True)
+    sea_commands.refresh_registry()
+    verdicts: dict[str, Path | None] = {}
+
+    def query(name: str) -> None:
+        verdicts[name] = sea_commands.model_sea(name)
+
+    first = threading.Thread(target=query, args=(names[0],), name="picker-first")
+    second = threading.Thread(target=query, args=(names[1],), name="picker-second")
+    first.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "the first thread never got into the parent's re-execution"
+        second.start()
+        key = sea_settings._module_name(parent)
+        while sea_settings._EXECUTING_WAIT.get(second) != key and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert sea_settings._EXECUTING_WAIT.get(second) == key, "the second thread did not wait"
+        assert runs.read_text(encoding="utf-8").count("run") == before + 1
+    finally:
+        resume.touch()
+        first.join(10)
+        second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert verdicts == {name: folder / name / f"{name}_sea.py" for name in names}
+    assert runs.read_text(encoding="utf-8").count("run") == before + 1, "re-executed twice"
 
 
 def test_a_named_parent_registered_or_rebound_later_is_re_read(tmp_path: Path) -> None:

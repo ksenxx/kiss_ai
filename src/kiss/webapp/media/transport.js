@@ -1,4 +1,4 @@
-/* global sessionStorage, WebSocket, PasswordCredential, prompt */
+/* global sessionStorage, WebSocket, PasswordCredential, prompt, AbortController */
 // WebSocket transport of the webapp: provides acquireTransport(), the
 // postMessage / getState / setState object media/main.js and
 // media/api.js talk to the daemon through.  Every frame sent through
@@ -289,14 +289,21 @@
   let _daemonCheckDelayMs = 0;
   const _DAEMON_RETRY_MIN_MS = 5000;
   const _DAEMON_RETRY_MAX_MS = 60000;
+  // A probe that gets no answer (a proxy holding the request while the
+  // socket stays up) is a lost probe too: past this deadline it is
+  // aborted, which fails it into the retry below.
+  const _DAEMON_PROBE_TIMEOUT_MS = 12000;
 
   function _checkDaemonInstance() {
     if (typeof fetch !== 'function' || !_authenticated) return;
     const sock = _ws;
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), _DAEMON_PROBE_TIMEOUT_MS);
     let req;
     try {
-      req = fetch('/api/daemon', {cache: 'no-store'});
+      req = fetch('/api/daemon', {cache: 'no-store', signal: abort.signal});
     } catch (_e) {
+      _clearTimer(deadline);
       _retryDaemonCheck(sock);
       return;
     }
@@ -307,6 +314,7 @@
         return null;
       })
       .then(info => {
+        _clearTimer(deadline);
         if (sock !== _ws || !_authenticated) return;
         _daemonCheckDelayMs = 0;
         const instance =
@@ -319,7 +327,10 @@
         if (instance === _daemonInstance) return;
         _reloadForDaemon(instance);
       })
-      .catch(() => _retryDaemonCheck(sock));
+      .catch(() => {
+        _clearTimer(deadline);
+        _retryDaemonCheck(sock);
+      });
   }
 
   // Reload the page for the daemon process *instance*, once the batch
@@ -786,9 +797,28 @@
   function _reopenPasswordPrompt() {
     _promptDeclined = false;
     _setOverlayAction(null, null);
-    _dispatchToApp({type: 'daemonStatus', connected: true});
+    _dispatchConnected();
     _promptForPassword();
     _reconnectNowIfNeeded();
+  }
+
+  // Tell main.js the daemon is reachable, naming the commands whose
+  // delivery is still owed (``unconfirmed``): the ones queued for the
+  // next flush, the flushed batch no ``pong`` has confirmed yet
+  // (re-sent on the next connection if this one dies first) and the
+  // frames held back behind it.  A reconnect settles the optimistic
+  // state main.js keeps for a command (a new tab's shield, see its
+  // ``pendingOpenTabs``) by the daemon's ``ready`` reply, unless the
+  // command is among these: the daemon has not answered it because it
+  // has not received it yet, and will.
+  function _dispatchConnected() {
+    _dispatchToApp({
+      type: 'daemonStatus',
+      connected: true,
+      unconfirmed: _pending
+        .concat(_inflight, _held)
+        .map(data => JSON.parse(data)),
+    });
   }
 
   window.acquireTransport = function () {
@@ -1075,7 +1105,7 @@
         // (its ``daemonWasDown`` path), which is what resyncs the
         // page: it goes out after the batch above, so a queued change
         // is applied before the server replays state to this client.
-        _dispatchToApp({type: 'daemonStatus', connected: true});
+        _dispatchConnected();
         _checkDaemonInstance();
         return;
       }
@@ -1120,7 +1150,7 @@
           return;
         }
         _setOverlayAction(null, null);
-        _dispatchToApp({type: 'daemonStatus', connected: true});
+        _dispatchConnected();
         _promptForPassword();
         return;
       }

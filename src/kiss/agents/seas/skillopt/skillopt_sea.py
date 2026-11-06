@@ -404,6 +404,7 @@ class SeaTarget(Target):
             ("docker_image", "docker_image"),
             ("model", "model_name"),
             ("model_config", "model_config"),
+            ("compaction", "compaction"),
         ):
             if setting in settings:
                 kwargs[key] = settings[setting]

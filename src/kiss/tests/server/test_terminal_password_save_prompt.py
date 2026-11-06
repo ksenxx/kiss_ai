@@ -37,7 +37,15 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import BrowserContext, Page, Request, Route, expect, sync_playwright
+from playwright.sync_api import (
+    BrowserContext,
+    Locator,
+    Page,
+    Request,
+    Route,
+    expect,
+    sync_playwright,
+)
 
 from kiss.core.user_config import save_config
 from kiss.server.web_server import RemoteAccessServer
@@ -165,6 +173,33 @@ async def _disconnect_clients(server: RemoteAccessServer) -> None:
     ))
 
 
+def _open_terminal(page: Page, index: int) -> Locator:
+    """Open a Terminal through the "..." menu; return its view, the *index*-th on the page.
+
+    xterm.js is downloaded from jsDelivr when the terminal opens
+    (``terminalTab.js``, 15 s budget).  Under full-suite load that
+    download sporadically dies (Chromium drops every request in flight
+    when a host interface appears or goes away; the fetch rejects with
+    "Failed to fetch") and the tab shows ``.terminal-load-error``
+    instead of a terminal.  Such a tab is closed and the terminal opened
+    again, three attempts in all, as ``test_remote_terminal_tab`` does.
+    """
+    for attempt in range(3):
+        page.locator("#more-btn").click()
+        page.locator("#terminal-btn").click()
+        terminal = page.locator(".terminal-view").nth(index)
+        expect(
+            terminal.locator(".xterm-helper-textarea, .terminal-load-error"),
+        ).to_have_count(1, timeout=30000)
+        load_error = terminal.locator(".terminal-load-error")
+        if load_error.count() == 0:
+            return terminal
+        assert attempt < 2, f"xterm.js failed to download three times: {load_error.inner_text()}"
+        page.locator("#content-tab-list .active .chat-tab-close").click()
+        expect(page.locator(".terminal-load-error")).to_have_count(0)
+    raise AssertionError("unreachable")
+
+
 @pytest.mark.timeout(120)
 def test_terminal_does_not_trigger_password_save(
     password_browser: BrowserContext, password_server: RemoteAccessServer, tmp_path: Path,
@@ -181,9 +216,7 @@ def test_terminal_does_not_trigger_password_save(
     before = internals.locator("body").inner_text()
     (tmp_path / "password-manager-before.txt").write_text(before)
     for index in range(2):
-        page.locator("#more-btn").click()
-        page.locator("#terminal-btn").click()
-        terminal = page.locator(".terminal-view").nth(index)
+        terminal = _open_terminal(page, index)
         expect(terminal.locator(".xterm-helper-textarea")).to_be_focused(timeout=30000)
         page.keyboard.type("printf 'terminal-%s\\n' verified")
         page.keyboard.press("Enter")

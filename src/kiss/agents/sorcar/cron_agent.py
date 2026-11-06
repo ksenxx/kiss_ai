@@ -273,13 +273,17 @@ def load_jobs(strict: bool = False, path: Path | None = None) -> list[dict[str, 
 
     Raises:
         ValueError: ``strict`` and the store exists but is unreadable or
-            not a JSON list.
+            not a JSON list (the message says which).
     """
     try:
         data = json.loads(read_bytes_waiting_for_writer(path or _jobs_path()).decode("utf-8"))
     except FileNotFoundError:
         return []
-    except (OSError, ValueError):
+    except OSError as exc:
+        if strict:
+            raise ValueError(f"the cron job store cannot be read: {exc}") from exc
+        return []
+    except ValueError:
         data = None
     if not isinstance(data, list):
         if strict:
@@ -890,12 +894,16 @@ def _run_outcome(summary: str, success: bool) -> tuple[str, str | None]:
         success: Whether the run succeeded.
 
     Returns:
-        ``("silent", None)`` for an empty or ``[SILENT]`` summary,
-        otherwise ``("ok" | "error", summary)``.
+        ``("silent", None)`` for a successful run with an empty or
+        ``[SILENT]`` summary, ``("ok", summary)`` for any other success,
+        ``("error", summary)`` for a failed run (``"Task failed"`` when
+        its summary is empty or silent: a failure covers no window,
+        however quiet it is).
     """
-    if not summary or _is_silent(summary):
-        return "silent", None
-    return ("ok" if success else "error"), summary
+    silent = not summary or _is_silent(summary)
+    if success:
+        return ("silent", None) if silent else ("ok", summary)
+    return "error", ("Task failed" if silent else summary)
 
 
 def _job_timeout(job: dict[str, Any], default: float) -> float:
@@ -979,6 +987,14 @@ def _run_in_chat_job(
         # The daemon confirmed the stop: a plain failed run, like a
         # prompt job's confirmed stop (nothing is left running).
         return "error", f"in-chat job timed out after {timeout:g}s and was stopped"
+    except daemon_client.ConnectionLostError as exc:
+        # The task may still be running in the chat's directory: the
+        # TimeoutError _execute_job records for a prompt job's lost
+        # connection, so the user is told rather than shown a plain error.
+        raise TimeoutError(
+            f"in-chat job lost its connection to the daemon, so the task MAY STILL BE "
+            f"RUNNING (and spending) in {run_dir}: {exc}"
+        ) from exc
     except (OSError, ValueError) as exc:
         return "error", f"Error: {exc}"
     return _run_outcome(result_summary(result), result.success)

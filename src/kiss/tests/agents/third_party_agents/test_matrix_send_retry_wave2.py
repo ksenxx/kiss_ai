@@ -122,14 +122,29 @@ class _Sleeper:
             self.cancelled.set()
             raise
 
-    def stop_once_started(self, frame: Any, event: str, arg: Any) -> Any:
-        """Tracer raising ``KeyboardInterrupt`` as ``Future.result`` is called.
 
-        It waits for the coroutine to be running first, so the Stop lands
-        while ``_run`` waits on a live coroutine.
-        """
-        if event == "call" and frame.f_code is concurrent.futures.Future.result.__code__:
-            assert self.started.wait(5)
+class _StopAtFutureResult:
+    """Tracer raising ``KeyboardInterrupt`` on the first ``Future.result`` call.
+
+    Installed with ``sys.settrace`` on the thread that calls ``_run``; it
+    first waits (at most 5 s) for *ready*, the state the test arranged
+    on the loop (a live coroutine, a held start), so the Stop lands while
+    ``_run`` waits on its future, the delivery model of
+    ``PyThreadState_SetAsyncExc``.
+    """
+
+    def __init__(self, ready: threading.Event) -> None:
+        self.ready = ready
+        self.fired = False
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> Any:
+        if (
+            event == "call"
+            and not self.fired
+            and frame.f_code is concurrent.futures.Future.result.__code__
+        ):
+            self.fired = True
+            assert self.ready.wait(5)
             raise KeyboardInterrupt("injected stop")
         return None
 
@@ -164,7 +179,7 @@ def test_stopped_run_cancels_the_coroutine() -> None:
     sleeper = _Sleeper()
     try:
         previous_trace = sys.gettrace()
-        sys.settrace(sleeper.stop_once_started)
+        sys.settrace(_StopAtFutureResult(sleeper.started))
         try:
             with pytest.raises(KeyboardInterrupt, match="injected stop"):
                 backend._run(sleeper.sleep(), timeout=60)

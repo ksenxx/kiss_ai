@@ -37,6 +37,8 @@ follow the OpenRouter SDK reference
 
 import json
 import logging
+import threading
+import time
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
@@ -183,6 +185,9 @@ class DecisionsModel(Model):
         super().__init__(model_name, model_config, token_callback, thinking_callback)
         self.endpoint_url = base_url.rstrip("/") + DECISIONS_PATH
         self.api_key = api_key
+        # Both the read timeout and the whole request's deadline: the
+        # read timeout alone bounds inactivity, which a peer that keeps
+        # sending a byte of JSON whitespace resets for ever.
         self.timeout = float(self.model_config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
         # One pooled connection per adapter: the ``decide`` tool keeps a
         # single adapter for the agent's lifetime and calls it for every
@@ -210,15 +215,22 @@ class DecisionsModel(Model):
             "cost"}, ...}``.  Answer shapes are documented on the three
             question builders.
 
+        The POST runs on a worker thread while this one watches the
+        thread's stop event and the deadline, as the OpenAI adapter's
+        blocking turn does: a thread parked inside ``requests`` can
+        notice neither.  A worker still busy at a Stop or the deadline
+        is abandoned (a daemon thread) with its connection; it ends when
+        the peer does or the read timeout fires.
+
         Raises:
             KISSError: On an unknown question type, a non-2xx response, an
-                unreachable endpoint, or a response without ``answers``.
+                unreachable endpoint, a request that outlived ``timeout``,
+                or a response without ``answers``.
             KeyboardInterrupt: The user pressed Stop before the request
-                was sent.  A Stop that lands during the POST (a plain
-                blocking call with no abort watchdog) is left to the
-                caller: the completed answer and its paid usage are
-                returned as usual, and the agent loop honours the Stop
-                at its next tool call.
+                was sent or while it was in flight.  A reply landing at
+                the Stop itself is taken: the completed answer and its
+                paid usage are returned as usual, and the agent loop
+                honours the Stop at its next tool call.
         """
         if stop_signal.stop_requested():
             raise stop_error()
@@ -236,15 +248,39 @@ class DecisionsModel(Model):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        try:
-            response = self._session.post(
-                self.endpoint_url,
-                json=body,
-                headers=headers,
-                timeout=(CONNECT_TIMEOUT, self.timeout),
-            )
-        except requests.RequestException as e:
-            raise KISSError(f"Decisions request to {self.endpoint_url} failed: {e}") from e
+        outcome: dict[str, Any] = {}
+        worker = threading.Thread(
+            target=_post_into,
+            args=(outcome, self._session, self.endpoint_url, body, headers, self.timeout),
+            name="decisions-request",
+            daemon=True,
+        )
+        deadline = time.monotonic() + self.timeout
+        stop_event = stop_signal.get_thread_stop_event()
+        worker.start()
+        while True:
+            worker.join(_STOP_POLL_SECONDS)
+            if not worker.is_alive():
+                break
+            if stop_event is not None and stop_event.is_set():
+                # A reply landing this very moment is paid for: give the
+                # worker one poll interval to bring it in.
+                worker.join(_STOP_POLL_SECONDS)
+                if worker.is_alive():
+                    raise stop_error()
+                break
+            if time.monotonic() >= deadline:
+                raise KISSError(
+                    f"Decisions request to {self.endpoint_url} exceeded {self.timeout:g}s"
+                )
+        if "error" in outcome:
+            error = outcome["error"]
+            if isinstance(error, requests.RequestException):
+                raise KISSError(
+                    f"Decisions request to {self.endpoint_url} failed: {error}"
+                ) from error
+            raise error
+        response = outcome["response"]
         if response.status_code >= 400:
             raise KISSError(_http_error_message(response))
         try:
@@ -364,6 +400,36 @@ class DecisionsModel(Model):
             KISSError: Always.
         """
         raise KISSError(f"{self.model_name} is a decisions model and cannot embed text.")
+
+
+#: How often :meth:`DecisionsModel.decide` looks at the stop event and the deadline.
+_STOP_POLL_SECONDS = 0.1
+
+
+def _post_into(
+    outcome: dict[str, Any],
+    session: requests.Session,
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    read_timeout: float,
+) -> None:
+    """Worker-thread body of :meth:`DecisionsModel.decide`: store the POST's response or error.
+
+    Args:
+        outcome: Receives ``"response"`` on success, else ``"error"``.
+        session: The adapter's pooled session.
+        url: The decisions endpoint.
+        body: The JSON request body.
+        headers: The request headers.
+        read_timeout: Seconds of socket inactivity tolerated.
+    """
+    try:
+        outcome["response"] = session.post(
+            url, json=body, headers=headers, timeout=(CONNECT_TIMEOUT, read_timeout),
+        )
+    except Exception as error:  # noqa: BLE001 - re-raised on the requesting thread
+        outcome["error"] = error
 
 
 def _http_error_message(response: requests.Response) -> str:

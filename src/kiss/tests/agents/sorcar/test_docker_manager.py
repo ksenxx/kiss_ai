@@ -4,55 +4,22 @@
 # add your name here
 """Test suite for DockerManager without mocking."""
 
-import socket
 import time
 import unittest
+from collections.abc import Iterator
 
+import docker
+import docker.errors
 import pytest
 import requests
 
-from kiss.agents.sorcar.docker_manager import DockerManager
-from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
-
-
-@pytest.mark.slow
-@unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
-class TestDockerManager(unittest.TestCase):
-    def test_port_mapping(self) -> None:
-        def find_free_port() -> int:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("", 0))
-                port: int = s.getsockname()[1]
-                return port
-
-        host_port = find_free_port()
-
-        with DockerManager("python:3.11-slim", ports={8000: host_port}) as env:
-            env.Bash("echo 'Hello from Docker!' > /tmp/index.html", "Create test file")
-            # The server must not keep the exec's stdout/stderr: the daemon
-            # closes those streams once the exec's shell exits, and the
-            # server's request log would then die on a broken pipe and drop
-            # the connection without a response.
-            env.Bash(
-                "cd /tmp && python -m http.server 8000 > /tmp/server.log 2>&1 &",
-                "Start HTTP server",
-            )
-
-            self.assertEqual(env.get_host_port(8000), host_port)
-
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    response = requests.get(
-                        f"http://localhost:{host_port}/index.html", timeout=5
-                    )
-                    break
-                except requests.exceptions.ConnectionError:
-                    if time.monotonic() >= deadline:
-                        self.fail(f"Could not connect to HTTP server on port {host_port}")
-                    time.sleep(0.2)
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("Hello from Docker!", response.text)
+from kiss.agents.sorcar.docker_manager import OWNER_LABEL, DockerManager, owner_label_value
+from kiss.tests.agents.sorcar.docker_test_containers import (
+    IMAGE,
+    image_container_ids,
+    is_docker_available,
+    remove_new_image_containers,
+)
 
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
@@ -73,6 +40,70 @@ class TestDockerManagerStreaming(unittest.TestCase):
         joined = "".join(streamed)
         assert "stdout_msg" in joined
         assert "stderr_msg" in joined
+
+
+@pytest.fixture
+def registry_repository() -> Iterator[str]:
+    """A repository of :data:`IMAGE` in a private registry on a random host port.
+
+    The registry runs in a container of its own; the image is pushed to
+    it and then untagged locally, so every ``open()`` of the yielded
+    ``localhost:<port>/kiss-registry-test`` has to pull it.
+    """
+    client = docker.from_env()
+    before = image_container_ids(client)
+    registry = client.containers.run(
+        "registry:2", detach=True, ports={"5000/tcp": None},
+        labels={OWNER_LABEL: owner_label_value()},
+    )
+    repository = ""
+    try:
+        registry.reload()
+        port = registry.attrs["NetworkSettings"]["Ports"]["5000/tcp"][0]["HostPort"]
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                if requests.get(f"http://127.0.0.1:{port}/v2/", timeout=5).status_code == 200:
+                    break
+            except requests.exceptions.ConnectionError:
+                assert time.monotonic() < deadline, "the registry did not come up"
+                time.sleep(0.2)
+        repository = f"localhost:{port}/kiss-registry-test"
+        client.images.get(IMAGE).tag(repository, "latest")
+        pushed = client.images.push(repository, tag="latest")
+        assert '"error"' not in pushed, pushed
+        yield repository
+    finally:
+        registry.remove(force=True)
+        for reference in client.images.list(name=repository) if repository else []:
+            for tag in reference.attrs.get("RepoTags") or []:
+                if tag.startswith(repository):
+                    client.images.remove(tag)
+            for digest in reference.attrs.get("RepoDigests") or []:
+                if digest.startswith(repository):
+                    client.images.remove(digest)
+        remove_new_image_containers(client, before)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
+def test_open_pulls_a_port_qualified_reference_and_a_digest(registry_repository: str) -> None:
+    """``localhost:<port>/name`` and ``name@sha256:...`` pull as docker reads them.
+
+    Split at their last colon they asked the daemon for image
+    ``localhost`` with tag ``<port>/name`` ("invalid tag format") and
+    for ``name@sha256`` with the digest's hex as its tag.
+    """
+    client = docker.from_env()
+    digests = client.images.get(f"{registry_repository}:latest").attrs["RepoDigests"]
+    digest = next(d for d in digests if d.startswith(f"{registry_repository}@"))
+    for reference in (registry_repository, digest):
+        client.images.remove(f"{registry_repository}:latest")
+        with pytest.raises(docker.errors.ImageNotFound):
+            client.images.get(reference)
+        with DockerManager(reference) as env:
+            assert env.Bash("echo pulled", "probe").split("\n")[0] == "pulled"
+        client.images.get(reference)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,11 @@ from kiss.core.config import DEFAULT_MAX_BUDGET, _env_flag, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
-from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
+from kiss.core.utils import (
+    atomic_write_text,
+    read_bytes_waiting_for_writer,
+    read_text_waiting_for_writer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +131,18 @@ DEFAULTS: dict[str, Any] = {
     # hashed embedder (kiss.core.memoryfield.index.default_embedder).
     "use_memory": True,
     "memory_dir": "",
+    # Context compaction (kiss.core.context_compaction), on by default:
+    # every agent of the daemon replaces old, large tool outputs in its
+    # conversation with short stubs once the context grows large.  The
+    # settings panel's "Compaction" checkbox toggles it; mirrored into
+    # ``DEFAULT_CONFIG.tool_output_compaction`` by :func:`apply_config_to_env`,
+    # which every agent reads at each step, so a change applies to running
+    # tasks too.  Off, no run compacts, whatever its own ``compaction`` run
+    # option (a ``run()`` keyword, a SEA setting, a ``run_agent`` option)
+    # says; on, a run's option turns it off for that run alone.  The same
+    # KISS_TOOL_OUTPUT_COMPACTION flag as ``Config`` seeds the default, so
+    # an environment opt-out holds until the panel's switch is saved.
+    "compaction": _env_flag("KISS_TOOL_OUTPUT_COMPACTION", True),
     # Chrome bridge (kiss.agents.sorcar.chrome_bridge): the daemon starts
     # the loopback server for the "KISS Sorcar Bridge" extension at boot,
     # so the user's everyday Chrome is reachable (``use_my_chrome``) from
@@ -666,17 +682,32 @@ def _env_line_sets_key(line: str, key_name: str) -> bool:
     return re.match(rf"\s*(?:export\s+)?{re.escape(key_name)}=", line) is not None
 
 
-def _shell_would_expand(raw: str) -> bool:
-    """Return True if a POSIX shell would expand ``$``/backtick in *raw*.
+def _shell_words(raw: str, continued: bool) -> list[str] | None:
+    """Split *raw*, the value of an assignment, into the words a POSIX shell reads.
 
-    Walks the string tracking quote state: ``$`` and `` ` `` expand only
-    outside single quotes and only when not backslash-escaped.  This is
-    what decides whether a stored value can be read literally — a
-    ``$`` inside single quotes (including the ``'a'"'"'b'`` concatenated
-    form ``shlex.quote`` emits for values holding an apostrophe) is a
-    literal to the shell too, while an unquoted ``$PATH`` from an RC
-    distillation was *meant* to expand and must not be imported verbatim.
+    Quotes and backslash escapes are undone as the shell undoes them: in
+    double quotes a backslash escapes only ``$``, a backtick, ``"`` and
+    itself (``"sk-\\$x"`` is ``sk-$x``, ``"a\\nb"`` keeps its backslash);
+    unquoted whitespace ends a word and a ``#`` that starts a word ends
+    the line (``abc # note`` is ``abc``, ``abc#def`` is itself) -- but
+    not the first word when *continued* says *raw* continues a word
+    already begun, the ``NAME=`` of a POSIX assignment: ``KEY=#literal``
+    assigns ``#literal``, as the shell does, whereas fish's ``set -gx
+    KEY #literal`` opens a new word and that is a comment.  This
+    is what decides whether a stored value can be read literally:
+    ``None`` means the shell would expand it -- ``$`` or a backtick
+    outside single quotes and not backslash-escaped -- so an unquoted
+    ``$PATH`` from an RC distillation, which was *meant* to expand, is
+    never imported verbatim, while a ``$`` inside single quotes
+    (including the ``'a'"'"'b'`` concatenated form ``shlex.quote`` emits
+    for values holding an apostrophe) is a literal to the shell too.
+
+    Raises:
+        ValueError: On an unbalanced quote, which no shell would accept.
     """
+    words: list[str] = []
+    word = ""
+    begun = continued  # a word has begun: ``""`` is one, an empty one
     state = ""
     i = 0
     while i < len(raw):
@@ -684,45 +715,69 @@ def _shell_would_expand(raw: str) -> bool:
         if state == "'":
             if c == "'":
                 state = ""
+            else:
+                word += c
         elif state == '"':
-            if c == "\\":
+            if c == "\\" and raw[i + 1 : i + 2] in ('$', '`', '"', "\\"):
                 i += 1
+                word += raw[i]
             elif c == '"':
                 state = ""
             elif c in "$`":
-                return True
+                return None
+            else:
+                word += c
+        elif c in "'\"":
+            state = c
+            begun = True
+        elif c == "\\":
+            i += 1
+            word += raw[i : i + 1]
+        elif c in "$`":
+            return None
+        elif c in " \t":
+            if word or begun:
+                words.append(word)
+                word, begun = "", False
+        elif c == "#" and not word and not begun:
+            break
         else:
-            if c == "\\":
-                i += 1
-            elif c in "'\"":
-                state = c
-            elif c in "$`":
-                return True
+            word += c
         i += 1
-    return False
+    if state:
+        raise ValueError("No closing quotation")
+    if word or begun:
+        words.append(word)
+    return words
 
 
 def _split_assignment(
     line: str, pattern: re.Pattern[str]
 ) -> tuple[str, str, list[str] | None] | None:
-    """Match one ``NAME=value`` line of *pattern* and ``shlex``-split its value.
+    """Match one ``NAME=value`` line of *pattern* and split its value into shell words.
 
     Returns ``None`` when *line* is no assignment or its value would
-    need shell expansion (see :func:`_shell_would_expand`); otherwise
-    ``(name, raw, words)`` with the stripped raw value and its ``shlex``
-    words, ``None`` for a remainder ``shlex`` cannot parse (unbalanced
-    quote).
+    need shell expansion (see :func:`_shell_words`); otherwise
+    ``(name, raw, words)`` with the stripped raw value and its words,
+    ``None`` for a remainder no shell could parse (unbalanced quote).
+    A blank right after the ``=`` makes the value empty, whatever
+    follows (``KEY= # removed``, ``KEY= other``): that is what the shell
+    assigns.
     """
     m = pattern.match(line)
     if m is None:
         return None
-    name, raw = m.group(1), m.group(2).strip()
-    if _shell_would_expand(raw):
-        return None
+    name, value = m.group(1), m.group(2)
+    raw = value.strip()
+    if value[:1] in (" ", "\t"):
+        return name, raw, [""]
+    # Right after ``NAME=`` the value continues the assignment's word;
+    # after fish's ``set -gx NAME`` and its blanks it is a word of its own.
     try:
-        return name, raw, shlex.split(raw)
+        words = _shell_words(raw, continued=line[m.end(1)] == "=")
     except ValueError:
         return name, raw, None
+    return None if words is None else (name, raw, words)
 
 
 def _parse_env_assignment(line: str) -> tuple[str, str] | None:
@@ -731,16 +786,15 @@ def _parse_env_assignment(line: str) -> tuple[str, str] | None:
     Returns ``None`` for blank lines, comments, anything that is not a
     single ``[export] NAME=value`` assignment, shell-only variables
     (see :data:`_SHELL_ONLY_ENV_VAR_RE`), and values that would need
-    shell expansion (see :func:`_shell_would_expand`) — those came from
+    shell expansion (see :func:`_shell_words`) — those came from
     an RC distillation where the shell was *meant* to expand them, and
     importing them verbatim would corrupt the environment.
 
-    Quoting is undone with ``shlex`` so a value stored as ``'sk-abc'``
-    or ``"sk-abc"`` loads as ``sk-abc``.  When the remainder splits
-    into several words — ``KEY=abc # note`` or ``KEY=two words`` — the
-    first word is the value, exactly what a shell sourcing the same
-    line assigns; a remainder ``shlex`` cannot parse at all (unbalanced
-    quote) is kept as the raw text.
+    Quoting is undone so a value stored as ``'sk-abc'`` or ``"sk-abc"``
+    loads as ``sk-abc``.  When the remainder splits into several words
+    — ``KEY=two words`` — the first word is the value, exactly what a
+    shell sourcing the same line assigns; a remainder no shell could
+    parse (unbalanced quote) is kept as the raw text.
     """
     split = _split_assignment(line, _ENV_ASSIGNMENT_RE)
     if split is None:
@@ -773,9 +827,14 @@ def _read_user_text(path: Path) -> str:
     ``café`` comment) becomes a lone surrogate instead of raising
     ``UnicodeDecodeError``, which is no ``OSError`` and used to abort the
     daemon start, and :func:`atomic_write_text` with the same handler
-    writes it back unchanged.
+    writes it back unchanged.  Read waiting out a concurrent
+    :func:`atomic_write_text` publish of the same file (a Windows
+    ``open`` fails during the replace): the store is read without its
+    lock by :func:`_import_api_keys_store`, and a channel agent the
+    daemon spawns must not start with no keys because the settings
+    panel was saving one.
     """
-    return path.read_text(encoding="utf-8", errors="surrogateescape")
+    return read_text_waiting_for_writer(path, errors="surrogateescape")
 
 
 def _has_line_break(value: str) -> bool:
@@ -967,20 +1026,34 @@ def save_api_key(key_name: str, key_value: str) -> None:
 def _save_api_key_locked(key_name: str, key_value: str, user_shell: str) -> None:
     """The store edit and RC scrub of :func:`save_api_key`; the caller holds ``_config_lock``."""
     with _api_keys_store_flock():
-        _edit_api_keys_env_file_locked({key_name: key_value or None})
         # The key must disappear from EVERY RC a previous release may
         # have written it to, not only the current $SHELL's: a copy left
         # in another shell's RC would be re-imported by the legacy-key
         # migration (or re-shipped by a deploy) after the user deleted
         # the key — and users do switch default shells between releases.
+        # The RCs go first: they are the step that can fail (an
+        # unreadable RC, a lock another process holds), and a save that
+        # fails must change nothing — the store edited before a failed
+        # scrub would hold the new key while this daemon kept using,
+        # and showing, the old one until a restart.  The hook can only
+        # go where the shell can source a bash-syntax file (not fish)
+        # and where the ``$HOME``-based hook line names the canonical
+        # store (no ``$KISS_HOME`` override); an absent RC that would
+        # get no hook is left alone, lock file included.
+        hook_wanted = (
+            bool(key_value)
+            and user_shell != "fish"
+            and api_keys_env_path() == Path.home() / HOME_DIR / API_KEYS_ENV_FILE
+        )
         for shell in ("bash", "zsh", "fish"):
             rc = _shell_rc_path(shell)
-            install_hook = bool(key_value) and shell == user_shell
+            install_hook = hook_wanted and shell == user_shell
             if not rc.exists() and not install_hook:
                 continue
             rc_lock = rc.with_name(rc.name + ".kiss.lock")
             with exclusive_file_lock(rc_lock, timeout=_LOCK_TIMEOUT_S):
                 _update_rc_for_key(rc, shell, key_name, install_hook=install_hook)
+        _edit_api_keys_env_file_locked({key_name: key_value or None})
         if key_value:
             os.environ[key_name] = key_value
         else:
@@ -1015,12 +1088,10 @@ def _update_rc_for_key(
     (``set -gx KEY …`` for fish) line a previous release wrote into the
     RC is removed — on save as well as on delete, otherwise a stale RC
     line sourced *after* the hook would shadow the canonical value in
-    interactive shells.  When *install_hook* is true and the shell can
-    source a bash-syntax file (bash/zsh), the :data:`RC_HOOK_BEGIN`
-    block is appended once so terminals read the store directly.  When
-    the canonical store lives somewhere other than ``~/.kiss`` (a
-    ``$KISS_HOME`` override), the ``$HOME``-based hook would read the
-    wrong file, so it is skipped rather than written wrong.
+    interactive shells.  When *install_hook* is true (the caller's
+    decision: a bash/zsh RC, a store at its ``~/.kiss`` home), the
+    :data:`RC_HOOK_BEGIN` block is appended once so terminals read the
+    store directly.
 
     Callers hold the RC locks; this only performs the line-oriented
     edit and the atomic 0600 replace.  An RC that needs no change is
@@ -1043,12 +1114,7 @@ def _update_rc_for_key(
         lines = _read_user_text(rc).splitlines(keepends=True)
     kept = [line for line in lines if not _rc_line_sets_key(line, shell, key_name)]
     changed = len(kept) != len(lines)
-    if (
-        install_hook
-        and shell != "fish"
-        and api_keys_env_path() == Path.home() / HOME_DIR / API_KEYS_ENV_FILE
-        and not any(line.rstrip("\n") == _RC_HOOK_LINE for line in kept)
-    ):
+    if install_hook and not any(line.rstrip("\n") == _RC_HOOK_LINE for line in kept):
         # A block from another brand's install (stock KISS sourcing
         # ~/.kiss/api_keys.env, say) shares the markers: this brand's
         # source line joins that block instead of opening a second one.
@@ -1090,8 +1156,9 @@ def _refresh_config() -> None:
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Apply loaded config values to the running process.
 
-    Sets ``max_budget``, ``claude_code_use_subscription`` and
-    ``codex_use_subscription`` on the default config.
+    Sets ``max_budget``, ``claude_code_use_subscription``,
+    ``codex_use_subscription`` and ``compaction`` (as
+    ``tool_output_compaction``) on the default config.
 
     A junk value (boolean, non-numeric, or non-finite) falls back to
     ``DEFAULTS['max_budget']``: the value can come from the
@@ -1117,6 +1184,11 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
             switch,
             bool(cfg.get(switch, DEFAULTS[switch])),
         )
+    # The global Compaction switch: every agent's
+    # ``_maybe_compact_conversation`` reads it at each step.
+    config_module.DEFAULT_CONFIG.tool_output_compaction = bool(
+        cfg.get("compaction", DEFAULTS["compaction"])
+    )
 
 
 def _parse_custom_headers(raw_headers: str) -> dict[str, str]:
@@ -1310,21 +1382,26 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
     without running a shell, so an assignment sitting *after* a stock
     Debian/Ubuntu interactivity guard (``case $- in *i*) ;; *) return``)
     is still found — sourcing the RC non-interactively returns before
-    reaching it.  Later assignments win, as they do in a shell.
-    Expansion-dependent, multi-word, or NUL-carrying values are skipped:
-    the canonical store cannot represent them faithfully.
+    reaching it.  Later assignments win, as they do in a shell: one
+    that is empty, expansion-dependent, multi-word or NUL-carrying
+    cannot be imported (the canonical store cannot represent it
+    faithfully) and also forgets an earlier literal, which the shell
+    no longer assigns either -- the sourcing fallback then resolves
+    what the text cannot.
     """
     found: dict[str, str] = {}
     pattern = _FISH_ASSIGNMENT_RE if shell == "fish" else _ENV_ASSIGNMENT_RE
     for line in text.splitlines():
+        m = pattern.match(line)
+        if m is None or m.group(1) not in wanted:
+            continue
+        name = m.group(1)
         split = _split_assignment(line, pattern)
-        if split is None:
-            continue
-        name, _raw, parts = split
-        if name not in wanted or parts is None:
-            continue
-        if len(parts) == 1 and parts[0] and "\x00" not in parts[0]:
+        parts = None if split is None else split[2]
+        if parts is not None and len(parts) == 1 and parts[0] and "\x00" not in parts[0]:
             found[name] = parts[0]
+        else:
+            found.pop(name, None)
     return found
 
 

@@ -770,16 +770,34 @@
    * transcripts still stand.
    */
   function onMicEnded(gen) {
+    failLivePipeline(
+      gen,
+      'the microphone was disconnected or taken by another application',
+    );
+  }
+
+  /**
+   * The speech worker reported an error for the wake-word recognizer of
+   * generation *gen* (it could not build it, or could not decode a
+   * chunk): nothing can wake through this pipeline any more, so it comes
+   * down like a lost microphone, with the worker's reason on the button.
+   * The loaded model is kept: the next click retries on it.
+   */
+  function onRecognizerError(gen, message) {
+    failLivePipeline(
+      gen,
+      (message && message.error) || 'the speech recognizer failed',
+    );
+  }
+
+  function failLivePipeline(gen, reason) {
     if (gen !== voiceGen) return;
     ++voiceGen;
     stopBrowserPipeline();
     flashPendingRounds();
     enabled = false;
     persist();
-    setUi(
-      'error',
-      'the microphone was disconnected or taken by another application',
-    );
+    setUi('error', reason);
   }
 
   function stopBrowserPipeline() {
@@ -934,6 +952,7 @@
             debugLog('partial', message.result.partial);
           }
         });
+        recognizer.on('error', message => onRecognizerError(gen, message));
         if (debugEnabled()) {
           freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
           freeRecognizer.on('result', message => {

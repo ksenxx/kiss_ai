@@ -295,7 +295,7 @@ def _mac_app_executable(app_path: str) -> str | None:
     try:
         with info.open("rb") as fh:
             executable = plistlib.load(fh).get("CFBundleExecutable")
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except (OSError, ValueError):  # plistlib.InvalidFileException is a ValueError
         return None
     if not isinstance(executable, str):
         return None

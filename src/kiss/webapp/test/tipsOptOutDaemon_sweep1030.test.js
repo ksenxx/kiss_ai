@@ -20,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const {newDom, MEDIA} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {openOptOutBox, closeTips} = require('./tips_helpers');
 const {test, report} = makeRunner();
 
 const TIPS = ['# One\n\nfirst', '# Two\n\nsecond'];
@@ -34,21 +35,6 @@ function loadTipsPage(cfg, storage) {
   win.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
   win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
   return win;
-}
-
-/** Open the tips from the Tips button and return the opt-out checkbox. */
-function openOptOutBox(win) {
-  win.document.getElementById('tips-btn').click();
-  const host = win.document.body.querySelector('kiss-tips-panel');
-  assert.ok(host, 'the Tips button opens the tips window');
-  return host.shadowRoot.querySelector('.tips-optout-input');
-}
-
-/** Close the open tips window with its close button. */
-function closeTips(win) {
-  const host = win.document.body.querySelector('kiss-tips-panel');
-  host.shadowRoot.querySelector('.tips-close').click();
-  assert.strictEqual(win.document.body.querySelector('kiss-tips-panel'), null);
 }
 
 test('the page-load opt-out of the daemon ticks the box in a browser without one', () => {

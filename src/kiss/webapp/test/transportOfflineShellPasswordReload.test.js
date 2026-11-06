@@ -16,20 +16,12 @@ const {
   installFakeWebSocket,
   frames,
   settle,
+  ok,
+  fail,
 } = require('./transport_page_helpers');
 
 const KEY = 'sorcar-remote-pwd';
 const RELOADED_FLAG = 'sorcar-offline-reloaded';
-
-function ok(msg) {
-  console.log('  ok -', msg);
-}
-
-function fail(msg, err) {
-  console.error('  FAIL -', msg);
-  if (err) console.error('       ', err.message || err);
-  process.exit(1);
-}
 
 /**
  * A tab on the real shim.  *offlineShell* adds the meta the service

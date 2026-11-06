@@ -420,12 +420,17 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
     commit, branch and uncommitted change stay as they were, and
     ``best.patch`` applies to the caller's tree and carries the idea.
     """
+    # Everything acquired after the home is acquired inside the ``try``,
+    # so a constructor that raises cannot leak the process-global state
+    # (``KISS_HOME``, the blanked provider keys) into the next test.
     home = IsolatedKissHome(prefix="kiss-discover-lab-")
-    credentials = _FakeCredentials()
-    parent = ChatSorcarAgent("parent")
+    credentials: _FakeCredentials | None = None
+    parent: ChatSorcarAgent | None = None
     script: _LabScript | None = None
     standin: StandInModelServer | None = None
     try:
+        credentials = _FakeCredentials()
+        parent = ChatSorcarAgent("parent")
         (home.repo / ".gitignore").write_text("tmp/\n", encoding="utf-8")
         run_git(home.repo, "add", ".gitignore")
         run_git(home.repo, "commit", "-qm", "ignore tmp")
@@ -499,7 +504,8 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
                 agent.discard()
         if standin is not None:
             standin.stop()
-        credentials.restore()
+        if credentials is not None:
+            credentials.restore()
         home.cleanup()
 
 
@@ -546,11 +552,13 @@ def test_a_typed_task_naming_discover_sees_its_help_but_its_runs_do_not() -> Non
     names it get none, so the SEA is never told to call itself.
     """
     home = IsolatedKissHome(prefix="kiss-discover-named-")
-    credentials = _FakeCredentials()
-    recorder = _Recorder()
-    standin = StandInModelServer(recorder)
-    help_line = f"- `/discover`: {DiscoverSea().description()}"
+    credentials: _FakeCredentials | None = None
+    standin: StandInModelServer | None = None
     try:
+        credentials = _FakeCredentials()
+        recorder = _Recorder()
+        standin = StandInModelServer(recorder)
+        help_line = f"- `/discover`: {DiscoverSea().description()}"
         home.write_config(max_budget=5.0, use_web_browser=False)
         server = AgentServer(printer=CapturePrinter())
         server.work_dir = str(home.repo)
@@ -586,6 +594,8 @@ def test_a_typed_task_naming_discover_sees_its_help_but_its_runs_do_not() -> Non
         assert "- Is subagent: yes\n" in sub_agent
         assert sea_commands.NAMED_COMMANDS_HEADING not in sub_agent
     finally:
-        standin.stop()
-        credentials.restore()
+        if standin is not None:
+            standin.stop()
+        if credentials is not None:
+            credentials.restore()
         home.cleanup()

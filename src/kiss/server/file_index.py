@@ -160,7 +160,7 @@ def _bulk_data_dirs(own_counts: dict[str, list[int]]) -> set[str]:
     return bulk
 
 
-def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str]]:
+def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str], set[str]]:
     """Extract the non-glob entries of a ``.gitignore``.
 
     Following gitignore semantics, an entry containing a slash anywhere
@@ -173,15 +173,17 @@ def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str]]:
         text: Contents of the ``.gitignore`` file.
 
     Returns:
-        ``(names, dir_names, anchored)`` — bare names to skip at any
-        depth, bare names to skip at any depth when they are directories,
-        and paths (relative to the ignore file's directory) to skip at
-        their exact location only.  Negations, comments and glob entries
-        are ignored.
+        ``(names, dir_names, anchored, anchored_dirs)`` — bare names to
+        skip at any depth, bare names to skip at any depth when they are
+        directories, and paths (relative to the ignore file's directory)
+        to skip at their exact location only, whatever they are
+        (``/build``) or only when they are directories (``/build/``).
+        Negations, comments and glob entries are ignored.
     """
     names: set[str] = set()
     dir_names: set[str] = set()
     anchored: set[str] = set()
+    anchored_dirs: set[str] = set()
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or line.startswith("!"):
@@ -190,12 +192,12 @@ def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str]]:
             continue
         entry = line.rstrip("/")
         if "/" in entry:
-            anchored.add(entry.lstrip("/"))
+            (anchored_dirs if line.endswith("/") else anchored).add(entry.lstrip("/"))
         elif line.endswith("/"):
             dir_names.add(entry)
         else:
             names.add(entry)
-    return names, dir_names, anchored
+    return names, dir_names, anchored, anchored_dirs
 
 
 def _is_hidden_dir(entry: os.DirEntry[str]) -> bool:
@@ -288,9 +290,10 @@ def _end_dist(path: str, query: str) -> int:
 # files and dotfiles, 2 and 3 = the same inside a wide container.
 _Buckets = tuple[list[str], list[str], list[str], list[str]]
 # Skip rules in force below a directory: gitignore bare names (any entry),
-# bare names that only skip directories, and root-relative anchored paths.
-_Rules = tuple[frozenset[str], frozenset[str], frozenset[str]]
-_ROOT_RULES: _Rules = (frozenset({".git"}), frozenset(), frozenset())
+# bare names that only skip directories, root-relative anchored paths (any
+# entry) and root-relative anchored paths that only skip directories.
+_Rules = tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]
+_ROOT_RULES: _Rules = (frozenset({".git"}), frozenset(), frozenset(), frozenset())
 
 # Skip rules of the home root.  macOS keeps application state in
 # ``~/Library`` (caches, sandbox containers, the mail, message and photo
@@ -301,7 +304,7 @@ _ROOT_RULES: _Rules = (frozenset({".git"}), frozenset(), frozenset())
 # at ``~/Library/Mobile Documents``) is a root of its own, as a work dir
 # inside any skipped directory is (``FileIndexRegistry.root_for``).
 _HOME_SKIPPED_DIRS = frozenset({"Library"}) if sys.platform == "darwin" else frozenset()
-_HOME_RULES: _Rules = (_ROOT_RULES[0], _ROOT_RULES[1], _HOME_SKIPPED_DIRS)
+_HOME_RULES: _Rules = (_ROOT_RULES[0], _ROOT_RULES[1], _HOME_SKIPPED_DIRS, frozenset())
 
 # Absolute paths of the directories this process may not read.  macOS
 # answers a daemon without "Files and Folders" permission (a launchd
@@ -388,15 +391,21 @@ def _child_rules(abs_dir: str, rel: str, rules: _Rules) -> _Rules:
     text = _read_gitignore(abs_dir)
     if text is None:
         return rules
-    names, dir_names, anchored = _parse_gitignore(text)
-    if not names and not dir_names and not anchored:
+    names, dir_names, anchored, anchored_dirs = _parse_gitignore(text)
+    if not names and not dir_names and not anchored and not anchored_dirs:
         return rules
-    skip_names, skip_dir_names, skip_paths = rules
+    skip_names, skip_dir_names, skip_paths, skip_dir_paths = rules
     return (
         skip_names | names,
         skip_dir_names | dir_names,
         skip_paths | {posixpath.join(rel, a) for a in anchored},
+        skip_dir_paths | {posixpath.join(rel, a) for a in anchored_dirs},
     )
+
+
+def _anchored_here(paths: frozenset[str], rel: str) -> set[str]:
+    """The names of the anchored *paths* that point into directory *rel* itself."""
+    return {p.rpartition("/")[2] for p in paths if p.rpartition("/")[0] == rel}
 
 
 def _derive(
@@ -422,12 +431,11 @@ def _derive(
         repository with many top-level packages is not a run dump).
     """
     prefix = rel + "/" if rel else ""
-    skip, skip_dirs, skip_paths = rules
+    skip, skip_dirs, skip_paths, skip_dir_paths = rules
     if skip_paths:
-        # Anchored entries that point into this very directory.
-        here = {p.rpartition("/")[2] for p in skip_paths if p.rpartition("/")[0] == rel}
-        if here:
-            skip = skip | here
+        skip = skip | _anchored_here(skip_paths, rel)
+    if skip_dir_paths:
+        skip_dirs = skip_dirs | _anchored_here(skip_dir_paths, rel)
     kept_files = [f for f in files if f not in skip]
     kept_dirs = [
         d for d in subdirs

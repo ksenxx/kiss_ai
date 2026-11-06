@@ -5,6 +5,7 @@
 """Tests for web_use_tool.py module."""
 
 import os
+import re
 import signal
 import sys
 import threading
@@ -23,8 +24,17 @@ from kiss.agents.sorcar.web_use_tool import (
     _activate_app,
     _get_frontmost_app,
     _is_profile_in_use,
+    _kill_driver_process,
 )
 from kiss.tests.conftest import posix_only
+
+# Without pidfds (macOS) asyncio's _ThreadedChildWatcher reaps the driver
+# from its own thread the moment it dies, parked loop or not: the dead
+# driver is never left as this process's unreaped child.
+needs_pidfd_child_watcher = pytest.mark.skipif(
+    not hasattr(os, "pidfd_open"),
+    reason="only asyncio's pidfd child watcher leaves a dead driver unreaped",
+)
 
 
 class _FailureCollector:
@@ -113,6 +123,27 @@ KEY_PAGE = b"""<!DOCTYPE html>
   <div id="key-result"></div>
 </body></html>"""
 
+# A form whose submission the server answers only after SLOW_POST_SECS,
+# longer than the 5 s bound of the positioned click in ``_human_click``.
+SLOW_FORM_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Slow Form</title></head>
+<body>
+  <form method="post" action="/slowform">
+    <button type="submit">Submit slowly</button>
+  </form>
+</body></html>"""
+SLOW_POST_SECS = 7.0
+SLOW_POSTS: list[str] = []
+
+# ``document.title`` answers at once with an object whose own getter never
+# returns: the title's bounded wait passes and its serialization wedges.
+HOSTILE_TITLE_PAGE = (
+    b"<!DOCTYPE html><html><head><title>Hostile</title></head><body><p>hostile</p><script>"
+    b'Object.defineProperty(document, "title", {get() { return {get x() { while (true) {} }}; }});'
+    b"</script></body></html>"
+)
+
+
 @pytest.fixture(scope="module")
 def http_server():
     class Handler(BaseHTTPRequestHandler):
@@ -125,12 +156,19 @@ def http_server():
                 "/empty": EMPTY_PAGE,
                 "/newtab": NEW_TAB_PAGE,
                 "/keytest": KEY_PAGE,
+                "/slowform": SLOW_FORM_PAGE,
+                "/hostile-title": HOSTILE_TITLE_PAGE,
             }
             content = pages.get(self.path, FORM_PAGE)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(content)
+
+        def do_POST(self) -> None:  # noqa: N802
+            SLOW_POSTS.append(self.path)
+            time.sleep(SLOW_POST_SECS)
+            self.do_GET()
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             return
@@ -191,11 +229,122 @@ def _assert_process_gone(pid: int, what: str, timeout: float = 10) -> None:
     pytest.fail(f"{what} (pid {pid}) survived")
 
 
+def _tool_started_on_a_worker_thread(http_server: str) -> tuple[WebUseTool, int]:
+    """Create a tool and load a page on a worker thread; return it with its driver's pid.
+
+    The worker has exited when this returns, so the sync API's greenlet
+    is unreachable: a later call from the test thread is the daemon's
+    atexit hook closing a tool a pool worker created.
+    """
+    box: dict[str, Any] = {}
+
+    def body() -> None:
+        tool = WebUseTool(user_data_dir=None, headless=True)
+        assert "Test Form" in tool.go_to_url(http_server + "/")
+        box["tool"] = tool
+        box["pid"] = tool._playwright._impl_obj._connection._transport._proc.pid
+
+    _in_own_thread(body)
+    return box["tool"], box["pid"]
+
+
 class TestNavigation:
 
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
         assert "Error" in result
+
+    def test_tab_list_shows_a_tab_whose_title_cannot_be_serialized_as_unresponsive(
+        self, web_tool, http_server
+    ):
+        """One tab whose title read times out must not abort the whole listing.
+
+        ``_read_page`` raises the built-in ``TimeoutError`` when the page's
+        answer cannot be serialized; the per-tab recovery of ``tab:list``
+        caught only Playwright's unrelated ``TimeoutError`` class, so the
+        healthy tabs were lost with the listing.  The hostile page is
+        served from another site (``localhost``) so the renderer it
+        wedges is not the healthy tab's.
+        """
+        assert "Second Page" in web_tool.go_to_url(f"{http_server}/second")
+        healthy = web_tool._page
+        hostile_url = f"{http_server.replace('127.0.0.1', 'localhost')}/hostile-title"
+        hostile = web_tool._context.new_page()
+        try:
+            hostile.goto(hostile_url, wait_until="domcontentloaded")
+            listing = web_tool.go_to_url("tab:list")
+        finally:
+            hostile.close()
+        assert listing.startswith("Open tabs ("), listing
+        assert f"Second Page - {http_server}/second (active)" in listing
+        assert f"(unresponsive) - {hostile_url}" in listing
+        assert web_tool._page is healthy
+        assert "Second Page" in web_tool.go_to_url(f"{http_server}/second")
+
+
+class TestClick:
+    def test_slow_form_submission_is_posted_once(self, web_tool, http_server):
+        """A click whose navigation outlives the 5 s positioned-click bound is not repeated.
+
+        Playwright's click timeout also covers the navigation the click
+        started; ``_human_click`` took every timeout for "point not
+        hittable" and clicked again at the centre, submitting a form the
+        server answers slowly a second time.
+        """
+        del SLOW_POSTS[:]
+        tree = web_tool.go_to_url(f"{http_server}/slowform")
+        match = re.search(r'\[(\d+)\] button "Submit slowly"', tree)
+        assert match, tree
+        result = web_tool.click(int(match.group(1)))
+        assert result.startswith("Page: Slow Form"), result
+        assert SLOW_POSTS == ["/slowform"]
+
+    def test_click_does_not_adopt_a_tab_another_task_opened(self, web_tool, http_server):
+        """A tab that appears during the click but was not opened by the page stays alone.
+
+        Tools driving the daemon's Browser tab share one context with the
+        tabs of every other task; ``_adopt_new_tab`` compared page counts
+        and switched to the newest page of the context whatever opened
+        it.  The other task's tab is opened at the real synchronisation
+        point: while the clicked link's request is being routed.
+        """
+        tree = web_tool.go_to_url(f"{http_server}/")
+        page = web_tool._page
+        match = re.search(r'\[(\d+)\] link "Go to second page"', tree)
+        assert match, tree
+        opened: list[Any] = []
+
+        def open_another_tab(route: Any) -> None:
+            other = web_tool._context.new_page()
+            other.goto(f"{http_server}/long", wait_until="domcontentloaded")
+            opened.append(other)
+            route.continue_()
+
+        page.route("**/second", open_another_tab)
+        try:
+            result = web_tool.click(int(match.group(1)))
+        finally:
+            page.unroute("**/second")
+            for other in opened:
+                other.close()
+        assert len(opened) == 1
+        assert result.startswith("Page: Second Page"), result
+        assert web_tool._page is page
+
+    def test_click_adopts_the_tab_the_page_opened(self, web_tool, http_server):
+        """A ``target=_blank`` link's tab, opened by the clicked page, is adopted."""
+        tree = web_tool.go_to_url(f"{http_server}/newtab")
+        page = web_tool._page
+        match = re.search(r'\[(\d+)\] link "Open in new tab"', tree)
+        assert match, tree
+        result = web_tool.click(int(match.group(1)))
+        popup = web_tool._page
+        try:
+            assert result.startswith("Page: Second Page"), result
+            assert popup is not page and popup.opener() is page
+        finally:
+            popup.close()
+            web_tool._adopt_page(page)
 
 
 class TestCrashRecovery:
@@ -326,6 +475,50 @@ class TestCrashRecovery:
                 tool.close()
 
         _in_own_thread(body)
+
+    @needs_pidfd_child_watcher
+    @pytest.mark.timeout(120)
+    def test_off_thread_close_reaps_a_driver_that_died_unobserved(self, http_server):
+        """A driver dead under a parked loop stays a zombie until ``close()`` reaps it.
+
+        Off the thread that started Playwright, ``stop()`` cannot run and
+        the loop whose child watcher would reap the driver is parked with
+        that thread's greenlet.  The close must reap the zombie without
+        signalling it (``waitid`` reports the exit first) and leave no
+        driver or Chromium behind.
+        """
+        tool, driver_pid = _tool_started_on_a_worker_thread(http_server)
+        browser_pid = tool._browser_pid
+        assert browser_pid is not None
+        os.kill(driver_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while os.waitid(os.P_PID, driver_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            assert time.monotonic() < deadline, "the killed driver did not exit"
+            time.sleep(0.05)
+        assert tool.close() == "Browser closed."
+        assert tool._playwright is None
+        # A zombie still answers kill(pid, 0): gone means reaped.
+        _assert_process_gone(driver_pid, "Playwright driver")
+        _assert_process_gone(browser_pid, "Chromium")
+
+    @needs_pidfd_child_watcher
+    @pytest.mark.timeout(120)
+    def test_a_reaped_driver_is_not_signalled_again(self, http_server):
+        """Once the driver is reaped its pid is nobody's to signal.
+
+        The loop's child watcher can reap the driver before the transport
+        records the exit (``returncode`` still unset), and the pid may
+        belong to another process by then.  The test reaps it the way the
+        watcher would; the kill helper must find nothing to signal or
+        reap, and the close must still complete.
+        """
+        tool, driver_pid = _tool_started_on_a_worker_thread(http_server)
+        os.kill(driver_pid, signal.SIGKILL)
+        assert os.waitpid(driver_pid, 0)[0] == driver_pid
+        assert tool._playwright._impl_obj._connection._transport._proc.returncode is None
+        assert _kill_driver_process(tool._playwright) is None
+        assert tool.close() == "Browser closed."
+        assert tool._playwright is None
 
 
 class TestSingletonLockCleanup:

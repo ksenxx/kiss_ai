@@ -353,6 +353,7 @@ class TestDeleteTrickCommand(_TricksHome):
         self.assertEqual(
             err["text"], "That promptlet is not in ~/.kiss/MY_INJECTION.md"
         )
+        self.assertEqual(err["command"], "deleteTrick")
         self.assertEqual(self.user_text(), _USER)
         # The panel dropped the row before asking; the error is followed
         # by the list on disk, stamped for the sender, to put it back.

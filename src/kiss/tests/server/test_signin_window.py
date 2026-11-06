@@ -361,6 +361,46 @@ class TestSigninWindow(SigninHookCase):
         error = await self._wait_for_event(reader, "signinError")
         self.assertEqual(error["error"], "no sign-in hook")
 
+    async def test_attempt_token_is_echoed_on_the_clickers_answers(self) -> None:
+        """A click's ``attempt`` comes back on its ``signinUrl`` / ``signinError``.
+
+        The page tells one click's answers from an earlier click's by the
+        token (a failure already on its way when the user clicks again
+        must not end the retry); ``signinDone`` is every window's and
+        carries none.  A click sending no token gets none back.
+        """
+        self._install_hook()
+        reader, _ = await self._ready("tab-a")
+        # A paste with no sign-in running: the paste's own token.
+        await self._send(reader, {"type": "signinPaste", "text": "x", "attempt": "p1"})
+        error = await self._wait_for_event(reader, "signinError")
+        self.assertEqual(error["attempt"], "p1")
+        # The URL, and the failure of the pasted code, carry the click's.
+        await self._send(reader, {"type": "signinLogin", "provider": "apple", "attempt": "a7"})
+        url = await self._wait_for_event(reader, "signinUrl")
+        self.assertEqual(url["attempt"], "a7")
+        self.assertEqual(url["provider"], "apple")
+        await self._send(reader, {"type": "signinPaste", "text": "bad", "attempt": "a7"})
+        error = await self._wait_for_event(reader, "signinError")
+        self.assertEqual(error["attempt"], "a7")
+        self.assertEqual(error["error"], "bad code")
+        # A failure before any page, and the absent hook's: stamped too.
+        await self._send(reader, {"type": "signinLogin", "provider": "nourl", "attempt": "a8"})
+        error = await self._wait_for_event(reader, "signinError")
+        self.assertEqual(error["attempt"], "a8")
+        (self.home / SIGNIN_HOOK).unlink()
+        await self._send(reader, {"type": "signinLogin", "provider": "google", "attempt": "a9"})
+        error = await self._wait_for_event(reader, "signinError")
+        self.assertEqual((error["attempt"], error["error"]), ("a9", "no sign-in hook"))
+        # Without a token nothing is stamped (an older page).
+        self._install_hook()
+        await self._send(reader, {"type": "signinLogin", "provider": "google"})
+        url = await self._wait_for_event(reader, "signinUrl")
+        self.assertNotIn("attempt", url)
+        await self._send(reader, {"type": "signinPaste", "text": " http://127.0.0.1:1/?code=1 "})
+        done = await self._wait_for_event(reader, "signinDone")
+        self.assertNotIn("attempt", done)
+
     async def test_cancel_and_restart_end_the_running_login_silently(self) -> None:
         self._install_hook()
         reader, _ = await self._ready("tab-a")

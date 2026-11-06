@@ -298,7 +298,8 @@ class TestPureHelpers:
 
     def test_manual_merge_cmd_with_baseline(self) -> None:
         assert _manual_merge_cmd(self._wt("abc123")) == (
-            "git cherry-pick --no-commit abc123..kiss/wt-x"
+            'git cherry-pick --no-commit "$(git commit-tree '
+            "'kiss/wt-x^{tree}' -p abc123 -m 'kiss: squashed kiss/wt-x')\""
         )
 
     def test_merge_fix_steps(self) -> None:

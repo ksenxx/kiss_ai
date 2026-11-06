@@ -18,7 +18,7 @@
 //         now pairs an untagged reply only with a round whose audio was
 //         posted, and tags every posted round so that a daemon echoing the
 //         tag refuses the late reply even after the next round posted its
-//         own audio.
+//         own audio (the tagged case is voiceRoundFailsClosed_wave3's).
 //  SENS   The wake sensitivity of a sibling same-origin tab did not follow
 //         a change made in another one (only auto-submit did), so the
 //         slider showed a stale value and the wake detector kept using it.
@@ -50,10 +50,6 @@ const LOAD_TIMEOUT_MS = 30000;
 
 function submits(posted) {
   return posted.filter(m => m.type === 'submit');
-}
-
-function transcribes(posted) {
-  return posted.filter(m => m.type === 'voiceTranscribe');
 }
 
 function taskInput(win) {
@@ -126,50 +122,6 @@ async function main() {
       const subs = submits(posted);
       assert.strictEqual(subs.length, 1, JSON.stringify(posted));
       assert.ok(subs[0].prompt.includes('round B words QW2'));
-      assert.strictEqual(subs[0].tabId, second);
-      win.close();
-    },
-  );
-
-  await test(
-    "ROUND: with round tags echoed, a cancelled round's reply arriving " +
-      'after the next round posted its audio is refused',
-    async () => {
-      const page = makeVoicePage();
-      const {win, posted} = page;
-      const {first, second} = twoTabs(win);
-      await cancelRoundThenMoveTab(page, first, second);
-      wake(page);
-      speak(page); // round B posts its audio before A's reply lands
-
-      const [roundA, roundB] = transcribes(posted).map(m => m.round);
-      assert.strictEqual(typeof roundA, 'number', 'audio carries its round');
-      assert.strictEqual(typeof roundB, 'number', 'audio carries its round');
-      assert.notStrictEqual(roundA, roundB, 'each round has its own tag');
-
-      // The daemon answers in order and echoes each round's tag.
-      posted.length = 0;
-      send(win, {
-        type: 'voiceSpeech',
-        text: 'round A words QW3',
-        round: roundA,
-      });
-      assert.strictEqual(
-        submits(posted).length,
-        0,
-        "the cancelled round's words must not reach tab Y: " +
-          JSON.stringify(posted),
-      );
-      assert.ok(!taskInput(win).value.includes('QW3'));
-
-      send(win, {
-        type: 'voiceSpeech',
-        text: 'round B words QW4',
-        round: roundB,
-      });
-      const subs = submits(posted);
-      assert.strictEqual(subs.length, 1, JSON.stringify(posted));
-      assert.ok(subs[0].prompt.includes('round B words QW4'));
       assert.strictEqual(subs[0].tabId, second);
       win.close();
     },

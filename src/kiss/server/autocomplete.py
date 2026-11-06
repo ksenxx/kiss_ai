@@ -532,17 +532,6 @@ class _AutocompleteMixin:
             worker.start()
             self._complete_worker = worker
 
-    def _resolve_work_dir(self, work_dir: str) -> str:
-        """Return *work_dir* when non-empty, else the daemon-wide work_dir.
-
-        Used by the ``@``-mention file picker so each chat tab can scan
-        its own working directory: the frontend stamps the active tab's
-        ``workDir`` on ``getFiles``/``recordFileUsage`` commands, and an
-        empty value falls back to the daemon-wide ``self.work_dir``
-        captured from ``KISS_WORKDIR`` or the most-recent ``setWorkDir``.
-        """
-        return work_dir or self.work_dir
-
     def _refresh_files_after_task(self, work_dir: str = "") -> None:
         """Rescan the ``@``-mention index covering *work_dir* after a task.
 
@@ -561,9 +550,10 @@ class _AutocompleteMixin:
         files from this task's workspace (fixer-5 F5-03/R5-03).
 
         A work_dir whose covering root was never indexed is left
-        alone: the first ``getFiles`` there scans it from scratch.
+        alone: the first ``getFiles`` there scans it from scratch.  An
+        empty *work_dir* is the daemon-wide one, as for :meth:`_get_files`.
         """
-        self._file_index.refresh(self._resolve_work_dir(work_dir))
+        self._file_index.refresh(work_dir or self.work_dir)
 
     def _emit_files(
         self,
@@ -645,7 +635,7 @@ class _AutocompleteMixin:
         or abandoned, so the map only ever holds connections with a
         build in flight.
         """
-        wd = self._resolve_work_dir(work_dir)
+        wd = work_dir or self.work_dir
         token: object = object()
         with self._state_lock:
             self._files_latest_request[conn_id] = token

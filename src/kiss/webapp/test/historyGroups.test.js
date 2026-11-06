@@ -1165,6 +1165,21 @@ async function main() {
     ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
+    // A clock shift that stays on the same local day changes no label,
+    // so the fast path keeps the node.
+    const realNow = win.Date.now;
+    win.Date.now = () => realNow() + 60000;
+    try {
+      send(win, {type: 'tasks_updated'});
+      sendHistory(win, posted, 0, page1());
+      assert.strictEqual(
+        firstRow(win),
+        rowBefore,
+        'a same-day clock change keeps the node',
+      );
+    } finally {
+      win.Date.now = realNow;
+    }
     // A wall-clock correction across local midnight must relabel
     // "Today"/"Yesterday", so the fast path is off on a new local day.
     const origToDateString = win.Date.prototype.toDateString;

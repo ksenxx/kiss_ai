@@ -1064,6 +1064,7 @@ def run_command(
     use_web_tools: bool | None = None,
     auto_classify: bool | None = None,
     use_memory: bool | None = None,
+    compaction: bool | None = None,
     is_parallel: bool = True,
     add_to_system_prompt: str = "",
     add_to_prompt: str = "",
@@ -1114,6 +1115,7 @@ def run_command(
         "use_web_tools": use_web_tools,
         "auto_classify": auto_classify,
         "use_memory": use_memory,
+        "compaction": compaction,
         "tool_profile": tool_profile,
         "docker_image": docker_image,
     }
@@ -1168,6 +1170,7 @@ def run(
     use_web_tools: bool | None = None,
     auto_classify: bool | None = None,
     use_memory: bool | None = None,
+    compaction: bool | None = None,
     is_parallel: bool = True,
     add_to_system_prompt: str = "",
     add_to_prompt: str = "",
@@ -1420,6 +1423,15 @@ def run(
             ``none`` tool profile), a Docker run, or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
+        compaction: Per-task context-compaction override, mapped to
+            the agent's ``compaction`` option
+            (:meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
+            ``False`` keeps the run (and the sub-agents that inherit
+            it) from replacing old tool outputs in its context with
+            stubs; ``True`` or ``None`` (the default) lets it compact
+            while the daemon's global Compaction setting (the settings
+            panel's "Compaction" checkbox, persisted as ``compaction``)
+            is on.
         is_parallel: Whether the agent gets the ``run_parallel`` tool
             (the user's parallel-mode toggle).  Defaults to True.
         add_to_system_prompt: Extra text appended to the run's
@@ -1716,6 +1728,7 @@ def run(
             use_web_tools=use_web_tools,
             auto_classify=auto_classify,
             use_memory=use_memory,
+            compaction=compaction,
             is_parallel=is_parallel,
             add_to_system_prompt=add_to_system_prompt,
             add_to_prompt=add_to_prompt,

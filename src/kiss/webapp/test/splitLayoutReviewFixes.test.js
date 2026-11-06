@@ -27,33 +27,12 @@ function makePage(opts) {
   let fireChange;
   const {win, posted} = makeSharedPage({
     bodyClass: 'remote-chat',
+    extraScripts: ['browserTab.js'],
     beforeScripts: win => {
       ({fireChange} = stubDesktop(win, desktopMatches));
-      stubBrowserTabView(win);
     },
   });
   return {win, posted, fireChange};
-}
-
-function stubBrowserTabView(win) {
-  const noop = function () {};
-  win.BrowserTabView = {
-    create: function () {
-      const el = win.document.createElement('div');
-      el.className = 'browser-screen';
-      el.tabIndex = 0;
-      return {
-        el: el,
-        setBadge: noop,
-        setVisible: noop,
-        state: noop,
-        error: noop,
-        frame: noop,
-        resubscribe: noop,
-        dispose: noop,
-      };
-    },
-  };
 }
 
 function openTabs(win) {

@@ -159,7 +159,10 @@ def test_guards_stay_linear_on_long_commands() -> None:
 
     A 20 kB command of repeated ``sudo -n`` (or ``X=1``) words ran for over a
     second with nested wrapper repetitions; the single-wrapper prefix keeps it
-    in milliseconds.
+    in milliseconds.  A 40 kB command of separators (``:;:;...``; audit
+    2026-11-05 A09-4) ran for seconds, since from every separator the
+    directory prefix and an assignment's value scanned the rest of the text
+    for a ``/`` or a blank; they stop at the next separator.
     """
     long_commands = [
         "sudo -n " * 2499 + "true #xx",
@@ -168,12 +171,19 @@ def test_guards_stay_linear_on_long_commands() -> None:
         "pkill " + "-f " * 3000 + "myserver",
         "rm -rf " + "./a " * 4000 + "./b",
         "npm " + "--flag " * 3000 + "test",
+        ":;" * 20_000,
+        ";A=" * 13_333,
+        ";/" * 20_000,
+        "|" * 40_000,
+        "(" * 40_000,
+        "a;" * 20_000 + "rm -rf /",
     ]
     for command in long_commands:
         started = time.monotonic()
         destructive_command_guard(command, "/work")
         lift_install_timeout(command, 30)
         assert time.monotonic() - started < 1, command[:40]
+    assert destructive_command_guard(long_commands[-1], "/work") == DESTRUCTIVE_VERDICT
 
 
 def test_install_timeout_lift() -> None:

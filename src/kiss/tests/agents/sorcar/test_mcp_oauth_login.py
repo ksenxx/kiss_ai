@@ -37,9 +37,11 @@ Branches not exercised:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import socket
+import socketserver
 import threading
 import time
 from collections.abc import Iterator
@@ -598,6 +600,59 @@ def test_unreachable_server_reports_error(home: Path) -> None:
     assert session.done is False
     assert session.error
     assert "ConnectError" in session.error
+
+
+class _SilentHandler(socketserver.BaseRequestHandler):
+    """Accept the connection, read the request, never answer."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            while self.request.recv(65536):
+                pass
+
+
+@pytest.fixture
+def silent_server() -> Iterator[str]:
+    """A server that accepts the MCP transport but never answers a request."""
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _SilentHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cancel_ends_a_login_stuck_on_a_silent_server(home: Path, silent_server: str) -> None:
+    """``cancel()`` must end the login flow, not just flag it.
+
+    The flow sits in its first request to a server that never answers;
+    ``cancel()`` only set a flag the flow checks at the redirect and in
+    the callback loop, which it never reaches, so the login thread kept
+    waiting on the server (the transport's read timeout, minutes) after
+    the user cancelled or a replacement session took over.
+    """
+    cfg = MCPServerConfig(name="silent", transport="http", url=silent_server)
+    session = MCPLoginSession.start(cfg, wait_seconds=1.0)
+    assert not session.auth_url and not session._finished.is_set()
+    session.cancel()
+    assert session.wait(10), "the cancelled login kept waiting on the silent server"
+    assert session.done is False
+    assert session.error == "sign-in cancelled"
+
+
+def test_login_stuck_on_a_silent_server_times_out(
+    home: Path, silent_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow the server never answers ends at the sign-in deadline with an error."""
+    monkeypatch.setattr(mcp_oauth, "_LOGIN_TIMEOUT", 0.5)
+    monkeypatch.setattr(mcp_oauth, "CONNECT_TIMEOUT", 0.5)
+    cfg = MCPServerConfig(name="silent", transport="http", url=silent_server)
+    session = MCPLoginSession.start(cfg, wait_seconds=10.0)
+    assert session.wait(10), "the login outlived its deadline"
+    assert session.done is False
+    assert "TimeoutError" in session.error, session.error
 
 
 # ---------------------------------------------------------------------------

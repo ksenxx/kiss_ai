@@ -19,7 +19,9 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import tempfile
+import threading
 import time
 
 import kiss.agents.sorcar.persistence as th
@@ -38,6 +40,23 @@ def _count(sql: str, *params: object) -> int:
 def _queue_events(task_id: str, n: int) -> None:
     for i in range(n):
         th._queue_chat_event({"type": "system_output", "text": f"line {i}"}, task_id)
+
+
+def _delete_task_signalling_begin(
+    task_id: str, begun: threading.Event, removed: list[int],
+) -> None:
+    """Run ``_delete_task`` on this thread's connection; set *begun* at its ``BEGIN``."""
+    db = th._get_db()
+
+    def trace(statement: str) -> None:
+        if statement.startswith("BEGIN"):
+            begun.set()
+
+    db.set_trace_callback(trace)
+    try:
+        removed.append(th._delete_task(task_id))
+    finally:
+        db.set_trace_callback(None)
 
 
 class TestDeleteRows:
@@ -152,6 +171,69 @@ class TestDeleteRows:
         rows = th._get_db().execute("SELECT id, deleted_ts FROM deleted_tasks").fetchall()
         assert sorted(r[0] for r in rows) == sorted([parent, child, other])
         assert all(before <= r[1] <= time.time() for r in rows)
+
+    def test_delete_drops_the_remote_subtask_records_of_the_deleted_tasks(self) -> None:
+        """A ``remote_subtasks`` record goes with the parent it belongs to.
+
+        The record is the parent's side of the account of a sub-agent run
+        on another machine; nothing else deletes it, and every spend
+        computation scans the whole table, so a deleted parent must not
+        leave its records behind.  A record of a surviving task stays.
+        """
+        parent, chat_id = th._add_task("parent")
+        child, _ = th._add_task("child", chat_id, extra={"subagent": {"parent_task_id": parent}})
+        other, other_chat = th._add_task("other")
+        th._record_remote_subtask("remote-of-parent", parent, "box", "m", 1.0, 10, 2)
+        th._record_remote_subtask("remote-of-child", child, "box", "m", 0.5, 5, 1)
+        th._record_remote_subtask("remote-of-other", other, "box", "m", 0.25, 2, 1)
+
+        assert th._delete_task(parent) == 2
+
+        assert _count(
+            "SELECT COUNT(*) FROM remote_subtasks WHERE parent_task_id IN (?, ?)", parent, child,
+        ) == 0
+        assert _count("SELECT COUNT(*) FROM remote_subtasks WHERE parent_task_id = ?", other) == 1
+
+        assert th._delete_chat(other_chat) == 1
+
+        assert _count("SELECT COUNT(*) FROM remote_subtasks") == 0
+
+    def test_delete_task_takes_a_sub_task_another_process_commits_meanwhile(self) -> None:
+        """The tree is discovered under the database's write lock.
+
+        ``_rw_lock`` orders this process only.  A peer process (a second
+        connection here) holding the write lock while it inserts a
+        sub-task commits once the deletion has asked for ``BEGIN
+        IMMEDIATE``; the sub-task is then in the tree the deletion
+        removes, not left behind pointing at a parent that is gone.
+        """
+        parent, chat_id = th._add_task("parent")
+        peer = sqlite3.connect(str(th._DB_PATH), timeout=30)
+        peer.execute("BEGIN IMMEDIATE")
+        peer.execute(
+            "INSERT INTO task_history (id, chat_id, timestamp, task, result, parent_task_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("late-child", chat_id, time.time(), "child", "Agent Failed Abruptly", parent),
+        )
+        begun = threading.Event()
+        removed: list[int] = []
+        deleter = threading.Thread(
+            target=_delete_task_signalling_begin, args=(parent, begun, removed),
+        )
+        try:
+            deleter.start()
+            assert begun.wait(20), "the deletion never issued its BEGIN"
+            peer.commit()
+            deleter.join(40)
+            assert not deleter.is_alive()
+        finally:
+            peer.close()  # rolls back whatever is still open
+
+        assert removed == [2]
+        assert _count(
+            "SELECT COUNT(*) FROM task_history WHERE id IN (?, 'late-child')", parent,
+        ) == 0
+        assert _count("SELECT COUNT(*) FROM deleted_tasks WHERE id = 'late-child'") == 1
 
     def test_shutdown_rewrite_refreshes_chat_context(self) -> None:
         task_id, chat_id = th._add_task("in flight")

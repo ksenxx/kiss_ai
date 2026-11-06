@@ -101,6 +101,7 @@ from kiss.agents.sorcar.decide_tool import (
     make_decide_tool,
 )
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.decisions_model import choice
 
@@ -635,9 +636,9 @@ def remember_classification(
     """Memoise *classification* for *task* on *model_name* and persist it.
 
     Memos another process wrote to the file since this process last
-    read it are merged in first (newer write wins per key), so
-    concurrent daemon and CLI processes only ever lose a memo to a
-    same-instant race, never to a stale mirror.  The cache is bounded
+    read it are merged in first (newer write wins per key) under a
+    cross-process file lock, so concurrent daemon and CLI processes
+    never lose a memo to each other.  The cache is bounded
     at :data:`CLASSIFIER_CACHE_MAX_ENTRIES` (oldest first) and written
     atomically; a write failure only loses the memo, never the verdict.
 
@@ -658,8 +659,29 @@ def _cache_entry_locked(key: str) -> dict[str, Any] | None:
 
 
 def _remember_locked(key: str, is_simple: bool) -> None:
-    """Store the verdict under *key* and persist the cache (``_cache_lock`` held)."""
+    """Store the verdict under *key* and persist the cache (``_cache_lock`` held).
+
+    The read-merge-write of the file is one transaction under a
+    cross-process lock (``<cache>.lock``), so two processes memoising
+    at once cannot replace each other's write with a stale copy.  When
+    the lock file cannot be made (an unwritable home), the memo still
+    enters the in-process mirror.
+    """
     path = _cache_path()
+    cache: dict[str, dict[str, Any]] | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(path.with_name(path.name + ".lock")):
+            cache = _memoise_locked(path, key, is_simple)
+            _write_cache_file(path, cache)
+    except OSError:
+        logger.debug("Could not persist classifier cache", exc_info=True)
+        if cache is None:
+            _memoise_locked(path, key, is_simple)
+
+
+def _memoise_locked(path: Path, key: str, is_simple: bool) -> dict[str, dict[str, Any]]:
+    """Merge the file at *path* into the mirror, add *key* and return the bounded mirror."""
     # A mirror loaded earlier may lag behind the file (another process
     # wrote since): merge the file in.  One that _load_cache_locked
     # reads just now is the file, so merging it would be a second read.
@@ -674,17 +696,21 @@ def _remember_locked(key: str, is_simple: bool) -> None:
     cache[key] = {"is_simple": is_simple, "ts": time.time()}
     while len(cache) > CLASSIFIER_CACHE_MAX_ENTRIES:
         del cache[next(iter(cache))]
+    return cache
+
+
+def _write_cache_file(path: Path, cache: dict[str, dict[str, Any]]) -> None:
+    """Replace the file at *path* atomically with *cache*; raises ``OSError`` on failure."""
     tmp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(json.dumps(cache), encoding="utf-8")
         os.replace(tmp_path, path)
     except OSError:
-        logger.debug("Could not persist classifier cache", exc_info=True)
         try:
             tmp_path.unlink()
         except OSError:
             pass
+        raise
 
 
 def clear_classification_cache() -> None:

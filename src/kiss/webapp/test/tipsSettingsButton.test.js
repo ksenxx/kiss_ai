@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const {newDom, MEDIA} = require('./simplify2_harness');
 const {makeRunner} = require('./ui_antipattern_harness');
+const {panelParts, THREE_TIPS} = require('./tips_helpers');
 const {test, report} = makeRunner();
 
 // The real chat.html markup with its placeholders blanked and its script
@@ -33,28 +34,6 @@ function loadChatDom(cfg, {withConfig = true, withMarked = true} = {}) {
 function panel(win) {
   return win.document.body.querySelector('kiss-tips-panel');
 }
-
-function panelParts(win) {
-  const host = panel(win);
-  assert.ok(host, 'kiss-tips-panel must be mounted on document.body');
-  const root = host.shadowRoot;
-  assert.ok(root, 'kiss-tips-panel must use shadow DOM');
-  return {
-    host,
-    root,
-    body: root.querySelector('.tips-body'),
-    counter: root.querySelector('.tips-counter'),
-    prev: root.querySelector('.tips-prev'),
-    next: root.querySelector('.tips-next'),
-    close: root.querySelector('.tips-close'),
-  };
-}
-
-const THREE_TIPS = [
-  '## First tip\n\n- alpha\n- beta',
-  'Second tip with **bold** text.',
-  '### Third tip\n\n`code` here.',
-];
 
 test('Tips button sits in the settings row', () => {
   const win = loadChatDom({tips: ['Hello.'], show: false});

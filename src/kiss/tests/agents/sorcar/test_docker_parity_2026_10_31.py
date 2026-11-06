@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import os
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -375,6 +376,24 @@ def test_a_container_cd_into_a_file_is_refused_before_the_rewrite(env: DockerMan
     assert out == rewrite_guard(crlf), out
     head = env.Bash("od -An -tx1 -N5 /tmp/victim", "peek", 30, 500)
     assert head.split() == ["6f", "6c", "64", "0d", "0a"], head  # still "old\r\n"
+
+
+def test_a_container_tilde_target_is_not_resolved_in_the_daemons_home(env: DockerManager) -> None:
+    """``cat > ~/x`` in the container is refused as unresolved, not written into the daemon's home.
+
+    The rewrite expanded ``~`` with the daemon's own home directory and
+    used that path inside the container (audit A06-9), creating the
+    file under the host user's home there; only the container's shell
+    knows its home, so the copy is refused and the agent is told to
+    name the literal path.
+    """
+    h = _Harness(env)
+    daemons_home = os.path.expanduser("~")
+    out = h.call("Bash", command="cat > ~/report.txt <<'EOF'\nhello\nEOF", description="write")
+    assert out == HEREDOC_UNRESOLVED_VERDICT.format(path="~/report.txt"), out
+    assert h.hook_calls[-1][0] == "Bash" and h.tool_calls()[-1] == "Bash"
+    listing = env.Bash(f"ls {daemons_home}/report.txt ~/report.txt", "nothing written", 30, 500)
+    assert listing.count("No such file") == 2 and listing.endswith("[exit code: 2]"), listing
 
 
 def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(

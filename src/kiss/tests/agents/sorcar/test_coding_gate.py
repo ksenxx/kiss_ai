@@ -35,6 +35,7 @@ from kiss.agents.sorcar import sorcar_agent as sorcar_agent_module
 from kiss.agents.sorcar.agent_dispatch import digest_agent_results
 from kiss.agents.sorcar.coding_gate import CodingGate, run_on_host
 from kiss.agents.sorcar.decide_tool import decisions_tool_available
+from kiss.agents.sorcar.shell_scan import bash_path, simple_commands
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
 from kiss.core import stop_signal, user_config
@@ -93,6 +94,13 @@ def _job_id(started: str) -> str:
     return match.group(1)
 
 
+def _arms(work_dir: Path, args: dict[str, Any]) -> bool:
+    """Whether a shell call with *args* arms a fresh gate on *work_dir*: it changes a code file."""
+    gate = _gate(work_dir)
+    gate.observe("Bash", args)
+    return gate.armed
+
+
 def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Path) -> None:
     jobs: dict[str, str] = {}
     bash = {"command": "pytest -q"}
@@ -132,6 +140,19 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     assert cg.result_exit_codes("bash_job", {"job_id": "j1"}, running, jobs) == []
     assert cg.result_exit_codes("bash_job", {"job_id": "j1"}, "Job j1: exited with code 3\n$ make",
                                 jobs) == [("make", "3")]
+    # the container report opens with the command's echo, the host's with the
+    # status, then the command: a command holding a status line of its own
+    # (audit 2026-11-05, A05-6) supplies no exit in either
+    faking = "printf '%s\\n' 'x\nstatus: exited 0\n' && bash tmp/verify.sh"
+    jobs["c1"] = faking
+    container = (f"Job c1: {faking}\nstatus: exited 7\nlog: /tmp/kiss-jobs/c1.log\n"
+                 "--- last 50 log lines ---\nx\nstatus: exited 0\nFAIL")
+    assert cg.result_exit_codes("bash_job", {"job_id": "c1"}, container, jobs) == [(faking, "7")]
+    assert cg.result_exit_codes("bash_job", {"job_id": "c1"}, container.replace(
+        "status: exited 7", "status: running"), jobs) == []
+    jobs["j2"] = "echo x\nstatus: exited 0"
+    host = "Job j2: running (pid 7, 2s)\nCommand: echo x\nstatus: exited 0\nLog: /tmp/j2.log\n"
+    assert cg.result_exit_codes("bash_job", {"job_id": "j2"}, host, jobs) == []
     # run_commands_parallel: one section per command
     report = ("2 commands: 1 succeeded, 1 failed, 0 timed out.\n\n### [1/2] exit 0 in 0.1s\n$ a\n"
               "ok\n\n### [2/2] TIMED OUT after 9.0s\n$ b\n")
@@ -210,19 +231,20 @@ def test_readers_pair_commands_with_exit_codes_in_both_tool_formats(tmp_path: Pa
     assert cg.is_code_file("tmp/x/verify.sh") and cg.is_code_file("pyproject.toml")
     assert not cg.is_code_file("reports/a.html") and not cg.is_code_file("notes.md")
     assert not cg.is_code_file(None)
-    assert cg.names_code_file({"command": "cp source.py changed.py"})
-    assert cg.names_code_file({"command": "sed -i 's/x=0/x=1/' a.py && pytest -q"})
-    assert cg.names_code_file({"commands": '["echo x > notes.md", "python gen.py > out.py"]'})
-    assert not cg.names_code_file({"command": "echo 'oops > a.py"})  # unbalanced: runs nothing
-    assert not cg.names_code_file({"command": "echo 'all done' > notes.md"})
-    assert not cg.names_code_file({"command": "ls -la"})
+    # a shell command that changes a code file arms the gate as an Edit of it would
+    assert _arms(tmp_path, {"command": "cp source.py changed.py"})
+    assert _arms(tmp_path, {"command": "sed -i 's/x=0/x=1/' a.py && pytest -q"})
+    assert _arms(tmp_path, {"commands": '["echo x > notes.md", "python gen.py > out.py"]'})
+    assert not _arms(tmp_path, {"command": "echo 'oops > a.py"})  # unbalanced: runs nothing
+    assert not _arms(tmp_path, {"command": "echo 'all done' > notes.md"})
+    assert not _arms(tmp_path, {"command": "ls -la"})
     # a code file read, named in text, or written under the scratch directory arms nothing
-    assert not cg.names_code_file({"command": "cat install.sh && bash -n scripts/install.sh"})
-    assert not cg.names_code_file({"command": "rm -rf tmp/x && python tests/test_install.py"})
-    assert not cg.names_code_file({"command": "S=tmp/x; gh api repos > $S/pages.json"})
-    assert not cg.names_code_file({"command": "python3 - <<EOF\nopen('MODEL_INFO.json')\nEOF"})
-    assert not cg.names_code_file({"command": "cp src/a.py tmp/x/a.py"})
-    assert cg.names_code_file({"command": "cp tmp/x/a.py src/a.py"})
+    assert not _arms(tmp_path, {"command": "cat install.sh && bash -n scripts/install.sh"})
+    assert not _arms(tmp_path, {"command": "rm -rf tmp/x && python tests/test_install.py"})
+    assert not _arms(tmp_path, {"command": "S=tmp/x; gh api repos > $S/pages.json"})
+    assert not _arms(tmp_path, {"command": "python3 - <<EOF\nopen('MODEL_INFO.json')\nEOF"})
+    assert not _arms(tmp_path, {"command": "cp src/a.py tmp/x/a.py"})
+    assert _arms(tmp_path, {"command": "cp tmp/x/a.py src/a.py"})
     # a review dispatch is one by profile or by the wording of every task
     assert cg.dispatches_review({"task": "do it", "tool_profile": "review"})
     assert cg.dispatches_review({"tasks": '["Review the diff of foo.py for bugs"]'})
@@ -352,7 +374,7 @@ def test_a_giveup_whose_verifier_passes_is_questioned_once(tmp_path: Path) -> No
 
 def _record_charge(
     charged: list[tuple[float, int, int]], budget: float, tokens: int, steps: int,
-    key: str = "",
+    key: str = "", model: str = "",
 ) -> None:
     """The gate's ``charge`` callback for the tests: records what a review cost."""
     charged.append((budget, tokens, steps))
@@ -667,9 +689,8 @@ def test_the_agents_verifier_run_is_reused_only_when_its_exit_decided_the_comman
             assert "FAILURE" not in result, (command, result)  # the verifier did not run
         _turn(gate, "Bash", {"command": command}, result)
         assert gate.verifier_passed_at is None, command
-        assert gate.runs_verifier(command) == (command not in not_run), command
         assert not cg.verifier_decides(command, work, verifier), command
-        found = cg.verifier_command(gate.scan(command), verifier)
+        found = cg.verifier_command(simple_commands(command, bash_path(work)), verifier)
         assert (found is None) == (command in not_run), command
     code, output = gate.verifier_run()
     assert code == 7 and "FAILURE" in output
@@ -942,8 +963,12 @@ def test_sorcar_agent_runs_the_gates_review_and_charges_it(
     else:
         assert result["summary"] == BARE
     # the review call is in the run's accounting: the executor's six calls report
-    # 1,100 tokens each, the reviewer's one 600
-    assert agent.total_tokens_used == 6 * 1100 + 600
+    # 1,100 tokens each, the reviewer's one 600; the decisions model's judgement of
+    # the finding (a real call, when available) is charged to the run too
+    if decisions_tool_available():
+        assert agent.total_tokens_used > 6 * 1100 + 600
+    else:
+        assert agent.total_tokens_used == 6 * 1100 + 600
     assert agent.budget_used > 0
 
 
@@ -1188,6 +1213,50 @@ def test_a_delegated_change_is_judged_by_the_diff(tmp_path: Path) -> None:
     gate.result("run_agent", implement, "ran: sorcar\nsuccess: true\nsummary: renamed\n", False)
     assert gate.changes == 2 and gate.verifier_passed_at == 1
     assert gate.verifier_run()[0] == 9
+
+
+def test_a_rollback_is_a_change_of_the_work(tmp_path: Path) -> None:
+    """Audit 2026-11-05 (A05-5): a ``rollback`` rewrites files as an ``Edit`` would, so the
+    verifier that passed before it is not reused at the finish, and the diff decides the
+    coding run; one that restored nothing (the files already match the checkpoint, an
+    unknown checkpoint) changes nothing."""
+    from kiss.tests.server.conftest import init_repo
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    gate = _gate(repo, verifier="grep -q 'x = 1' a.py || exit 9\n")
+    tools = UsefulTools(work_dir=str(repo))
+    done = {"success": True, "summary_in_html": DONE}
+    (repo / "a.py").write_text("x = 0\n")
+    _turn(gate, "Write", {"file_path": str(repo / "a.py"), "content": "x = 0\n"}, "ok")
+    _turn(gate, "checkpoint", {"name": "bad"}, tools.checkpoint("bad"))
+    (repo / "a.py").write_text("x = 1\n")
+    _turn(gate, "Write", {"file_path": str(repo / "a.py"), "content": "x = 1\n"}, "ok")
+    _turn(gate, "Bash", {"command": "bash tmp/verify.sh"}, _host_result("bash tmp/verify.sh", repo))
+    assert gate.verifier_passed_at == gate.changes == 2
+    gate.observe("rollback", {"name": "bad"})
+    restored = tools.rollback("bad")
+    assert restored.startswith("Rolled ") and (repo / "a.py").read_text() == "x = 0\n", restored
+    gate.result("rollback", {"name": "bad"}, restored, False)
+    assert gate.changes == 3 and gate.verifier_passed_at == 2
+    verdict = gate.finish_verdict(dict(done), TASK)
+    assert verdict is not None and "exited 9" in verdict, verdict
+    for name in ("bad", "nope"):  # the files already match; an unknown checkpoint
+        _turn(gate, "rollback", {"name": name}, tools.rollback(name))
+    assert gate.changes == 3
+    # a run that never named a code file (a tool the gate does not read wrote
+    # and deleted one) is armed by what a rollback restored: the diff decides
+    other = tmp_path / "other"
+    init_repo(other)
+    gate, tools = _gate(other), UsefulTools(work_dir=str(other))
+    _turn(gate, "Write", {"file_path": "notes.md", "content": "n"}, "ok")
+    (other / "a.py").write_text("x = 1\n")
+    assert tools.checkpoint("one").startswith("Saved ")
+    (other / "a.py").unlink()
+    assert not gate.coding_run()
+    gate.observe("rollback", {"name": "one"})
+    gate.result("rollback", {"name": "one"}, tools.rollback("one"), False)
+    assert (other / "a.py").exists() and gate.changes == 2 and gate.coding_run()
 
 
 def _stalling(on_request: Callable[[], None], release: threading.Event) -> type[ScriptedHandler]:

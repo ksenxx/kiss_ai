@@ -170,6 +170,20 @@ class TestF1LinearTimeToolCallDetection:
 
 _FIRST = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
 _SECOND = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "pwd"}}]}'
+# A call whose argument is itself an envelope-shaped document (its data,
+# never a call: test_claude_code_model_sweep1026.TestEnvelopeInsideAStreamedArgument).
+_NESTED = json.dumps(
+    {
+        "tool_calls": [
+            {
+                "name": "store_payload",
+                "arguments": {
+                    "payload": {"tool_calls": [{"name": "unexpected_action", "arguments": {}}]}
+                },
+            }
+        ]
+    }
+)
 
 
 class TestUnmatchedProseBraceBeforeTheBlock:
@@ -205,6 +219,28 @@ class TestUnmatchedProseBraceBeforeTheBlock:
             assert [c["arguments"]["command"] for c in _parse_text_based_tool_calls(content)] == [
                 "ls"
             ]
+
+    def test_envelope_inside_the_arguments_after_a_prose_brace(self) -> None:
+        """A nested envelope waits for its call, not for the prose brace that never closes.
+
+        The inner document closes inside two open candidates: the call,
+        which may still parse, and ``{"cmd"``, which never will.  The
+        call's close is judged at once (the prose brace cannot swallow
+        it), the stream stops there, and the call is ``store_payload``.
+        """
+        prefix = 'Pass {"cmd" and then run:\n'
+        text = prefix + _NESTED + "\n(no output)\n" + _SECOND
+        for chunk in (1, 4, 16):
+            m = _model()
+            lines = _text_delta_lines(text, chunk)[:-2] + ["never-read"]
+            consumed: list[str] = []
+            content, _ = m._parse_stream_events(_recorded(lines, consumed), stop_on_tool_calls=True)
+            assert content == prefix + _NESTED, chunk
+            assert m._stopped_for_tool_calls is True, chunk
+            assert consumed[-1] != "never-read", chunk
+            assert [c["name"] for c in _parse_text_based_tool_calls(content)] == [
+                "store_payload"
+            ], chunk
 
     def test_end_of_turn_truncation_after_a_prose_brace(self) -> None:
         """A stream that ends right after the block is still truncated to it."""
@@ -242,6 +278,31 @@ class TestUnmatchedProseBraceBeforeTheBlock:
         assert content == text
         assert m._stopped_for_tool_calls is True
         assert _parse_text_based_tool_calls(content)[0]["arguments"]["rows"] == rows
+
+    def test_envelope_shaped_records_in_the_arguments_stay_linear(self) -> None:
+        """Thousands of envelope-shaped records in one call cost one decode of it, not one each.
+
+        Each record closes inside the still-open call and looks like a
+        ``tool_calls`` block; judging whether the call may still swallow
+        it decodes the call's text so far, so doing that once per record
+        is quadratic (4000 records took 7 s).  They are the call's data,
+        never a call.
+        """
+        rows = [
+            {"tool_calls": [{"name": "unexpected_action", "arguments": {"i": i}}]}
+            for i in range(4000)
+        ]
+        text = json.dumps({"tool_calls": [{"name": "store_payload", "arguments": {"rows": rows}}]})
+        assert len(text) > 256 * 1024
+        m = _model()
+        lines = _text_delta_lines(text, 16) + [json.dumps({"type": "result", "result": text})]
+        started = time.perf_counter()
+        content, _ = m._parse_stream_events(iter(lines), stop_on_tool_calls=True)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 3.0, f"parsing took {elapsed:.1f}s"
+        assert content == text
+        assert m._stopped_for_tool_calls is True
+        assert [c["name"] for c in _parse_text_based_tool_calls(content)] == ["store_payload"]
 
 
 # A Python program, not a shell script: Windows cannot run a shebang

@@ -43,8 +43,7 @@ const {
   rightClick,
   toast: toastById,
 } = require('./ui_antipattern_harness');
-
-const openWindows = [];
+const {trackWindow, closeWindows} = require('./workdir_helpers');
 
 // `created` is the harness's recording Monaco's list of the editors in
 // creation order (`created[i].editor`: a suite types into them and reads
@@ -65,7 +64,7 @@ function makePage() {
       w.localStorage.setItem('kiss-explorer-roots', JSON.stringify(['/extra']));
     },
   });
-  openWindows.push(win);
+  trackWindow(win);
   return {win, posted, created};
 }
 
@@ -628,7 +627,7 @@ const tests = [
       console.log('not ok - ' + name);
       console.log(e && e.stack ? e.stack : String(e));
     } finally {
-      while (openWindows.length) openWindows.pop().close();
+      closeWindows();
     }
   }
   console.log(`\n${tests.length - failed} passed, ${failed} failed`);

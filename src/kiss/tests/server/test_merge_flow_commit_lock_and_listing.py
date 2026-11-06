@@ -310,6 +310,34 @@ class TestPendingWorktreeIsListedOnce(unittest.TestCase):
         assert self.events == []
         assert self.agent._wt_pending
 
+    @posix_only("a FIFO that blocks git's read of a .gitignore")
+    def test_failed_untracked_listing_is_unknown_not_clean(self) -> None:
+        """A worktree whose new files git cannot list is presented, not discarded as clean.
+
+        ``git ls-files --others --exclude-standard`` reads every
+        ``.gitignore`` it walks past; a FIFO by that name holds the
+        read until ``_git``'s timeout fails the command (returncode
+        124) while the tracked diffs, which read no ignore file, come
+        back clean.  Taking that failure for "no new files" would
+        auto-discard the branch with the task's only output.
+        """
+        wt = self.agent._wt
+        assert wt is not None
+        (wt.wt_dir / "f.txt").write_text("one\n")
+        (wt.wt_dir / "sub").mkdir()
+        fifo = wt.wt_dir / "sub" / ".gitignore"
+        os.mkfifo(fifo)
+        self.addCleanup(fifo.unlink)
+        saved = git_worktree._GIT_TIMEOUT_SECONDS
+        git_worktree._GIT_TIMEOUT_SECONDS = 1.0
+        self.addCleanup(setattr, git_worktree, "_GIT_TIMEOUT_SECONDS", saved)
+        [(_, files)] = self.server._list_pending(self.agent)
+        assert files is None, files
+        assert self.server._present_pending_worktree("tab-v6-present") is True
+        done = _wait_for(self.events, "worktree_done", timeout=1)
+        assert done["changedFiles"] == [] and done["worktrees"][0]["changedFiles"] == []
+        assert self.agent._wt_pending and (wt.wt_dir / "new.txt").exists()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -769,7 +769,11 @@ class RemoteViews:
                 lost and registered and not self._closing and name in self._bound.values()
             )
             stream.retired = True
-            if lost:
+            # Only the registered stream's loss ends anything here: a
+            # candidate that lost the registration (``_stream_for``)
+            # relayed the same machine's pages, whose ids are the
+            # machine's, so its loss must not close the winner's pages.
+            if lost and registered:
                 logger.warning(
                     "%s: %d page(s) and %d terminal(s) shown from it close here",
                     text, len(stream.browser_tabs), len(stream.terminals),

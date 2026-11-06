@@ -16,11 +16,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from kiss.agents.sorcar.skills import (
     Skill,
@@ -31,6 +34,7 @@ from kiss.agents.sorcar.skills import (
     make_skill_tool,
     skill_permission,
 )
+from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 from kiss.tests.conftest import posix_only
 
 
@@ -444,4 +448,51 @@ def test_sorcar_agent_no_skill_tool_without_skills(
     agent.work_dir = str(isolated_homes / "project")
     agent._use_web_tools = False
     names = [t.__name__ for t in agent._get_tools()]
+    assert "skill" not in names
+
+
+def _run_once(agent: Any, project: Path, **run_args: Any) -> dict[str, Any]:
+    """Run *agent* in *project* against a one-answer local model server; its first request."""
+    with serve([finish_body("<p>ok</p>", prompt_tokens=500)]) as (url, requests):
+        result = agent.run(
+            prompt_template="Say ok.",
+            model_name=MODEL,
+            max_steps=2,
+            max_budget=1.0,
+            model_config={"base_url": url, "api_key": "local"},
+            use_memory=False,
+            web_tools=False,
+            verbose=False,
+            work_dir=str(project),
+            **run_args,
+        )
+    assert yaml.safe_load(result)["success"] is True
+    return requests[0]
+
+
+def test_skills_profile_run_offers_the_skill_and_the_next_run_discovers_afresh(
+    isolated_homes: Path,
+) -> None:
+    """A ``skills``-profile run offers the skill its note promises; the next run rediscovers.
+
+    The restricted-profile note and the toolset share one discovery per
+    run (A09-2), and that discovery does not outlive the run: once the
+    project's only skill is gone, the agent's next run (the full
+    profile, which does not probe for the note) offers no ``skill`` tool.
+    """
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+    project = isolated_homes / "project"
+    skill_dir = _write_skill(project / ".kiss" / "skills", "deploy", "Deploy the app")
+    agent = SorcarAgent("skills-run")
+    request = _run_once(agent, project, tool_profile="skills")
+    assert {t["function"]["name"] for t in request["tools"]} == {"skill", "finish"}
+    system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
+    note = system.split("# Restricted tool profile: skills", 1)[1]
+    assert "skill" in note.split("plus finish: ", 1)[1].split("\n", 1)[0]
+
+    shutil.rmtree(skill_dir)
+    request = _run_once(agent, project)
+    names = {t["function"]["name"] for t in request["tools"]}
+    assert "Bash" in names
     assert "skill" not in names

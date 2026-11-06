@@ -48,7 +48,10 @@ def _store_commands(staging: str, target: str, data: bytes) -> list[str]:
     names, and the last command publishes it with one ``mv`` (keeping
     the mode of the file it replaces), so a reader of the target sees
     the previous file or the whole new one and a second writer of the
-    same target cannot splice its bytes into this one.  Each command
+    same target cannot splice its bytes into this one.  A target that
+    is a symlink is published to the file it points to (``readlink -f``,
+    made when the link dangles), as the ``cat > target`` a redirected
+    copy stands for writes through it, so the link stays.  Each command
     echoes :data:`_WRITE_OK` once its piece landed and nothing
     (non-zero status) when it did not.
 
@@ -59,8 +62,9 @@ def _store_commands(staging: str, target: str, data: bytes) -> list[str]:
     """
     pieces = _pieces(data)
     publish = (
-        f'{{ [ ! -f {target} ] || chmod "$(stat -c %a {target})" {staging}; }} && '
-        f"mv -fT {staging} {target} && "
+        f'KISS_TARGET="$(readlink -f {target})" && '
+        f'{{ [ ! -f "$KISS_TARGET" ] || chmod "$(stat -c %a "$KISS_TARGET")" {staging}; }} && '
+        f'mv -fT {staging} "$KISS_TARGET" && '
     )
     commands = []
     for index, piece in enumerate(pieces):

@@ -1210,9 +1210,16 @@ def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingA
     )
     backend_sy.send_message("", "legacy hello")
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
-    # LINE: the SDK is not installed here, so the legacy constructor
-    # fails and the authenticate tool reports the error (no config write).
+
+
+def test_line_legacy_mode_unchanged(isolated_kiss_home: Path) -> None:
+    """With Muse off and no LINE SDK, the legacy constructor's error reaches the tool.
+
+    Its own test so the skip (the SDK installed) does not relabel the
+    other connectors' legacy checks as skipped.
+    """
     _require_linebot_absent()
+    assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     line_config.clear()
     agent = LineAgent()
     tools = auth_tools(agent)

@@ -176,6 +176,82 @@ const run = (async () => {
       assert.strictEqual(txt.selectionEnd, 2);
     },
   );
+
+  // The clipboard read is asynchronous (the browser may first ask the
+  // user for permission): a field the page made read-only, disabled or
+  // removed meanwhile is left alone, as the native paste would leave it.
+  await runner.test(
+    'a Paste whose clipboard read lands after the field became read-only ' +
+      'does not write into it',
+    async () => {
+      const win = makeDom('');
+      let deliver = null;
+      Object.defineProperty(win.navigator, 'clipboard', {
+        value: {
+          readText: () =>
+            new Promise(resolve => {
+              deliver = resolve;
+            }),
+        },
+        configurable: true,
+      });
+      const txt = win.document.getElementById('txt');
+      txt.setSelectionRange(1, 1);
+      const inputs = [];
+      txt.addEventListener('input', () => inputs.push(txt.value));
+      activate(win, txt, 'paste');
+      assert.ok(deliver, 'the clipboard was asked');
+      txt.readOnly = true;
+      deliver('X');
+      await settle();
+      assert.strictEqual(txt.value, 'ab', 'a read-only field is not written');
+      assert.deepStrictEqual(inputs, [], 'and gets no input event');
+      assert.deepStrictEqual(unhandled, []);
+      assert.deepStrictEqual(listenerErrors, []);
+    },
+  );
+
+  // The sandboxed preview iframe (an opaque origin, no clipboard-read
+  // delegation) cannot read the clipboard: its Paste is offered disabled
+  // instead of doing nothing; the keyboard shortcut shown still works.
+  // jsdom does not load a srcdoc iframe, so the preview document is
+  // built from the bootstrap markup main.js appends to the srcdoc, at
+  // the opaque origin the sandbox gives it.
+  await runner.test(
+    'in the sandboxed preview document Paste is offered disabled',
+    async () => {
+      const win = makeDom('');
+      const preview = new JSDOM(
+        '<!DOCTYPE html><body><textarea id="ta">ab</textarea>' +
+          win.ContentContextMenu.contentContextMenuBootstrapHtml() +
+          '</body>',
+        {runScripts: 'dangerously', pretendToBeVisual: true, url: 'about:srcdoc'},
+      );
+      const fwin = preview.window;
+      windows.push(fwin);
+      const fdoc = fwin.document;
+      assert.strictEqual(String(fdoc.location.origin), 'null', 'opaque origin');
+      const ta = fdoc.getElementById('ta');
+      ta.dispatchEvent(
+        new fwin.MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+      const paste = fdoc.querySelector(
+        '#sorcar-content-context-menu .sorcar-ctx-item[data-action="paste"]',
+      );
+      assert.ok(paste, 'Paste is listed');
+      assert.strictEqual(
+        paste.getAttribute('aria-disabled'),
+        'true',
+        'Paste is disabled where the clipboard cannot be read',
+      );
+      assert.strictEqual(paste.textContent.includes('V'), true, 'shortcut shown');
+    },
+  );
 })();
 
 run.then(() => {

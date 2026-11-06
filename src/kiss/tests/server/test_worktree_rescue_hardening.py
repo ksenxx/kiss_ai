@@ -76,6 +76,32 @@ class TestRescueHardening:
             "a rescue that could not land a file must fail closed"
         )
 
+    def test_partial_rescue_lands_independent_inodes(self) -> None:
+        """A file landed before the rescue fails is a copy, not an alias.
+
+        The worktree is preserved when one file cannot be landed, so a
+        hard link from main to the worktree's file would make the two
+        trees share one writable inode: a later edit on either side
+        would silently appear on the other.
+        """
+        os.symlink(self.outside, self.repo / "data")
+        (self.wt_dir / "data").mkdir()
+        (self.wt_dir / "data" / "out.csv").write_text("blocked\n")
+        (self.wt_dir / "run.log").write_text("task output\n")
+        rescued, ok = GitWorktreeOps.rescue_ignored_files(
+            self.wt_dir, self.repo,
+        )
+        assert (rescued, ok) == (1, False)
+        landed = self.repo / "run.log"
+        kept = self.wt_dir / "run.log"
+        assert landed.read_text() == "task output\n"
+        assert not os.path.samefile(landed, kept), (
+            "the preserved worktree and the main tree share one inode"
+        )
+        with open(kept, "a") as fh:
+            fh.write("resumed task edit\n")
+        assert landed.read_text() == "task output\n"
+
     def test_collision_lands_kiss_rescued_sibling(self) -> None:
         """Different existing content is preserved beside, not dropped."""
         (self.repo / ".env").write_text("SECRET=users\n")

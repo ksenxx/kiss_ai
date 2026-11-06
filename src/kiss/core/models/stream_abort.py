@@ -171,7 +171,12 @@ class StreamAbortWatchdog:
         response yet: Gemini arms the watchdog before its lazy generator
         issues the request, so a Stop pressed in that window would
         otherwise be acted on once (with nothing to shut down) and then
-        forgotten, leaving the task to wait for the read timeout.
+        forgotten, leaving the task to wait for the read timeout.  A
+        claim still pending when :meth:`stop` disarms the watchdog is
+        withdrawn, as :meth:`_abort` withdraws one it finds disarmed:
+        the stream ended on its own (headers and body all arrived
+        within one poll), so the caller has a complete result, not a
+        stall; a user stop still surfaces through its event.
         """
         poll = self._poll_interval()
         claimed = False
@@ -180,6 +185,8 @@ class StreamAbortWatchdog:
                 claimed = self._claim_abort()
             if claimed and self._abort():
                 return
+        if claimed:
+            self.stalled = self.stopped = False
 
     def _claim_abort(self) -> bool:
         """Decide whether to abort, atomically with respect to :meth:`stop`.

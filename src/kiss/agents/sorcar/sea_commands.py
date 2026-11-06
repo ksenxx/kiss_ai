@@ -100,6 +100,7 @@ from kiss.agents.sorcar.sea_settings import (
     execute_python_file,
     is_stop,
     parsed_sea,
+    refresh_imported_module,
     resolve_settings,
     safe_message,
     script_name,
@@ -1277,8 +1278,12 @@ def _registers_as_model(sea_path: Path) -> bool:
     inherited from a custom base (``class X(sea_class(...))``) and an
     edit of that base alone changes the verdict; a base is stamped as
     it was before it ran, so one edited while the load was in flight
-    is re-read too, and a base named by command is also keyed on the
-    script the name resolves to (:func:`_reading`).  Only a script
+    is re-read too, a base named by command is also keyed on the
+    script the name resolves to (:func:`_reading`), and a base the
+    script imports the ordinary way is re-executed once it changed
+    (:func:`~kiss.agents.sorcar.sea_settings.refresh_imported_module`),
+    with every class deriving from it (:func:`_refresh_bases`), so the
+    stamp describes the class the script derives from.  Only a script
     whose source mentions ``register_as_model`` or derives its class
     from something other than the plain bases (so it may inherit the
     registration) is imported: importing every registered SEA (channel
@@ -1303,7 +1308,19 @@ def _registers_as_model(sea_path: Path) -> bool:
         asked: dict[Path | str, _Reading] = {}
         _picker_load.bases = asked
         try:
+            # A base imported the ordinary way (``from parent import
+            # Parent``) is re-executed before the child runs, else the
+            # child would derive from its old class under its new stamp.
+            for base in cached[0] if cached is not None else ():
+                if isinstance(base, Path):
+                    refresh_imported_module(base)
             sea = load_sea(sea_path)
+            _refresh_bases(sea)
+            if _superseded(type(sea)):
+                # A base re-executed after the load (first met now, its
+                # module's revision unknown before the load, or deriving
+                # from a changed one): the class derives from the old module.
+                sea = load_sea(sea_path)
             stamps.update(_base_stamps(sea))
             verdict = _call(_method(sea, "register_as_model")) is True
         except SeaError:
@@ -1328,6 +1345,31 @@ def _base_stamps(sea: BaseSea) -> dict[Path | str, _Reading]:
     """Return the revision stamp of every SEA file the class of *sea* derives from."""
     files = {_file_of(cls) for cls in type(sea).__mro__[1:] if issubclass(cls, BaseSea)}
     return {file: parsed_sea(file).stamp for file in files if file is not None}
+
+
+def _refresh_bases(sea: BaseSea) -> None:
+    """Re-execute the changed imported bases of the class of *sea*, root first.
+
+    Each base after every base of its own: one that derives from a
+    class its module no longer holds (:func:`_superseded`, the base's
+    own base re-executed before this walk or by it) is re-executed
+    whatever its revision, so its class derives from the new one.
+    Afterwards every base is current, and the script's own class is
+    superseded exactly when the script must run again.
+    """
+    for cls in reversed(type(sea).__mro__[1:]):
+        file = _file_of(cls)
+        if file is not None and issubclass(cls, BaseSea):
+            refresh_imported_module(file, _superseded(cls))
+
+
+def _superseded(cls: type) -> bool:
+    """Whether a base of *cls* is no longer the class its module holds under its name: the
+    module was re-executed since *cls* derived from it, and *cls* must be re-executed too."""
+    return any(
+        getattr(sys.modules.get(base.__module__), base.__name__, None) is not base
+        for base in cls.__bases__
+    )
 
 
 def model_seas() -> dict[str, Path]:

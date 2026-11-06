@@ -12,12 +12,14 @@
 // version}` (pinned by tests/server/test_tips_opt_out_bootstrap_wave2.py).
 // main.js hands the event to tips.js.  On a browser that never stored the
 // choice itself the tips window must stay closed and, opened from the
-// Tips button, show the box ticked.
+// Tips button, show the box ticked; an event without the opt-out (or
+// with anything but `true`) leaves the box unticked.
 //
 // Real chat.html, main.js and tips.js on jsdom, browser storage empty.
 
 const assert = require('assert');
 const {makePage, send} = require('./simplify2_harness');
+const {openOptOutBox, closeTips} = require('./tips_helpers');
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 
 const TIPS = ['# One\n\nfirst', '# Two\n\nsecond'];
@@ -35,11 +37,8 @@ function tipsWindow(win) {
 
 /** Open the tips from the Tips button: the opt-out checkbox's state. */
 function boxTicked(win) {
-  win.document.getElementById('tips-btn').click();
-  const host = tipsWindow(win);
-  assert.ok(host, 'the Tips button opens the tips window');
-  const ticked = host.shadowRoot.querySelector('.tips-optout-input').checked;
-  host.shadowRoot.querySelector('.tips-close').click();
+  const ticked = openOptOutBox(win).checked;
+  closeTips(win);
   return ticked;
 }
 
@@ -54,6 +53,22 @@ test("an opted-out daemon's tipsData opens nothing and ticks the box", () => {
   });
   assert.strictEqual(tipsWindow(win), null, 'the tips window stays closed');
   assert.strictEqual(boxTicked(win), true);
+  assert.strictEqual(win.__TIPS__.optOut, true);
+  win.close();
+});
+
+test('a tipsData without the opt-out leaves the box unticked', () => {
+  const win = freshBrowserPage();
+  send(win, {type: 'tipsData', tips: TIPS, show: false, version: '2.0'});
+  assert.strictEqual(boxTicked(win), false);
+  send(win, {
+    type: 'tipsData',
+    tips: TIPS,
+    show: false,
+    version: '2.0',
+    optOut: 'yes',
+  });
+  assert.strictEqual(boxTicked(win), false, 'only true opts out');
   win.close();
 });
 
@@ -80,7 +95,9 @@ test('without the opt-out the same event opens the tips once per version', () =>
     host.shadowRoot.querySelector('.tips-optout-input').checked,
     false,
   );
+  assert.strictEqual(win.localStorage.getItem('kissTipsSeenVersion'), '9.9');
   host.shadowRoot.querySelector('.tips-close').click();
+  // A reconnect re-sends tipsData: not again for the same version.
   send(win, event);
   assert.strictEqual(tipsWindow(win), null, 'not again for the same version');
   win.close();

@@ -638,6 +638,11 @@ class AgentServer(
         self._tabs_state_requested = 0
         self._tabs_state_sent = 0
         self._tabs_state_sender: threading.Thread | None = None
+        # The ``ack`` tokens of the ``openTab`` / ``closeTab`` commands
+        # whose snapshot is still to go, each with the generation its
+        # request drew: a snapshot covering that generation echoes the
+        # token in its ``acks`` (A18-1).
+        self._tabs_state_acks: list[tuple[int, str]] = []
         self._tab_opened_task_ids: dict[str, str] = {}
         self._tab_models: dict[str, str] = {}
         self._autocommit_tabs: set[str] = set()
@@ -792,7 +797,7 @@ class AgentServer(
             # the departed connection's entry behind forever.
             self._files_latest_request.pop(conn_id, None)
 
-    def _broadcast_tabs_state(self) -> None:
+    def _broadcast_tabs_state(self, ack: str = "") -> None:
         """Send the full tab registry snapshot to EVERY connected client.
 
         Called after every registry mutation (open, close, rebind,
@@ -821,11 +826,18 @@ class AgentServer(
         inside a run's publication returns at once): when a sender is
         busy, the request alone makes its next snapshot cover the
         caller's mutation.
+
+        Args:
+            ack: The ``ack`` token of the client command this mutation
+                answers (``""`` for none): the snapshot covering the
+                request echoes it in its ``acks``, so the sender keeps
+                its optimistic open / close until the snapshot that
+                reflects the command, not merely the next few.
         """
-        locked_call(self._tabs_state_cond, self._tabs_state_request)
+        locked_call(self._tabs_state_cond, self._tabs_state_request, ack)
         self._send_tabs_state_settled()
 
-    def _publish_tabs_state(self) -> None:
+    def _publish_tabs_state(self, ack: str = "") -> None:
         """Broadcast the registry, and return only once a snapshot taken
         after the caller's mutation is on the wire.
 
@@ -836,8 +848,11 @@ class AgentServer(
         ship every request made so far (its own among them); when
         there is no live sender (the sender was interrupted, or has
         quit), the caller sends it itself.
+
+        Args:
+            ack: As for :meth:`_broadcast_tabs_state`.
         """
-        self._broadcast_tabs_state()
+        self._broadcast_tabs_state(ack)
         while not locked_call(self._tabs_state_cond, self._await_tabs_state_sent):
             self._send_tabs_state_settled()
 
@@ -863,13 +878,15 @@ class AgentServer(
         """
         try:
             while True:
-                generation = locked_call(self._tabs_state_cond, self._tabs_state_next)
-                if generation is None:
+                claim = locked_call(self._tabs_state_cond, self._tabs_state_next)
+                if claim is None:
                     return
+                generation, acks = claim
                 self.printer.broadcast(
                     {
                         "type": "tabs_state",
                         "tabs": self.tab_registry.snapshot(),
+                        "acks": acks,
                         "tabId": "",
                     }
                 )
@@ -884,16 +901,25 @@ class AgentServer(
                     daemon=True,
                 ).start()
 
-    def _tabs_state_request(self) -> int:
-        """Under ``_tabs_state_cond``: request a snapshot taken from now on."""
+    def _tabs_state_request(self, ack: str = "") -> int:
+        """Under ``_tabs_state_cond``: request a snapshot taken from now on.
+
+        Args:
+            ack: The token the snapshot covering this request echoes
+                (``""`` for none).
+        """
         self._tabs_state_requested += 1
+        if ack:
+            self._tabs_state_acks.append((self._tabs_state_requested, ack))
         return self._tabs_state_requested
 
-    def _tabs_state_next(self) -> int | None:
+    def _tabs_state_next(self) -> tuple[int, list[str]] | None:
         """Under ``_tabs_state_cond``: claim or keep the sender role.
 
         Returns:
-            The generation the next snapshot will cover, or ``None``
+            The generation the next snapshot will cover and the tokens
+            it echoes (every token still pending was requested, after
+            its mutation, before the snapshot is taken), or ``None``
             when nothing is left to send (the role is handed back) or
             another live thread holds the role.
         """
@@ -906,11 +932,18 @@ class AgentServer(
             self._tabs_state_cond.notify_all()
             return None
         self._tabs_state_sender = me
-        return self._tabs_state_requested
+        return self._tabs_state_requested, [ack for _gen, ack in self._tabs_state_acks]
 
     def _tabs_state_mark_sent(self, generation: int) -> None:
-        """Under ``_tabs_state_cond``: a snapshot covering *generation* is on the wire."""
+        """Under ``_tabs_state_cond``: a snapshot covering *generation* is on the wire.
+
+        The tokens that snapshot echoed are answered; one an
+        interrupted sender never shipped stays for the resend.
+        """
         self._tabs_state_sent = max(self._tabs_state_sent, generation)
+        self._tabs_state_acks = [
+            (gen, ack) for gen, ack in self._tabs_state_acks if gen > generation
+        ]
         self._tabs_state_cond.notify_all()
 
     def _tabs_state_abandon(self) -> bool:
@@ -1596,7 +1629,7 @@ class AgentServer(
             event["since"] = since
         self._broadcast_to_conn(event, conn_id)
 
-    def _close_tab(self, tab_id: str) -> None:
+    def _close_tab(self, tab_id: str, ack: str = "") -> None:
         """Close a tab: remove it from the registry and drop its state.
 
         The tab's state is marked ``frontend_closed`` BEFORE the
@@ -1614,6 +1647,11 @@ class AgentServer(
 
         Args:
             tab_id: The frontend tab identifier to close.
+            ack: The ``ack`` token of the ``closeTab`` command this
+                answers (``""`` for none), echoed by the snapshot
+                that omits the tab; a close that found the tab absent
+                publishes nothing, and the client's shield lifts on
+                the next snapshot's omission anyway.
         """
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
@@ -1621,7 +1659,7 @@ class AgentServer(
                 state.frontend_closed = True
         removal_token = self.tab_registry.close_tab(tab_id)
         if removal_token:
-            self._broadcast_tabs_state()
+            self._broadcast_tabs_state(ack)
         # The removal token lets the cleanup tail stand down when a
         # later publication (a concurrent ``resumeSession`` reopen)
         # has legitimately taken the tab over.  A close that found the
@@ -2671,9 +2709,19 @@ class AgentServer(
             self._emit_pending_ask(tab_id)
             return
 
+        is_done = True
         if subagent_info is not None:
+            side_channel = bool(subagent_info.get("side_channel"))
             is_done = _subagent_is_done(result.get("task_id"))
-            if is_done and subagent_info.get("side_channel"):
+            # A recovery changes no publication state (``recovery``
+            # above): the tab the client is re-attached to stays as the
+            # user left it, open or closed.  The announcement decides
+            # ``is_done`` again under the lock it broadcasts under.
+            if not recovery and not (is_done and side_channel):
+                is_done = self._reopen_subagent_tab(
+                    tab_id, subagent_info, result, rebound_state, is_done, reopen, replay_scope,
+                )
+            if is_done and side_channel:
                 # A finished side channel (the /ask answerer) has
                 # nothing to show: its answer sits in the parent's
                 # transcript.  The client that asked for this replay
@@ -2682,13 +2730,6 @@ class AgentServer(
                 # close the tab instead of re-opening it finished.
                 self.printer.broadcast({**_subagent_done_event(tab_id), **replay_scope})
                 return
-            # A recovery changes no publication state (``recovery``
-            # above): the tab the client is re-attached to stays as the
-            # user left it, open or closed.
-            if not recovery:
-                self._reopen_subagent_tab(
-                    tab_id, subagent_info, result, rebound_state, is_done, reopen, replay_scope,
-                )
 
         if rebound_state is not None:
             # The live agent's stamp (``_cmd_run``'s start, stamped by
@@ -2769,6 +2810,21 @@ class AgentServer(
                 task_id=bound_task,
             )
         self._emit_pending_ask(tab_id)
+        if subagent_info is not None and not recovery and not is_done:
+            # Announced running above.  A child that finished meanwhile
+            # broadcast its ``subagentDone`` before the announcement
+            # reached a client still opening the tab, which would show
+            # the finished sub-agent as a tab nothing closes: tell it
+            # again, as ``_open_persisted_subagent_tabs`` does for the
+            # children it announces.  A tab reopened since it finished
+            # stays open.
+            with self._state_lock:
+                if (
+                    _subagent_is_done(result.get("task_id"))
+                    and tab_id not in self._reopened_subagent_tabs
+                    and not self._tab_chat_views.get(tab_id)
+                ):
+                    self.printer.broadcast({**_subagent_done_event(tab_id), **replay_scope})
         self._emit_pending_worktree(tab_id)
 
         # A resumed sub-agent may itself have fanned out: its running
@@ -2797,7 +2853,7 @@ class AgentServer(
         is_done: bool,
         reopen: bool,
         replay_scope: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Announce the sub-agent tab *tab_id* a client asked for by name (``_replay_session``).
 
         A tab the user had closed while it ran is open again.
@@ -2821,9 +2877,14 @@ class AgentServer(
             subagent_info: The row's ``subagent`` extra.
             result: The replayed row.
             rebound_state: The live state the tab was attached to, if any.
-            is_done: Whether the sub-agent has finished.
+            is_done: Whether the sub-agent had finished when the
+                caller sampled it (outside the lock).
             reopen: See :meth:`_replay_session`.
             replay_scope: The replay's ``connId``/``replayId`` stamp.
+
+        Returns:
+            Whether the sub-agent had finished when the announcement
+            was broadcast: *is_done* re-sampled under the lock.
         """
         announcement = self._subagent_announcement(
             result,
@@ -2834,6 +2895,18 @@ class AgentServer(
             replay_scope,
         )
         with self._state_lock:
+            # Sampled, decided and broadcast in one locked step (the
+            # ``_open_persisted_subagent_tabs`` pattern): the child's
+            # release (``_release_run_state``) runs under this lock
+            # and its ``subagentDone`` follows, so a child that
+            # finished since the caller's sample is announced finished
+            # (or, a side channel, closed) rather than running AFTER
+            # its done signal.
+            if not is_done:
+                is_done = _subagent_is_done(result.get("task_id"))
+                if is_done and subagent_info.get("side_channel"):
+                    return True  # the caller closes the tab instead
+                announcement["isDone"] = is_done
             self._closed_subagent_tabs.discard(tab_id)
             if reopen and is_done:
                 self._reopened_subagent_tabs.add(tab_id)
@@ -2846,6 +2919,7 @@ class AgentServer(
             if rebound_state is not None and rebound_state.running():
                 self.printer.subscribe_tab(rebound_state.task_id, tab_id)
             self.printer.broadcast(announcement)
+        return is_done
 
     def replay_image(self, task_id: str, index: int) -> dict[str, Any] | None:
         """The *index*-th picture of *task_id*'s transcript, as its replays number them.
@@ -3150,6 +3224,11 @@ class AgentServer(
             # ``_replay_session``) lands wholly before or wholly after,
             # so every connection gets them in daemon order.
             with self._state_lock:
+                if self._tab_chat_views.get(sub_tab_id):
+                    # A chat replay bound the tab to a chat while the
+                    # rows loaded (a sub-agent view has no chat view):
+                    # its frames must be the last the tab receives.
+                    continue
                 is_done = _subagent_is_done(sub_task_id)
                 if is_done:
                     self._closed_subagent_tabs.discard(sub_tab_id)
@@ -3221,6 +3300,10 @@ class AgentServer(
                 )
                 continue
             if not transcripts:
+                # Rebound to a chat since the announcement: the offer
+                # would fetch the child into the chat's tab.
+                if locked_call(self._state_lock, self._tab_chat_views.get, sub_tab_id):
+                    continue
                 self.printer.broadcast(
                     {
                         "type": "replay_deferred",
@@ -3242,6 +3325,10 @@ class AgentServer(
                     conn_id,
                     recording,
                 ) as live_events:
+                    # Checked after the send reservation, like the
+                    # parent transcript (``_tab_bound_to``).
+                    if locked_call(self._state_lock, self._tab_chat_views.get, sub_tab_id):
+                        continue
                     if live_events:
                         row["events"] = live_events
                     self.printer.broadcast(
@@ -3265,7 +3352,12 @@ class AgentServer(
                     is_done = _subagent_is_done(sub_task_id)
                     # A tab reopened since it finished stays open: the
                     # reopening already told every client it finished.
-                    if is_done and sub_tab_id not in self._reopened_subagent_tabs:
+                    # A tab bound to a chat since shows that chat.
+                    if (
+                        is_done
+                        and sub_tab_id not in self._reopened_subagent_tabs
+                        and not self._tab_chat_views.get(sub_tab_id)
+                    ):
                         self.printer.broadcast({**_subagent_done_event(sub_tab_id), **scope})
             # Descendants come after this child's announcement: a client
             # opens a finished sub-agent only below an open parent.

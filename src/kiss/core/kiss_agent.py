@@ -242,7 +242,9 @@ class NativeTurn:
         closed: Set once the turn's bridge has closed; a call that
             returns after that leaves the agent's conversation alone.
         lock: Held to close the turn and to publish a call's result
-            (:meth:`KISSAgent._publish_native_call`), so the check of
+            (:meth:`KISSAgent._publish_native_call`; a call nested in
+            one of the turn's calls settles under it too,
+            :meth:`KISSAgent._settle_native_call`), so the check of
             ``closed`` and the writes it guards are one step: a handler
             past the check when the Stop closes the turn publishes
             first, never after, when the agent may be running another
@@ -599,6 +601,10 @@ class KISSAgent(Base):
         self.last_call_usage: dict[str, Any] | None = None
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self._llm_hook_conversation_index = 0
+        # The run's ``compaction`` option (:meth:`run`); a step driven
+        # without a run (a test's ``_execute_step``) compacts as the
+        # global setting says.
+        self.compaction = True
         self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._last_compaction_step = -COMPACTION_MIN_STEP_GAP
         # Wall-clock start of the last request that read or wrote the
@@ -633,6 +639,7 @@ class KISSAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
         print_prompts: bool = True,
+        compaction: bool = True,
     ) -> None:
         self.model_name = model_name
         self.print_prompts = print_prompts
@@ -650,6 +657,7 @@ class KISSAgent(Base):
         self.messages: list[dict[str, Any]] = []
         self.reset_usage()
         self._reset_run_state()
+        self.compaction = compaction
         # ``run_start_timestamp`` is the real wall clock: the saved record
         # pairs it with ``run_end_timestamp``.  The trajectory FILENAME is
         # keyed by (name, id, _trajectory_stamp) in whole seconds; two runs
@@ -751,6 +759,7 @@ class KISSAgent(Base):
         llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
         llm_response_hook: Callable[[LLMReply], Verdict] | None = None,
+        compaction: bool = True,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -821,6 +830,14 @@ class KISSAgent(Base):
                 (``end_run(result)``) ends the run with the verdict's text
                 as the result and none of the reply's tool calls run.
                 Default is None (no hook).
+            compaction (bool): Whether this run compacts its context:
+                old, large tool outputs and arguments are replaced with
+                short stubs once the context grows past the configured
+                thresholds (:meth:`_maybe_compact_conversation`). False
+                never compacts. True (the default) compacts while the
+                global Compaction setting
+                (``DEFAULT_CONFIG.tool_output_compaction``) is on; off,
+                no run compacts.
 
         Returns:
             str: The result of the agent's task.
@@ -841,6 +858,7 @@ class KISSAgent(Base):
                 printer,
                 verbose,
                 print_prompts=print_prompts,
+                compaction=compaction,
             )
 
             if not self.is_agentic and tools is not None:
@@ -907,11 +925,20 @@ class KISSAgent(Base):
     def _run_non_agentic(self) -> str:
         """Run a single generation without tools, with billing and transcript.
 
+        The generation is a paid request like any step of the agentic
+        loop, so it is under the same limits (:meth:`_check_limits`: a
+        spent budget, a parent's ``budget_check_hook``) and made only
+        when they allow it.
+
         Returns:
             str: The generated response text from the model.
+
+        Raises:
+            KISSError: When a limit is already exceeded.
         """
         start_timestamp = int(time.time())
         self.step_count += 1
+        self._check_limits()
         response_text, _response = self._billed_model_call(self.model.generate)
         self._add_message(
             "model",
@@ -1045,8 +1072,12 @@ class KISSAgent(Base):
         nothing for the cut-off turn) with :data:`RETRY_EFFORT` applied
         for that one call by :meth:`_turn_effort`.  No retry is arranged
         when the model takes no effort parameter (no catalog ``thinking``
-        level), already runs at a low level, or this request had its
-        retry already: the caller then fails over to another family.
+        level), already runs at a low level (an explicit
+        ``reasoning_effort``, else Anthropic's native
+        ``output_config.effort``, else Gemini's ``thinking_config``
+        level, else the catalog level), or this
+        request had its retry already: the caller then fails over to
+        another family.
 
         Args:
             error: The cut-off the adapter reported.
@@ -1057,7 +1088,21 @@ class KISSAgent(Base):
         info = MODEL_INFO.get(self.model.model_name)
         if self._low_effort_retried or info is None or not info.thinking:
             return False
-        effort = str(self.model.model_config.get("reasoning_effort") or info.thinking)
+        config = self.model.model_config
+        output_config = config.get("output_config")
+        gemini_level = config.get("thinking_config")
+        if isinstance(gemini_level, dict):
+            gemini_level = gemini_level.get("thinking_level")
+        else:  # a Gemini ``ThinkingConfig`` (or None): its level is an enum
+            gemini_level = getattr(
+                getattr(gemini_level, "thinking_level", None), "value", None
+            )
+        effort = str(
+            config.get("reasoning_effort")
+            or (output_config.get("effort") if isinstance(output_config, dict) else None)
+            or gemini_level
+            or info.thinking
+        ).lower()
         if effort in _LOW_EFFORT_LEVELS:
             return False
         self._low_effort_retried = True
@@ -1487,7 +1532,7 @@ class KISSAgent(Base):
                 raise forced_stop
 
     def _guarded_execute_tool(
-        self, function_call: dict[str, Any]
+        self, function_call: dict[str, Any], turn: NativeTurn | None = None
     ) -> tuple[str, str, Verdict | None]:
         """Execute one tool call the way the agent loop does: hook, guard, then tool.
 
@@ -1496,14 +1541,25 @@ class KISSAgent(Base):
         sees.  Allowing means "no objection", not "must execute": the
         framework's :attr:`tool_call_guard` may still block the call.  A
         long-running call keeps the prompt cache warm meanwhile.  The
-        :attr:`tool_result_hook` reads the result (a refusal included)
-        before the note of an allowing verdict
+        result is then settled (:meth:`_settle_tool_result`): the
+        :attr:`tool_result_hook` reads it (a refusal included) before the
+        note of an allowing verdict
         (:func:`~kiss.core.tool_verdict.allow_with_note`) and a pending
-        re-issue reminder are appended to it.
+        re-issue reminder are appended to it.  A call made inside a
+        natively served call (*turn* given: the call a tool of the turn
+        redirected to, or its follow-up) is settled under ``turn.lock``,
+        and not at all once the turn is closed
+        (:meth:`_settle_native_call`): the hook and the refusal
+        bookkeeping belong to the run the call was made in, not to the
+        one the agent may be running by then.  The served call itself
+        is run by :meth:`_execute_tool_on_helper_thread`, which settles
+        and records it under the same lock.
 
         Args:
             function_call: The tool call dict with ``name`` and
                 ``arguments``.
+            turn: The turn a call nested in a natively served call
+                belongs to; ``None`` for a call of the agent loop.
 
         Returns:
             tuple[str, str, Verdict | None]: (function_name, function_response_string,
@@ -1511,27 +1567,75 @@ class KISSAgent(Base):
             was not executed (its ``ends_run`` says whether the run ends
             on it), else ``None``.
         """
+        name, response, verdict, owed = self._execute_tool_through_hooks(function_call, turn)
+        if turn is None:
+            return self._settle_tool_result(function_call, name, response, verdict, owed)
+        return locked_call(
+            turn.lock, self._settle_native_call, turn, function_call, name, response, verdict, owed
+        )
+
+    def _execute_tool_through_hooks(
+        self, function_call: dict[str, Any], turn: NativeTurn | None
+    ) -> tuple[str, str, Verdict, str | None]:
+        """Run the hook, the guard, then the tool: :meth:`_guarded_execute_tool` unsettled.
+
+        Args:
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            turn: The native turn the call belongs to, for the calls a
+                tool of the turn redirects to; ``None`` for a call of
+                the agent loop.
+
+        Returns:
+            tuple[str, str, Verdict, str | None]: The tool's name and
+            result (a refusal included), the hook's or guard's verdict
+            on the call, and :attr:`_refused_call` as it was before the
+            call -- what :meth:`_settle_tool_result` takes.
+        """
         name = function_call["name"]
         args = _call_args(function_call)
         if name != "finish":
             self.tool_calls_made += 1
         verdict = self._tool_call_verdict(name, args)
-        blocked = None if verdict.allowed else verdict
-        if blocked is not None:
+        owed = self._refused_call
+        if not verdict.allowed:
             # A refused finish is owed no re-issue: the gate's verdict says
             # what to do next, and a reminder to "re-issue it now" sent
             # the model straight back into the gate, a wasted round each
             # time.
             self._refused_call = None if name == "finish" else name
-            name, response = self._execute_tool(function_call, blocked=blocked.text)
-            settled = True
+            name, response = self._execute_tool(function_call, blocked=verdict.text, turn=turn)
         else:
-            owed = self._refused_call
             self._redirect_ended = None
             if is_long_running_call(name, args):
-                name, response = self._execute_tool_keeping_cache_warm(function_call)
+                name, response = self._execute_tool_keeping_cache_warm(function_call, turn)
             else:
-                name, response = self._execute_tool(function_call)
+                name, response = self._execute_tool(function_call, turn=turn)
+        return name, response, verdict, owed
+
+    def _settle_tool_result(
+        self,
+        function_call: dict[str, Any],
+        name: str,
+        response: str,
+        verdict: Verdict,
+        owed: str | None,
+    ) -> tuple[str, str, Verdict | None]:
+        """Settle the result of a call :meth:`_guarded_execute_tool` ran.
+
+        Args:
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            name: The tool's name, as :meth:`_execute_tool` returned it.
+            response: The tool's result (a refusal included).
+            verdict: The :attr:`tool_call_hook`'s or
+                :attr:`tool_call_guard`'s verdict on the call.
+            owed: :attr:`_refused_call` as it was before the call.
+
+        Returns:
+            tuple[str, str, Verdict | None]: As :meth:`_guarded_execute_tool`.
+        """
+        if verdict.allowed:
             # A call this one redirected to (ToolRedirect) was refused or
             # settled the refusal inside: the model owes the re-issue at
             # its next step, not in this result, as for a call of its own.
@@ -1540,8 +1644,11 @@ class KISSAgent(Base):
             # on its follow-up): the run ends on this call, whose result
             # (the note, the nested refusal) is what the turn records.
             blocked = self._redirect_ended
+        else:
+            settled = True
+            blocked = verdict
         if self.tool_result_hook is not None:
-            self.tool_result_hook(name, args, response, blocked is not None)
+            self.tool_result_hook(name, _call_args(function_call), response, blocked is not None)
         if verdict.allowed and verdict.text and name != "finish":
             response += verdict.text
         if not settled:
@@ -1584,7 +1691,8 @@ class KISSAgent(Base):
         and the event sink's printer (``kiss.core.event_sink``, what a
         tool or hook publishes a gate stage through) are thread-local,
         so they are re-bound here before the call takes the normal
-        :meth:`_guarded_execute_tool` path — otherwise the tool's events
+        hook-guard-tool path (:meth:`_execute_tool_through_hooks`, as
+        :meth:`_guarded_execute_tool`) — otherwise the tool's events
         would reach no tab, its records would be dropped and the task's
         Stop would not reach the tool.  The agent thread's context
         variables (a :func:`~kiss.core.base.collecting_trajectories`
@@ -1643,9 +1751,16 @@ class KISSAgent(Base):
             return name, refusal_result(name, f"The run has ended: {turn.ended.text}")
         previous_printer = bind_printer(self.printer)
         try:
-            name, response, blocked = self._guarded_execute_tool(function_call)
-            locked_call(
-                turn.lock, self._publish_native_call, turn, function_call, name, response, blocked
+            name, response, verdict, owed = self._execute_tool_through_hooks(function_call, turn)
+            name, response, _ = locked_call(
+                turn.lock,
+                self._publish_native_call,
+                turn,
+                function_call,
+                name,
+                response,
+                verdict,
+                owed,
             )
         except Exception as e:
             turn.error = e
@@ -1657,35 +1772,81 @@ class KISSAgent(Base):
             bind_printer(previous_printer)
         return name, response
 
+    def _settle_native_call(
+        self,
+        turn: NativeTurn,
+        function_call: dict[str, Any],
+        name: str,
+        response: str,
+        verdict: Verdict,
+        owed: str | None,
+    ) -> tuple[str, str, Verdict | None]:
+        """Settle a call made inside one of *turn*'s calls, unless *turn* has closed.
+
+        Called under ``turn.lock``, as :meth:`_publish_native_call` is
+        and for the same reason: a nested call the turn's end abandoned
+        (along with the call that redirected to it) never reaches a
+        hook, nor settles a refusal, once the turn is closed.  Nothing
+        is recorded here: the redirecting call's result carries the
+        nested one and is recorded with it.
+
+        Args:
+            turn: The record of the turn the call belongs to.
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            name: The tool's name, as :meth:`_execute_tool` returned it.
+            response: The tool's result (a refusal included).
+            verdict: The hook's or guard's verdict on the call.
+            owed: :attr:`_refused_call` as it was before the call.
+
+        Returns:
+            tuple[str, str, Verdict | None]: As :meth:`_guarded_execute_tool`;
+            the unsettled result when the turn is closed.
+        """
+        if turn.closed.is_set():
+            return name, response, None
+        return self._settle_tool_result(function_call, name, response, verdict, owed)
+
     def _publish_native_call(
         self,
         turn: NativeTurn,
         function_call: dict[str, Any],
         name: str,
         response: str,
-        blocked: Verdict | None,
-    ) -> None:
-        """Record a call :meth:`_execute_tool_on_helper_thread` ran, unless *turn* has closed.
+        verdict: Verdict,
+        owed: str | None,
+    ) -> tuple[str, str, Verdict | None]:
+        """Settle and record a call :meth:`_execute_tool_on_helper_thread` ran, if *turn* is open.
 
         Called under ``turn.lock`` (see :class:`NativeTurn`): the check
-        of ``closed`` and what it guards — the routine-turn note, the
-        trajectory, the limit check — are one step with respect to the
-        closing of the turn, so a call the turn's end abandoned never
-        writes to the agent once the turn is closed.
+        of ``closed`` and what it guards — the settling of the result
+        (:meth:`_settle_tool_result`: the ``tool_result_hook``, the
+        refusal bookkeeping), the routine-turn note, the trajectory, the
+        limit check — are one step with respect to the closing of the
+        turn, so a call the turn's end abandoned never writes to the
+        agent, nor reaches a hook, once the turn is closed.
 
         Args:
             turn: The record of the turn the call belongs to.
             function_call: The tool call dict with ``name`` and
                 ``arguments``.
-            name: The tool's name, as :meth:`_guarded_execute_tool` returned it.
+            name: The tool's name, as :meth:`_execute_tool` returned it.
             response: The tool's result (a refusal included).
-            blocked: The refusing verdict when the call was not executed.
+            verdict: The hook's or guard's verdict on the call.
+            owed: :attr:`_refused_call` as it was before the call.
+
+        Returns:
+            tuple[str, str, Verdict | None]: As :meth:`_guarded_execute_tool`;
+            the unsettled result when the turn is closed.
 
         Raises:
             KISSError: What the limit check raised.
         """
         if turn.closed.is_set():
-            return
+            return name, response, None
+        name, response, blocked = self._settle_tool_result(
+            function_call, name, response, verdict, owed
+        )
         self._mark_routine_turn(function_call, response, blocked is not None)
         turn.calls += 1
         self._add_message(
@@ -1694,8 +1855,9 @@ class KISSAgent(Base):
         self._add_message("user", f"[{name}]: {response}")
         if blocked is not None and blocked.ends_run:
             turn.ended = blocked
-            return
-        self._check_limits()
+        else:
+            self._check_limits()
+        return name, response, blocked
 
     def _mark_routine_turn(self, function_call: dict[str, Any], result: str, refused: bool) -> None:
         """Note whether the next model call follows a routine tool call.
@@ -1715,7 +1877,9 @@ class KISSAgent(Base):
         refused = refused or result.startswith("REFUSED:")
         self._routine_next_turn = is_routine_turn(name, _call_args(function_call), result, refused)
 
-    def _execute_tool_keeping_cache_warm(self, function_call: dict[str, Any]) -> tuple[str, str]:
+    def _execute_tool_keeping_cache_warm(
+        self, function_call: dict[str, Any], turn: NativeTurn | None
+    ) -> tuple[str, str]:
         """Run a tool call that may outlive the prompt cache, pinging the cache meanwhile.
 
         Every ping is a billed request; its cost is added to the budget
@@ -1725,6 +1889,8 @@ class KISSAgent(Base):
 
         Args:
             function_call: The tool call dict from the model response.
+            turn: The native turn the call belongs to, if any; see
+                :meth:`_execute_tool`.
 
         Returns:
             The ``(name, result)`` pair of :meth:`_execute_tool`.
@@ -1733,7 +1899,7 @@ class KISSAgent(Base):
             # Nested in a call already kept warm (a ToolRedirect's
             # follow-up): its pings cover this call, and the model object
             # takes one ping thread at a time.
-            return self._execute_tool(function_call, blocked=None)
+            return self._execute_tool(function_call, blocked=None, turn=turn)
         keep_alive = PromptCacheKeepAlive(
             self.model,
             self.function_map,
@@ -1744,7 +1910,7 @@ class KISSAgent(Base):
         self._keeping_cache_warm = True
         try:
             with keep_alive:
-                return self._execute_tool(function_call, blocked=None)
+                return self._execute_tool(function_call, blocked=None, turn=turn)
         finally:
             self._keeping_cache_warm = False
             # A Stop landing on ``__exit__``'s entry skips its join: stop
@@ -1791,8 +1957,10 @@ class KISSAgent(Base):
     def _maybe_compact_conversation(self) -> None:
         """Compact old tool outputs and arguments once the context is past its threshold.
 
-        Runs before a model call when ``DEFAULT_CONFIG.tool_output_compaction``
-        is on and the last response's context size reached
+        Runs before a model call when the global Compaction setting
+        (``DEFAULT_CONFIG.tool_output_compaction``) and the run's
+        ``compaction`` option (:attr:`compaction`) are both on and the
+        last response's context size reached
         ``_next_compaction_at`` (100k tokens, then every further 100k of
         growth) or the steady-state target (:meth:`_compaction_target`,
         past which every step is a candidate), and at least
@@ -1806,7 +1974,7 @@ class KISSAgent(Base):
         the tokens it removed, so the event log shows what the context
         would have cost.
         """
-        if not DEFAULT_CONFIG.tool_output_compaction:
+        if not (DEFAULT_CONFIG.tool_output_compaction and self.compaction):
             return
         target = self._compaction_target()
         above_target = target is not None and self.context_tokens_used >= target
@@ -1994,6 +2162,7 @@ class KISSAgent(Base):
         self,
         function_call: dict[str, Any],
         blocked: str | None = None,
+        turn: NativeTurn | None = None,
     ) -> tuple[str, str]:
         """Execute a single tool call.
 
@@ -2005,6 +2174,9 @@ class KISSAgent(Base):
                 executed and :func:`~kiss.core.tool_verdict.refusal_result`
                 of it (which opens by saying the call did not run) is
                 returned as an error result instead.
+            turn: The native turn the call belongs to, for the calls the
+                tool redirects to (:meth:`_execute_redirected`); ``None``
+                for a call of the agent loop.
 
         Returns:
             tuple[str, str]: (function_name, function_response_string).
@@ -2057,7 +2229,7 @@ class KISSAgent(Base):
                     raise KISSError(f"Function {function_name} is not a registered tool")
                 function_response = str(self.function_map[function_name](**function_args))
             except ToolRedirect as redirect:
-                function_response = self._execute_redirected(redirect)
+                function_response = self._execute_redirected(redirect, turn)
             except BudgetExceededError:
                 raise
             except (Exception, SystemExit) as e:
@@ -2114,7 +2286,7 @@ class KISSAgent(Base):
 
         return function_name, function_response
 
-    def _execute_redirected(self, redirect: ToolRedirect) -> str:
+    def _execute_redirected(self, redirect: ToolRedirect, turn: NativeTurn | None) -> str:
         """Make the call a tool raised *redirect* for, as if the model had issued it.
 
         The call goes through :meth:`_guarded_execute_tool`, so the
@@ -2136,9 +2308,16 @@ class KISSAgent(Base):
         the redirected call and after each nested call, so the chain
         ends as interrupted instead of running on.
 
+        The calls of a natively served redirecting call belong to its
+        *turn*: they settle only while it is open, and so is the count
+        restored and the verdict kept (:meth:`_end_redirect`) -- the
+        agent's counters are the next run's once the turn is closed.
+
         Args:
             redirect: The call to make, the note its result opens with
                 and the follow-up call, if any.
+            turn: The native turn the redirecting call belongs to;
+                ``None`` for a call of the agent loop.
 
         Returns:
             The note, a newline, and the redirected call's result (the
@@ -2151,9 +2330,10 @@ class KISSAgent(Base):
         """
         counted = self.tool_calls_made
         call = {"name": redirect.name, "arguments": redirect.arguments}
+        ended: Verdict | None = None
         try:
             raise_if_interrupted()
-            _, response, blocked = self._guarded_execute_tool(call)
+            _, response, blocked = self._guarded_execute_tool(call, turn)
             raise_if_interrupted()
             result = f"{redirect.note}\n{response}"
             if redirect.followup is not None:
@@ -2163,15 +2343,41 @@ class KISSAgent(Base):
                     ("Error", "Failed to call", USER_INTERRUPTED_MESSAGE)
                 ):
                     _, after, blocked = self._guarded_execute_tool(
-                        {"name": name, "arguments": arguments}
+                        {"name": name, "arguments": arguments}, turn
                     )
                     raise_if_interrupted()
                 result += "\n" + followup_result(name, arguments, after, redirect.name)
             if blocked is not None and blocked.ends_run:
-                self._redirect_ended = blocked
+                ended = blocked
         finally:
-            self.tool_calls_made = counted
+            if turn is None:
+                self._end_redirect(turn, counted, ended)
+            else:
+                locked_call(turn.lock, self._end_redirect, turn, counted, ended)
         return result
+
+    def _end_redirect(self, turn: NativeTurn | None, counted: int, ended: Verdict | None) -> None:
+        """Close the books of a :class:`ToolRedirect`'s calls, unless their *turn* has closed.
+
+        Only the redirecting call counts: :attr:`tool_calls_made` goes
+        back to *counted*, its value before the redirected calls.  A
+        run-ending verdict *ended* on one of them is kept on
+        :attr:`_redirect_ended` for the redirecting call's settlement.
+        Called under ``turn.lock`` for a natively served call, and not
+        applied once the turn is closed: the counters then belong to
+        the run the agent was reset for.
+
+        Args:
+            turn: The native turn the redirecting call belongs to;
+                ``None`` for a call of the agent loop.
+            counted: :attr:`tool_calls_made` before the redirected calls.
+            ended: The run-ending verdict a redirected call got, if any.
+        """
+        if turn is not None and turn.closed.is_set():
+            return
+        self.tool_calls_made = counted
+        if ended is not None:
+            self._redirect_ended = ended
 
     def _check_limits(self) -> None:
         """Check budget and context limits, raise KISSError if exceeded.

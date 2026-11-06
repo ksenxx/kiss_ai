@@ -118,7 +118,6 @@ function lastCssRule(css, selector) {
 }
 
 module.exports = {
-  inlineDesignTokens,
   installTokenisedCss,
   cssRule,
   lastCssRule,

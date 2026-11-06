@@ -198,8 +198,12 @@ function runTests() {
         'the click opens a tab before the URL is known',
       );
       assert.strictEqual(tabs[0].navigatedTo, 'about:blank');
+      // The click carries a token of its own (A18-3) that the daemon
+      // echoes on the click's answers.
+      const attempt = sent(posted, 'signinLogin')[0].attempt;
+      assert.ok(attempt, 'the click is sent with an attempt token');
       assert.deepStrictEqual(sent(posted, 'signinLogin'), [
-        {type: 'signinLogin', provider: 'google'},
+        {type: 'signinLogin', provider: 'google', attempt},
       ]);
       assert.ok(note(win).textContent.includes('Starting the sign-in'));
 
@@ -243,6 +247,7 @@ function runTests() {
         {
           type: 'signinPaste',
           text: 'http://127.0.0.1:5555/?code=abc&state=xyz',
+          attempt,
         },
       ]);
       assert.ok(note(win).textContent.includes('Finishing the sign-in'));
@@ -301,10 +306,9 @@ function runTests() {
       send(win, SIGNIN);
       assert.strictEqual(buttons(win).length, 2, 'buttons');
       buttons(win)[1].click();
-      assert.deepStrictEqual(sent(posted, 'signinLogin').pop(), {
-        type: 'signinLogin',
-        provider: 'apple',
-      });
+      const apple = sent(posted, 'signinLogin').pop();
+      assert.strictEqual(apple.provider, 'apple');
+      assert.ok(apple.attempt, 'the click carries an attempt token');
       send(win, {
         type: 'signinError',
         provider: 'apple',
@@ -358,10 +362,12 @@ function runTests() {
       assert.ok(!tabs[2].closed, 'the navigated tab is not touched');
       buttons(win)[1].click();
       assert.strictEqual(tabs.length, 4, 'the retry opens a fresh tab');
-      assert.deepStrictEqual(sent(posted, 'signinLogin').pop(), {
-        type: 'signinLogin',
-        provider: 'apple',
-      });
+      assert.strictEqual(sent(posted, 'signinLogin').pop().provider, 'apple');
+      assert.strictEqual(
+        new Set(sent(posted, 'signinLogin').map(m => m.attempt)).size,
+        sent(posted, 'signinLogin').length,
+        'every click has a token of its own',
+      );
 
       // window.open blocked: the note's link is the way to the page.
       win.open = () => null;
@@ -385,10 +391,7 @@ function runTests() {
         throw new Error('blocked');
       };
       buttons(win)[1].click();
-      assert.deepStrictEqual(sent(posted, 'signinLogin').pop(), {
-        type: 'signinLogin',
-        provider: 'apple',
-      });
+      assert.strictEqual(sent(posted, 'signinLogin').pop().provider, 'apple');
     } finally {
       win.close();
     }
@@ -450,6 +453,77 @@ function runTests() {
       // The live attempt's own failure is still reported.
       send(win, {type: 'signinError', provider: 'google', error: 'denied'});
       assert.strictEqual(note(win).textContent, 'Sign-in failed: denied');
+    } finally {
+      win.close();
+    }
+  }
+
+  // 2026-11-05 A18-3: a retry of the SAME provider.  The first click's
+  // failure, already on its way when the user clicked again, carries the
+  // first click's attempt token: it must not close the retry's blank tab
+  // or make the retry's page, when it arrives, go unshown.  The retry's
+  // own answers (its token) are acted on; a failure echoing no token (an
+  // older daemon, a paste's failure) still goes by the provider.
+  {
+    const {win, posted, tabs} = signinPage();
+    try {
+      send(win, SIGNIN);
+      buttons(win)[0].click();
+      buttons(win)[0].click();
+      const [first, retry] = sent(posted, 'signinLogin');
+      assert.strictEqual(first.provider, 'google');
+      assert.strictEqual(retry.provider, 'google');
+      assert.ok(first.attempt && retry.attempt, 'both clicks carry a token');
+      assert.notStrictEqual(first.attempt, retry.attempt, 'distinct tokens');
+      assert.ok(tabs[0].closed, "the first click's blank tab is closed");
+      assert.ok(!tabs[1].closed);
+
+      send(win, {
+        type: 'signinError',
+        provider: 'google',
+        attempt: first.attempt,
+        error: 'stale',
+      });
+      assert.ok(!tabs[1].closed, "the retry's tab stays open");
+      assert.ok(
+        !note(win).classList.contains('signin-modal-error'),
+        'the replaced attempt has no failure to report',
+      );
+      send(win, {
+        type: 'signinUrl',
+        provider: 'google',
+        attempt: first.attempt,
+        url: 'https://accounts.example/stale',
+      });
+      assert.strictEqual(tabs[1].navigatedTo, 'about:blank', 'stale URL ignored');
+      assert.strictEqual(pasteRow(win).style.display, 'none');
+
+      send(win, {
+        type: 'signinUrl',
+        provider: 'google',
+        attempt: retry.attempt,
+        url: 'https://accounts.example/retry',
+      });
+      assert.strictEqual(tabs[1].navigatedTo, 'https://accounts.example/retry');
+      assert.strictEqual(pasteRow(win).style.display, '', 'paste row shown');
+      const input = win.document.getElementById('signin-modal-paste-input');
+      input.value = 'ABCD-1234';
+      win.document.getElementById('signin-modal-paste-btn').click();
+      assert.deepStrictEqual(sent(posted, 'signinPaste'), [
+        {type: 'signinPaste', text: 'ABCD-1234', attempt: retry.attempt},
+      ]);
+      // The paste's failure names no provider and echoes the retry's token.
+      send(win, {type: 'signinError', attempt: retry.attempt, error: 'denied'});
+      assert.strictEqual(note(win).textContent, 'Sign-in failed: denied');
+      assert.ok(!tabs[1].closed, 'the navigated tab is not touched');
+
+      // An older daemon echoes no token: the provider decides, as before.
+      buttons(win)[0].click();
+      send(win, {type: 'signinError', provider: 'apple', error: 'other'});
+      assert.ok(!note(win).classList.contains('signin-modal-error'));
+      send(win, {type: 'signinError', provider: 'google', error: 'mine'});
+      assert.strictEqual(note(win).textContent, 'Sign-in failed: mine');
+      assert.ok(tabs[2].closed, 'the blank tab of the failed click is closed');
     } finally {
       win.close();
     }

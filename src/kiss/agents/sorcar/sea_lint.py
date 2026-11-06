@@ -123,6 +123,7 @@ from kiss.agents.sorcar.sea_settings import (
     declares_hidden,
     settings_dicts,
 )
+from kiss.core.utils import atomic_write_text
 
 REMOVED_GETTERS = (
     "model",
@@ -213,8 +214,9 @@ def lint_all(
         registered: With ``paths=None``, also check the user's
             registered scripts.
         fix: Rewrite the fixable findings first (:func:`fix_sea`; each
-            rewrite is printed as ``fixed <path>:<line>: <note>``) and
-            report what is left.
+            rewrite is printed as ``fixed <path>:<line>: <note>``, a
+            script the codemod cannot rewrite as ``not fixed <path>:
+            <why>``) and report what is left.
 
     Returns:
         The findings, in path order.
@@ -230,6 +232,9 @@ def lint_all(
                 fixed = fix_sea(script)
             except (OSError, *PARSE_ERRORS):
                 continue  # lint_sea reports it below as ``broken: cannot parse``
+            except SeaError as exc:
+                print(f"not fixed {exc}")  # the codemod's own failure; the script is unchanged
+                continue
             for line in fixed:
                 print(f"fixed {line}")
     findings: list[Finding] = []
@@ -567,10 +572,10 @@ def _code_strings(tree: ast.Module) -> list[ast.Constant]:
 def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     """Return the string constants naming settings keys inside the SEA's ``settings`` method.
 
-    The keys of every dict literal in the function except dicts that
-    are the *value* of another dict's key (``model_config``'s contents
-    are not settings), plus the string elements of a ``locked`` list,
-    which name keys too.
+    The keys of every settings dict of the method (:func:`settings_dicts`:
+    a dict the return value is built from, not ``model_config``'s
+    contents nor a dict the method only reads), plus the string
+    elements of a ``locked`` list, which name keys too.
     """
     keys: list[ast.Constant] = []
     for sub in settings_dicts(tree):
@@ -934,11 +939,20 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
 def fix_sea(path: Path) -> list[str]:
     """Rewrite the fixable findings of the script at *path* in place (:func:`_rewrites`).
 
+    The rewritten script replaces the file atomically
+    (:func:`kiss.core.utils.atomic_write_text`), so a daemon loading
+    the script meanwhile reads the old or the new text, never a
+    truncated one.
+
     Args:
         path: The ``*_sea.py`` file.
 
     Returns:
         One line per rewrite (empty when nothing changed).
+
+    Raises:
+        SeaError: The rewritten text no longer parses (a failure of the
+            codemod itself, not of the script); the file is left as it was.
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
@@ -952,8 +966,13 @@ def fix_sea(path: Path) -> list[str]:
         changed.append(f"{path}:{lineno}: {note}")
     if changed:
         rewritten = data.decode("utf-8")
-        ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses
-        path.write_text(rewritten, encoding="utf-8")
+        try:
+            ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses
+        except PARSE_ERRORS as exc:
+            raise SeaError(
+                f"{path}: the rewrite no longer parses and was not saved: {exc}"
+            ) from exc
+        atomic_write_text(path, rewritten)
     return list(reversed(changed))
 
 

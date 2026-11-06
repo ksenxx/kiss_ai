@@ -451,6 +451,9 @@ class RemoteTabs:
         # the tabs of a long session leave nothing behind.
         self._connecting: dict[str, int] = {}
         self._unbinds: dict[str, int] = {}
+        # Set by :meth:`close_all`: a bind still connecting then stands
+        # down instead of registering a stream the shutdown never closes.
+        self._closing = False
         self._lock = threading.Lock()
 
     def machine_of(self, tab_id: str) -> str:
@@ -572,6 +575,8 @@ class RemoteTabs:
             )
             return None
         with self._lock:
+            if self._closing:
+                return None
             tab = self._tabs.get(tab_id)
             displaced: RemoteTab | None = None
             orphans: list[str] = []
@@ -601,7 +606,7 @@ class RemoteTabs:
                 same: RemoteTab | None = None  # a bind to the same machine that won
                 lost = False
                 with self._lock:
-                    stood_down = self._unbinds.get(tab_id, 0) != unbinds
+                    stood_down = self._closing or self._unbinds.get(tab_id, 0) != unbinds
                     winner = self._tabs.get(tab_id)
                     if winner is not None and winner.machine == machine:
                         same = winner
@@ -1145,8 +1150,9 @@ class RemoteTabs:
             self._end_stream(tab, tab_ids)
 
     def close_all(self) -> None:
-        """Close every stream (daemon shutdown)."""
+        """Close every stream (daemon shutdown); a bind still connecting stands down."""
         with self._lock:
+            self._closing = True
             tabs = list({id(t): t for t in self._tabs.values()}.values())
             for tab in tabs:
                 self._retire(tab)

@@ -36,7 +36,13 @@ from kiss.core.user_config import (
     save_api_key,
     save_config,
 )
-from kiss.tests.conftest import AMBIENT_AWS_ENV_VARS, HOT_READER_PAUSE, IS_WINDOWS, posix_only
+from kiss.tests.conftest import (
+    AMBIENT_AWS_ENV_VARS,
+    HOT_READER_PAUSE,
+    IS_WINDOWS,
+    is_root,
+    posix_only,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -292,7 +298,40 @@ class TestApiKeySave:
         assert "export ANTHROPIC_API_KEY=ant-key" in content
         rc = Path.home() / ".config" / "fish" / "config.fish"
         assert not rc.exists()
+        # No RC will be written, so no lock file (nor its directory) is made for it.
+        assert not (Path.home() / ".config").exists()
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
+
+    @posix_only("an unreadable RC needs chmod-based permission denial")
+    def test_a_failed_rc_scrub_leaves_the_store_and_the_process_agreeing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save whose RC scrub fails (the error reaches the caller) changes
+        nothing: the store, the process environment and the config singleton
+        all keep the old key.  Editing the store first left it holding the new
+        key while this daemon kept using, and showing, the old one until a
+        restart loaded the new."""
+        if is_root():
+            pytest.skip("root reads a mode-000 file")
+        from kiss.core import config as config_module
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        env_file = api_keys_env_path()
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("export OPENAI_API_KEY=old\n")
+        load_api_keys()
+        assert os.environ["OPENAI_API_KEY"] == "old"
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export OPENAI_API_KEY=old\n")
+        rc.chmod(0)
+        try:
+            with pytest.raises(PermissionError):
+                save_api_key("OPENAI_API_KEY", "new")
+        finally:
+            rc.chmod(0o600)
+        assert env_file.read_text() == "export OPENAI_API_KEY=old\n"
+        assert os.environ["OPENAI_API_KEY"] == "old"
+        assert config_module.DEFAULT_CONFIG.OPENAI_API_KEY == "old"
 
     def test_replace_existing_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A key already in the canonical store is replaced in place."""
@@ -879,22 +918,49 @@ class TestLoadApiKeys:
         load_api_keys()
         assert os.environ.get("GEMINI_API_KEY") is None
 
+    def test_a_later_rc_assignment_wins_even_when_it_cannot_be_imported(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``export KEY=old`` followed by ``export KEY=""`` leaves the key unset in
+        a shell, so the migration must not resurrect ``old`` into the store; the
+        same holds for a later assignment that needs the shell to expand it."""
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
+        rc.write_text(
+            'export OPENAI_API_KEY=old\nexport OPENAI_API_KEY=""\n'
+            'export GEMINI_API_KEY=stale\nG=later\nexport GEMINI_API_KEY="$G-key"\n'
+        )
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        load_api_keys()
+        store = api_keys_env_path().read_text()
+        assert "old" not in store and os.environ.get("OPENAI_API_KEY") is None
+        assert "stale" not in store and os.environ.get("GEMINI_API_KEY") == "later-key"
+
     def test_load_parses_quoting_edge_cases(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unbalanced quotes, empty values, and multi-word raws load honestly.
 
-        A line ``shlex`` cannot parse (unbalanced quote) keeps its raw
-        text; a multi-word remainder loads its first word (what a shell
-        assigns for ``KEY=two words``); a bare ``KEY=`` loads as empty.
-        None of these may crash the loader or corrupt the rest of the
-        file's imports.
+        A line with an unbalanced quote keeps its raw text; a multi-word
+        remainder loads its first word (what a shell assigns for
+        ``KEY=two words``); a bare ``KEY=`` loads as empty, and so does
+        ``KEY= # removed`` (the value ends at the blank, the rest is a
+        comment); ``\\$`` and ``\\``` inside double quotes lose their
+        backslash as in a shell, ``#`` inside a word is no comment, and
+        neither is one opening the value (``KEY=#literal`` continues the
+        assignment's word: the shell assigns ``#literal``).  None of
+        these may crash the loader or corrupt the rest of the file's
+        imports.
         """
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        for name in (
-            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
-            "KISS_TEST_WORDS", "KISS_TEST_OK",
-        ):
+        names = (
+            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY", "KISS_TEST_WORDS", "KISS_TEST_OK",
+            "KISS_TEST_BLANK", "KISS_TEST_ESCAPED", "KISS_TEST_HASH", "KISS_TEST_NOTE",
+            "KISS_TEST_LEADING_HASH",
+        )
+        for name in names:
             monkeypatch.delenv(name, raising=False)
         env_file = api_keys_env_path()
         env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -902,18 +968,31 @@ class TestLoadApiKeys:
             "export KISS_TEST_UNBALANCED=\"oops\n"
             "export KISS_TEST_EMPTY=\n"
             "export KISS_TEST_WORDS=two words\n"
-            "export KISS_TEST_OK='fine'\n",
+            "export KISS_TEST_OK='fine'\n"
+            "export KISS_TEST_BLANK= # removed\n"
+            'export KISS_TEST_ESCAPED="sk-\\$lit\\`eral\\n"\n'
+            "export KISS_TEST_HASH=abc#def\n"
+            "export KISS_TEST_NOTE=abc # note\n"
+            "export KISS_TEST_LEADING_HASH=#literal # note\n",
         )
         load_api_keys()
         assert os.environ.get("KISS_TEST_UNBALANCED") == '"oops'
         assert os.environ.get("KISS_TEST_EMPTY") == ""
         assert os.environ.get("KISS_TEST_WORDS") == "two"
         assert os.environ.get("KISS_TEST_OK") == "fine"
-        for name in (
-            "KISS_TEST_UNBALANCED", "KISS_TEST_EMPTY",
-            "KISS_TEST_WORDS", "KISS_TEST_OK",
-        ):
+        assert os.environ.get("KISS_TEST_BLANK") == ""
+        assert os.environ.get("KISS_TEST_ESCAPED") == "sk-$lit`eral\\n"
+        assert os.environ.get("KISS_TEST_HASH") == "abc#def"
+        assert os.environ.get("KISS_TEST_NOTE") == "abc"
+        assert os.environ.get("KISS_TEST_LEADING_HASH") == "#literal"
+        for name in names:
             del os.environ[name]
+        # In fish the value is a word of its own, so a ``#`` opening it is a comment.
+        assert user_config._scan_rc_text_for_keys(
+            "set -gx OPENAI_API_KEY #literal\nset -gx GEMINI_API_KEY g#1\n",
+            "fish",
+            {"OPENAI_API_KEY", "GEMINI_API_KEY"},
+        ) == {"GEMINI_API_KEY": "g#1"}
 
     def test_save_collapses_duplicate_store_lines(
         self, monkeypatch: pytest.MonkeyPatch,

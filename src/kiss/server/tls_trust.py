@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import glob
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -152,11 +153,12 @@ def install_into_windows_store(ca_cert_path: Path) -> list[str]:
 
 def linux_system_store_hint(ca_cert_path: Path) -> list[str]:
     """Return the (root-only) commands that trust the CA system-wide on Linux."""
+    cert = shlex.quote(str(ca_cert_path))
     return [
         "Browsers on Linux do not read the system store; for curl/python run one of:",
-        f"  sudo cp {ca_cert_path} /usr/local/share/ca-certificates/kiss-sorcar-local-ca.crt"
+        f"  sudo cp {cert} /usr/local/share/ca-certificates/kiss-sorcar-local-ca.crt"
         " && sudo update-ca-certificates",
-        f"  sudo cp {ca_cert_path} /etc/pki/ca-trust/source/anchors/kiss-sorcar-local-ca.pem"
+        f"  sudo cp {cert} /etc/pki/ca-trust/source/anchors/kiss-sorcar-local-ca.pem"
         " && sudo update-ca-trust extract",
     ]
 

@@ -490,10 +490,13 @@ class _MergeFlowMixin:
                 # output and fully finished between the empty answer
                 # above and the claim.  With the claim held, task
                 # admission refuses new runs on this tab, so this
-                # answer cannot go stale before it is acted on.
-                listing = self._list_pending(wt_agent)
-                changed = _flatten_changed(listing, wt_agent._wt)
-                unreadable = _unreadable_worktrees(listing)
+                # answer cannot go stale before it is acted on.  A
+                # caller that already held the claim (the resume's
+                # ``_emit_pending_worktree``) probed under it above.
+                if prev_thread is not threading.current_thread():
+                    listing = self._list_pending(wt_agent)
+                    changed = _flatten_changed(listing, wt_agent._wt)
+                    unreadable = _unreadable_worktrees(listing)
                 if not changed and not unreadable:
                     # Automatic path: rescue git-ignored task output
                     # the changed-files probe cannot see (see
@@ -724,7 +727,13 @@ class _MergeFlowMixin:
                 if staged is None:
                     return None
                 files.extend(staged)
-            files.extend(_capture_untracked(str(wt.wt_dir)))
+            # A failed listing (a timeout walking a huge or hung tree)
+            # is unknown, not "no new files": an empty answer here
+            # discards the worktree.
+            untracked = _git_paths(str(wt.wt_dir), "ls-files", "--others", "--exclude-standard")
+            if untracked is None:
+                return None
+            files.extend(untracked)
             return sorted(set(files))
         base_ref = self._resolve_base_ref(
             str(wt.repo_root), wt.baseline_commit, wt.original_branch,

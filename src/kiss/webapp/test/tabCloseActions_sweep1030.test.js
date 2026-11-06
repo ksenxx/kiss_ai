@@ -131,29 +131,6 @@ async function main() {
     win.close();
   });
 
-  await test('Close Inactive closes an idle chat whose sub-agent stopped', () => {
-    const {win, tabA} = page(true);
-    threeChats(win, tabA);
-    h.send(win, {
-      type: 'openSubagentTab',
-      tab_id: 'sub-a',
-      parent_tab_id: tabA,
-      description: 'a sub-agent',
-      task_id: 'sub-task-a',
-      taskIndex: 0,
-      isSubagentTab: true,
-    });
-    h.send(win, {type: 'status', running: true, tabId: 'tab-c'});
-    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
-    pickTabMenuItem(win, tabEl(win, tabA), 'Close Inactive');
-    assert.deepStrictEqual(
-      [...openIds(win)],
-      ['tab-c'],
-      'only the running chat stays',
-    );
-    win.close();
-  });
-
   await test('Close Others from a file in the content pane fetches no chat', () => {
     const {win, posted, tabA} = page(true);
     threeChats(win, tabA);

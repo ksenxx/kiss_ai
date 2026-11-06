@@ -21,6 +21,7 @@ const {
   click,
   typeInto: input,
 } = require('./simplify2_harness');
+const {key} = require('./ui_antipattern_harness');
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -31,17 +32,6 @@ function texts(doc) {
     const t = el.querySelector('.sidebar-item-text');
     return t ? t.textContent : el.querySelector('.tricks-edit-input').value;
   });
-}
-
-function key(win, el, keyName, init) {
-  el.dispatchEvent(
-    new win.KeyboardEvent('keydown', {
-      key: keyName,
-      bubbles: true,
-      cancelable: true,
-      ...init,
-    }),
-  );
 }
 
 function editor(doc, row) {
@@ -514,6 +504,68 @@ function runPanel() {
     1,
   );
   assert.strictEqual(editsPosted(posted).length, 7, 'closing posts no edit');
+
+  // --- another window deleting a PRECEDING promptlet leaves the edited
+  // one in place: the editor follows it to its new row with the draft,
+  // and the save names the promptlet, not the row it had
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B', 'Bundled alpha'],
+    userCount: 2,
+  });
+  click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
+  ta = editor(doc, rows(doc)[1]);
+  input(win, ta, 'UNSAVED B\nsecond line');
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine B', 'Bundled alpha'],
+    userCount: 1,
+  });
+  assert.strictEqual(
+    editor(doc, rows(doc)[0]),
+    ta,
+    'the editor follows its promptlet to its new row',
+  );
+  assert.strictEqual(ta.value, 'UNSAVED B\nsecond line', 'the draft survives');
+  assert.deepStrictEqual(texts(doc), ['UNSAVED B\nsecond line', 'Bundled alpha']);
+  key(win, ta, 'Enter');
+  assert.deepStrictEqual(editsPosted(posted).slice(7), [
+    {type: 'editTrick', text: 'Mine B', newText: 'UNSAVED B\nsecond line'},
+  ]);
+  assert.deepStrictEqual(texts(doc), ['UNSAVED B\nsecond line', 'Bundled alpha']);
+  // The daemon's answer settles the edit.
+  send(win, {
+    type: 'tricksData',
+    tricks: ['UNSAVED B\nsecond line', 'Bundled alpha'],
+    userCount: 1,
+  });
+  assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
+
+  // --- another window changing an UNRELATED promptlet repaints the
+  // list: the editor keeps the keyboard focus and the caret
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B', 'Bundled alpha'],
+    userCount: 2,
+  });
+  click(win, rows(doc)[0].querySelector('.sidebar-item-edit'));
+  ta = editor(doc, rows(doc)[0]);
+  input(win, ta, 'Mine A draft');
+  ta.focus();
+  ta.setSelectionRange(4, 4);
+  assert.strictEqual(doc.activeElement, ta, 'setup: the editor has focus');
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Mine A', 'Mine B2', 'Bundled alpha'],
+    userCount: 2,
+  });
+  assert.strictEqual(editor(doc, rows(doc)[0]), ta, 'the editor is kept');
+  assert.strictEqual(ta.value, 'Mine A draft');
+  assert.strictEqual(doc.activeElement, ta, 'the editor keeps the focus');
+  assert.strictEqual(ta.selectionStart, 4, 'and the caret');
+  assert.strictEqual(ta.selectionEnd, 4);
+  key(win, ta, 'Escape');
+  assert.strictEqual(editsPosted(posted).length, 8, 'nothing more posted');
 
   // --- a filtered list edits the right promptlet (index into the full list)
   send(win, {

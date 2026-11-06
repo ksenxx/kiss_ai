@@ -117,7 +117,9 @@ class SettingsWriteFailureTest(TwoClientHarness):
         a.send({"type": "saveConfig", "config": {"max_budget": 7.0}, "apiKeys": {}})
         reply = self._wait_reply(a, before)
         self.assertNotEqual(reply["config"]["max_budget"], 7.0)
-        self.assertIn("Could not save the settings", self.wait_event(a, "error")["text"])
+        error = self.wait_event(a, "error")
+        self.assertIn("Could not save the settings", error["text"])
+        self.assertEqual(error["command"], "saveConfig")
 
     @unittest.skipUnless(
         thread_start_can_be_starved(),

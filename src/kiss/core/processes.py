@@ -15,6 +15,7 @@ project goes through this module.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import selectors
@@ -381,8 +382,13 @@ def _group_exited(proc: subprocess.Popen[Any], grace: float) -> bool:
     report the group empty.  Once it is reaped, POSIX keeps its pid
     reserved as the group id for as long as any member lives, so the
     probe names this group and nothing else; a ``ProcessLookupError``
-    means every member is gone.  On Windows the first round terminated
-    the whole Job Object, so the leader's exit is the group's.
+    means every member is gone.  So does a process that now owns the
+    number as its pid: the kernel hands it out only once the last
+    member is gone, and from then on a group of that id is a stranger's
+    (a later session leader's), which the probe must not keep waiting
+    for and the caller's escalation must not kill.  On Windows the
+    first round terminated the whole Job Object, so the leader's exit
+    is the group's.
     """
     deadline = time.monotonic() + grace
     try:
@@ -392,6 +398,8 @@ def _group_exited(proc: subprocess.Popen[Any], grace: float) -> bool:
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         return True
     while True:
+        if pid_alive(proc.pid):  # pragma: no cover — needs the pid recycled
+            return True
         try:
             os.killpg(proc.pid, 0)
         except ProcessLookupError:
@@ -551,11 +559,94 @@ def exited_unreaped(proc: subprocess.Popen[Any]) -> bool:
     Returns:
         True once *proc* has exited, reaped or not.
     """
+    return exit_status_unreaped(proc) is not None
+
+
+def exit_status_unreaped(proc: subprocess.Popen[Any]) -> int | None:
+    """Return *proc*'s exit status without reaping it, or ``None`` while it runs.
+
+    :func:`exited_unreaped` with the status: what ``Popen.poll`` would
+    report (negative for a death by signal), for a caller that must act
+    on the exit but keep the leader a zombie through its last group
+    signal (the CLI supervisor of :mod:`kiss.core.models.model`).  A
+    child already reaped reports its ``returncode``.
+
+    Args:
+        proc: A child started with :func:`popen_process_group`.
+
+    Returns:
+        The exit status, or ``None`` while *proc* is running.
+    """
     if proc.returncode is not None:
-        return True
+        return proc.returncode
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return proc.poll() is not None
-    return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        return proc.poll()
+    try:
+        info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:  # pragma: no cover — reaped by another thread meanwhile
+        return proc.returncode
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+
+
+def signal_unreaped_child(pid: int, sig: int) -> bool:
+    """Send *sig* to this process's child *pid* unless it has exited or been reaped.
+
+    A pid is signalled only while it is this process's unreaped child
+    (``waitid`` without reaping, as :func:`exit_status_unreaped` asks),
+    so a pid that another thread's wait has reaped and the kernel has
+    handed to a stranger is left alone.  Where the kernel has pidfds
+    (Linux) the signal goes through one opened before the check: it
+    names that process and no later holder of the pid, which closes the
+    window between the check and the signal that ``os.kill`` leaves
+    open (and ``Popen.send_signal`` accepts).  The bare pid is signalled
+    only where pidfds do not exist (no ``os.pidfd_open``, a kernel or
+    seccomp profile without the call); a pidfd that cannot be opened
+    for another reason (no descriptor left) raises instead.  POSIX only.
+
+    Args:
+        pid: A child of this process.
+        sig: The signal to send.
+
+    Returns:
+        True while *pid* is this process's unreaped child (signalled
+        now, or exited and waiting to be reaped), False once reaped.
+
+    Raises:
+        OSError: The pidfd could not be opened although the kernel has
+            pidfds (``EMFILE`` and the like); nothing was signalled.
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd = -1
+    if pidfd_open is not None:
+        try:
+            pidfd = pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                raise
+            # pragma: no cover — a kernel or seccomp profile without pidfd_open
+            logger.debug("pidfd_open(%d): %s; signalling the pid instead", pid, exc.strerror)
+    try:
+        try:
+            exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        if exited is not None:
+            return True
+        try:
+            if pidfd >= 0:
+                signal.pidfd_send_signal(pidfd, sig)
+            else:
+                os.kill(pid, sig)
+        except ProcessLookupError:  # pragma: no cover — reaped between the check and the signal
+            return False
+        return True
+    finally:
+        if pidfd >= 0:
+            os.close(pidfd)
 
 
 def _wait_exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
@@ -567,25 +658,36 @@ def _wait_exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
     return True
 
 
-def _drain_stderr(stream: IO[bytes], out: CappedOutput, keep: int, give_up: float) -> None:
-    """Read *stream* (stderr) to the end or *give_up*, publishing its first *keep* bytes.
+def _drain_stderr(
+    stream: IO[bytes], out: CappedOutput, keep: int, give_up: float, stop: threading.Event,
+) -> None:
+    """Read *stream* (stderr) to the end, *give_up* or *stop*, publishing its first *keep* bytes.
 
     ``out.stderr`` is updated after every chunk (an atomic reference
     store), so a caller that stops waiting for this thread while a
     stray group member still holds the pipe gets the stderr read so far.
+    *stop* is that caller giving the pipe up: the read ends within a
+    poll slice, so the thread neither keeps the pipe open nor rewrites
+    ``out.stderr`` after the result was returned.  The pipe is closed
+    here, by its only reader.
     """
     kept = b""
-    while True:
-        chunk = _read_some(stream, 65536, give_up)
-        if not chunk:
-            break
-        if len(kept) < keep:
-            kept = (kept + chunk)[:keep]
-            out.stderr = kept.decode("utf-8", "replace")
+    try:
+        while True:
+            chunk = _read_some(stream, 65536, give_up, stop)
+            if not chunk:
+                break
+            if len(kept) < keep:
+                kept = (kept + chunk)[:keep]
+                out.stderr = kept.decode("utf-8", "replace")
+    finally:
+        stream.close()
 
 
-def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
-    """Read up to *limit* bytes of a child's pipe; ``b""`` at EOF or past *give_up*.
+def _read_some(
+    stream: IO[bytes], limit: int, give_up: float, stop: threading.Event | None = None,
+) -> bytes:
+    """Read up to *limit* bytes of a child's pipe; ``b""`` at EOF, past *give_up* or on *stop*.
 
     A plain ``read`` would stay blocked for as long as ANY process
     holds the pipe's write end: a hook git ran that started a daemon
@@ -613,10 +715,13 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
         limit: The most bytes to return.
         give_up: ``time.monotonic()`` deadline, :data:`PIPE_GIVE_UP_SECONDS`
             past the watchdog's timeout.
+        stop: Set by the caller that no longer wants the pipe read (the
+            stderr drain, once the command's result was returned);
+            checked once per slice.
 
     Returns:
-        The bytes read, possibly fewer than *limit*; ``b""`` at EOF or
-        once *give_up* has passed.
+        The bytes read, possibly fewer than *limit*; ``b""`` at EOF,
+        once *give_up* has passed, or once *stop* is set.
     """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         return stream.read(limit)
@@ -625,6 +730,8 @@ def _read_some(stream: IO[bytes], limit: int, give_up: float) -> bytes:
         with selectors.DefaultSelector() as ready:
             ready.register(stream, selectors.EVENT_READ)
             while remaining > 0:
+                if stop is not None and stop.is_set():
+                    return b""
                 if ready.select(min(remaining, _STOP_POLL_SECONDS)):
                     return os.read(stream.fileno(), limit)
                 remaining = give_up - time.monotonic()
@@ -688,17 +795,23 @@ def run_capped(
     deadline = time.monotonic() + timeout
     give_up = deadline + PIPE_GIVE_UP_SECONDS
     err_thread = None
-    if proc.stderr is not None:
-        err_thread = threading.Thread(
-            target=_drain_stderr, args=(proc.stderr, out, keep_stderr, give_up), daemon=True,
-        )
-        err_thread.start()
+    drain_stop = threading.Event()
     timer = threading.Timer(timeout, _capped_timeout, args=(proc, out))
     timer.daemon = True
-    timer.start()
     chunks: list[bytes] = []
     size = 0
     try:
+        # The thread starts block on the new thread's bootstrap, so a
+        # Stop is likely delivered right there: inside the ``try``,
+        # whose handler kills and reaps the child, not before it.
+        if proc.stderr is not None:
+            err_thread = threading.Thread(
+                target=_drain_stderr,
+                args=(proc.stderr, out, keep_stderr, give_up, drain_stop),
+                daemon=True,
+            )
+            err_thread.start()
+        timer.start()
         while size < limit:
             chunk = _read_some(stdout, min(65536, limit - size), give_up)
             if not chunk:
@@ -734,17 +847,23 @@ def run_capped(
                 # holds the stderr pipe: it has nothing left to say.
                 kill_process_tree(proc)
                 err_thread.join(timeout=PIPE_GIVE_UP_SECONDS)
+                # A holder outside the group (its own session) survived
+                # the kill: stop reading rather than leave the thread,
+                # the pipe and ``out.stderr`` to it until ``give_up``.
+                drain_stop.set()
+                err_thread.join(timeout=1)
     except BaseException:
         # A wait cut short (a Stop landing as ``KeyboardInterrupt``, an
         # injected exception) must not leave the child running with
         # its stdout open; the reap is bounded as in
         # :func:`run_process_group`.  Stderr is left to its drain
-        # thread, which sees EOF once the group is dead (closing the
-        # pipe under its read would only turn that into an error).  The
-        # leader is still unreaped here, so the group kill is safe; the
-        # timer must not kill again after the reap below.
+        # thread, told to stop (closing the pipe under its read would
+        # only turn that into an error).  The leader is still unreaped
+        # here, so the group kill is safe; the timer must not kill
+        # again after the reap below.
         locked_call(out._guard, _mark_finished, out)
         kill_process_tree(proc)
+        drain_stop.set()
         stdout.close()
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_REAP_GRACE_SECONDS)

@@ -29,6 +29,7 @@ Command line: ``python -m kiss.agents.sorcar.mcp_oauth <name> [url]``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -40,6 +41,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from kiss.agents.sorcar._concurrency import locked, locked_call
 from kiss.agents.sorcar.mcp_servers import (
+    CONNECT_TIMEOUT,
     FileTokenStorage,
     MCPServerConfig,
     _enter_transport,
@@ -240,6 +242,10 @@ class MCPLoginSession:
         self._url_ready = threading.Event()
         self._finished = threading.Event()
         self._server: _RedirectServer | None = None
+        # The flow's loop and task, set by ``_login`` so ``cancel`` can
+        # cancel the flow from another thread.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task[Any] | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     @classmethod
@@ -309,12 +315,19 @@ class MCPLoginSession:
     def cancel(self) -> None:
         """Stop the session and free the redirect port at once.
 
-        The login thread exits at its next wake-up, but it may sit in a
-        network call to the MCP server for much longer; closing the
-        listener here lets a replacement session bind the port without
-        waiting for that call to return.
+        The flow's task is cancelled on its own loop, so a login sitting
+        in a network call to the MCP server (a first request the server
+        never answers) unwinds at once instead of holding the thread
+        until the transport's read timeout; closing the listener here
+        lets a replacement session bind the port without waiting even
+        for that.
         """
         self._cancelled = True
+        loop, task = self._loop, self._task
+        if loop is not None and task is not None:
+            # A finished flow has closed its loop: nothing left to cancel.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(task.cancel)
         if self._server is not None:
             self._server.server_close()
 
@@ -351,13 +364,27 @@ class MCPLoginSession:
             self._finished.set()
 
     async def _login(self) -> None:
-        """Open the transport with the OAuth provider and initialize."""
+        """Open the transport with the OAuth provider and initialize.
+
+        The whole flow is bounded by :data:`_LOGIN_TIMEOUT` (the user's
+        consent allowance, enforced again by :meth:`_await_callback`)
+        plus :data:`~kiss.agents.sorcar.mcp_servers.CONNECT_TIMEOUT`
+        for the handshake itself: the SDK's session has no read
+        timeout, so a server that accepts the transport and never
+        answers ``initialize`` would otherwise hold the thread for ever.
+        """
         from contextlib import AsyncExitStack
 
         from mcp import ClientSession
 
+        self._loop = asyncio.get_running_loop()
+        self._task = asyncio.current_task()
+        # A cancel that landed before the task was published above
+        # could not cancel it; it is honoured here instead.
+        if self._cancelled:
+            raise RuntimeError("sign-in cancelled")
         auth = build_provider(self.cfg, self._on_redirect, self._await_callback)
-        async with AsyncExitStack() as stack:
+        async with asyncio.timeout(_LOGIN_TIMEOUT + CONNECT_TIMEOUT), AsyncExitStack() as stack:
             read, write = await _enter_transport(stack, self.cfg, auth)
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()

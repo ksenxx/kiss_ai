@@ -81,6 +81,7 @@ _EXTENSION_FILES = ("manifest.json", "background.js")
 _PROBE_TIMEOUT_SECS = 1.0
 _CONFIG_LOCK_TIMEOUT_SECS = 5.0
 _REPLY_MARGIN_SECS = 1.0  # the extension's deadline runs at most this much short of ours
+_PONG_TIMEOUT_SECS = 5.0  # a pong not written by then: the extension stopped reading
 
 
 def extension_dir() -> Path:
@@ -366,16 +367,27 @@ class ChromeBridge:
         """
         if self._server is not None:
             self._server.shutdown()
-            self._server = None
+            # Forgotten under _conn_lock: a handshake still in flight (the
+            # listener's close does not end it) checks there, before
+            # publishing its connection, that this bridge still runs.
+            locked_call(self._conn_lock, self._forget_server)
         conn = self._conn  # one read: the handler thread may drop it meanwhile
         if conn is not None:
             self._drop_connection(conn, "bridge server stopped")
+            # Shut down before the close, as call()'s timeout path does: a
+            # close alone waits up to websockets' close_timeout (10 s) on a
+            # peer that stopped reading, and blocks behind a sender stuck
+            # in sendall(), which holds the protocol mutex.
+            _shutdown_socket(conn.ws.socket)
             try:
                 conn.ws.close()  # half-dead handlers keep the extension pinging otherwise
             except Exception:  # noqa: BLE001 - already gone
                 logger.debug("Exception caught", exc_info=True)
         if self._write_config:
             _remove_config_if_owned(extension_dir() / CONFIG_FILE_NAME, self._token)
+
+    def _forget_server(self) -> None:
+        self._server = None
 
     def wait_for_extension(self, timeout: float) -> bool:
         """Block until an extension is connected or *timeout* seconds pass.
@@ -473,15 +485,6 @@ class ChromeBridge:
         while we still wait, instead of our timeout dropping the connection
         and every other command in flight.
 
-        The socket write has no deadline of its own: once a peer that
-        stopped draining its socket has filled the buffers, ``sendall``
-        blocks for good.  A watchdog shuts the socket down when the
-        deadline passes mid-write (``shutdown`` takes none of websockets'
-        mutexes and fails the blocked write), and the connection is then
-        dropped like any other failed send.  The watchdog is bound to
-        *conn*'s socket and cancelled once the write returned, so it never
-        cuts a later, healthy connection.
-
         Raises:
             ChromeBridgeError: the frame could not be written; the
                 connection is dropped.
@@ -489,6 +492,24 @@ class ChromeBridge:
         budget = max(deadline - time.monotonic(), 0.0)
         timeout_ms = round((budget - min(budget / 10, _REPLY_MARGIN_SECS)) * 1000)
         frame = json.dumps({"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms})
+        self._write(conn, frame, budget, f"'{cmd}'")
+
+    def _write(self, conn: _Connection, frame: str, budget: float, what: str) -> None:
+        """Write *frame* to *conn* (its send lock held) within *budget* seconds.
+
+        The socket write has no deadline of its own: once a peer that
+        stopped draining its socket has filled the buffers, ``sendall``
+        blocks for good.  A watchdog shuts the socket down when the
+        budget passes mid-write (``shutdown`` takes none of websockets'
+        mutexes and fails the blocked write), and the connection is then
+        dropped like any other failed send.  The watchdog is bound to
+        *conn*'s socket and cancelled once the write returned, so it never
+        cuts a later, healthy connection.
+
+        Raises:
+            ChromeBridgeError: the frame could not be written (*what*
+                names it); the connection is dropped.
+        """
         cut = threading.Event()
         watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut))
         try:
@@ -499,7 +520,7 @@ class ChromeBridge:
                 self._drop_connection(conn, "send failed")
             if cut.is_set():
                 raise ChromeBridgeError(
-                    f"the extension stopped reading; '{cmd}' could not be sent within "
+                    f"the extension stopped reading; {what} could not be sent within "
                     f"the {budget:.0f}s left of its timeout"
                 ) from None
             raise ChromeBridgeError(f"lost the extension connection: {e}") from e
@@ -530,6 +551,8 @@ class ChromeBridge:
                 return
             ws.send(json.dumps({"type": "hello_ok", "proof": _proof(nonce, self._token)}))
             with self._conn_lock:
+                if self._server is None:  # stopped while this handshake was in flight
+                    return  # closed on return: the extension looks for a live bridge
                 old, self._conn = self._conn, conn
                 self._connected.set()
             if old is not None:  # a second Chrome profile connected: keep the newest
@@ -549,8 +572,11 @@ class ChromeBridge:
 
     def _on_message(self, conn: _Connection, msg: dict[str, Any]) -> None:
         if msg.get("type") == "ping":
+            # Bounded like a command's write: unbounded, a pong to a peer
+            # that stopped reading held the send lock for good, so every
+            # command failed as busy while the peer still counted as live.
             with conn.lock:
-                conn.ws.send(json.dumps({"type": "pong"}))
+                self._write(conn, json.dumps({"type": "pong"}), _PONG_TIMEOUT_SECS, "the pong")
             return
         msg_id = msg.get("id")
         if not isinstance(msg_id, int):

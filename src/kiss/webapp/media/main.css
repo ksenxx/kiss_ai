@@ -587,8 +587,6 @@ body.content-tab-open #chat-header { display: none; }
 
 .config-label textarea { resize: vertical; }
 
-.config-label input[readonly] { color: var(--dim); }
-
 .config-label select { cursor: pointer; }
 
 .config-label input:focus,
@@ -1652,16 +1650,24 @@ body.content-tab-open #send-btn { display: none !important; }
 
 /* 24x24 is the WCAG 2.2 minimum pointer target; the glyph keeps its
    size, the padding grows the hit area so a near miss does not land in
-   the input and move the caret instead of clearing. */
-#input-clear-btn {
-  position: absolute; top: 0; right: 0; z-index: var(--z-float-top);
+   the input and move the caret instead of clearing.  The same control
+   clears the input and the sidebar's search boxes; only its anchor in
+   the box differs. */
+#input-clear-btn,
+.search-clear-btn {
+  position: absolute; z-index: var(--z-float-top);
   background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
   font-size: var(--fs-xl); line-height: 1; cursor: pointer;
   width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
   display: flex; align-items: center; justify-content: center;
   transition: color var(--dur-base), background var(--dur-base);
 }
-#input-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+#input-clear-btn { top: 0; right: 0; }
+
+.search-clear-btn { top: 50%; right: 5px; transform: translateY(-50%); }
+
+#input-clear-btn:hover,
+.search-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 #input-actions { display: flex; gap: var(--space-2); align-items: center; flex-shrink: 0; }
 
@@ -1797,17 +1803,6 @@ body.content-tab-open #send-btn { display: none !important; }
 #model-dropdown.open { display: flex; }
 
 .search-wrap { position: relative; }
-
-/* 24x24 hit target (WCAG 2.2 minimum), same glyph size as before. */
-.search-clear-btn {
-  position: absolute; top: 50%; right: 5px; transform: translateY(-50%); z-index: var(--z-float-top);
-  background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
-  font-size: var(--fs-xl); line-height: 1; cursor: pointer;
-  width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
-  display: flex; align-items: center; justify-content: center;
-  transition: color var(--dur-base), background var(--dur-base);
-}
-.search-clear-btn:hover { color: color-mix(in srgb, var(--fg) 74%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 #model-search {
   width: 100%; background: transparent; border: none;
@@ -4204,16 +4199,9 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 /* The row's workspace line and, under it, its machine / max budget /
-   agent line. */
+   agent line and its ids line. */
 .running-item-workspace,
-.running-item-settings {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+.running-item-settings,
 .running-item-ids {
   flex-basis: 100%;
   font-size: var(--fs-sm);

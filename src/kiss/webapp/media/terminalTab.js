@@ -180,12 +180,15 @@
     // Set while an Enter on an ended shell asks for a new one, so the
     // fresh shell's terminalOpened is not reported as a lost session.
     let restarting = false;
-    // Set while the WebSocket is down: keystrokes typed meanwhile wait
-    // in heldInput until terminalOpened says the daemon re-attached the
-    // shell to the new connection.  Sent before that they would reach
-    // the daemon ahead of the reconnect's terminalOpen, from a
-    // connection that does not own the shell yet, and be dropped.
-    let detached = false;
+    // Set until terminalOpened says the daemon attached the shell to
+    // the current connection, and again while the WebSocket is down:
+    // keystrokes typed meanwhile wait in heldInput.  Sent before that
+    // they would reach the daemon ahead of the terminalOpen, from a
+    // connection that does not own the shell yet, and be dropped; or,
+    // posted while the socket is down, join the transport's offline
+    // batch, which a reconnect re-sends until a pong confirms it (a
+    // shell command run twice is not a settings save applied twice).
+    let detached = true;
     let heldInput = [];
     let lastSize = {cols: 0, rows: 0};
 
@@ -221,8 +224,9 @@
     // Runs before xterm's own key handling (which stops propagation).
     function keyHandler(ev) {
       if (ev.type !== 'keydown') return true;
-      // Enter on an ended shell starts a new one in the same tab.
-      if (ev.key === 'Enter' && view.exited && hadShell) {
+      // Enter on an ended shell (or one the daemon could not start)
+      // asks for a new one in the same tab.
+      if (ev.key === 'Enter' && view.exited) {
         restartShell();
         return false;
       }
@@ -371,7 +375,7 @@
       // is not its fresh shell.
       restarting = false;
       view.exited = true;
-      note(text, RED);
+      note(text + '  Press Enter to try again.', RED);
     };
 
     view.disconnected = function () {

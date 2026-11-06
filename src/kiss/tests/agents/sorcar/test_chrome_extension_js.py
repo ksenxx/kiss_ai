@@ -41,6 +41,7 @@ TEST_PAGE = """<!doctype html><html><head><title>Snapshot Test Page</title></hea
 <div style="cursor:pointer">Pointer card</div>
 <div style="cursor:pointer" aria-label="Close dialog"><svg><path d="M1 1l8 8"/></svg></div>
 <div style="cursor:pointer" id="bare-icon"><i></i></div>
+<button style="cursor:pointer">Export report<span style="display:none">hidden label</span></button>
 </body></html>"""
 
 
@@ -90,6 +91,10 @@ def test_snapshot_lists_visible_interactive_elements(page) -> None:
     assert '<input type=checkbox> [checked]' in snap
     assert '<div> "edit me"' in snap
     assert '<button> "icon-only-button"' in snap
+    # A hidden descendant (text, cursor inherited) must not suppress its
+    # visible clickable ancestor: the button stays, the hidden label goes.
+    assert '<button> "Export report"' in snap
+    assert "hidden label" not in snap
     # Non-visible and non-interactive elements are excluded.
     assert "Hidden by display" not in snap
     assert "Hidden by visibility" not in snap

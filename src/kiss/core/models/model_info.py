@@ -397,8 +397,9 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     prefix such as ``openai/gpt-6.1-sol``, or as a ``bedrock/<id>``
     profile of a ``claude-*`` entry; the one rule of
     :func:`_lookup_model_info`) copies THAT model's context length,
-    ``thinking`` level and prices, cache prices included and scaled by a
-    Bedrock profile's premium (see :func:`bedrock_price_factor`) —
+    ``thinking`` level, capability flags, transport flag, fallback,
+    thinking overrides and prices, cache prices included and scaled by
+    a Bedrock profile's premium (see :func:`bedrock_price_factor`) —
     seeding the generic :data:`_CUSTOM_MODEL_DEFAULTS` over e.g.
     ``gpt-5.6-sol`` would replace its real 500K context and per-token
     prices with 128K and $0, silently breaking budget accounting for
@@ -408,10 +409,24 @@ def _seed_new_custom_entry(name: str) -> dict[str, Any]:
     info = _lookup_model_info(name)
     if info is None:
         return dict(_CUSTOM_MODEL_DEFAULTS)
-    # Every per-million price, audio and image output included: the
-    # loader replaces the catalog entry with this one, so a dropped
-    # field would bill audio/image tokens at the text rates.
-    entry: dict[str, Any] = {"context_length": info.context_length, "thinking": info.thinking}
+    # Every field the loader reads (see :func:`_build_model_info_entry`),
+    # audio and image prices included: the loader replaces the catalog
+    # entry with this one, so a dropped field would bill audio/image
+    # tokens at the text rates, turn a decisions-only or embedding model
+    # into a generation one, and drop the Responses transport from the
+    # entry and (see :func:`_sync_alias_transport_flags`) its aliases.
+    entry: dict[str, Any] = {
+        "context_length": info.context_length,
+        "thinking": info.thinking,
+        "fc": info.is_function_calling_supported,
+        "emb": info.is_embedding_supported,
+        "gen": info.is_generation_supported,
+        "dec": info.is_decisions_supported,
+        "use_responses_api": info.use_responses_api,
+        "fallback": info.fallback,
+        "extended_thinking": info.extended_thinking,
+        "adaptive_thinking": info.adaptive_thinking,
+    }
     entry.update({field: getattr(info, field) for field in _PER_1M_PRICE_FIELDS})
     if info.prompt_tiers:
         entry["prompt_tiers"] = [
@@ -2626,12 +2641,17 @@ _DEFAULT_PROVIDER_PRIORITY = (
     "Gemini",
     "OpenRouter",
     "Together",
+    "Z.AI",
+    "Moonshot",
     "Bedrock",
     "Claude Code CLI",
     "Codex CLI",
 )
 """Provider labels in the order :func:`get_default_model` and
-:func:`get_fast_model` prefer them."""
+:func:`get_fast_model` prefer them: every label of
+:func:`_configured_providers`, so an install whose only credential is
+for one provider never gets ``"No model"`` while that provider's models
+are offered."""
 
 
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
@@ -2658,9 +2678,9 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Bedrock
-    (the Bedrock id of the Anthropic fast model, see
-    :func:`registered_bedrock_model`) → Claude Code CLI.
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Z.AI →
+    Moonshot → Bedrock (the Bedrock id of the Anthropic fast model, see
+    :func:`registered_bedrock_model`) → Claude Code CLI → Codex CLI.
 
     Returns:
         A fast model name for the first available provider.
@@ -2672,6 +2692,8 @@ def get_fast_model() -> str:
             "Gemini": "gemini-3.5-flash-lite",
             "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
             "Together": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "Z.AI": "glm-4.5-air",
+            "Moonshot": "kimi-k2.5",
             "Bedrock": registered_bedrock_model(cheapest=True) or "",
             "Claude Code CLI": "cc/haiku",
             "Codex CLI": "codex/default",
@@ -2683,9 +2705,9 @@ def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
     Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
-    Bedrock (the Bedrock id of the Anthropic default model, see
-    :func:`registered_bedrock_model`) > Claude Code CLI.
-    Falls back to ``"No model"`` if no keys are set.
+    Z.AI > Moonshot > Bedrock (the Bedrock id of the Anthropic default
+    model, see :func:`registered_bedrock_model`) > Claude Code CLI >
+    Codex CLI.  Falls back to ``"No model"`` if no keys are set.
     """
     return _model_for_first_configured_provider(
         {
@@ -2694,6 +2716,8 @@ def get_default_model() -> str:
             "Gemini": "gemini-3.8-flash",
             "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
             "Together": "moonshotai/Kimi-K3",
+            "Z.AI": "glm-4.7",
+            "Moonshot": "kimi-k3",
             "Bedrock": registered_bedrock_model(cheapest=False) or "",
             "Claude Code CLI": "cc/opus",
             "Codex CLI": "codex/default",

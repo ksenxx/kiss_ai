@@ -111,8 +111,12 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
     Resolution order:
 
     1. An explicit ``reasoning_effort`` in ``model_config`` (the
-       framework-wide spelling shared with the OpenAI adapters) wins.
-    2. Otherwise the catalog entry's ``thinking`` level, when it is one
+       framework-wide spelling shared with the OpenAI adapters) wins: it
+       is the key the agent sets when it lowers the effort for one turn
+       (``KISSAgent._turn_effort``), so a caller's native setting must
+       not outrank it.
+    2. Otherwise the caller's native ``output_config.effort``.
+    3. Otherwise the catalog entry's ``thinking`` level, when it is one
        of :data:`ANTHROPIC_EFFORT_LEVELS`: a generated ``-{level}`` alias
        carries its own level (``claude-opus-5-5-medium`` → ``"medium"``)
        and a base entry carries the level the catalog runs it at
@@ -123,9 +127,6 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
        (``medium`` when omitted) and the request must match the catalog.
        Entries that reject the parameter (Haiku 4.5, Sonnet 4.5) carry no
        ``thinking`` and get none.
-
-    A native ``output_config`` already carrying ``effort`` is left to the
-    caller (see :meth:`AnthropicModel._build_create_kwargs`).
 
     Args:
         model_name: The catalog model name as passed to the adapter.
@@ -139,6 +140,9 @@ def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | No
     explicit = model_config.get("reasoning_effort")
     if explicit is not None:
         return str(explicit)
+    native = model_config.get("output_config")
+    if isinstance(native, dict) and native.get("effort") is not None:
+        return str(native["effort"])
     info = MODEL_INFO.get(model_name)
     if info is not None and info.thinking in ANTHROPIC_EFFORT_LEVELS:
         return str(info.thinking)
@@ -1116,15 +1120,13 @@ class AnthropicModel(Model):
         }
         # ``reasoning_effort`` is the framework-wide spelling (shared with
         # the OpenAI adapters); the Messages API wants it as
-        # ``output_config.effort``.  A native ``output_config.effort`` set
-        # by the caller wins over both the framework key and a catalog
-        # alias level.
+        # ``output_config.effort`` (precedence: see ``_effort_level_for``).
         kwargs.pop("reasoning_effort", None)
         effort_level = _effort_level_for(self._catalog_model_name, self.model_config)
         if effort_level is not None:
             output_config = kwargs.get("output_config")
             output_config = dict(output_config) if isinstance(output_config, dict) else {}
-            output_config.setdefault("effort", effort_level)
+            output_config["effort"] = effort_level
             kwargs["output_config"] = output_config
         enable_cache = self.model_config.get("enable_cache", True)
         # The same hoisting Gemini applies (see Model docstring of

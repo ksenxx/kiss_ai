@@ -24,11 +24,13 @@ real signals, real file locks held by a real second process.  No mocks.
 
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 from types import FrameType
@@ -450,13 +452,71 @@ def test_shutdown_right_after_construction_stops_the_loop_thread() -> None:
     A shutdown that returned early in that window left the daemon thread
     spinning for the rest of the process.  Many back-to-back cycles make
     the window likely to be hit at least once.
+
+    The stopped loop is also closed (its selector and self-pipe
+    descriptors released) and the manager's ``atexit`` hook withdrawn,
+    so a manager rebuilt after every shutdown leaks neither
+    descriptors nor the old manager object.
     """
-    for _ in range(50):
-        mgr = MCPManager(idle_timeout_s=0.3, max_connections=2, health_interval_s=0.5)
+    for _ in range(49):
+        _shut_down_new_manager()
+    ref = weakref.ref(_shut_down_new_manager())
+    gc.collect()
+    assert ref() is None, "shutdown() left its atexit hook holding the manager"
+
+
+def _shut_down_new_manager() -> MCPManager:
+    """Build a manager, shut it down at once and check its loop thread and loop are gone."""
+    mgr = MCPManager(idle_timeout_s=0.3, max_connections=2, health_interval_s=0.5)
+    mgr.shutdown()
+    mgr._thread.join(timeout=10)
+    assert not mgr._thread.is_alive(), "manager loop thread outlived shutdown()"
+    assert not mgr._loop.is_running()
+    assert mgr._loop.is_closed(), "shutdown() left the stopped loop open"
+    return mgr
+
+
+#: The server above, kept alive after stdin EOF by a non-daemon thread so
+#: its teardown needs the SDK's SIGTERM instead of ending at once.
+_LINGERING_SERVER_SCRIPT = _SERVER_SCRIPT.replace(
+    "import os, sys, time", "import os, sys, threading, time",
+).replace(
+    "    mcp.run()", "    threading.Thread(target=time.sleep, args=(60,)).start()\n    mcp.run()",
+)
+
+
+def test_shutdown_waits_for_an_evicted_connection_to_unwind(
+    server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """``shutdown()`` right after an eviction must still reap the evicted child.
+
+    The eviction popped the connection from the pool and told it to
+    stop but registered it nowhere, so a shutdown that followed while
+    its transport was still closing found nothing to wait for and
+    stopped the loop underneath that teardown: a stdio child that
+    lingers after stdin EOF (it needs the SDK's SIGTERM) outlived the
+    manager.
+    """
+    lingering = tmp_path / "lsrv.py"
+    lingering.write_text(_LINGERING_SERVER_SCRIPT, encoding="utf-8")
+    mgr = MCPManager(idle_timeout_s=3600, max_connections=1, health_interval_s=30)
+    old_pid = 0
+    try:
+        first = mgr.connect(_config(lingering, tmp_path / "old", "--n=0"))
+        assert first.session is not None, first.error
+        old_pid = _wait_for_pid_file(tmp_path / "old")
+        second = mgr.connect(_config(server_script, tmp_path / "new", "--n=1"))
+        assert second.session is not None, second.error
+        assert _connection_key(first.config) not in mgr._connections, "not evicted"
         mgr.shutdown()
-        mgr._thread.join(timeout=10)
-        assert not mgr._thread.is_alive(), "manager loop thread outlived shutdown()"
-        assert not mgr._loop.is_running()
+        assert first.finished.is_set(), (
+            "shutdown() returned while the evicted connection was still unwinding"
+        )
+        assert not _alive(old_pid), "the evicted child outlived the manager"
+    finally:
+        mgr.shutdown()
+        if _alive(old_pid):
+            os.kill(old_pid, 9)
 
 
 def test_token_lock_does_not_stall_other_mcp_calls(

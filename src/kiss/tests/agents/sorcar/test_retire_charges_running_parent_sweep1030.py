@@ -69,9 +69,11 @@ def test_retired_sub_task_charges_its_running_parent(tmp_path: Path) -> None:
 
         assert agent.retire_for_disposal()
 
-        spent = _agent_usage(agent)[0] - before
+        # Charged straight to the finished row it was made for (side_call_binding),
+        # not to the retired agent's ledger.
+        spent = _row_cost(child) - 0.5
         assert spent > 0
-        assert _row_cost(child) == pytest.approx(0.5 + spent)
+        assert _agent_usage(agent)[0] == pytest.approx(before)
         assert _row_cost(root) == pytest.approx(3.0)
         assert _agent_usage(parent_agent)[0] == pytest.approx(spent)
     finally:

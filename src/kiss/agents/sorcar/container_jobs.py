@@ -221,11 +221,6 @@ class ContainerJobs:
                 known = ", ".join(self.commands) or "none"
                 return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
             self.commands[job_id] = probe
-        if until:
-            complaint = self.bash_fn(UNTIL_CHECK.format(pattern=shlex.quote(until)),
-                                     "check the until pattern", QUICK_TIMEOUT, 2000).strip()
-            if complaint:
-                return f"Error: until is not a valid grep -E regex: {complaint}"
         lines = max(1, int(tail_lines))
         report = REPORT_SCRIPT.format(d=JOBS_DIR, id=job_id, n=lines)
         timeout = QUICK_TIMEOUT
@@ -233,6 +228,10 @@ class ContainerJobs:
             seconds = max(1, int(timeout_seconds))
             match = ""
             if until:
+                complaint = self.bash_fn(UNTIL_CHECK.format(pattern=shlex.quote(until)),
+                                         "check the until pattern", QUICK_TIMEOUT, 2000).strip()
+                if complaint:
+                    return f"Error: until is not a valid grep -E regex: {complaint}"
                 match = MATCH_CLAUSE.format(pattern=shlex.quote(until), d=JOBS_DIR, id=job_id)
             script = WAIT_SCRIPT.format(timeout=seconds, d=JOBS_DIR, id=job_id, match=match)
             script += report

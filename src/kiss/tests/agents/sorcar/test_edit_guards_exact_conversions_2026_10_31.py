@@ -391,21 +391,73 @@ def test_a_pair_with_a_bare_newline_is_not_converted_over_a_crlf_file(
         else:
             assert out.startswith("Applied as Edit(") and source.read_bytes() == written, out
     # Pairs are judged in order, each against the text the earlier ones left, as Edit
-    # applies them: the first pair below eats the only bare "a\n", so the second would be
-    # retried with "\r\n" and match where python matches nothing.
+    # applies them: the first pair below eats the only bare "a\n", so the second matches
+    # nothing, as in python, and is left out (handed on, Edit would retry it with "\r\n").
     chain = (
         "s = open('a.py', newline='').read()\ns = s.replace('a\\n', 'a\\r\\n')\n"
         "s = s.replace('a\\nb', 'X')\nopen('a.py', 'w', newline='').write(s)\n"
     )
     command = f"python3 - <<'EOF'\n{chain}EOF"
     edit = mechanical_edit(command, str(tmp_path))
-    assert edit is not None and edit.edits_for("a\nb\r\n") is None
-    assert edit.edits_for("a\nb\n") == edit.edits  # no CRLF: Edit never retries
+    assert edit is not None and edit.edits_for("a\nb\r\n") == [("a\n", "a\r\n", True)]
+    assert edit.edits_for("a\nb\n") == [("a\n", "a\r\n", True)]  # the same without CRLF
     source.write_bytes(b"a\nb\r\n")
     assert _python(tmp_path, chain).encode() == b"a\r\nb\r\n"
     source.write_bytes(b"a\nb\r\n")
     out = tools.Bash(command, "rewrite")
-    assert out == rewrite_guard(command) and source.read_bytes() == b"a\nb\r\n", out
+    assert out.startswith("Applied as Edit(") and source.read_bytes() == b"a\r\nb\r\n", out
+
+
+def test_a_pair_matching_nothing_is_left_out_as_str_replace_leaves_the_text(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """A chain whose first pair matches nothing: python skips it, and so must the ``Edit``.
+
+    ``s.replace('absent', 'unused').replace('bar', 'BAR')`` over ``bar``
+    wrote ``BAR``, while the Edit it was converted to kept the unmatched
+    pair and refused the whole chain as a string not found (audit
+    2026-11-05, A06-7).  A pair matching nothing in the text the earlier
+    pairs leave is left out; when none matches, the pairs stand and the
+    Edit reports the first.
+    """
+    source = tmp_path / "a.py"
+    program = (
+        "s = open('a.py', newline='').read()\n"
+        "s = s.replace('absent', 'unused').replace('bar', 'BAR')\n"
+        "open('a.py', 'w', newline='').write(s)\n"
+    )
+    command = f"python3 - <<'EOF'\n{program}EOF"
+    edit = mechanical_edit(command, str(tmp_path))
+    assert edit is not None and edit.text_dependent  # a chain: read the file to settle it
+    assert edit.edits_for("bar\n") == [("bar", "BAR", True)]
+    assert edit.edits_for("baz\n") == edit.edits  # nothing matches: the Edit reports it
+    source.write_text("bar\n")
+    assert _python(tmp_path, program) == "BAR\n"
+    source.write_text("bar\n")
+    tools.Read(str(source))
+    out = tools.Bash(command, "rewrite")
+    assert out.startswith("Applied as Edit(") and source.read_text() == "BAR\n", out
+
+
+def test_a_tilde_target_is_resolved_in_the_home_given(tmp_path: Path) -> None:
+    """``cat > ~/x`` names a file in the home of the shell that runs it, not the daemon's.
+
+    The copy's path once came from the daemon's ``HOME`` whatever shell
+    ran the command (audit 2026-11-05, A06-9): a container's or a remote
+    shell's ``~`` is elsewhere, so the caller names it (``home``), or
+    passes ``None`` when it is unknown, which leaves the path to the shell.
+    """
+    command = "cat > ~/report.txt <<'EOF'\nhello\nEOF"
+    home = tmp_path / "home"
+    home.mkdir()
+    _bash(command, tmp_path, HOME=str(home))
+    assert (home / "report.txt").read_text() == "hello\n"
+    copy = heredoc_copy(command, str(tmp_path), home=str(home))
+    assert copy is not None and copy.path == str(home / "report.txt")
+    copy = heredoc_copy(command, str(tmp_path), home=None)
+    assert copy is not None and copy.path is None and copy.target == "~/report.txt"
+    copy = heredoc_copy(command, str(tmp_path))  # the daemon's own shell by default
+    assert copy is not None and copy.path == os.path.expanduser("~/report.txt")
 
 
 # --- 5. a here-document followed by another input redirection -----------------

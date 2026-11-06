@@ -60,4 +60,4 @@ function makeSharePage(bodyHtml) {
   return win;
 }
 
-module.exports = {click, shareWithTasks, makeSharePage};
+module.exports = {click, shareWithTasks, makeSharePage, SHARE_JS};

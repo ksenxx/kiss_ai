@@ -919,6 +919,12 @@ Unlike ``grok-4.5``/``grok-4.3``, the mini family accepts ONLY ``low`` and
 ``-low`` and ``-high`` siblings only; a bogus ``-medium`` alias would be a
 correctness bug."""
 
+_GEMINI_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+"""The Gemini ``thinking_config.thinking_level`` scale that ``GeminiModel``
+sends for ``reasoning_effort``. ``gemini-4-argon`` and ``gemini-3.8-flash``
+accept these three and reject ``minimal`` with HTTP 400 (live probe,
+2026-11-05); models without thinking levels (Gemini 2.5) reject them all."""
+
 _XAI_MODEL_PREFIXES: tuple[str, ...] = (
     "openrouter/x-ai/",
     "openrouter/~x-ai/",
@@ -1076,6 +1082,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
       (``low``/``medium``/``high``).
     * z-ai ``GLM-5.2`` uses :data:`_GLM_5_2_EFFORT_LEVELS`
       (``high``/``max``).
+    * Direct ``gemini-*`` models use :data:`_GEMINI_THINKING_LEVELS`
+      (``low``/``medium``/``high``).
     * Direct ``claude-*`` models use the Anthropic ``output_config.effort``
       ladder from :func:`_anthropic_effort_scale` (up to
       ``low``/``medium``/``high``/``xhigh``/``max``); a ``bedrock/`` id
@@ -1105,6 +1113,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _GROK_EFFORT_LEVELS
     if _is_glm_5_2_family(model_name):
         return _GLM_5_2_EFFORT_LEVELS
+    if model_name.startswith("gemini-"):
+        return _GEMINI_THINKING_LEVELS
     if model_name.startswith("claude-"):
         return _anthropic_effort_scale(model_name)
     if model_name.startswith("bedrock/"):
@@ -1137,8 +1147,6 @@ def detect_thinking_level(model_name: str) -> str | None:
       via its own ``model_reasoning_effort`` config rather than per-call.
     * ``cc/*`` — routed through the Claude Code CLI, which has no
       ``reasoning_effort`` surface at all.
-    * ``gemini-*`` — Gemini's ``thinking_config.thinking_level`` is not
-      wired to ``reasoning_effort``.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
       ``-chat-latest``, ``-image``).
 
@@ -1148,6 +1156,16 @@ def detect_thinking_level(model_name: str) -> str | None:
     probe yields the model's ladder top (see :func:`_anthropic_effort_scale`
     for the per-generation ladders). Claude models without the effort
     parameter (Haiku 4.5, Sonnet 4.5) fail every level and return ``None``.
+
+    Direct ``gemini-*`` models are probed too: ``GeminiModel`` sends
+    ``reasoning_effort`` as ``thinking_config.thinking_level``, which
+    Gemini 2.5 models and unsupported levels reject with HTTP 400. A
+    ``high`` verdict (e.g. ``gemini-4-argon``) makes
+    :func:`_write_entry_with_thinking_split` emit the ``-low`` /
+    ``-medium`` / ``-high`` aliases.
+
+    Also returns ``None`` without an API call for:
+
     * Moonshot models outside the Kimi K3 family (K2.x controls thinking
       via ``thinking.type``, ``moonshot-v1-*`` has none; see
       :func:`_is_kimi_k3_family`).
@@ -1168,7 +1186,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
-    if model_name.startswith(("codex/", "cc/", "gemini-")):
+    if model_name.startswith(("codex/", "cc/")):
         return None
     if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
         return None
@@ -1186,7 +1204,8 @@ def detect_thinking_level(model_name: str) -> str | None:
     )
     is_glm_5_2 = _is_glm_5_2_family(model_name)
     if not (
-        is_openai
+        model_name.startswith("gemini-")
+        or is_openai
         or is_anthropic
         or is_openrouter_openai
         or is_together_gpt_oss

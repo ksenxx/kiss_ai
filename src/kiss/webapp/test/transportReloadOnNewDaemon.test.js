@@ -55,7 +55,8 @@ function page() {
   // Every /api/daemon request is answered from the front of `answers`:
   // {instance} -> 200 JSON, 'fail' -> a network error, 'http500' ->
   // 500, 'http404' -> 404, 'throw' -> fetch itself throws, a function
-  // -> a deferred answer the test resolves later.
+  // (given the request's options) -> a deferred answer the test
+  // resolves later.
   const answers = [];
   const requests = [];
   window.fetch = function (url, opts) {
@@ -70,7 +71,7 @@ function page() {
         json: () => Promise.reject(new Error('no body')),
       });
     }
-    if (typeof next === 'function') return next();
+    if (typeof next === 'function') return next(opts);
     return Promise.resolve({
       ok: true,
       status: 200,
@@ -287,6 +288,46 @@ async function main() {
   assert.strictEqual(requests.length, asked, 'no fetch, no request');
   assert.strictEqual(reloads.length, 2, 'no fetch, no reload');
   window.fetch = realFetch;
+
+  // A probe that never answers (a proxy holding the request while the
+  // socket stays up) is a lost probe too: its deadline aborts it, the
+  // abort is retried like any failure, and the retry's answer from a
+  // new daemon reloads the page.  Without the deadline nothing would
+  // ever ask again on this connection.
+  reconnect(sockets, timers, 13);
+  answers.push(
+    opts =>
+      new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () =>
+          reject(new Error('AbortError')),
+        );
+      }),
+  );
+  authOk(sockets[14]);
+  await settle();
+  const stalled = requests[requests.length - 1];
+  assert.strictEqual(requests.length, asked + 1, 'the auth_ok probed');
+  assert.ok(stalled.opts.signal, 'the probe carries an abort signal');
+  const deadline = pendingTimers(timers).filter(t => t.ms === 12000);
+  assert.strictEqual(deadline.length, 1, 'the probe armed its deadline');
+  assert.strictEqual(retries(timers).length, 0, 'no retry while it waits');
+  fire(deadline[0]);
+  assert.ok(stalled.opts.signal.aborted, 'the deadline aborts the probe');
+  await settle();
+  const retry = retries(timers);
+  assert.strictEqual(retry.length, 1, 'the aborted probe is retried');
+  assert.strictEqual(retry[0].ms, 5000);
+  answers.push({instance: 'daemon-D', version: '2026.10.24'});
+  fire(retry[0]);
+  await settle();
+  assert.strictEqual(requests.length, asked + 2, 'the retry asked again');
+  assert.strictEqual(
+    pendingTimers(timers).filter(t => t.ms === 12000).length,
+    0,
+    'an answered probe clears its deadline',
+  );
+  sockets[14].fireMessage({type: 'pong'});
+  assert.strictEqual(reloads.length, 3, 'the new daemon reloads the page');
   window.close();
   console.log('transportReloadOnNewDaemon.test.js: all tests passed');
 }

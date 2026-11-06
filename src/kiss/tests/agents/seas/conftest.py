@@ -319,6 +319,15 @@ def fake_checkout(root: Path, seas: dict[str, str]) -> Path:
     return folder
 
 
+def add_extra(path: Path) -> None:
+    """Append a harmless ``extra()`` helper to the module at *path*: a change the gate accepts.
+
+    Args:
+        path: The Python file to edit in place.
+    """
+    path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
+
+
 def persist_task(
     prompt: str,
     events: Sequence[dict[str, Any]] = (),

@@ -56,6 +56,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING, Any
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.locked import locked
 from kiss.core.models.codex_mcp_bridge import ToolBridge, toml_value
 from kiss.core.models.model import (
     CLITextModel,
@@ -63,7 +64,6 @@ from kiss.core.models.model import (
     TokenCallback,
     _iter_jsonl,
     environ_without,
-    parse_binary_attachments,
     render_tool_call,
 )
 from kiss.core.processes import kill_process_tree, popen_process_group, run_process_group
@@ -360,9 +360,15 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
         except OSError as e:
             return {"error": f"`codex login --device-auth` failed to start: {e}"}
         prompt = {}
-        # Stderr is drained on its own thread: the CLI's log lines go
-        # there, and a child that fills the pipe (64 KiB) before it
-        # prints the code would otherwise block and never print it.
+        # Both pipes are read on their own threads.  Stderr: the CLI's
+        # log lines go there, and a child that fills the pipe (64 KiB)
+        # before it prints the code would otherwise block and never
+        # print it.  Stdout: a read of the pipe returns only once every
+        # holder of its write end is gone, so a descendant that escaped
+        # the timeout's group kill into its own session would hold this
+        # thread (and the login lock) for as long as it lived; the wait
+        # below takes lines from a queue instead, with the deadline, and
+        # leaves the pipe to its reader.
         assert proc.stdout is not None and proc.stderr is not None
         stderr_lines: list[str] = []
         drain = threading.Thread(
@@ -372,31 +378,41 @@ def codex_device_login(timeout: float = 60.0, fresh: bool = False) -> dict[str, 
             daemon=True,
         )
         drain.start()
-        expired = threading.Event()
-        timer = threading.Timer(timeout, _kill_expired, args=(proc, expired))
-        timer.start()
-        try:
-            for raw in proc.stdout:
-                line = _ANSI_ESCAPES.sub("", raw).strip()
-                url = _DEVICE_URL.search(line)
-                if url and "url" not in prompt:
-                    prompt["url"] = url.group(0)
-                elif _DEVICE_CODE.match(line):
-                    prompt["code"] = line
-                if "url" in prompt and "code" in prompt:
-                    break
-        finally:
-            # cancel() does not say whether the timer fired first; once
-            # it is joined, ``expired`` is exact, so a CLI the timer
-            # killed just as its code arrived is never published.
-            timer.cancel()
-            timer.join()
-        if expired.is_set() or "url" not in prompt or "code" not in prompt:
+        stdout_lines: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(
+            target=_queue_lines,
+            args=(proc.stdout, stdout_lines),
+            name="codex-device-login-stdout",
+            daemon=True,
+        ).start()
+        deadline = time.monotonic() + timeout
+        expired = False
+        while "url" not in prompt or "code" not in prompt:
+            # The deadline is checked before every line, not only once
+            # the queue runs dry: a CLI chattier than the timeout allows
+            # reading would otherwise keep the login lock past it.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                expired = True
+                break
+            try:
+                raw = stdout_lines.get(timeout=remaining)
+            except queue.Empty:
+                expired = True
+                break
+            if raw is None:
+                break
+            line = _ANSI_ESCAPES.sub("", raw).strip()
+            url = _DEVICE_URL.search(line)
+            if url and "url" not in prompt:
+                prompt["url"] = url.group(0)
+            elif _DEVICE_CODE.match(line):
+                prompt["code"] = line
+        if expired or "url" not in prompt or "code" not in prompt:
             kill_process_tree(proc)
-            proc.stdout.close()
             proc.wait()
             drain.join(timeout=_STDERR_DRAIN_GRACE_SECONDS)
-            within = f" within {timeout:g}s" if expired.is_set() else ""
+            within = f" within {timeout:g}s" if expired else ""
             return {
                 "error": f"`codex login --device-auth` printed no login code{within}: "
                 + ("".join(stderr_lines).strip()[:300] or "(no output)")
@@ -441,25 +457,17 @@ def _start_codex(path: str, *args: str) -> "subprocess.Popen[str]":
     )
 
 
-def _kill_expired(proc: "subprocess.Popen[str]", expired: threading.Event) -> None:
-    """Timer callback: record that the login wait expired, then kill the CLI."""
-    expired.set()
-    kill_process_tree(proc)
-
-
 def _finish_device_login(
     proc: "subprocess.Popen[str]", drain: threading.Thread, stderr_lines: list[str]
 ) -> None:
     """Wait for the device-login CLI to exit, log a failure and forget its prompt.
 
-    Its stdout is read to the end meanwhile, so the CLI cannot block on
-    a full pipe while it polls for the login; *drain* collects its
-    stderr into *stderr_lines*.
+    Its stdout is read to the end meanwhile by the thread
+    :func:`codex_device_login` started, so the CLI cannot block on a
+    full pipe while it polls for the login; *drain* collects its stderr
+    into *stderr_lines*.
     """
     global _device_login
-    assert proc.stdout is not None
-    for _ in proc.stdout:
-        pass
     proc.wait()
     drain.join(timeout=_STDERR_DRAIN_GRACE_SECONDS)
     if proc.returncode != 0:
@@ -544,7 +552,10 @@ _DEFAULT_MODEL_TTL_SECONDS = 3600.0
 _DEFAULT_MODEL_RETRY_SECONDS = 60.0
 #: ``(cli path, CODEX_HOME)`` -> ``(expiry on time.monotonic(), model or None)``.
 _default_model_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
-_default_model_lock = threading.Lock()
+# Reentrant and taken only through ``locked``: the writer is the task
+# thread, where a Stop injected right after a plain ``with``'s
+# ``__enter__`` would leave it held for every later ``codex/default`` turn.
+_default_model_lock = threading.RLock()
 
 
 def codex_default_model(env: dict[str, str], timeout: float = 15.0) -> str | None:
@@ -579,16 +590,27 @@ def codex_default_model(env: dict[str, str], timeout: float = 15.0) -> str | Non
     cached = _default_model_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
         return cached[1]
-    model = _query_default_model(path, env, timeout)
-    with _default_model_lock:
-        now = time.monotonic()
-        current = _default_model_cache.get(key)
-        if model is None and current is not None and current[1] and current[0] > now:
-            # A concurrent turn resolved it meanwhile: a late failure
-            # must not replace that answer.
-            return current[1]
-        ttl = _DEFAULT_MODEL_TTL_SECONDS if model else _DEFAULT_MODEL_RETRY_SECONDS
-        _default_model_cache[key] = (now + ttl, model)
+    return _record_default_model(key, _query_default_model(path, env, timeout))
+
+
+@locked(_default_model_lock)
+def _record_default_model(key: tuple[str, str], model: str | None) -> str | None:
+    """Cache *model* as *key*'s answer and return it; see :func:`codex_default_model`.
+
+    Args:
+        key: ``(cli path, CODEX_HOME)`` the answer was resolved for.
+        model: The resolved default, or ``None`` for a failed resolution.
+
+    Returns:
+        *model*, or the answer a concurrent turn cached meanwhile when
+        *model* is a failure: a late failure must not replace it.
+    """
+    now = time.monotonic()
+    current = _default_model_cache.get(key)
+    if model is None and current is not None and current[1] and current[0] > now:
+        return current[1]
+    ttl = _DEFAULT_MODEL_TTL_SECONDS if model else _DEFAULT_MODEL_RETRY_SECONDS
+    _default_model_cache[key] = (now + ttl, model)
     return model
 
 
@@ -853,10 +875,20 @@ class CodexModel(CLITextModel):
     ) -> tuple[str, str]:
         """Run *call* through *execute* and return the result as text Codex can take.
 
-        A binary payload a tool embedded in its result (a screenshot) is
-        lifted out: the CLI has no way to show it, and the raw bytes
-        would only bloat the turn.  The conversation gets the usual
-        notice when the call is replayed.
+        The result is transformed as every tool result is
+        (:meth:`tool_result_text_and_attachments`): a binary payload the
+        tool embedded in it is lifted out — the CLI has no way to show
+        it, and the raw bytes would only bloat the turn — an image or a
+        PDF is replaced by a vision model's description, and the usage
+        line is appended.  What cannot be described (an audio clip) is
+        noted in the text instead, since the replayed conversation holds
+        the text only.
+
+        This runs on the bridge's thread, which records exceptions only:
+        a Stop landing in the description (the ``KeyboardInterrupt`` of
+        the task's stop event, bound to this thread by *execute*) is
+        reported as the error that ends the turn, as *execute* reports
+        one landing in the tool.
 
         Args:
             execute: The agent's tool executor.
@@ -864,9 +896,19 @@ class CodexModel(CLITextModel):
 
         Returns:
             ``(name, result_text)``.
+
+        Raises:
+            Exception: What *execute* raised, or what the description's
+                limit check raised, or a ``KISSError`` naming the Stop
+                that interrupted the description.
         """
         name, result = execute(call)
-        text, attachments = parse_binary_attachments(result)
+        try:
+            text, attachments = self.tool_result_text_and_attachments({"result": result})
+        except Exception:
+            raise
+        except BaseException as e:
+            raise KISSError(f"Tool {name} stopped: {e}") from e
         if attachments:
             text += (
                 f"\n\n[{len(attachments)} attachment(s) in this tool result could "
@@ -883,19 +925,21 @@ class CodexModel(CLITextModel):
         take the ordinary tool-call shape (an assistant message with
         ``tool_calls``, a ``tool`` message answering it), so the
         conversation stays valid for an API model a later model switch
-        hands it to.
+        hands it to.  The result is recorded as it was served: it was
+        transformed once, in :meth:`_execute_for_codex`.
 
         Args:
             bridge: The bridge whose answered calls are taken.
         """
         for call in bridge.take_served():
+            call_id = f"call_{uuid.uuid4().hex[:8]}"
             self.conversation.append(
                 {
                     "role": "assistant",
                     "content": render_tool_call(call.name, call.arguments),
                     "tool_calls": [
                         {
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "id": call_id,
                             "type": "function",
                             "function": {
                                 "name": call.name,
@@ -905,8 +949,8 @@ class CodexModel(CLITextModel):
                     ],
                 }
             )
-            self.add_function_results_to_conversation_and_return(
-                [(call.name, {"result": call.result})]
+            self.conversation.append(
+                {"role": "tool", "tool_call_id": call_id, "content": call.result}
             )
 
     def _tool_call_in_flight(self) -> bool:

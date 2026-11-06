@@ -845,6 +845,9 @@ class RelentlessAgent(Base):
         self.llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
         self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.llm_response_hook: Callable[[LLMReply], Verdict] | None = None
+        # The run's ``compaction`` option (:meth:`run`), given to every
+        # per-session executor.
+        self.compaction: bool = True
         # Whether the run has the built-in toolset (``SorcarAgent.run``'s
         # *append_basic_tools*).
         self._append_basic_tools: bool = True
@@ -888,6 +891,7 @@ class RelentlessAgent(Base):
         self.llm_call_hook = None
         self.tool_call_hook = None
         self.llm_response_hook = None
+        self.compaction = True
         # The thread's own binding first (the daemon binds one per
         # task thread), then the JSON printer's thread-local, a view
         # over the same storage.  Resolved once here so every user —
@@ -1509,6 +1513,7 @@ class RelentlessAgent(Base):
                         llm_call_hook=self.llm_call_hook,
                         tool_call_hook=self.tool_call_hook,
                         llm_response_hook=self.llm_response_hook,
+                        compaction=self.compaction,
                     )
                 finally:
                     _fold_helper_spend(executor)
@@ -1774,6 +1779,7 @@ class RelentlessAgent(Base):
                         printer=self.printer,
                         verbose=self.verbose,
                         print_prompts=False,
+                        compaction=self.compaction,
                     )
                 finally:
                     self._accumulate_usage(summarizer_agent)
@@ -1953,6 +1959,7 @@ class RelentlessAgent(Base):
         llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
         llm_response_hook: Callable[[LLMReply], Verdict] | None = None,
+        compaction: bool = True,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -1993,6 +2000,11 @@ class RelentlessAgent(Base):
                 every model reply with an :class:`~kiss.core.llm_reply.LLMReply`
                 (text, tool calls, token usage); ``ALLOW`` goes on,
                 ``end_run(result)`` ends the run.  Defaults to None (no hook).
+            compaction: Whether the run's sessions compact their context
+                (see :meth:`kiss.core.kiss_agent.KISSAgent.run`): every
+                per-session executor and the summarizer get it.  False
+                never compacts; True (the default) compacts while the
+                global Compaction setting is on.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -2012,6 +2024,7 @@ class RelentlessAgent(Base):
         self.llm_call_hook = llm_call_hook
         self.tool_call_hook = tool_call_hook
         self.llm_response_hook = llm_response_hook
+        self.compaction = compaction
         args = arguments or {}
         self.task_description = substitute_prompt_args(prompt_template, args)
 

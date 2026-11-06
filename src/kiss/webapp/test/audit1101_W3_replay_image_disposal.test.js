@@ -392,6 +392,40 @@ async function main() {
     assert.ok(!img.classList.contains('tr-img-lazy'));
   });
 
+  await test('without the observer, a reconnect asks afresh for the pictures still awaited', () => {
+    // The dropped connection never answers the request in flight; with
+    // no observer to re-watch the picture, it is asked for again at
+    // once (as a restored transcript's is), not left blank for good.
+    const page = makePage({beforeScripts: stubRaf});
+    const {win, posted} = page;
+    pages.push(win);
+    assert.strictEqual(typeof win.IntersectionObserver, 'undefined');
+    const {parentId} = bootParallelRun(1, page);
+    replay(win, parentId, 'parent-task');
+    const first = ofType(posted, 'getReplayImage').pop();
+    assert.ok(first, 'the picture is asked for at once');
+    const before = posted.length;
+    send(win, {type: 'daemonStatus', connected: false});
+    send(win, {type: 'daemonStatus', connected: true});
+    const again = ofType(posted.slice(before), 'getReplayImage');
+    assert.strictEqual(
+      again.length,
+      1,
+      'BUG: the awaited picture is not asked for again after the outage',
+    );
+    assert.strictEqual(again[0].index, 0);
+    assert.notStrictEqual(again[0].token, first.token, 'with a new token');
+    const img = win.document.querySelector(
+      'img[data-replay-owner="' + parentId + '"]',
+    );
+    assert.ok(img, 'the picture is on screen');
+    send(win, {type: 'replayImage', token: first.token, mime: 'image/png', b64: 'AAAA'});
+    assert.strictEqual(img.getAttribute('src'), null, 'a dropped reply shown');
+    send(win, {type: 'replayImage', token: again[0].token, mime: 'image/png', b64: 'CCCC'});
+    assert.strictEqual(img.getAttribute('src'), 'data:image/png;base64,CCCC');
+    assert.ok(!img.classList.contains('tr-img-lazy'));
+  });
+
   report('audit1101_W3_replay_image_disposal');
   await new Promise(r => setTimeout(r, 0));
   for (const win of pages) win.close();

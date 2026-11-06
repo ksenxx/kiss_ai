@@ -17,6 +17,7 @@ BUG 5 (obsolete): covered ``_release_worktree``'s branch fallback on
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -122,6 +123,40 @@ class TestBug2RenameDeletesOldFile:
 
             assert not (wt_dir / "README.md").exists()
             assert (wt_dir / "docs" / "README.md").exists()
+
+    def test_tracked_directory_replaced_by_symlink(self) -> None:
+        """A tracked ``dir/`` replaced by a symlink to an external directory.
+
+        Porcelain lists ``A  dir`` (the symlink) and ``D  dir/x`` (its
+        former child) when staged, `` D dir/x`` and ``?? dir`` when not.
+        The child entry must be treated as gone: ``repo/dir/x`` and
+        ``wt/dir/x`` now resolve *through* the symlink to the external
+        file, which must be neither copied nor deleted.
+        """
+        for staged in (True, False):
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = _make_repo(Path(tmp) / "repo")
+                (repo / "dir").mkdir()
+                (repo / "dir" / "x").write_text("tracked x\n")
+                _git("add", "-A", cwd=repo)
+                _git("commit", "-q", "-m", "add dir", cwd=repo)
+                external = Path(tmp) / "external"
+                external.mkdir()
+                (external / "x").write_text("EXTERNAL DATA\n")
+                (repo / "dir" / "x").unlink()
+                (repo / "dir").rmdir()
+                os.symlink(str(external), str(repo / "dir"))
+                if staged:
+                    _git("add", "-A", cwd=repo)
+
+                wt_dir = _create_worktree(repo, f"kiss/wt-dir-symlink-{int(staged)}")
+                assert GitWorktreeOps.copy_dirty_state(repo, wt_dir), staged
+
+                assert (external / "x").read_text() == "EXTERNAL DATA\n", staged
+                assert (wt_dir / "dir").is_symlink(), staged
+                # The link is copied verbatim (Windows reads it back with a \\?\ prefix).
+                assert os.readlink(wt_dir / "dir") == os.readlink(repo / "dir"), staged
+                assert (wt_dir / "dir").resolve() == external.resolve(), staged
 
 
 class TestBug3StashPopWarning:

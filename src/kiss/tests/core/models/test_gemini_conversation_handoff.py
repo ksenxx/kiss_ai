@@ -39,12 +39,15 @@ import copy
 import json
 from typing import Any
 
+import pytest
+
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.core.models.model import Attachment, flatten_content_to_text
+from kiss.core.models.model import Attachment, flatten_content_to_text, hand_off_conversation
 from kiss.core.models.model_info import model
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,
@@ -227,6 +230,37 @@ class TestOpenAIToGemini:
         assert parts[0].inline_data.data == b"hello"
         assert parts[0].inline_data.mime_type == "image/png"
         assert parts[1].text == "describe"
+
+    @pytest.mark.parametrize("source", ["chat_completions", "responses"])
+    def test_input_audio_part_becomes_inline_bytes(self, source: str) -> None:
+        """A clip the OpenAI adapters stored as ``input_audio`` survives a switch to Gemini.
+
+        Both transports store a WAV/MP3 attachment as an ``input_audio``
+        content part (``format`` + base64 ``data``), and the handoff keeps
+        that part as it is; Gemini's converter dropped it as unsupported,
+        so the prompt arrived without its clip although Gemini takes
+        audio bytes natively.
+        """
+        wav = b"RIFF\x24\x00\x00\x00WAVEfmt " + bytes(16) + b"data\x00\x00\x00\x00"
+        old: OpenAICompatibleModel | OpenAICompatibleModel2 = (
+            _make_openai()
+            if source == "chat_completions"
+            else OpenAICompatibleModel2(
+                model_name="gpt-4o", base_url="https://api.openai.com/v1", api_key="test-key"
+            )
+        )
+        old.initialize("Listen to this clip", attachments=[Attachment(wav, "audio/wav")])
+        assert "input_audio" in json.dumps(old.conversation)
+        new = _make_gemini()
+        new.initialize("replaced")
+        hand_off_conversation(old, new)
+        contents = new._convert_conversation_to_gemini_contents(new._chat_messages())
+        parts = _parts(contents[-1])
+        audio = [part for part in parts if part.inline_data is not None]
+        assert len(audio) == 1
+        assert audio[0].inline_data.data == wav
+        assert audio[0].inline_data.mime_type == "audio/wav"
+        assert [part.text for part in parts if part.text] == ["Listen to this clip"]
 
 
 class TestAnthropicToGemini:

@@ -50,6 +50,7 @@ from kiss.core import stop_signal, tool_interrupt
 from kiss.core.kiss_agent import KISSAgent, NativeTurn
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.codex_mcp_bridge import STOP_WAIT_SECONDS, ServedCall, ToolBridge
+from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model import _CLIProcess, _StreamReadTimeoutError
 from kiss.core.tool_interrupt import (
     USER_INTERRUPTED_MESSAGE,
@@ -60,6 +61,7 @@ from kiss.core.tool_interrupt import (
     raise_if_interrupted,
     register_tool_call,
 )
+from kiss.core.tool_verdict import ToolRedirect
 from kiss.core.utils import finish as structured_finish
 from kiss.tests.core.test_codex_mcp_bridge import (
     AGENT_UNDER_TEST,
@@ -547,6 +549,67 @@ def test_a_call_queued_behind_a_tool_when_the_stop_ends_the_block_is_refused(hol
         _reply(first)
         assert LATE_CALLS == [], "the queued tool ran after the bridge returned"
         assert bridge.calls_in_flight == 0
+    finally:
+        RELEASE_HOLD.set()
+        stop_signal.set_thread_stop_event(None)
+
+
+class _ResultHook:
+    """A run's ``tool_result_hook``: records every result it is given."""
+
+    def __init__(self) -> None:
+        self.results: list[tuple[str, dict[str, Any], str, bool]] = []
+
+    def __call__(self, name: str, args: dict[str, Any], result: str, refused: bool) -> None:
+        self.results.append((name, args, result, refused))
+
+
+def redirect_to_hold() -> str:
+    """Redirect to :func:`hold_until_released`: the deaf tool runs nested in this call.
+
+    Raises:
+        ToolRedirect: Always.
+    """
+    raise ToolRedirect("hold_until_released", {}, "redirected:")
+
+
+@pytest.mark.parametrize("tool", [hold_until_released, redirect_to_hold])
+def test_a_tool_the_stop_abandoned_settles_nothing_once_its_turn_is_closed(tool: Any) -> None:
+    """A deaf tool the Stop abandoned returns after the agent was reset for the
+    next run, which installed its own ``tool_result_hook`` and owes a re-issue:
+    the abandoned call's result reaches neither (the turn it belongs to is
+    closed), exactly as it stays out of the conversation.  The same holds when
+    the deaf tool is the one a served call redirected to (a nested call of the
+    same turn): neither its result nor the count it restores is the next run's."""
+    HOLD_STARTED.clear()
+    RELEASE_HOLD.clear()
+    stop = threading.Event()
+    agent = KISSAgent("abandoned native call")
+    agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+    agent.function_map = {"hold_until_released": hold_until_released, tool.__name__: tool}
+    agent._cached_tools_schema = _schema(tool.__name__)
+    old_run = _ResultHook()
+    agent.tool_result_hook = old_run
+    stop_signal.set_thread_stop_event(stop)
+    try:
+        with agent._native_tools_exposed():
+            assert isinstance(agent.model, CodexModel)
+            bridge = agent.model._tool_bridge
+            assert bridge is not None
+            first = _call(bridge, tool.__name__)
+            assert HOLD_STARTED.wait(5)
+            stop.set()
+        assert agent._native_turn.closed.is_set()
+        agent._reset("codex/gpt-5.5", True, 10, 10.0, None, verbose=False)
+        new_run = _ResultHook()
+        agent.tool_result_hook = new_run
+        agent._refused_call = "Bash"
+        RELEASE_HOLD.set()
+        _reply(first)
+        assert old_run.results == []
+        assert new_run.results == [], "the abandoned call reached the next run's hook"
+        assert agent._refused_call == "Bash", "the abandoned call settled the next run's refusal"
+        assert agent.messages == [] and agent.tool_calls_made == 0
     finally:
         RELEASE_HOLD.set()
         stop_signal.set_thread_stop_event(None)

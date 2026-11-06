@@ -111,10 +111,12 @@ function loadPrevTask41(win, posted, tabId, O) {
 }
 
 // CAND-1: a tab switch must not forget which neighbours are already
-// spliced into the transcript. Today restoreTab -> resetAdjacentState
-// rewinds oldestLoadedTaskId to the tab's own task while the spliced
-// container survives in the fragment, so the next overscroll re-fetches
-// task 41 and renderAdjacentTask splices a SECOND container for it.
+// spliced into the transcript. The pagination anchors travel with the
+// detached transcript (saveCurrentTab / restoreTab), so the overscroll
+// after a switch-and-return asks for the task BEYOND the spliced
+// neighbour 41, not for 41 again (A24-8); and should a reply for a
+// task already on screen arrive anyway, renderAdjacentTask splices no
+// second container for it.
 function testNoDuplicateAdjacentRegionAfterTabSwitch() {
   const {win, posted} = makePage();
   try {
@@ -133,9 +135,9 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
       'the spliced container must come back with the restored transcript',
     );
 
-    // The transcript still shows task 41, but the rewound anchors make
-    // the next overscroll fetch it again; the reply must not splice a
-    // second copy.
+    // The transcript still shows task 41: the next overscroll fetches
+    // the task before it, and a reply naming 41 anyway must not splice
+    // a second copy.
     O.scrollTop = 0;
     wheel(win, O, -50, 10);
     const adj = getAdjacent(posted);
@@ -145,6 +147,14 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
         'tasks; got ' +
         JSON.stringify(adj),
     );
+    assert.strictEqual(
+      String(adj[adj.length - 1].taskId),
+      '41',
+      'the overscroll after a switch-and-return asks for the task beyond ' +
+        'the spliced neighbour 41 (the anchors came back with the ' +
+        'transcript), not for 41 again',
+    );
+    assert.strictEqual(adj[adj.length - 1].direction, 'prev');
     send(win, {
       type: 'adjacent_task_events',
       tabId,
@@ -162,6 +172,42 @@ function testNoDuplicateAdjacentRegionAfterTabSwitch() {
         'task id',
     );
     console.log('PASS no duplicate adjacent region after tab switch');
+  } finally {
+    win.close();
+  }
+}
+
+// The anchors describe the thread they were saved with: a tab whose
+// task changed while it was in the background (a new run started on it
+// from another surface: its task_settings name the new task id) comes
+// back with its anchors rewound to that task, as a fresh transcript's
+// are, and the edge flags cleared.
+function testAnchorsOfAnotherTaskAreNotRestored() {
+  const {win, posted} = makePage();
+  try {
+    const {tabId, O} = setupWithHistoryTask(win, posted);
+    loadPrevTask41(win, posted, tabId, O);
+    // The chat has nothing older than 41: the edge is remembered...
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    send(win, {type: 'adjacent_task_events', tabId, direction: 'prev'});
+    const before = getAdjacent(posted).length;
+    wheel(win, O, -50, 10);
+    assert.strictEqual(getAdjacent(posted).length, before, 'no fetch past the edge');
+
+    win._testApi.createNewTab();
+    send(win, {type: 'task_settings', tabId, settings: {task_id: '43'}});
+    clickTab(win, tabId);
+    assert.strictEqual(win._testApi.getActiveTabId(), tabId);
+
+    // ...but it was 42's edge, not 43's: the overscroll asks again,
+    // from the tab's new task.
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    const adj = getAdjacent(posted);
+    assert.strictEqual(adj.length, before + 1, 'the edge flag went with the old task');
+    assert.strictEqual(String(adj[adj.length - 1].taskId), '43');
+    console.log('PASS anchors of another task are not restored');
   } finally {
     win.close();
   }
@@ -356,6 +402,7 @@ function testDaemonDisconnectClearsAdjacentLoading() {
 function main() {
   const tests = [
     testNoDuplicateAdjacentRegionAfterTabSwitch,
+    testAnchorsOfAnotherTaskAreNotRestored,
     testBgEventTabSwapKeepsRestoredStatusRow,
     testDetachedLoaderRemovedOnRestore,
     testDaemonDisconnectClearsAdjacentLoading,

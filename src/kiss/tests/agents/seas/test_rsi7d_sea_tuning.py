@@ -26,7 +26,7 @@ from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.seas.rsi7d import sea_tuning
 from kiss.agents.sorcar import sea_commands
 from kiss.core.tool_verdict import ALLOW, refuse
-from kiss.tests.agents.seas.conftest import fake_checkout, git, persist_task, registered
+from kiss.tests.agents.seas.conftest import add_extra, fake_checkout, git, persist_task, registered
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
@@ -723,16 +723,11 @@ class _EditingDaemon(RecordingDaemon):
     def __init__(self, path: Path) -> None:
         super().__init__(text="reworked")
         self.path = path
-        self.edit: Callable[[Path], None] = _add_extra_helper
+        self.edit: Callable[[Path], None] = add_extra
 
     async def _handle(self, ws: Any) -> None:
         self.edit(self.path)
         await super()._handle(ws)
-
-
-def _add_extra_helper(path: Path) -> None:
-    """Append a harmless ``extra()`` helper: a change the gate accepts."""
-    path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
 
 
 def _break_settings(path: Path) -> None:

@@ -3041,7 +3041,41 @@
     "audio_input_price_per_1M": 1.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "gemini-3-flash-preview-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "audio_input_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "gemini-3-flash-preview"
+  },
+  "gemini-3-flash-preview-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "audio_input_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "gemini-3-flash-preview"
+  },
+  "gemini-3-flash-preview-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "audio_input_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "gemini-3-flash-preview"
   },
   "gemini-3-pro-image": {
     "context_length": 131072,
@@ -3068,7 +3102,19 @@
     "audio_input_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "gemini-3.1-flash-lite-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "gemini-3.1-flash-lite"
   },
   "gemini-3.1-flash-lite-image": {
     "context_length": 65536,
@@ -3080,6 +3126,28 @@
     "gen": true,
     "comment": "NEW"
   },
+  "gemini-3.1-flash-lite-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "gemini-3.1-flash-lite"
+  },
+  "gemini-3.1-flash-lite-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "gemini-3.1-flash-lite"
+  },
   "gemini-3.1-flash-lite-preview": {
     "context_length": 500000,
     "input_price_per_1M": 0.25,
@@ -3087,7 +3155,41 @@
     "audio_input_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "gemini-3.1-flash-lite-preview-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "gemini-3.1-flash-lite-preview"
+  },
+  "gemini-3.1-flash-lite-preview-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "gemini-3.1-flash-lite-preview"
+  },
+  "gemini-3.1-flash-lite-preview-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "gemini-3.1-flash-lite-preview"
   },
   "gemini-3.1-flash-tts-preview": {
     "context_length": 8192,
@@ -3113,7 +3215,19 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "ai.google.dev/gemini-api/docs/changelog 2026-10-08: gemini-3.5-flash is deprecated and every request is routed to gemini-3.6-flash, which bills $0.75 in / $3.75 out (cache read $0.075); the old $1.50 / $9.00 rate is no longer on the pricing page"
+    "comment": "ai.google.dev/gemini-api/docs/changelog 2026-10-08: gemini-3.5-flash is deprecated and every request is routed to gemini-3.6-flash, which bills $0.75 in / $3.75 out (cache read $0.075); the old $1.50 / $9.00 rate is no longer on the pricing page",
+    "thinking": "high"
+  },
+  "gemini-3.5-flash-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/changelog 2026-10-08: gemini-3.5-flash is deprecated and every request is routed to gemini-3.6-flash, which bills $0.75 in / $3.75 out (cache read $0.075); the old $1.50 / $9.00 rate is no longer on the pricing page",
+    "thinking": "high",
+    "alias_of": "gemini-3.5-flash"
   },
   "gemini-3.5-flash-lite": {
     "context_length": 500000,
@@ -3122,7 +3236,63 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "gemini-3.5-flash-lite-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "gemini-3.5-flash-lite"
+  },
+  "gemini-3.5-flash-lite-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "gemini-3.5-flash-lite"
+  },
+  "gemini-3.5-flash-lite-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "gemini-3.5-flash-lite"
+  },
+  "gemini-3.5-flash-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/changelog 2026-10-08: gemini-3.5-flash is deprecated and every request is routed to gemini-3.6-flash, which bills $0.75 in / $3.75 out (cache read $0.075); the old $1.50 / $9.00 rate is no longer on the pricing page",
+    "thinking": "low",
+    "alias_of": "gemini-3.5-flash"
+  },
+  "gemini-3.5-flash-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/changelog 2026-10-08: gemini-3.5-flash is deprecated and every request is routed to gemini-3.6-flash, which bills $0.75 in / $3.75 out (cache read $0.075); the old $1.50 / $9.00 rate is no longer on the pricing page",
+    "thinking": "medium",
+    "alias_of": "gemini-3.5-flash"
   },
   "gemini-3.6-flash": {
     "context_length": 500000,
@@ -3131,7 +3301,41 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)"
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "high"
+  },
+  "gemini-3.6-flash-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "high",
+    "alias_of": "gemini-3.6-flash"
+  },
+  "gemini-3.6-flash-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "low",
+    "alias_of": "gemini-3.6-flash"
+  },
+  "gemini-3.6-flash-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "medium",
+    "alias_of": "gemini-3.6-flash"
   },
   "gemini-3.7-flash": {
     "context_length": 500000,
@@ -3140,7 +3344,41 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)"
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "high"
+  },
+  "gemini-3.7-flash-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "high",
+    "alias_of": "gemini-3.7-flash"
+  },
+  "gemini-3.7-flash-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "low",
+    "alias_of": "gemini-3.7-flash"
+  },
+  "gemini-3.7-flash-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-09: $0.75 in / $3.75 out through 2026-12-31 ($1.50 / $7.50 from 2027-01-01)",
+    "thinking": "medium",
+    "alias_of": "gemini-3.7-flash"
   },
   "gemini-3.8-flash": {
     "context_length": 500000,
@@ -3149,7 +3387,41 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "gemini-3.8-flash-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "gemini-3.8-flash"
+  },
+  "gemini-3.8-flash-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "gemini-3.8-flash"
+  },
+  "gemini-3.8-flash-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "gemini-3.8-flash"
   },
   "gemini-4-argon": {
     "context_length": 500000,
@@ -3159,7 +3431,44 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "gemini-4-argon-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "cache_read_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "gemini-4-argon"
+  },
+  "gemini-4-argon-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "cache_read_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "gemini-4-argon"
+  },
+  "gemini-4-argon-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "cache_read_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "gemini-4-argon"
   },
   "gemini-embedding-001": {
     "context_length": 2048,
@@ -3290,78 +3599,6 @@
     "emb": false,
     "gen": true
   },
-  "gpt-3.5-turbo": {
-    "context_length": 16385,
-    "input_price_per_1M": 0.5,
-    "output_price_per_1M": 1.5,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-3.5-turbo-0125": {
-    "context_length": 16385,
-    "input_price_per_1M": 0.5,
-    "output_price_per_1M": 1.5,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-3.5-turbo-1106": {
-    "context_length": 16385,
-    "input_price_per_1M": 1.0,
-    "output_price_per_1M": 2.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-3.5-turbo-16k": {
-    "context_length": 16385,
-    "input_price_per_1M": 3.0,
-    "output_price_per_1M": 4.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4": {
-    "context_length": 8192,
-    "input_price_per_1M": 30.0,
-    "output_price_per_1M": 60.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4-0613": {
-    "context_length": 8192,
-    "input_price_per_1M": 30.0,
-    "output_price_per_1M": 60.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4-turbo": {
-    "context_length": 128000,
-    "input_price_per_1M": 10.0,
-    "output_price_per_1M": 30.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4-turbo-2024-04-09": {
-    "context_length": 128000,
-    "input_price_per_1M": 10.0,
-    "output_price_per_1M": 30.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
   "gpt-4.1": {
     "context_length": 128000,
     "input_price_per_1M": 2.0,
@@ -3398,37 +3635,10 @@
     "gen": true,
     "use_responses_api": true
   },
-  "gpt-4.1-nano": {
-    "context_length": 128000,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.4,
-    "fc": false,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4.1-nano-2025-04-14": {
-    "context_length": 500000,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.4,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
   "gpt-4o": {
     "context_length": 128000,
     "input_price_per_1M": 2.5,
     "output_price_per_1M": 10.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "gpt-4o-2024-05-13": {
-    "context_length": 128000,
-    "input_price_per_1M": 5.0,
-    "output_price_per_1M": 15.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -3470,38 +3680,6 @@
     "gen": true,
     "use_responses_api": true
   },
-  "gpt-4o-mini-search-preview": {
-    "context_length": 128000,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 0.6,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "gpt-4o-mini-search-preview-2025-03-11": {
-    "context_length": 128000,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 0.6,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "gpt-4o-search-preview": {
-    "context_length": 128000,
-    "input_price_per_1M": 2.5,
-    "output_price_per_1M": 10.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "gpt-4o-search-preview-2025-03-11": {
-    "context_length": 128000,
-    "input_price_per_1M": 2.5,
-    "output_price_per_1M": 10.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
   "gpt-5": {
     "context_length": 400000,
     "input_price_per_1M": 1.25,
@@ -3519,14 +3697,6 @@
     "emb": false,
     "gen": true,
     "use_responses_api": true
-  },
-  "gpt-5-chat-latest": {
-    "context_length": 400000,
-    "input_price_per_1M": 1.25,
-    "output_price_per_1M": 10.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
   },
   "gpt-5-mini": {
     "context_length": 400000,
@@ -3582,14 +3752,6 @@
     "gen": true,
     "use_responses_api": true
   },
-  "gpt-5.1-chat-latest": {
-    "context_length": 400000,
-    "input_price_per_1M": 1.25,
-    "output_price_per_1M": 10.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
   "gpt-5.2": {
     "context_length": 400000,
     "input_price_per_1M": 1.75,
@@ -3607,22 +3769,6 @@
     "emb": false,
     "gen": true,
     "use_responses_api": true
-  },
-  "gpt-5.2-chat-latest": {
-    "context_length": 400000,
-    "input_price_per_1M": 1.75,
-    "output_price_per_1M": 14.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "gpt-5.3-chat-latest": {
-    "context_length": 400000,
-    "input_price_per_1M": 1.75,
-    "output_price_per_1M": 14.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
   },
   "gpt-5.4": {
     "context_length": 500000,
@@ -4302,17 +4448,6 @@
     "gen": true,
     "comment": "developers.openai.com/api/docs/pricing 2026-09: text $0.60 / $2.40, audio $10 / $20 per 1M"
   },
-  "gpt-audio-mini-2025-10-06": {
-    "context_length": 128000,
-    "input_price_per_1M": 0.6,
-    "output_price_per_1M": 2.4,
-    "audio_input_price_per_1M": 10.0,
-    "audio_output_price_per_1M": 20.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "developers.openai.com/api/docs/pricing 2026-09: text $0.60 / $2.40, audio $10 / $20 per 1M"
-  },
   "gpt-audio-mini-2025-12-15": {
     "context_length": 128000,
     "input_price_per_1M": 0.6,
@@ -4323,14 +4458,6 @@
     "emb": false,
     "gen": true,
     "comment": "developers.openai.com/api/docs/pricing 2026-09: text $0.60 / $2.40, audio $10 / $20 per 1M"
-  },
-  "gpt-image-1": {
-    "context_length": 32768,
-    "input_price_per_1M": 5.0,
-    "output_price_per_1M": 40.0,
-    "fc": false,
-    "emb": false,
-    "gen": true
   },
   "gpt-image-1-mini": {
     "context_length": 32768,
@@ -4753,6 +4880,57 @@
     "cache_read_price_per_1M": 0.3,
     "alias_of": "moonshotai/Kimi-K3"
   },
+  "moonshotai/Kimi-K3.1-Pro": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.2
+  },
+  "moonshotai/Kimi-K3.1-Pro-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.2,
+    "alias_of": "moonshotai/Kimi-K3.1-Pro"
+  },
+  "moonshotai/Kimi-K3.1-Pro-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.2,
+    "alias_of": "moonshotai/Kimi-K3.1-Pro"
+  },
+  "moonshotai/Kimi-K3.1-Pro-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.2,
+    "alias_of": "moonshotai/Kimi-K3.1-Pro"
+  },
   "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": {
     "context_length": 32768,
     "input_price_per_1M": 0.88,
@@ -4789,24 +4967,6 @@
     "gen": true,
     "cache_read_price_per_1M": 0.2
   },
-  "o1": {
-    "context_length": 200000,
-    "input_price_per_1M": 15.0,
-    "output_price_per_1M": 60.0,
-    "fc": false,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "o1-2024-12-17": {
-    "context_length": 200000,
-    "input_price_per_1M": 15.0,
-    "output_price_per_1M": 60.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
   "o3": {
     "context_length": 200000,
     "input_price_per_1M": 2.0,
@@ -4820,42 +4980,6 @@
     "context_length": 200000,
     "input_price_per_1M": 2.0,
     "output_price_per_1M": 8.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "o3-mini": {
-    "context_length": 200000,
-    "input_price_per_1M": 1.1,
-    "output_price_per_1M": 4.4,
-    "fc": false,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "o3-mini-2025-01-31": {
-    "context_length": 200000,
-    "input_price_per_1M": 1.1,
-    "output_price_per_1M": 4.4,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "o4-mini": {
-    "context_length": 200000,
-    "input_price_per_1M": 1.1,
-    "output_price_per_1M": 4.4,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "use_responses_api": true
-  },
-  "o4-mini-2025-04-16": {
-    "context_length": 200000,
-    "input_price_per_1M": 1.1,
-    "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -6383,7 +6507,7 @@
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "context_length": 500000,
-    "input_price_per_1M": 0.059,
+    "input_price_per_1M": 0.0553,
     "output_price_per_1M": 0.3,
     "fc": true,
     "emb": false,
@@ -6415,14 +6539,14 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.115,
-    "output_price_per_1M": 4.6,
+    "input_price_per_1M": 0.103,
+    "output_price_per_1M": 4.11,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.11
+    "cache_read_price_per_1M": 0.098
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
@@ -6775,13 +6899,13 @@
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
     "context_length": 262144,
-    "input_price_per_1M": 0.083,
-    "output_price_per_1M": 0.25,
+    "input_price_per_1M": 0.025,
+    "output_price_per_1M": 0.076,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.042
+    "cache_read_price_per_1M": 0.013
   },
   "openrouter/google/gemma-4-31b-it": {
     "context_length": 262144,
@@ -6892,6 +7016,17 @@
     "comment": "NEW",
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.012
+  },
+  "openrouter/inclusionai/ling-3.0-tiny": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.015,
+    "output_price_per_1M": 0.045,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.003
   },
   "openrouter/inclusionai/ling-3.1-flash": {
     "context_length": 500000,
@@ -7039,21 +7174,22 @@
   },
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
     "context_length": 131072,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.32,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.52,
     "fc": false,
     "emb": false,
-    "gen": false
+    "gen": false,
+    "cache_read_price_per_1M": 0.1
   },
   "openrouter/meta-llama/llama-4-maverick": {
     "context_length": 524288,
-    "input_price_per_1M": 0.1875,
-    "output_price_per_1M": 0.652,
+    "input_price_per_1M": 0.35,
+    "output_price_per_1M": 1.0,
     "fc": false,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.05
+    "cache_read_price_per_1M": 0.17
   },
   "openrouter/meta-llama/llama-4-scout": {
     "context_length": 500000,
@@ -8953,49 +9089,49 @@
   },
   "openrouter/openai/gpt-oss-120b": {
     "context_length": 131072,
-    "input_price_per_1M": 0.024,
-    "output_price_per_1M": 0.089,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
     "fc": false,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.022
+    "cache_read_price_per_1M": 0.075
   },
   "openrouter/openai/gpt-oss-120b-high": {
     "context_length": 131072,
-    "input_price_per_1M": 0.024,
-    "output_price_per_1M": 0.089,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
     "fc": false,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.022,
+    "cache_read_price_per_1M": 0.075,
     "alias_of": "openrouter/openai/gpt-oss-120b"
   },
   "openrouter/openai/gpt-oss-120b-low": {
     "context_length": 131072,
-    "input_price_per_1M": 0.024,
-    "output_price_per_1M": 0.089,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
     "fc": false,
     "emb": false,
     "gen": true,
     "thinking": "low",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.022,
+    "cache_read_price_per_1M": 0.075,
     "alias_of": "openrouter/openai/gpt-oss-120b"
   },
   "openrouter/openai/gpt-oss-120b-medium": {
     "context_length": 131072,
-    "input_price_per_1M": 0.024,
-    "output_price_per_1M": 0.089,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
     "fc": false,
     "emb": false,
     "gen": true,
     "thinking": "medium",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.022,
+    "cache_read_price_per_1M": 0.075,
     "alias_of": "openrouter/openai/gpt-oss-120b"
   },
   "openrouter/openai/gpt-oss-20b": {
@@ -9398,14 +9534,13 @@
   },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "context_length": 262144,
-    "input_price_per_1M": 0.1,
+    "input_price_per_1M": 0.09,
     "output_price_per_1M": 1.1,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
-    "use_responses_api": true,
-    "cache_read_price_per_1M": 0.07
+    "use_responses_api": true
   },
   "openrouter/qwen/qwen3-vl-235b-a22b-instruct": {
     "context_length": 262144,
@@ -9769,6 +9904,17 @@
     "gen": false,
     "dec": true,
     "comment": "NEW"
+  },
+  "openrouter/ricursiveai/ripple-65b-preview": {
+    "context_length": 500000,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.05
   },
   "openrouter/sakana/fugu-max": {
     "context_length": 500000,
@@ -10574,25 +10720,25 @@
   },
   "openrouter/z-ai/glm-5.3": {
     "context_length": 500000,
-    "input_price_per_1M": 0.08,
-    "output_price_per_1M": 3.6,
+    "input_price_per_1M": 0.0699,
+    "output_price_per_1M": 1.4,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.076
+    "cache_read_price_per_1M": 0.0689
   },
   "openrouter/z-ai/glm-5.3-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.0269,
-    "output_price_per_1M": 0.0996,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0269
+    "cache_read_price_per_1M": 0.03
   },
   "openrouter/z-ai/glm-5.3-flashx": {
     "context_length": 500000,
@@ -10694,7 +10840,7 @@
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.032,
+    "input_price_per_1M": 0.006,
     "output_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
@@ -10705,18 +10851,18 @@
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.1035,
+    "input_price_per_1M": 0.0927,
     "output_price_per_1M": 8.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.1
+    "cache_read_price_per_1M": 0.0927
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.059,
+    "input_price_per_1M": 0.0553,
     "output_price_per_1M": 0.3,
     "fc": true,
     "emb": false,
@@ -10771,8 +10917,8 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.1624,
-    "output_price_per_1M": 10.1551,
+    "input_price_per_1M": 0.1672,
+    "output_price_per_1M": 10.5448,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -11309,14 +11455,14 @@
   },
   "openrouter/~z-ai/glm-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.0269,
-    "output_price_per_1M": 0.0996,
+    "input_price_per_1M": 0.0285,
+    "output_price_per_1M": 0.0923,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0269
+    "cache_read_price_per_1M": 0.0285
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,

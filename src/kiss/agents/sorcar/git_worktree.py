@@ -897,6 +897,23 @@ def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
     return entries
 
 
+def _under_symlink(root: Path, rel: str) -> bool:
+    """True when an ancestor directory of *rel* inside *root* is a symlink.
+
+    Git never lists a path beyond a symlink, so a porcelain entry whose
+    ancestor is one (``D  dir/x`` next to ``A  dir`` after the tracked
+    ``dir/`` was replaced by a symlink) is a stale child: ``root / rel``
+    resolves *through* the link to a file outside the tree, which must
+    be neither copied nor removed.
+    """
+    path = root
+    for part in Path(rel).parts[:-1]:
+        path = path / part
+        if path.is_symlink():
+            return True
+    return False
+
+
 class GitWorktreeOps:
     """Stateless helper class with all git worktree operations.
 
@@ -2446,14 +2463,16 @@ class GitWorktreeOps:
           (preserving the only copy outranks ignore hygiene) and each
           landed sibling is verified with ``git check-ignore``,
           warning about any that are no longer ignored.
-        * Landing is atomic: the source is hard-linked into place
+        * Landing is atomic: a private copy is hard-linked into place
           (``os.link`` fails on an existing path and never follows a
           symlink), so a racing main-tree writer can neither be
           truncated nor redirected through a just-created leaf
           symlink, and a crash can never leave a partial destination
           that a later rescue would mistake for the user's file.  On
           filesystems refusing the link, an ``O_CREAT | O_EXCL`` copy
-          is used instead.
+          is used instead.  The landed file never shares the worktree
+          file's inode: a failed rescue preserves the worktree, and an
+          alias would carry every later edit of one tree into the other.
         * The nearest EXISTING ancestor of every destination must
           resolve inside *repo* — a main-tree directory symlink
           pointing elsewhere must not let the rescue write outside
@@ -2630,13 +2649,14 @@ class GitWorktreeOps:
         """Place *src* at *dst* without overwriting or following links.
 
         Symlink sources are recreated with ``os.symlink`` (atomic,
-        fails on an existing path).  Regular files are hard-linked
-        (atomic, same filesystem — the worktree lives under the repo);
-        when the filesystem refuses the link, an ``O_CREAT | O_EXCL``
-        exclusive-create copy is used.  An existing destination with
-        identical bytes counts as already safe; one with different
-        bytes gets the worktree's version landed under a
-        ``<stem>.kiss-rescued-<ns><ext>`` sibling so neither copy is lost.
+        fails on an existing path).  Regular files are copied to a
+        temporary file beside *dst* and that copy is hard-linked into
+        place (atomic, same filesystem); when the filesystem refuses
+        the link, an ``O_CREAT | O_EXCL`` exclusive-create copy is used.
+        An existing destination with identical bytes counts as already
+        safe; one with different bytes gets the worktree's version
+        landed under a ``<stem>.kiss-rescued-<ns><ext>`` sibling so
+        neither copy is lost.
 
         Args:
             src: The worktree file to preserve.
@@ -2672,29 +2692,40 @@ class GitWorktreeOps:
             dst = GitWorktreeOps._rescued_sibling(dst)
         else:
             dst.parent.mkdir(parents=True, exist_ok=True)
+        # The linked inode is a private copy, never *src* itself: a
+        # failed rescue preserves the worktree, and a main-tree file
+        # sharing the worktree file's inode would show every later
+        # edit of either side on the other.
+        fd, tmp = tempfile.mkstemp(prefix=_RESCUE_SIBLING_MARKER, dir=dst.parent)
         try:
-            os.link(src, dst)
-            return dst
-        except FileExistsError:
-            # A racing writer created dst between the check and the
-            # link; its file wins, ours lands beside it.
-            sibling = GitWorktreeOps._rescued_sibling(dst)
-            os.link(src, sibling)
-            return sibling
-        except OSError:
-            # Filesystem without hard-link support: exclusive-create
-            # copy (never follows a symlink, never overwrites).
-            fd = os.open(
-                dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
-            )
+            with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+                shutil.copyfileobj(inp, out)
+            shutil.copystat(str(src), tmp)
             try:
-                with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
-                    shutil.copyfileobj(inp, out)
-            except BaseException:
-                dst.unlink(missing_ok=True)
-                raise
-            shutil.copystat(str(src), str(dst))
-            return dst
+                os.link(tmp, dst)
+                return dst
+            except FileExistsError:
+                # A racing writer created dst between the check and the
+                # link; its file wins, ours lands beside it.
+                sibling = GitWorktreeOps._rescued_sibling(dst)
+                os.link(tmp, sibling)
+                return sibling
+            except OSError:
+                # Filesystem without hard-link support: exclusive-create
+                # copy (never follows a symlink, never overwrites).
+                fd = os.open(
+                    dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
+                )
+                try:
+                    with os.fdopen(fd, "wb") as out, open(tmp, "rb") as inp:
+                        shutil.copyfileobj(inp, out)
+                except BaseException:
+                    dst.unlink(missing_ok=True)
+                    raise
+                shutil.copystat(str(src), str(dst))
+                return dst
+        finally:
+            os.unlink(tmp)
 
     @staticmethod
     def _rescued_sibling(dst: Path) -> Path:
@@ -2771,14 +2802,19 @@ class GitWorktreeOps:
 
         copied = False
         for code, old_name, fname in _porcelain_entries(status.stdout):
-            src = repo / fname
-            dst = wt_dir / fname
-
-            if old_name is not None:
+            if old_name is not None and not _under_symlink(wt_dir, old_name):
                 old_dst = wt_dir / old_name
                 if old_dst.is_symlink() or old_dst.exists():
                     GitWorktreeOps._remove_path(old_dst)
                     copied = True
+
+            if _under_symlink(repo, fname) or _under_symlink(wt_dir, fname):
+                # The entry's ancestor is (or became) a symlink: the
+                # ancestor's own entry installs the link in *wt_dir* and
+                # takes the stale real directory with it.
+                continue
+            src = repo / fname
+            dst = wt_dir / fname
 
             if src.is_symlink():
                 GitWorktreeOps._remove_path(dst)
@@ -3973,10 +4009,15 @@ def _repo_key(wt: GitWorktree) -> Path:
 def _manual_merge_cmd(wt: GitWorktree) -> str:
     """Return the correct manual merge command for a worktree.
 
-    When a baseline commit exists, the auto-merge uses
-    ``cherry-pick --no-commit baseline..branch`` to replay only agent
-    commits.  ``git merge --squash`` would incorrectly include the
-    baseline's dirty-state snapshot.
+    When a baseline commit exists, the command applies the agent's net
+    change (``baseline..branch``) exactly as the auto-merge does: ONE
+    ``cherry-pick --no-commit`` of a synthetic commit holding the
+    branch's tree with the baseline as parent (see
+    :meth:`GitWorktreeOps._squashed_commit`), created inline by
+    ``git commit-tree``.  Replaying the range commit by commit would
+    refuse a merge commit on the branch (``no -m option``), and
+    ``git merge --squash`` would incorrectly include the baseline's
+    dirty-state snapshot.
 
     Args:
         wt: The worktree state.
@@ -3985,8 +4026,12 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
         A shell command string for manual merge.
     """
     if wt.baseline_commit:
-        rev_range = shlex.quote(f"{wt.baseline_commit}..{wt.branch}")
-        return f"git cherry-pick --no-commit {rev_range}"
+        squashed = (
+            f"git commit-tree {shlex.quote(wt.branch + '^{tree}')}"
+            f" -p {shlex.quote(wt.baseline_commit)}"
+            f" -m {shlex.quote(f'kiss: squashed {wt.branch}')}"
+        )
+        return f'git cherry-pick --no-commit "$({squashed})"'
     return f"git merge --squash {shlex.quote(wt.branch)}"
 
 

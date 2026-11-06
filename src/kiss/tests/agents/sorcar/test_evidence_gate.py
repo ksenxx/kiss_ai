@@ -192,6 +192,14 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
     # find's ``{}`` are its matches, under its start paths
     assert eg.file_changes({"command": "find . -name '*.pyc' -exec rm {} +"}) == ["rm", "."]
     assert eg.file_changes({"command": "find src lib -delete"}) == ["find", "src", "lib"]
+    # every -exec clause counts, each read up to its own ``;`` / ``+`` (audit A06-11: the
+    # first clause once swallowed the rest), and -execdir's directory is that clause's alone
+    assert eg.file_changes({
+        "command": "find data -type f -exec true {} \\; -exec touch changed.py \\;",
+    }) == ["touch", "changed.py"]
+    assert eg.file_changes({
+        "command": "cd /w/tmp/x && find . -type f -execdir cat {} + -exec touch /w/src/x.py \\;",
+    }) == ["touch", "/w/src/x.py"]
     assert eg.file_changes({"command": "uv run check --full --fix"}) == ["uv", "run", "check"]
     assert eg.file_changes({"command": "(" * 20000 + "rm x"}) == []  # nested too deep to read
     assert not eg.writes_files({"commands": 7})

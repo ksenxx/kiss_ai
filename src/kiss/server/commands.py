@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -155,6 +156,28 @@ def sea_commands_event(commands: list[str]) -> dict[str, Any]:
 _ASK_TIMEOUT_SECONDS = 600.0
 
 
+@dataclass(frozen=True)
+class _Steer:
+    """A message admitted on a running task, and what its delivery after the lock needs.
+
+    Made by :meth:`_CommandsMixin._admit_steer` under
+    :data:`agent_state.STATE_LOCK`, consumed by
+    :meth:`_CommandsMixin._deliver_steer` once the lock is released.
+    """
+
+    # The owner's persisted task id, to stamp the echo and the ``/ask``
+    # answer with; ``""`` while the task has no row yet.
+    owner_task: str
+    # The owner's chat and live agent, which a ``/ask`` answering
+    # session joins and is charged to.
+    chat_id: str
+    owner_agent: Any
+    # The side channel's question; ``None`` for a queued steering message.
+    ask_question: str | None = None
+    # Whether the text goes into the composer's autocomplete history.
+    remember: bool = True
+
+
 def _parse_int(value: Any) -> int | None:
     """Parse a frontend-supplied JSON value as an int.
 
@@ -174,7 +197,8 @@ def _parse_int(value: Any) -> int | None:
     """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: JSON ``1e400`` arrives as infinity.
         return None
 
 
@@ -192,7 +216,8 @@ def _parse_time(value: Any) -> float:
         return 0.0
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: a JSON integer too large for a float.
         return 0.0
     return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
 
@@ -365,8 +390,8 @@ class _CommandsMixin:
         def _tab_chat_id_locked(self, tab_id: str) -> str: ...
         def _tab_view_locked(self, tab_id: str) -> tuple[str, str]: ...
         def _tab_model_locked(self, tab_id: str) -> str: ...
-        def _broadcast_tabs_state(self) -> None: ...
-        def _publish_tabs_state(self) -> None: ...
+        def _broadcast_tabs_state(self, ack: str = "") -> None: ...
+        def _publish_tabs_state(self, ack: str = "") -> None: ...
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(
@@ -414,7 +439,7 @@ class _CommandsMixin:
             conn_id: str,
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
-        def _close_tab(self, tab_id: str) -> None: ...
+        def _close_tab(self, tab_id: str, ack: str = "") -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _registry_update_tab(
             self,
@@ -611,6 +636,8 @@ class _CommandsMixin:
         inject_prompt: str | None = None
         inject_task = ""
         remember = True
+        steer = False
+        admitted: _Steer | None = None
         thread: threading.Thread | None = None
         state: AgentState | None = None
         chat_id = ""
@@ -656,17 +683,18 @@ class _CommandsMixin:
                 # AFTER the thread starts, so gating on the flag (or on
                 # thread death) silently dropped a second ``run``
                 # submitted during the startup window in which the
-                # thread was alive but the flag not yet raised.
-                if typed:
-                    queued = self._queue_prompt_on_owner(prev, prompt, tab_id, attachments)
-                    if queued is None:
-                        # Queued after the agent loop ended: no drain
-                        # will consume it, so ``_run_task``'s cleanup
-                        # re-submits it as the tab's next run, whose
-                        # own prompt echo replaces the steering echo.
-                        return
-                    remember, inject_task = queued
-                    inject_prompt = prompt
+                # thread was alive but the flag not yet raised.  The
+                # line is the same user action as ``appendUserMessage``
+                # (the page sends that once it knows the tab is busy):
+                # steering text, or a ``/ask`` side-channel question,
+                # admitted on ``prev`` in THIS lock hold — a lookup
+                # after the lock could find the tab idle (the task
+                # just ended: the text would be refused instead of
+                # re-run) or re-armed by another chat's task (which
+                # would receive the text).
+                steer = typed
+                if steer:
+                    admitted = self._admit_steer(prev, prompt, tab_id, attachments)
             elif asked is not None:
                 queued = self._queue_prompt_on_owner(asked, prompt, tab_id, attachments)
                 if queued is None:
@@ -736,6 +764,11 @@ class _CommandsMixin:
                 )
                 state.task_thread = thread
                 agent_state.register(state)
+        if steer:
+            if admitted is not None:
+                self._deliver_steer(admitted, cmd, prompt, tab_id)
+            self._broadcast_run_notice(cmd, tab_id)
+            return
         if thread is None:
             if inject_prompt is not None:
                 self._echo_injected_prompt(
@@ -1878,94 +1911,126 @@ class _CommandsMixin:
                         "tabId": tab_id,
                     })
                 return
-            # ``/ask <question>`` is a live side-channel Q&A over the
-            # running task's persisted events: routed to a background
-            # ``ask_sea`` dispatch instead of ``pending_user_messages``
-            # so the answering session runs independently of the outer
-            # agent (which may be blocked inside a long tool call).
-            # The captured id is the SAME task id the message was
-            # queued against — the state lock is still held here, so
-            # a successor task cannot have re-armed the tab yet.  The
-            # SEA slash-command parser decides, so the side channel
-            # takes exactly the prompts the ``ask`` command would: it
-            # is word-boundary strict at character zero (``/askme``
-            # and ``  /ask q``, leading spaces, flow through the normal
-            # steering queue like any other typed message), and a bare
-            # ``/ask`` has no question.
-            command = _split_slash_command(prompt)
-            question = command[1] if command is not None and command[0] == "ask" else ""
-            # Read once under the lock: task teardown clears
-            # ``owner.agent`` under this same lock, so a re-read after
-            # the ``with`` block could hand the side channel ``None``
-            # and drop its spend.
-            owner_agent = owner.agent
-            owner_task = _persisted_task_id(owner_agent)
-            # The agent's id counts only when it is the owner's own
-            # registry key (see ``_queue_prompt_on_owner``): an agent
-            # carried over from the tab's previous task still names
-            # THAT task's row until the new run allocates its own.
-            if owner_task != owner.task_id:
-                owner_task = ""
-            # An empty ``owner_task`` means the running task has not
-            # allocated its ``task_history`` row yet (the narrow
-            # window between ``run()`` entry and ``_add_task``): the
-            # answering session would receive an empty task id and
-            # be unable to read any events, so bail out of the side
-            # channel and let the normal queue path handle the
-            # ``/ask …`` line as a steering message instead — that
-            # path already handles the pre-allocation window through
-            # ``unattributed_prompt_echoes``.
-            ask_question: str | None = None
-            owner_chat_id = owner.chat_id
-            remember = True
-            if question and owner_task:
-                ask_question = question
-            else:
-                queued = self._queue_prompt_on_owner(owner, prompt, tab_id, attachments)
-                if queued is None:
-                    # The agent loop is over: nothing drains the queue
-                    # any more and ``_run_task``'s cleanup re-submits
-                    # the text as the tab's next run, which echoes it
-                    # as its own prompt — a steering echo here would
-                    # show the message twice.
-                    return
-                remember, owner_task = queued
-        if ask_question is not None:
-            # Echo the raw ``/ask …`` line the user typed, then hand
-            # off to the side-channel worker.  The echo carries the
-            # OWNER's task id (not a fresh one) so the message appears
-            # in the running task's history stream, right where the
-            # answer will land.
-            self._echo_injected_prompt(tab_id, prompt, owner_task)
-            if ask_question.lower() in RESERVED_SUBCOMMANDS:
-                # ``/ask help`` is the SEA's ``description()`` and
-                # ``/ask check`` its dry-run report, like every
-                # ``/xxx help`` / ``/xxx check`` — answered here, no
-                # dispatch.
-                try:
-                    help_text, help_ok = help_text_if_command(prompt), True
-                except SeaError as exc:
-                    help_text, help_ok = str(exc), False
-                if help_text is not None:
-                    self._broadcast_ask_answer(
-                        tab_id=tab_id,
-                        owner_task_id=owner_task,
-                        question=ask_question,
-                        text=help_text,
-                        success=help_ok,
-                    )
-                    return
-            raw_attachments = cmd.get("attachments")
-            self._dispatch_ask_side_channel(
-                tab_id=tab_id,
-                owner_task_id=owner_task,
-                owner_agent=owner_agent,
-                chat_id=owner_chat_id,
-                question=ask_question,
-                attachments=raw_attachments if isinstance(raw_attachments, list) else None,
-            )
+            admitted = self._admit_steer(owner, prompt, tab_id, attachments)
+        if admitted is not None:
+            self._deliver_steer(admitted, cmd, prompt, tab_id)
+
+    def _admit_steer(
+        self,
+        owner: AgentState,
+        prompt: str,
+        tab_id: str,
+        attachments: list[Attachment] | None,
+    ) -> _Steer | None:
+        """Admit *prompt*, typed into a running task, on *owner*.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK` —
+        the same hold that chose *owner* as the tab's running task, so
+        a task ending or a successor re-arming the tab meanwhile can
+        neither strand nor misroute the message.  Only the decision and
+        the queueing happen here; :meth:`_deliver_steer` echoes and
+        dispatches once the lock is released.
+
+        ``/ask <question>`` is a live side-channel Q&A over the running
+        task's persisted events: routed to a background ``ask_sea``
+        dispatch instead of ``pending_user_messages`` so the answering
+        session runs independently of the outer agent (which may be
+        blocked inside a long tool call).  The SEA slash-command parser
+        decides, so the side channel takes exactly the prompts the
+        ``ask`` command would: it is word-boundary strict at character
+        zero (``/askme`` and ``  /ask q``, leading spaces, flow through
+        the normal steering queue like any other typed message), and a
+        bare ``/ask`` has no question.  While the running task has no
+        ``task_history`` row yet (the narrow window between ``run()``
+        entry and ``_add_task``) the answering session would receive an
+        empty task id and be unable to read any events, so the
+        ``/ask …`` line is queued as a steering message instead — that
+        path handles the pre-allocation window through
+        ``unattributed_prompt_echoes``.
+
+        Args:
+            owner: The running-task state the message is for.
+            prompt: The user's message (non-empty).
+            tab_id: Frontend tab id the message was typed into.
+            attachments: The message's lazily decoded attachments.
+
+        Returns:
+            What the delivery needs, or ``None`` when the agent loop is
+            already over: nothing drains the queue any more and
+            ``_run_task``'s cleanup re-submits the text as the tab's
+            next run, which echoes it as its own prompt — a steering
+            echo would show the message twice.
+        """
+        command = _split_slash_command(prompt)
+        question = command[1] if command is not None and command[0] == "ask" else ""
+        # Read under the lock: task teardown clears ``owner.agent``
+        # under this same lock, so a read after it could hand the side
+        # channel ``None`` and drop its spend.  The agent's id counts
+        # only when it is the owner's own registry key (see
+        # ``_queue_prompt_on_owner``): an agent carried over from the
+        # tab's previous task still names THAT task's row until the
+        # new run allocates its own.
+        owner_agent = owner.agent
+        owner_task = _persisted_task_id(owner_agent)
+        if owner_task != owner.task_id:
+            owner_task = ""
+        if question and owner_task:
+            return _Steer(owner_task, owner.chat_id, owner_agent, ask_question=question)
+        queued = self._queue_prompt_on_owner(owner, prompt, tab_id, attachments)
+        if queued is None:
+            return None
+        remember, owner_task = queued
+        return _Steer(owner_task, owner.chat_id, owner_agent, remember=remember)
+
+    def _deliver_steer(
+        self, steer: _Steer, cmd: dict[str, Any], prompt: str, tab_id: str,
+    ) -> None:
+        """Echo an admitted message and, for ``/ask``, answer or dispatch it.
+
+        Runs outside :data:`agent_state.STATE_LOCK`: the echo writes the
+        autocomplete history and broadcasts, the dispatch starts a
+        thread.  The echo carries the OWNER's task id (not a fresh one)
+        so the message appears in the running task's history stream,
+        right where a ``/ask`` answer will land.
+
+        Args:
+            steer: The admission made by :meth:`_admit_steer`.
+            cmd: The command that carried the message (its raw
+                ``attachments`` go to the answering session).
+            prompt: The user's message, as typed.
+            tab_id: Frontend tab id the message was typed into.
+        """
+        if steer.ask_question is None:
+            self._echo_injected_prompt(tab_id, prompt, steer.owner_task, steer.remember)
             return
-        self._echo_injected_prompt(tab_id, prompt, owner_task, remember)
+        self._echo_injected_prompt(tab_id, prompt, steer.owner_task)
+        if steer.ask_question.lower() in RESERVED_SUBCOMMANDS:
+            # ``/ask help`` is the SEA's ``description()`` and
+            # ``/ask check`` its dry-run report, like every
+            # ``/xxx help`` / ``/xxx check`` — answered here, no
+            # dispatch.
+            try:
+                help_text, help_ok = help_text_if_command(prompt), True
+            except SeaError as exc:
+                help_text, help_ok = str(exc), False
+            if help_text is not None:
+                self._broadcast_ask_answer(
+                    tab_id=tab_id,
+                    owner_task_id=steer.owner_task,
+                    question=steer.ask_question,
+                    text=help_text,
+                    success=help_ok,
+                )
+                return
+        raw_attachments = cmd.get("attachments")
+        self._dispatch_ask_side_channel(
+            tab_id=tab_id,
+            owner_task_id=steer.owner_task,
+            owner_agent=steer.owner_agent,
+            chat_id=steer.chat_id,
+            question=steer.ask_question,
+            attachments=raw_attachments if isinstance(raw_attachments, list) else None,
+        )
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
         """Replay a previous chat session.
@@ -2043,6 +2108,21 @@ class _CommandsMixin:
         unlocked ``has_tab`` re-probe here used to let a concurrent
         ``closeTab`` turn a benign re-announce of an existing tab into
         a spurious "Tab limit reached" rejection (D-RC2).
+
+        A page that keeps its new tab shielded from the snapshots
+        broadcast before this command was processed sends an ``ack``
+        token; the snapshot the open publishes echoes it (A18-1).  A
+        re-announce of a registered tab publishes nothing: the page's
+        shield lifts on the snapshot that lists the tab.
+
+        A REPLAYED open (its token was already decided: the page's
+        transport re-sent the batch whose ``pong`` its connection lost,
+        see media/transport.js) is not a new open — the tab may have
+        been closed on another surface in between, and opening it
+        again would bring it back everywhere.  It is answered with a
+        snapshot that echoes the token: still registered, the tab is
+        listed; closed meanwhile, it is omitted and the page drops its
+        shielded copy.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str) or not tab_id:
@@ -2053,9 +2133,10 @@ class _CommandsMixin:
         work_dir = cmd.get("workDir", "")
         if not isinstance(work_dir, str):
             work_dir = ""
-        outcome = self.tab_registry.open_tab(tab_id, title, work_dir)
-        if outcome is OpenTabOutcome.OPENED:
-            self._publish_tabs_state()
+        ack = _opt_str(cmd.get("ack")) or ""
+        outcome = self.tab_registry.open_tab(tab_id, title, work_dir, ack)
+        if outcome in (OpenTabOutcome.OPENED, OpenTabOutcome.REPLAYED):
+            self._publish_tabs_state(ack)
         elif outcome is OpenTabOutcome.FULL:
             self._broadcast_to_conn(
                 {
@@ -2070,10 +2151,14 @@ class _CommandsMixin:
             )
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
-        """Clean up backend state for a closed frontend tab."""
+        """Clean up backend state for a closed frontend tab.
+
+        The command's ``ack`` token, when it sends one, rides the
+        snapshot that omits the tab (see :meth:`_cmd_open_tab`).
+        """
         tab_id = cmd.get("tabId", "")
         if tab_id:
-            self._close_tab(tab_id)
+            self._close_tab(tab_id, _opt_str(cmd.get("ack")) or "")
 
     # -- Browser tab: the daemon machine's browser streamed to every surface.
     # Browser page ids travel as ``tab_id`` (never ``tabId``, which names
@@ -2468,7 +2553,7 @@ class _CommandsMixin:
                 logger.warning("saveConfig failed", exc_info=True)
                 failure = f"Could not save the settings: {e}"
         if failure:
-            self._send_error_to_sender(failure, cmd)
+            self._send_error_to_sender(failure, cmd, "saveConfig")
             self._broadcast_to_conn(self._config_data_event(), conn_id)
             return
 
@@ -2659,18 +2744,28 @@ class _CommandsMixin:
             logger.warning("saveMyModel failed", exc_info=True)
             error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
-            self._send_error_to_sender(error, cmd)
+            self._send_error_to_sender(error, cmd, "saveMyModel")
             return
         self._broadcast_my_models(cmd)
 
-    def _send_error_to_sender(self, error: str, cmd: dict[str, Any]) -> None:
+    def _send_error_to_sender(self, error: str, cmd: dict[str, Any], command: str) -> None:
         """Answer a failed ``~/.kiss`` file mutation with an ``error`` event.
 
         Stamped with the sender's ``connId`` when present so the banner
-        pops only in the window that clicked.
+        pops only in the window that clicked, and with *command* (the
+        request's type) so the page relays the refusal to that one
+        pending operation: a promptlet add, a promptlet edit and a
+        custom-model save can await their answers at the same time.
+
+        Args:
+            error: The refusal, shown to the user.
+            cmd: The request being answered (its ``connId`` scopes the
+                event).
+            command: The request's type (``addTrick``, ``saveMyModel``, ...).
         """
         self._broadcast_to_conn(
-            {"type": "error", "text": error}, cmd.get("connId", ""),
+            {"type": "error", "text": error, "command": command},
+            cmd.get("connId", ""),
         )
 
     def _cmd_delete_my_model(self, cmd: dict[str, Any]) -> None:
@@ -2690,7 +2785,7 @@ class _CommandsMixin:
                 logger.warning("deleteMyModel failed", exc_info=True)
                 error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
-            self._send_error_to_sender(error, cmd)
+            self._send_error_to_sender(error, cmd, "deleteMyModel")
             return
         self._broadcast_my_models(cmd)
 
@@ -2774,7 +2869,7 @@ class _CommandsMixin:
             error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
         event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
-            self._send_error_to_sender(error, cmd)
+            self._send_error_to_sender(error, cmd, name)
         # A failed write repaints only the sender; a successful one
         # repaints every window (the file is shared).
         self._broadcast_to_conn(event, cmd.get("connId", "") if error else "")

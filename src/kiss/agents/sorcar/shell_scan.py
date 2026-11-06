@@ -20,7 +20,8 @@ directory it runs in, followed through ``cd``.  A subshell, a
 substitution, a pipeline stage and a ``&`` list keep their ``cd`` and
 their assignments to themselves; a ``cd`` that may not run (after
 ``||``, or in an ``if``, a loop or a ``case``) leaves the directory
-unknown, and a variable set any other way than by a literal
+unknown, as does one after ``&&`` once its list ends (the rest of the
+list runs only when it ran), and a variable set any other way than by a literal
 assignment (``read``, ``unset``, ``declare``, ``let``, a loop variable,
 an arithmetic command or expansion, an assignment before a special
 builtin, ``eval``, ``source``) is unknown afterwards.  Other commands
@@ -133,14 +134,27 @@ _BOTH = frozenset({"&>", "&>>"})
 # whose output is a word of another command rather than a stream.
 _SUBSHELLS = frozenset({"(", "$(", "`"})
 _SUBSTITUTIONS = frozenset({"$(", "`"})
-#: Groups within groups a scan follows; past them the text is not a command
-#: line anyone runs, and the scan ends with the commands found so far
-#: (each level costs a few Python frames, so the interpreter's limit stays far).
+#: Groups and expansions within groups a scan follows; past them the text is
+#: not a command line anyone runs, and the scan ends: a guard's with
+#: :class:`TooDeepError`, a gate's with the commands found so far (each level
+#: costs a few Python frames, so the interpreter's limit stays far).
 MAX_NESTING = 100
 
 
-class _TooDeepError(Exception):
-    """The groups nest deeper than :data:`MAX_NESTING`."""
+#: Text the model sees instead of running a command nested past :data:`MAX_NESTING`.
+TOO_DEEP_VERDICT = (
+    "REFUSED: the command did not run: it nests groups or expansions more than "
+    f"{MAX_NESTING} levels deep, past what the shell guards read. Split it into simpler "
+    "commands."
+)
+
+
+class TooDeepError(Exception):
+    """The groups or expansions nest deeper than :data:`MAX_NESTING`.
+
+    :func:`simple_commands` raises it for a guard, which must refuse
+    what it cannot read; its message is :data:`TOO_DEEP_VERDICT`.
+    """
 
 
 # On Windows host commands run in Git Bash, which spells ``C:\Users\x``
@@ -361,15 +375,24 @@ def simple_commands(command: str, cwd: str | None,
         optimistic: Assume every list ran through: an assignment or a
             ``cd`` after ``&&`` or ``||`` holds for the rest of the
             command (``cd d && T=tmp/x && a; cp b $T/``), not only for
-            the rest of its list.  A guard that must not let a write
-            through keeps the default; a gate that judges what the
-            agent changed reads the command as it was meant to run.
+            the rest of its list, and a command nested past
+            :data:`MAX_NESTING` is read up to the nesting.  A guard that
+            must not let a write through keeps the default; a gate that
+            judges what the agent changed reads the command as it was
+            meant to run.
+
+    Raises:
+        TooDeepError: The groups or expansions nest deeper than
+            :data:`MAX_NESTING`, so the commands past them are unread,
+            and the scan is not *optimistic*: a guard refuses the command.
     """
     scanner = _Scanner(command, cwd, None, optimistic=optimistic)
     try:
         scanner.command_list()
-    except _TooDeepError:
-        pass  # the commands before the nesting are the reading
+    except TooDeepError:
+        if not optimistic:
+            raise
+        # the gate's reading: the commands before the nesting
     return scanner.commands
 
 
@@ -475,6 +498,9 @@ class _Scanner:
         self.after_or = False
         self.after_and = False
         self.and_assigned: set[str] = set()
+        # Whether a ``cd`` after ``&&`` set the directory: known to the rest
+        # of the and-list, unknown once the list ends any other way.
+        self.and_cd = False
         # Whether a ``!`` was read and no command has taken it yet.
         self.negate = False
         # Where in the text a ``((`` was found not to close as ``))``: shared
@@ -660,9 +686,12 @@ class _Scanner:
         group = self.group = Group(word, self.cwd, outer, conditional)
         self.after_or = self.after_and = False
         and_assigned, self.and_assigned = self.and_assigned, set()
+        and_cd, self.and_cd = self.and_cd, False
         self.nested_command_list()
         self.group = outer
         self.and_assigned = and_assigned
+        # a brace group after ``&&`` that changed directory: known to the rest of the and-list
+        self.and_cd = and_cd or (may_not_run and not conditional and self.cwd != group.cwd)
         if may_not_run:
             for name in before.keys() | self.variables.keys():
                 if self.variables.get(name) != before.get(name):
@@ -675,12 +704,16 @@ class _Scanner:
     def forget_and_assigned(self) -> None:
         """End the and-list: the variables assigned after its ``&&`` may not have been.
 
+        Nor may a ``cd`` there have run: the directory is unknown then.
         An optimistic scan keeps them: the list is assumed to have run through.
         """
         if not self.optimistic:
             for name in self.and_assigned:
                 self.variables[name] = None
+            if self.and_cd:
+                self.cwd = None
         self.and_assigned = set()
+        self.and_cd = False
 
     def subshell(self, kind: str) -> Group:
         """Scan the commands of a subshell or a substitution to its ``)``; return its group.
@@ -688,23 +721,32 @@ class _Scanner:
         A ``cd`` in it ends with it.
         """
         saved = (self.cwd, self.group, self.after_or, self.after_and, self.variables,
-                 self.and_assigned)
+                 self.and_assigned, self.and_cd)
         group = self.group = Group(kind, self.cwd, self.group)
         self.after_or = self.after_and = False
         self.variables = dict(self.variables)  # its assignments end with it too
         self.and_assigned = set()
+        self.and_cd = False
         self.nested_command_list()
         (self.cwd, self.group, self.after_or, self.after_and, self.variables,
-         self.and_assigned) = saved
+         self.and_assigned, self.and_cd) = saved
         return group
 
     def nested_command_list(self) -> None:
-        """Scan the commands of the group just entered; past :data:`MAX_NESTING` end the scan."""
-        if self.depth >= MAX_NESTING:
-            raise _TooDeepError
-        self.depth += 1
+        """Scan the commands of the group just entered, one level deeper."""
+        self.depth = self.deeper()
         self.command_list()
         self.depth -= 1
+
+    def deeper(self) -> int:
+        """Return the depth of the group or expansion just entered; past the limit end the scan.
+
+        Raises:
+            TooDeepError: It would be deeper than :data:`MAX_NESTING`.
+        """
+        if self.depth >= MAX_NESTING:
+            raise TooDeepError(TOO_DEEP_VERDICT)
+        return self.depth + 1
 
     def substitution(self) -> Word:
         """Scan the ``$(...)``, ``<(...)`` or ``>(...)`` at the position as one word."""
@@ -737,6 +779,8 @@ class _Scanner:
         group = command.group
         conditional = (self.after_or and not self.optimistic) or (
             group is not None and group.conditional)
+        if name in ("cd", "pushd", "popd") and self.after_and:
+            self.and_cd = True
         if name == "cd":
             self.cwd = None if conditional else _cd(self.cwd, argv[1:])
         elif name == "pushd":
@@ -1041,6 +1085,7 @@ class _Scanner:
         """
         text = self.text
         self.pos += 2
+        self.depth = self.deeper()
         # The parameter comes first: the ``?`` of ``${?:+word}`` and the
         # ``#`` of ``${#:+word}`` name a parameter, not an operator.
         parameter = _BRACE_PARAMETER.match(text, self.pos)
@@ -1055,7 +1100,7 @@ class _Scanner:
             char = text[self.pos]
             if char == "}":
                 self.pos += 1
-                return
+                break
             if char == "\\":
                 self.pos += 2
             elif text.startswith("$'", self.pos) and (run or quoted):
@@ -1082,6 +1127,7 @@ class _Scanner:
                 elif slash and char == "/" and self.pos != slash:
                     run, slash = expands, 0  # the replacement
                 self.pos += 1
+        self.depth -= 1
 
     def arithmetic(self, pos: int) -> int:
         """Scan the arithmetic expression from *pos* to its ``))``; return the index past it.
@@ -1099,7 +1145,7 @@ class _Scanner:
         if pos in self.not_arithmetic:
             return 0
         text = self.text
-        scanner = _Scanner(text, self.cwd, self.group, self.depth, self.optimistic)
+        scanner = _Scanner(text, self.cwd, self.group, self.deeper(), self.optimistic)
         scanner.pos, scanner.not_arithmetic, depth = pos, self.not_arithmetic, 0
         while scanner.pos < len(text):
             char = text[scanner.pos]

@@ -33,16 +33,8 @@ const path = require('path');
 const {spawn} = require('child_process');
 
 const GATE = path.join(__dirname, 'coverage_gate.js');
+const {killGroup} = require(GATE);
 const WAIT_MS = 20000;
-
-/** SIGKILL process group `pgid`; a group already gone is fine. */
-function killGroup(pgid) {
-  try {
-    process.kill(-pgid, 'SIGKILL');
-  } catch {
-    // ESRCH: every process of the group has exited.
-  }
-}
 
 /** Resolves after `ms`, without holding the process open. */
 function delay(ms) {
@@ -133,8 +125,13 @@ async function testHungSuiteOutputStreams() {
     // hangs well past WAIT_MS; exits on its own if nothing kills it.  It
     // stops the guard first: a guard that cannot react to the gate's
     // death stands for one too slow to do so before this test cleans up,
-    // so the cleanup below has to retire it itself.
+    // so the cleanup below has to retire it itself.  The guard's pid goes
+    // to a file before the stop, so the cleanup finds it even when the
+    // output never reached this process (the failure the test detects):
+    // a stopped guard that only the captured output named leaked for ever.
     'hung.test.js':
+      "require('fs').writeFileSync(" +
+      "require('path').join(__dirname, 'guard.pid'), String(process.ppid));\n" +
       "process.kill(process.ppid, 'SIGSTOP');\n" +
       "console.log('ok - first ' + process.ppid);\n" +
       'setTimeout(() => process.exit(3), 60000);\n',
@@ -150,6 +147,7 @@ async function testHungSuiteOutputStreams() {
     /ok - first \d+\n/,
   );
   const guard = /ok - first (\d+)\n/.exec(res.out);
+  const pidFile = path.join(dir, 'guard.pid');
   let closed = false;
   try {
     assert.ok(
@@ -157,6 +155,11 @@ async function testHungSuiteOutputStreams() {
       "the hung suite's output did not reach the gate's stdout while it ran",
     );
     assert.strictEqual(res.code, null, 'the suite was still running');
+    assert.strictEqual(
+      fs.readFileSync(pidFile, 'utf8'),
+      guard[1],
+      'the suite named its guard in the pid file before stopping it',
+    );
   } finally {
     // The kill reached the gate only.  Its guard leads its own group,
     // holds the gate's pipes, and once it notices the gate is gone
@@ -166,7 +169,9 @@ async function testHungSuiteOutputStreams() {
     // with the coverage file in it, one directory per run.  So kill the
     // guard's group here and wait for the pipes to close, which only the
     // exit of their last holder does, before removing the directory.
-    if (guard) killGroup(Number(guard[1]));
+    // The pid file, not the captured output, names the guard: a SIGKILL
+    // reaches a stopped process, so no SIGCONT is needed.
+    if (fs.existsSync(pidFile)) killGroup(Number(fs.readFileSync(pidFile, 'utf8')));
     closed = await Promise.race([
       res.closed.then(() => true),
       delay(WAIT_MS).then(() => false),

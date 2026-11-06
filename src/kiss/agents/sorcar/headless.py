@@ -28,7 +28,9 @@ created (session executors, the summarizer, the task classifier, ...)
 naming convention; ``save_trajectories=False`` writes none.
 
 Needs an API key in the environment or in ``$KISS_HOME/api_keys.env``
-(loaded by :func:`run_sea`).  The ``run_agent`` / ``run_parallel``
+(loaded by :func:`run_sea`, which also applies the settings saved in
+``$KISS_HOME/config.json`` — the default budget, the global Compaction
+switch — as the daemon does).  The ``run_agent`` / ``run_parallel``
 tools need the daemon; a SEA meant for headless runs leaves the
 ``agents`` tool group out of its ``tool_profile``.
 ``scripts/run_sea.py`` is the command-line form.
@@ -48,7 +50,7 @@ from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.base import collecting_trajectories
 from kiss.core.printer import Printer
-from kiss.core.user_config import load_api_keys_readonly
+from kiss.core.user_config import apply_config_to_env, load_api_keys_readonly, load_config
 
 logger = logging.getLogger("kiss.headless")
 
@@ -138,6 +140,11 @@ def run_sea(
             raised or returned a value of the wrong type).
     """
     load_api_keys_readonly()
+    # The persisted settings (``config.json``: the default budget, the
+    # subscription switches, the global Compaction switch), as the daemon
+    # applies them at start-up: a headless process otherwise runs with
+    # the declared defaults whatever the user saved.
+    apply_config_to_env(load_config())
     sea_path = resolve_sea(sea)
     run = evaluate_sea(sea_layers(sea_path), task)
     settings = run.settings
@@ -161,6 +168,7 @@ def run_sea(
                 tool_profile=settings.get("tool_profile", ""),
                 web_tools=bool(settings.get("use_web_tools", False)),
                 use_memory=settings.get("use_memory"),
+                compaction=settings.get("compaction", True),
                 model_config=model_config,
                 docker_image=settings.get("docker_image") or None,
                 system_prompt_hook=run.system_prompt_hook,

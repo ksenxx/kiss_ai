@@ -132,14 +132,17 @@ class TestScan:
         assert reg.root_for(str(tmp_path / "src")) == (str(tmp_path), "src/")
 
     def test_nested_gitignores_apply_to_dirs_and_files_below_them(self, tmp_path: Path) -> None:
-        (tmp_path / ".gitignore").write_text("build/\n/top-only\nsecret.txt\n!keep\n*.log\n")
+        (tmp_path / ".gitignore").write_text(
+            "build/\n/top-only\nsecret.txt\n!keep\n*.log\n/data/\n/cache/\n"
+        )
         touch(
             tmp_path, "build/a.o", "top-only/x", "nested/top-only/y", "secret.txt",
             "nested/secret.txt", "keep", "run.log", "repo/.gitignore", "repo/tmp/junk",
             "repo/src/tmp/also-junk", "repo/generated/out.py", "repo/deeper/generated/in.py",
-            "other/tmp/kept.py", "nested/build",
+            "other/tmp/kept.py", "nested/build", "data", "cache/c.o", "nested/cache/k",
+            "repo/gen", "repo/sub/gen/g.py",
         )
-        (tmp_path / "repo" / ".gitignore").write_text("tmp\n/generated\n")
+        (tmp_path / "repo" / ".gitignore").write_text("tmp\n/generated\n/gen/\n/sub/gen/\n")
         paths = set(FileIndex.scan(str(tmp_path)).paths)
         assert "build/" not in paths and "build/a.o" not in paths
         assert "nested/build" in paths, "a `dir/` rule does not hide a file of that name"
@@ -152,6 +155,14 @@ class TestScan:
         assert "repo/generated/" not in paths
         assert "repo/deeper/generated/" in paths
         assert "repo/.gitignore" in paths
+        # An anchored ``/dir/`` rule skips that directory only: not a
+        # file of the same name (``git check-ignore data`` says so), nor
+        # a directory of that name elsewhere.
+        assert "cache/" not in paths and "cache/c.o" not in paths
+        assert "nested/cache/" in paths
+        assert "data" in paths, "an anchored `dir/` rule does not hide a file of that name"
+        assert "repo/gen" in paths
+        assert "repo/sub/gen/" not in paths and "repo/sub/gen/g.py" not in paths
 
     def test_rescan_reuses_unchanged_listings_and_sees_changes(self, tmp_path: Path) -> None:
         touch(tmp_path, "a/one.py", "b/two.py")

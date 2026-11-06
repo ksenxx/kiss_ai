@@ -179,6 +179,7 @@ class RunOptions:
     use_web_tools: bool | None = None
     auto_classify: bool | None = None
     use_memory: bool | None = None
+    compaction: bool | None = None
     tool_profile: str = ""
     docker_image: str = ""
     inherit: bool | None = None
@@ -814,8 +815,9 @@ def inherit_from_parent(
       toolset after the sub-task's own SEA's ``tools()``
       tools; a script on the ``none`` tool profile keeps exactly its
       own set.
-    - ``use_web_tools`` / ``use_memory``: the caller's per-run
-      settings (``_use_web_tools`` / ``_use_memory_override``).
+    - ``use_web_tools`` / ``use_memory`` / ``compaction``: the caller's
+      per-run settings (``_use_web_tools`` / ``_use_memory_override`` /
+      ``compaction``).
     - ``docker_image``: the call's own ``docker_image`` option, else
       ``container:<id>`` of the caller's live Docker
       container, so the sub-task acts in the same container instead of
@@ -900,6 +902,10 @@ def _inherited_budget(
     spend lands on the ledger in the critical section that clears its
     reservation (:func:`_attribute_dispatch_usage`), so each sub-task
     is counted exactly once: by its reservation or by its spend.
+    A job whose SEA pins ``max_budget`` keeps the reservation
+    :func:`new_agent_job` recorded: the daemon pins the share sent
+    here to the SEA's value (``sea_apply.apply_run``), so that value,
+    not the share, is what the sub-task can spend of the remainder.
 
     Returns:
         The budget, or ``None`` when the caller has no budget context.
@@ -913,7 +919,7 @@ def _inherited_budget(
     budget = _unreserved_share(parent_agent, share(siblings), siblings, reserved)
     if budget is not None and budget_cap is not None:
         budget = min(budget, budget_cap)
-    if job is not None:
+    if job is not None and job.budget is None:
         job.budget = budget
     return budget
 
@@ -965,6 +971,10 @@ def _inherit_from_parent(
         use_memory=(
             getattr(parent_agent, "_use_memory_override", None)
             if options.use_memory is None else options.use_memory
+        ),
+        compaction=(
+            getattr(parent_agent, "compaction", None)
+            if options.compaction is None else options.compaction
         ),
     )
     docker_image = options.docker_image
@@ -1410,6 +1420,7 @@ def dispatch_command(
         "model_config": options.model_config,
         "use_web_tools": options.use_web_tools,
         "use_memory": options.use_memory,
+        "compaction": options.compaction,
         # The Python API's ``is_parallel`` (a sequential caller does
         # not hand ``run_parallel`` to its children); not a setting.
         "is_parallel": bool(getattr(parent_agent, "_is_parallel", True)) if inherit else True,
@@ -2268,8 +2279,9 @@ class AgentJob:
             that started the job; the siblings of one fan-out share it
             and never reserve budget against each other.
         budget: The USD budget the sub-task was given: the call's own
-            from registration, or its inherited share once the job's
-            thread resolves it (:func:`inherit_from_parent`, under
+            or its SEA's ``max_budget`` setting from registration, or
+            its inherited share once the job's thread resolves it
+            (:func:`inherit_from_parent`, under
             :data:`_AGENT_JOBS_LOCK`) and before the sub-task runs;
             ``None`` until then or when the daemon default applies.
             While the job is unfinished it is reserved against the
@@ -2338,8 +2350,9 @@ def start_agent_job(
         name: The agent's display name.
         kwargs: The keyword arguments of :func:`dispatch_result`, plus
             the ``alias`` :func:`format_dispatch_result` shows; the
-            job itself is added as ``job``.  The call's own ``budget``
-            is reserved from registration (:attr:`AgentJob.budget`).
+            job itself is added as ``job``.  The call's own ``budget``,
+            else the SEA's ``max_budget`` setting, is reserved from
+            registration (:attr:`AgentJob.budget`).
         owner: The calling agent (``None`` for standalone use).
         call_id: The :attr:`AgentJob.call_id` of the call starting the
             job (``run_parallel`` gives its siblings one); empty for a
@@ -2365,10 +2378,17 @@ def new_agent_job(
         The unlaunched job.
     """
     job_id = f"agent-{uuid.uuid4().hex[:8]}"
+    # The budget the sub-task will be given, when it is known before
+    # the dispatch (sea_settings.PRECEDENCE_RULE): the call's own, else
+    # the SEA's ``max_budget`` setting, which the daemon applies over
+    # the inherited share; an inherited one is resolved on the thread.
+    budget = kwargs.get("budget")
+    if budget is None:
+        budget = (kwargs.get("settings") or {}).get("max_budget")
     job = AgentJob(
         job_id, name, owner, _JobEvent(), _JobEvent(),
         timeout=float(kwargs["timeout"]), workspace=str(kwargs.get("workspace") or ""),
-        call_id=call_id or uuid.uuid4().hex, budget=kwargs.get("budget"),
+        call_id=call_id or uuid.uuid4().hex, budget=budget,
     )
     job.thread = threading.Thread(
         target=_finish_agent_job, args=(job, {**kwargs, "job": job}),
@@ -2560,12 +2580,12 @@ def reserved_budget(jobs: Sequence[AgentJob]) -> float:
     *jobs* are the caller's live jobs of other calls, read under
     :data:`_AGENT_JOBS_LOCK` when a job thread resolves its inherited
     budget (:func:`_inherited_budget`): a job of another call that
-    resolved first has recorded its share by then, an explicit budget
-    is on its job from registration, and the siblings of one
-    ``run_parallel`` call (same :attr:`AgentJob.call_id`) are left
-    out, as the split already divides the remainder among them.  A
-    sub-task whose spend is on the caller's ledger (its budget was
-    cleared as the spend landed) or that finished holds nothing.
+    resolved first has recorded its share by then, an explicit or
+    SEA-pinned budget is on its job from registration, and the
+    siblings of one ``run_parallel`` call (same :attr:`AgentJob.call_id`)
+    are left out, as the split already divides the remainder among
+    them.  A sub-task whose spend is on the caller's ledger (its budget
+    was cleared as the spend landed) or that finished holds nothing.
     """
     return sum(job.budget or 0.0 for job in jobs if not job.finished)
 
@@ -2990,7 +3010,8 @@ def make_run_agent_tool(
                 text), ``model_config`` (JSON object), ``docker_image``,
                 and the booleans ``inherit`` (``false`` = take nothing
                 from this task), ``auto_classify``, ``use_web_tools``,
-                ``use_memory``.
+                ``use_memory``, ``compaction`` (``false`` = the sub-task
+                never compacts its context).
             wait: ``"false"`` = return a job id at once; then
                 ``agent_job(job_id, "wait")`` returns the result,
                 ``"tail"`` its status, ``"kill"`` stops it.  Use it to

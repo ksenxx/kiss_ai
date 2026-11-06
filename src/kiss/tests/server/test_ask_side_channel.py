@@ -54,6 +54,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import clear_agent_states
+from kiss.tests.server.pause import Pause
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -287,6 +288,101 @@ def test_ask_check_answers_with_the_dry_run_report_without_dispatch() -> None:
     assert answer["text"] == sea_commands.sea_check("ask", Path(ask_sea.__file__))
     assert answer["text"].startswith("/ask: " + ask_sea.AskSea().description())
     assert "tools added: task_context" in answer["text"]
+
+
+def test_ask_through_a_run_on_a_busy_tab_is_the_side_channel_too() -> None:
+    """A ``run`` that lands on a tab whose task is live routes ``/ask`` like ``appendUserMessage``.
+
+    The page switches to ``appendUserMessage`` once it knows the tab
+    is busy; a ``run`` sent before that (the startup window) or by an
+    API client is the same user action, so its ``/ask …`` line is the
+    side channel (here ``/ask help``, answered locally with the ask
+    SEA's description), not steering text handed to the running
+    agent.  A plain line still steers.
+    """
+    server, events = _make_server()
+    st = _register_running_task("task-abc", "tab-1", chat_id="chat-1")
+    st.task_thread = threading.Thread(target=lambda: None, daemon=True)
+    sea_commands.refresh_registry()
+
+    server._cmd_run({"tabId": "tab-1", "prompt": "/ask help", "_notice": "sent 1 file"})
+
+    assert st.pending_user_messages == []
+    assert [e["type"] for e in events] == ["setTaskText", "prompt", "ask_answer", "notice"], events
+    assert events[1] == {
+        "type": "prompt", "text": "/ask help", "tabId": "tab-1", "steer": True,
+        "taskId": "task-abc",
+    }
+    assert events[2]["text"] == ask_sea.AskSea().description()
+    assert events[3] == {"type": "notice", "text": "sent 1 file", "tabId": "tab-1"}
+
+    server._cmd_run({"tabId": "tab-1", "prompt": "plain follow-up"})
+    assert st.pending_user_messages == ["plain follow-up"]
+    assert [e["type"] for e in events[4:]] == ["setTaskText", "prompt"]
+
+
+@pytest.mark.parametrize("successor_chat", ["", "chat-other"])
+def test_run_on_a_busy_tab_admits_the_message_in_the_lock_hold_that_found_the_task(
+    successor_chat: str,
+) -> None:
+    """A ``run`` into a busy tab queues its text on the task it found, in the same lock hold.
+
+    ``_cmd_run`` picks the tab's running task under ``STATE_LOCK``; the
+    message must land on that task's queue in the same lock hold, so a
+    task that ends right after the pick re-runs the text (the real
+    ``_release_run_state`` drains the queue into the tab's next run)
+    and a successor task of another chat that re-arms the tab meanwhile
+    never receives it.  It used to be handed to
+    ``_cmd_append_user_message`` after the lock was released, whose own
+    lookup saw the tab idle (the text was refused, back in the
+    composer) or bound to the successor (the text steered an unrelated
+    chat, ``chatId`` notwithstanding).  A run that reaches that handler
+    is held at its entry while the task ends, which lands the race for
+    sure; one that queues the text under its own lock never gets there.
+    """
+    server, events = _make_server()
+    original = _register_running_task("task-orig", "tab-busy", chat_id="chat-orig")
+    original.task_thread = threading.Thread(target=lambda: None, daemon=True)
+    failures: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            server._cmd_run({
+                "tabId": "tab-busy", "chatId": "chat-orig", "prompt": "follow-up for chat-orig",
+            })
+        except BaseException as exc:  # noqa: BLE001 — reported by the test thread
+            failures.append(exc)
+
+    successor: AgentState | None = None
+    held = Pause(
+        AgentServer._cmd_append_user_message.__code__,
+        lambda local: local.get("self") is server,
+    )
+    with held:
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+        while worker.is_alive() and not held.paused.is_set():
+            worker.join(0.01)
+        with server._state_lock:
+            reruns, redispatch, _ = server._release_run_state(original, {}, "tab-busy", "")
+            if successor_chat:
+                agent_state.unregister(original.task_id, original)
+                successor = _register_running_task("task-succ", "tab-busy", chat_id=successor_chat)
+                successor.task_thread = threading.Thread(target=lambda: None, daemon=True)
+        held.release()
+        worker.join(10)
+    assert not worker.is_alive() and not failures, failures
+
+    refused = [e["text"] for e in events if e.get("code") == "prompt_refused"]
+    assert refused == [], refused
+    if successor is not None:
+        assert successor.pending_user_messages == [], (
+            f"chat {successor_chat} received the text: {successor.pending_user_messages}"
+        )
+    assert [text for text, _files in reruns] == ["follow-up for chat-orig"], (
+        f"the ended task does not re-run the text; reruns={reruns}"
+    )
+    assert redispatch is True
 
 
 def test_non_ask_message_still_queues_and_does_not_dispatch() -> None:

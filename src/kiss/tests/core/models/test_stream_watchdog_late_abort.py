@@ -26,9 +26,10 @@ is real — real SDK, real sockets, real SSE, real threads.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-from kiss.core.models.stream_abort import StreamAbortWatchdog
+from kiss.core.models.stream_abort import StreamAbortWatchdog, stop_aware_events
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
@@ -190,3 +191,49 @@ class TestDisarmedWatchdogNeverClaimsAnAbort:
             finally:
                 watchdog.stop()
                 stream.close()
+
+
+class _HeaderlessStream:
+    """A stream that ends before its ``response`` ever arrives.
+
+    The watchdog reads ``response`` only once it has claimed an abort
+    (``_abort``'s "headers not here yet, retry later" check); that first
+    read releases the iteration, so every event flows after the stall
+    verdict was taken, and the stream ends (disarming the watchdog)
+    before the watchdog could act on it.  This is Gemini's lazy
+    generator with the headers and the whole body arriving within one
+    poll of a stall claimed while they were late.
+    """
+
+    def __init__(self) -> None:
+        self.claimed = threading.Event()
+        self.closed = False
+
+    @property
+    def response(self) -> None:
+        """Never any response: the watchdog's abort stays pending."""
+        self.claimed.set()
+        return None
+
+    def __iter__(self) -> Iterator[str]:
+        assert self.claimed.wait(10), "the watchdog never claimed the stall"
+        yield "first"
+        yield " rest"
+
+    def close(self) -> None:
+        """Record the release the wrapper owes the stream."""
+        self.closed = True
+
+
+def test_a_stall_claimed_but_never_acted_on_is_withdrawn_at_stop() -> None:
+    """A stream that completes after a stall was claimed is a complete result, not a stall.
+
+    The verdict is withdrawn when the abort runs after the disarm; it
+    must be withdrawn just the same when the disarm ends the watch loop
+    before the abort ever ran, or the caller raises ``TimeoutError``
+    for a stream it consumed to the end and re-asks the model.
+    """
+    stream = _HeaderlessStream()
+    events = list(stop_aware_events(stream, stall_timeout=0.05, name="stale-verdict-watchdog"))
+    assert events == ["first", " rest"]
+    assert stream.closed

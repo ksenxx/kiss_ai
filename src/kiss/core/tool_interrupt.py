@@ -197,20 +197,11 @@ _INJECT_LOCK = threading.RLock()
 _RUNNING: dict[int, ToolCallToken] = {}
 
 
-def new_tool_call(name: str) -> ToolCallToken:
-    """Create the token for a tool call about to start on this thread.
-
-    Kept separate from :func:`register_tool_call` so the caller can hold
-    the token BEFORE the call becomes interruptible: an exception
-    injected after registration then always has a token to unregister.
-
-    Args:
-        name: The tool's name.
-
-    Returns:
-        The unregistered token.
-    """
-    return ToolCallToken(name)
+new_tool_call = ToolCallToken
+"""Create the (unregistered) token for a tool call about to start on this
+thread.  Creating it apart from :func:`register_tool_call` lets the caller
+hold the token BEFORE the call becomes interruptible: an exception
+injected after registration then always has a token to unregister."""
 
 
 def register_tool_call(token: ToolCallToken) -> None:
@@ -284,17 +275,19 @@ def unregister_tool_call(token: ToolCallToken) -> None:
     on never injects; then waits out an injection that is in progress
     (the interrupting side read ``closing`` before it was set), so
     ``token.injected`` is final when this returns; then drops the
-    registry entry.  Plain stores, reads and a short sleep loop — no
-    lock is taken on the tool thread.  Used from the
-    ``except ToolCallInterrupted`` handler and as the ``finally`` safety
-    net on every other exit path of the tool call.
+    registry entry.  The wait has no deadline: the verdict is a few
+    statements away on the interrupting side, which holds nothing this
+    thread waits on, and a return that gave up waiting would let the
+    injection land in whatever this thread runs next.  Plain stores,
+    reads and a short sleep loop — no lock is taken on the tool thread.
+    Used from the ``except ToolCallInterrupted`` handler and as the
+    ``finally`` safety net on every other exit path of the tool call.
 
     Args:
         token: The token of the call on this thread.
     """
     token.closing = True
-    deadline = time.monotonic() + _DRAIN_SECONDS
-    while token.injecting and time.monotonic() < deadline:
+    while token.injecting:
         time.sleep(0.001)
     if _RUNNING.get(token.thread_ident) is token:
         if token.parent is None:
@@ -571,7 +564,7 @@ def interrupt_tool_call(
     # its registry entry before it reads the marks of the calls it is
     # nested in (register_tool_call), so one side or the other sees the
     # nested call interrupted.
-    _signal(token, thread_ident)
+    _signal(token)
     # A call nested in the interrupted one (the thread's registered
     # call, down from the interrupted one through ``parent``) is what
     # runs now: it is signalled too, so the Stop lands in it and the
@@ -586,11 +579,11 @@ def interrupt_tool_call(
     if running is token:
         for call in nested:
             if not call.interrupted:
-                _signal(call, thread_ident)
+                _signal(call)
     return True
 
 
-def _signal(call: ToolCallToken, thread_ident: int) -> None:
+def _signal(call: ToolCallToken) -> None:
     """Mark *call* interrupted, set its event and arm its watchdog.  Called under the lock."""
     call.interrupted = True
     call.event.set()
@@ -598,7 +591,7 @@ def _signal(call: ToolCallToken, thread_ident: int) -> None:
         "Interrupting tool call %s (#%d) on thread %s",
         call.name,
         call.call_id,
-        thread_ident,
+        call.thread_ident,
     )
     try:
         threading.Thread(

@@ -161,6 +161,21 @@ class TestEnsureHtml:
         doc = "<!DOCTYPE html><html><body>hi</body></html>"
         assert ensure_html(doc) == doc
 
+    def test_markdown_with_html_inside_code_is_rendered_as_markdown(self) -> None:
+        """A tag inside a fenced block or a code span is an example, not
+        markup: the Markdown is rendered and the tag reaches the page escaped."""
+        fenced = ensure_html("# Example\n\n```html\n<div>Hello</div>\n```")
+        assert fenced.startswith("<h1>Example</h1>")
+        assert "<pre><code" in fenced and "&lt;div&gt;Hello&lt;/div&gt;" in fenced
+        assert "<div>" not in fenced
+        span = ensure_html("Wrap it in `<b>` tags")
+        assert span == "<p>Wrap it in <code>&lt;b&gt;</code> tags</p>"
+
+    def test_html_with_backticks_in_its_text_is_still_html(self) -> None:
+        """Backticks in an HTML summary's prose do not make it Markdown."""
+        html = "<p>Run `make` and ```make test``` then `make install`</p>"
+        assert ensure_html(html) == html
+
     def test_non_string_input_is_coerced(self) -> None:
         """Some LLMs pass numbers/lists for summary_in_html — must not crash."""
         assert ensure_html(42) == "<p>42</p>"  # type: ignore[arg-type]

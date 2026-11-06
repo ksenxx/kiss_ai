@@ -323,6 +323,7 @@ not exist is reported as `missing: <path>` and fails the run either way.
 | `use_web_tools` | `bool` | `useWebTools` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | `classifyTasks` | Let the pre-run classifier decide whether the task is simple (lite prompt) (daemon default: the persisted setting). |
 | `use_memory` | `bool` | `useMemory` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
+| `compaction` | `bool` | `compaction` | Let the run compact its context: old, large tool outputs and arguments become short stubs once the context grows large (default: on). `false` turns it off for the run; the daemon's global Compaction setting (the settings panel's checkbox) off turns it off for every run, whatever a SEA or a call passes. |
 | `tool_profile` | `str` | `toolProfile` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | `dockerImage` | Run inside this Docker image (default: the host). |
 | `timeout` | `int \| float` | — | Seconds a `run_agent` / `run_parallel` call blocks for the run: the call's `timeout` argument wins, then this setting, then 3600. When it expires the run is not stopped: it keeps going as an `agent_job` and the call returns its job id (a job still running when the calling task ends is killed). Ignored by `/<name>`. |
@@ -672,10 +673,15 @@ over disjoint named pieces of work (`undivided_work` /
 `/`, a dotted module or file name, a URL or a backticked command, and
 no piece is named by two tasks; pieces under `tmp/` and, in a fan-out
 of three or more, pieces every task names (shared instructions) do
-not count, and a directory two tasks share is no overlap when each
-names a more specific piece under it; the shortfall names the task
-that names nothing of its own, or every pair of tasks sharing a piece
-and up to three of the pieces each, in one clause), (ii) the caller's own
+not count; a directory a task also names a more specific piece under
+is context for that piece, not a claim on the directory, so `src/x/`
+with `src/x/a.py` in one task and `src/x/` with `src/x/b.py` in the
+other is no overlap, while a piece two tasks claim, and a directory
+one task claims whole while the other claims a piece under it
+(`src/x/` against `src/x/b.py` or `src/x/nested/`), are; the
+shortfall names the task that names nothing of its own, or every pair
+of tasks sharing a piece and up to three of the pieces each, in one
+clause), (ii) the caller's own
 task asks for sub-agents in so many words (`asks_for_sub_agents`:
 "sub-agent", "sub-task", `run_parallel`, `run_agent`, "parallel
 agents", "adversarial testing" / "training", "second opinion" or
@@ -1103,7 +1109,9 @@ stopped by the timeout.  A list longer than the daemon's
 under the caller's work dir and the call returns its digest instead
 (`agent_dispatch.digest_agent_results`: one `[i/N] ok|FAILED: <first
 200 characters of the summary>` line per child, `running (job <id>)`
-for one not finished).  The `summary` of every sub-task result
+for one not finished, `FAILED: <the error>` for one whose dispatch
+could not run and so has neither a result nor a job).  The `summary`
+of every sub-task result
 (`run_agent`, `agent_job` and each `run_parallel` entry alike,
 `agent_dispatch.format_dispatch_result`) of a child that ran several
 sessions (a hand-off, see [Refusals and session
@@ -1135,8 +1143,13 @@ gets the real model the picker resolved to.
 not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
 lists every registered SEA whose `register_as_model()` returns `True`
 (the verdict is cached per script, stamped with the mtime, size and
-inode of the script and of every SEA file its class derives from, so
-an edit of a custom base alone, `class X(sea_class(...))`, is re-read;
+inode of the script and of every SEA file its class derives from —
+a base named by command, `sea_class("name")`, as it was read before
+the load ran and with the script the name resolved to, an imported
+base as found once the load has returned — so
+an edit of a custom base alone, `class X(sea_class(...))`, one of a
+command-named base made while the load was in flight, or a
+re-registration of the command is re-read;
 only a script whose source mentions `register_as_model` or derives
 from something other than the plain bases is imported for it,
 `_registers_as_model`),
@@ -1342,7 +1355,14 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
 - **`attachments`** — the files sent with the prompt (an image or
   PDF the user attached), each `{"mimeType", "data"}` with base64
   `data`, the webapp's `submit` wire shape; sent as the wire field
-  `attachments` only when non-empty.  The `/ask` side channel passes
+  `attachments` only when non-empty.  The `mimeType` is advisory:
+  the bytes' own header decides the type the model is told when it
+  is one of `image/png`, `image/jpeg`, `image/gif` or `image/webp`
+  (`Attachment.from_bytes`, `model.image_mime_type`), since a vision
+  API rejects the whole request when the declared type and the bytes
+  disagree (a `.png` file holding WebP bytes), and an iPhone HEIC
+  photo is transcoded to JPEG when the host has a HEIF decoder; the
+  declared type is used only for bytes the header does not identify.  The `/ask` side channel passes
   the files attached to the question on to its answering run this
   way.  A message with files sent to a running task is queued for
   that task instead of starting a run: a steering message's files
@@ -1547,7 +1567,10 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   `sha256(token:nonce)` → `hello_ok` with `sha256(nonce:token)`; the
   token never crosses the wire, a wrong proof gets `hello_error` and
   a 4001 close, a second Chrome profile connecting replaces the first
-  with a 4002 close, `ping`/`pong` frames keep the service worker
+  with a 4002 close — sent from a thread of its own, since the close
+  waits up to websockets' 10 s close timeout for the old peer's close
+  frame and a wedged old profile must not hold the new connection's
+  reads for that long — `ping`/`pong` frames keep the service worker
   alive).  The extension files (`manifest.json`, with the product
   name filled in so a white-label install never shows "KISS Sorcar",
   and `background.js`) are installed into `$KISS_HOME/chrome_extension/`
@@ -1574,7 +1597,14 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   sends, so a reused port does not count) does not steal the
   extension but returns `Error starting the Chrome bridge: another
   KISS process already serves the Chrome bridge on port N ... run this
-  task through that process`.  The bundled `/devtools` SEA
+  task through that process`.  That probe, the start of the server
+  thread and the write of `bridge-config.json` are one critical
+  section under the file's lock (`_config_lock`, given up after
+  `_CONFIG_LOCK_TIMEOUT_SECS`, 5 s), so two processes starting
+  together cannot both find no live bridge and both publish; the
+  server answers before its file is written, so the next starter's
+  probe finds it, and a start that the probe, the lock or the write
+  refuses closes the socket it had bound and publishes nothing.  The bundled `/devtools` SEA
   (`devtools_sea.py`) packages this workflow — act, then verify the
   effect with `wait_for`, `list_console_messages`,
   `list_network_requests` and `evaluate_script` instead of re-reading
@@ -1699,8 +1729,26 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   changed-file and conflict lists do, `merge_flow._git_paths` and
   the shared `_porcelain_entries` parser),
   and `commit_and_merge` when done, which commits the branch and
-  squash-merges it into the original branch; a conflicting merge is
-  resolved by the bundled `/merge` SEA run as a sub-agent.  A
+  squash-merges it into the original branch: the branch's net change
+  since its baseline commit (the one that captured the checkout's
+  dirty state when the worktree was made, `branch.<branch>.kiss-baseline`
+  in the git config) is applied as one `git cherry-pick --no-commit`
+  of a synthetic commit holding the branch's tree with the baseline as
+  parent (`GitWorktreeOps._squashed_commit`), one three-way merge
+  whatever the branch's history, so an intermediate edit the task
+  later reverted cannot conflict and a merge commit on the branch
+  cannot stop it (a worktree without a baseline gets `git merge
+  --squash`); a conflicting merge is
+  resolved by the bundled `/merge` SEA run as a sub-agent.  A merge
+  that would write over a file git ignores — one on disk at a path the
+  branch starts tracking, or an ignored directory in the way of an
+  incoming file (`GitWorktreeOps.ignored_collisions`, what `git
+  ls-files --others` lists at or under the path) — is refused before
+  anything is applied, since both `merge --squash` and `cherry-pick`
+  silently replace such a file and no stash holds a copy: the result
+  reads as a merge conflict, the branch is kept, and the log names the
+  files to move away; the checkout of the original branch before a
+  merge runs with `--no-overwrite-ignore` for the same reason.  A
   repository nested inside the worktree (a clone with a `.git` of
   its own) is a checkout of its own that the enclosing worktree does
   not isolate (`sorcar_agent._in_checkout_of`): a tracked, non-ignored
@@ -1711,7 +1759,13 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   (`bill_to`), and when a worktree is retired after that task's row
   is already saved (a new task, a new chat, a tab disposal) the spend
   is added to the row and its finished ancestors with a persisted
-  `usage_info` event (`_retire_after_task_saved`).  A Stop during the
+  `usage_info` event (`_retire_after_task_saved`).  A Stop accepted on
+  the `commit_and_merge` call while the `/merge` resolver runs inside
+  it ends the resolver at its next safe point — before its next model
+  request and once a step's tool results are in its trajectory
+  (`KISSAgent._execute_step` calls `tool_interrupt.raise_if_interrupted`
+  at both) — so the call ends as interrupted instead of the resolver
+  requesting on, or returning a result, after the Stop.  A Stop during the
   merge rolls back a half-applied squash and pops the stash the merge
   made of the user's uncommitted changes (when that pop fails, the
   task's result carries a warning telling the user to run
@@ -1720,8 +1774,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   Both tools belong to the `edit` tool group; `WorkerSea.tools()`
   strips them, so a worker edits the caller's tree in place.  A
   worktree the agent created but never merged is presented to the
-  user with the Merge / Discard bar; one with no tracked changes
-  against its base is discarded instead (announced after the task,
+  user with the Merge / Discard bar; one with no changes against its
+  base (no file its commits changed, no edits on disk or staged in
+  its index, no untracked files) is discarded instead (announced after the task,
   its git-ignored output rescued into the checkout; silently for a
   stale resumed session), but only when git could list its
   changes (`merge_flow._changed_files_of` answers `None`, not an empty
@@ -2141,7 +2196,8 @@ SEA's own `tool_call_hook` need not restate:
   (`agent_dispatch.digest_agent_results`: `N sub-tasks; the whole
   result is in <path>, this is its digest:` and one `[i/N] ok|FAILED:
   <first 200 characters of the summary as text>` line per child, or
-  `[i/N] running (job <id>)` for one still running).  The coding gate
+  `[i/N] running (job <id>)` for one still running and `[i/N] FAILED:
+  <the error>` for one whose dispatch could not run).  The coding gate
   reads exit codes and sub-task outcomes from the digests as it does
   from the full reports.  `memory_list(max_output_chars=...)` has the same
   default and ceiling, and a `Read` with no range keeps the default
@@ -2227,7 +2283,9 @@ SEA's own `tool_call_hook` need not restate:
   <str>)` one or more times and writes the text back to the same file
   (`edit_guards.python_edit`; `re.sub`, a loop, two files or an
   `encoding`/`newline` keyword that would change the bytes are not
-  mechanical); and a `sed -i` with at most `-e`/`-z` whose one script
+  mechanical, nor is an import that rebinds a name the pattern reads,
+  `import os as p`, `from gzip import open`, a `Path` that is not
+  `pathlib`'s or a `*` import, `_PythonRewrite.imports`); and a `sed -i` with at most `-e`/`-z` whose one script
   is `s<d>old<d>new<d>` or `s<d>old<d>new<d>g` with literal text on
   both sides (`edit_guards.sed_edit`; `g` becomes `replace_all`, and a
   `sed` without `g` or `-z`, which replaces the first match of every
@@ -2241,7 +2299,8 @@ SEA's own `tool_call_hook` need not restate:
   command or the first step of `[cd DIR &&] <rewrite> [&& | ; |
   newline] <rest>` on one line with no subshell, substitution or
   backtick, at the top level (not in a subshell, group, pipe or
-  background list) and with only the redirections a `Write`/`Edit`
+  background list, not negated by `!`, which inverts a status no
+  `Edit` has) and with only the redirections a `Write`/`Edit`
   reproduces (`edit_guards._exact_redirections`: the here-document on
   standard input, standard output to a file through `>`, `>>`, `>|`,
   `>&` with a file operand, `&>` or `&>>`, `2>&1`, `2> /dev/null` and
@@ -2346,9 +2405,14 @@ SEA's own `tool_call_hook` need not restate:
   (exit code N):`, `Error: Command timed out`, a `bash_job` report —
   parses what it looks for; also in `run_commands_parallel`, after
   the command's output; not for a `Bash(..., machine=)` job, whose
-  files this host cannot see), unless the rewrite is ambiguous: a
-  global option with a value, `--directory x`, `--with x`, before or
-  after `run` would be dropped, or the
+  files this host cannot see; `uv run -m MODULE` / `--module` becomes
+  the environment's `python -m MODULE`, a wrapper before `uv`, `timeout
+  5 uv run x`, gets the `PYTHONPATH=` assignment through `env` so it
+  stays an assignment there, and the paths are shell-quoted), unless
+  the rewrite is ambiguous: a global option with a value, `--directory
+  x`, `--with x`, before or after `run` would be dropped, a flag after
+  which the next word is no program of the environment (`--script`,
+  `-s`, `--gui-script`, `--help`, `--version`), or the
   environment lacks the program, which is refused as above; a shell rewrite of a
   file that the bullet above did not apply as a `Write`/`Edit`: a
   `sed` editing in place (`-i`, `-i.bak`, `-Ei`, `--in-place`) with
@@ -2359,7 +2423,12 @@ SEA's own `tool_call_hook` need not restate:
   the `Edit` call to make instead, with the file and the
   `old_string`/`new_string` pairs filled in when the command names
   them literally, each string cut to `edit_guards.PREVIEW_CHARS`, 80,
-  `edit_guards.edit_call`); a `cat` or `tee` here-document
+  `edit_guards.edit_call`; a `python3 - <<` that is only text of a
+  here-document a `cat`/`tee` copies into named files and nowhere
+  else — `cat > tmp/x.sh <<'EOF'`, `cat <<'EOF' | tee f > /dev/null`,
+  a script being written, `_copies_to_files` — is data and not
+  refused, while one whose copy also reaches a pipe, a shell, a
+  `"$OUT"` or the command's own standard output keeps the refusal); a `cat` or `tee` here-document
   whose text reaches an existing file — through `>`, `>>`, a `tee`
   operand or `tee -a`, directly, down a pipe of `cat`/`tee` copies or
   into a group that copies it (`| { cat > f; }`)
@@ -2379,7 +2448,9 @@ SEA's own `tool_call_hook` need not restate:
   resolve to scratch or missing files, a python heredoc every written
   path of which (`edit_guards.python_written_paths`: `open(p, "w")`,
   `p.write_text(...)`, a literal or a name bound exactly once in the
-  program; a path built at run time keeps the refusal) resolves so,
+  program; a path built at run time keeps the refusal, as does an
+  `os.chdir`/`os.fchdir` in the program, after which a relative path
+  names a file the guard cannot place) resolves so,
   and a here-document into a scratch file run as written; the
   `guarded(path)` predicate the guards take
   (`useful_tools._host_guarded`) says which absolute paths are still
@@ -2403,7 +2474,18 @@ SEA's own `tool_call_hook` need not restate:
   here-document hands on is kept on the command reading it,
   `SimpleCommand.heredoc_body`, as written after a quoted delimiter,
   after an unquoted one only when it holds no `$` or backtick:
-  `handed_text`).  `pushd DIR` is followed as a `cd`; `pushd -n DIR`
+  `handed_text`; in the body after an unquoted delimiter a line ending
+  in a backslash is joined with the next before the delimiter is
+  looked for, as the shell does; and the delimiter itself gets quote
+  removal only, so a `$(...)` or backtick in it is text of the
+  delimiter, not a command the scanner reads).  A redirection on a
+  descriptor of two or more digits or on bash's `{name}` (`11>file`,
+  `{fd}>file`) is read as both shells would: the redirection counts
+  as the operator's default descriptor's, so the file is an output of
+  the command (bash truncates it for the descriptor it opens, sh
+  writes the standard output there), and the `11` or `{fd}` is kept as
+  a word of the command, the argument sh would pass;
+  `SimpleCommand.redirections` keeps the descriptor as written.  `pushd DIR` is followed as a `cd`; `pushd -n DIR`
   stays where it is, and a bare `pushd` or `pushd +N` goes to a
   directory only the shell knows.  Each simple command records
   whether it follows `||` (`conditional`), follows `&&` (`after_and`),
@@ -2423,13 +2505,18 @@ SEA's own `tool_call_hook` need not restate:
   after `&&` or `||` holds for the rest of the command, since the gate
   reads what the agent changed rather than keeping a write from a path
   that may not have been set);
-  not in a compound command that may not run, not `T+=`; a subshell's,
+  not in a compound command that may not run, not `T+=`, not an
+  assignment before a special builtin or before a wrapper with no
+  command after it (`T=x export Y`, `T=x exec >f`: sh keeps the
+  variable, bash does not, so it is unknown; `_SPECIAL_BUILTINS`); a subshell's,
   a pipeline stage's and a backgrounded list's assignments end with
   them (a brace group's included); after a brace group that may not
   have run, after `read` (`read T`, `read -aT`), `unset`, `declare`,
   `readonly`, `let`, `printf -v`, a loop over the variable, an
-  arithmetic command assigning it or an array assignment (`T[0]=x`,
-  `T=(x y)`, `T+=(z)`) the variable is unknown (as are `REPLY` after any
+  arithmetic command or expansion assigning it (`((T=1))`, `$((i++))`)
+  or an array assignment (`T[0]=x`, `T=(x y)`, `T+=(z)`; the
+  substitutions in an array value run, so their commands are scanned)
+  the variable is unknown (as are `REPLY` after any
   `read` or `select` and `MAPFILE` after any `mapfile`, the variables
   those fill when no operand names one), and after `eval`, `source` or a
   name reference (`declare -n`) every variable is —
@@ -2523,7 +2610,10 @@ SEA's own `tool_call_hook` need not restate:
   soon as the log matches the pattern (scanned once a second,
   `_log_matches`: a log of at most `_LOG_SCAN_BYTES`, 8,000,000, is
   searched whole, a longer one only in its last 8,000,000 bytes from
-  the first complete line in them), so a
+  the first complete line in them; the search runs in a matcher child
+  process, `_start_log_matcher`, that exits 0 on a match and is killed
+  when the wait ends at its deadline or a Stop, so a pattern that
+  backtracks for minutes cannot hold the task thread past either), so a
   long run is one turn to start and one to collect; `"tail"` and
   `"kill"` are the other actions.  A Docker or bridged run has the
   same `background=True`, `on_timeout="background"` and `bash_job`
@@ -2552,7 +2642,12 @@ SEA's own `tool_call_hook` need not restate:
   sub-agent or a Docker run, see above).  `checkpoint` snapshots every
   non-ignored file under the top level of the git working tree that
   holds the work dir (the same directory `Bash` runs in,
-  `_resolve_cwd`) as a git tree object, written through a
+  `_resolve_cwd`; git runs with the repo-scoping variables of the
+  daemon's environment, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`
+  and the like, dropped, as every git call of the worktree code drops
+  them, `git_worktree._REPO_SCOPED_GIT_ENV`, so a daemon started with
+  them set still snapshots and restores that tree and no other) as a
+  git tree object, written through a
   private copy of the index (`copy2`, so the copy keeps the real
   index's mtime and git's "racy git" re-read still catches a
   same-size rewrite made in the second the index was written) so
@@ -2718,7 +2813,28 @@ so its text and any tool-call arguments may be incomplete.` as a
 Responses stream without its `response.completed` event does,
 rather than letting the partial text become the turn; the usage
 already seen is kept for the agent's partial-usage drain
-(`take_partial_usage_response`).  A
+(`take_partial_usage_response`).  The other transports refuse the
+same cut: an Anthropic stream whose body ends before its
+`message_stop` event raises `KISSError: Anthropic stream ended
+without a message_stop event, so its text and any tool-call
+arguments may be incomplete.`, and a Gemini stream that delivered
+chunks but none carrying the candidate's `finishReason` raises
+`KISSError: Gemini stream ended without a finish reason, so its text
+and any tool calls may be incomplete.` (a Gemini stream that
+delivered nothing at all is an empty turn, not an error).  Every
+Anthropic request that carries tools asks for fine-grained tool
+streaming (the `fine-grained-tool-streaming-2025-05-14` beta header,
+added next to `interleaved-thinking-2025-05-14` when thinking is on),
+so a large tool argument (a long `finish` summary, a `Write` of a big
+file) streams as it is written instead of being buffered until the
+model has finished it, which would trip the stall watchdog on every
+retry; since the API then sends tool input unvalidated, the raw JSON
+accumulated for each `tool_use` block (every one that is not blank) is
+parsed strictly once the message ends, and a malformed one is the
+retryable step error
+`Anthropic model <name> streamed malformed JSON for a tool call's
+arguments: ...` (the block a `max_tokens` stop cut off is skipped,
+since it is dropped anyway).  A
 non-streamed (callback-less) OpenAI-compatible request has no stall
 clock, since a reasoning turn may legitimately send nothing for
 minutes, but it is still stoppable: the SDK call runs on a worker
@@ -2756,9 +2872,17 @@ its content policy, OpenAI's 400 "This content was flagged for
 possible cybersecurity risk" or Azure's "content management policy"
 (`kiss_agent.is_content_policy_error`), which the loop types as a
 `ContentFilterError(stop_reason="content_policy")` instead of counting
-it toward the three consecutive-error retries), an
+it toward the three consecutive-error retries; on Gemini, a blocked
+prompt — `promptFeedback.blockReason`, raised as `Gemini blocked the
+prompt (block_reason=<reason>); the same request will be blocked
+again.` — or a candidate that stopped on one
+of the filter `finishReason`s, `gemini_model._FILTER_FINISH_REASONS`:
+`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`,
+`IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`, `IMAGE_RECITATION`, with
+that name as its `stop_reason`), an
 output-token cap hit before a usable answer (`OutputCapError`:
-Anthropic `stop_reason="max_tokens"` with no complete tool call on a
+Anthropic `stop_reason="max_tokens"` or Gemini
+`finish_reason="MAX_TOKENS"` with no complete tool call on a
 tool-bearing turn, Responses `max_output_tokens`, Chat Completions
 `finish_reason == "length"`; the cut-off request is still billed)
 or two consecutive empty responses (no text, no tool call) fail
@@ -2913,7 +3037,7 @@ SEA's hooks, so a hook author knows what the model reads:
   from `.py` to `.toml`, `.yaml`, `.json`, `.css`, and
   `CODE_FILE_NAMES` such as `Makefile`, `Dockerfile`,
   `CMakeLists.txt`), a shell command changes one
-  (`names_code_file`, read from the files the call changes,
+  (`CodingGate.observe`, read from the files the call changes,
   `evidence_gate.file_changes`, described with the verifier reuse
   below, so a
   `rm`, `mv` or `git checkout` of a code file arms it too, while a
@@ -2944,16 +3068,29 @@ SEA's hooks, so a hook author knows what the model reads:
   verifier's (`CodingGate.verifier_decides`, the module function
   `verifier_decides(command, work_dir, verifier_path)` the coding SEA
   shares, read from the scanned command: `bash`/`sh
-  ./tmp/<id>/verify.sh`, other than `bash -n`, or the script itself as
+  ./tmp/<id>/verify.sh` with no option but a switch that keeps the
+  first operand the script (`SHELL_SWITCH`: `-x`, `-e`, `-u`, `-v`,
+  `-l`, `-p`, `-E`, `-T` and their clusters, `--posix`, `--norc`,
+  `--noprofile`, `--login`, `--verbose`; not `-n` or `-D`, which run
+  nothing, `-s`, whose script comes from stdin, `-c`, or `-o` / `-O`
+  / `--rcfile`, whose next word is their value), a `--` or `-` ending
+  the options so that the word after it is the script whatever it
+  starts with, or the script itself as
   the command, from the work dir or after a `cd` the scanner follows,
   `verifier_command`, at the top level of the command, not
   negated, its output not piped, not after `||`, not in the
   background, nothing before it that leaves the shell — `exit`,
-  `return`, an `exec` of a program — and everything after it after
+  `return`, an `exec` of a program, a `set -n` / `set -o noexec`
+  left on, `leaves_shell` — and everything after it after
   `&&`, so `bash v.sh && echo ok` counts and `bash v.sh | tail`,
   `bash v.sh; echo $?` and `bash v.sh || true` do not, since their
-  exit shows nothing about the verifier's) sets `verifier_passed_at`
-  to the change count of the moment and keeps the output; an `Edit` /
+  exit shows nothing about the verifier's; and only when the call
+  writes no file itself, since in `bash v.sh && printf x > f` the
+  write follows the run) sets `verifier_passed_at`
+  to the change count of the moment and keeps the output — a
+  background job's exit, read from its `bash_job` report, counts only
+  when nothing changed since the job started, the change count noted
+  at its start, `job_changes`; an `Edit` /
   `Write` of `verify.sh` or a shell command naming it forgets that
   run, as does any later change of the work — an edit outside `tmp/`,
   or a shell command that changes files) and, when a reviewer is
@@ -3067,7 +3204,8 @@ SEA's hooks, so a hook author knows what the model reads:
   sub-task of it succeeded and no file changed since.  Any other
   local sub-task counts as a change of the work only when the work
   differs after it: a digest of the tracked diff since the base and
-  of the untracked files' contents (`CodingGate.fingerprint`) is
+  of the untracked files' paths and contents (`CodingGate.fingerprint`;
+  an untracked file renamed with its contents kept is a change) is
   taken at the dispatch and compared when the result, or the
   `agent_job` report of a job left running, is read (outside git,
   where none can be taken, the sub-task is a change); a sub-task sent
@@ -3120,9 +3258,10 @@ SEA's hooks, so a hook author knows what the model reads:
   the merge, judged on no review, so no finding older than the merge
   ends as its caveat other than those the merge was let through
   with.  When the agent first writes its interpretation ledger
-  (`Write` of a file named `LEDGER_NAME`, `ledger.md`, under the
-  scratch directory, `CodingGate.is_scratch`; the system prompt's How
-  to Work rule 1 asks for it), the reviewer model reads the task and
+  (`Write` of `LEDGER_NAME`, `ledger.md`, in the task's scratch
+  directory, `CodingGate.is_ledger`; the system prompt's How
+  to Work rule 1 asks for it; once per run, and only when a reviewer
+  is configured), the reviewer model reads the task and
   the ledger once (`CodingGate.reading_note`: one `side_call` with
   `READING_PROMPT`, the ledger cut at `REVIEW_ONE_FILE_BYTES`) and
   names the sentences of the task it would read differently or finds
@@ -3151,10 +3290,26 @@ SEA's hooks, so a hook author knows what the model reads:
   — banked on the live ledger while the row is unfinished, and once
   the row is finished (a review a Stop left running) added to the row
   and its finished ancestors with a persisted `usage_info`, rather
-  than landing on the agent's next task — and a run without either
-  goes to the ledger epoch directly; keyed per attempt
+  than landing on the agent's next task — a run with a row but no
+  such printer (a CLI run) gets the same row-or-ledger policy from
+  `_charge_persisted_usage`, under `TASK_USAGE_LOCK` as the bridge
+  is, a finished row then broadcasting `tasks_updated` so the history
+  lists show its new total, and a run without a row goes to the
+  ledger epoch directly; keyed per attempt
   (`_gate_charges_taken`) so a retry or a stop never bills it twice,
   and a charge the bridge could not make is not retried.  The
+  reviewer emits no `llm_call`, so a row charge also records the
+  reviewer model, spend and tokens under the row
+  (`persistence._record_model_charge`, a `gate_stage` event of stage
+  `charge`) for the Spend subpanel's split by model, however the
+  review ends; a model call made for the run outside its agent loop
+  — the gate's `decide` call on the findings
+  (`CodingGate._charge_decide`, under the decisions model), the
+  commit message, a `talk` synthesis, a `decide` call — is charged
+  the same way under a key of its own (`side_call_binding`, the run's
+  epoch and row taken as the call starts, so a reply that lands after
+  the task ended still charges the task it was made for, and
+  `_attribute_side_call_usage`) and filed under the model it ran on.  The
   classifier fold and the row's final usage save are each retried
   once when an exception, a Stop's injected interrupt above all,
   cuts them short (`_retried_cleanup_step`), the
@@ -3431,7 +3586,13 @@ model, a standard provider endpoint carries over only when the new
 model routes to the same provider default, and a Gemini-to-Gemini or
 Claude-to-Claude switch (direct and Bedrock kept apart) keeps the
 task's own key, so a per-task key is not silently replaced by the
-process-global one.  The conversation handed over
+process-global one.  The routing the switch computed is kept in the
+agent's `model_config`, so the next session's executor (a
+continuation, the summarizer; `_executor_model_config`) runs the
+switched model with that endpoint, key and headers rather than
+sending its name to the launch endpoint (the executor's per-session
+`work_dir` and `system_instruction` are kept only when the launch
+config set them).  The conversation handed over
 (`model.hand_off_conversation`, which also moves
 the `llm_call_hook` boundary, the helper spend record and the
 agent's limit check) is kept verbatim when both models talk
@@ -3439,7 +3600,13 @@ to the same endpoint (`base_url`), so an OpenAI model keeps another
 OpenAI model's reasoning items, and converted to plain chat messages
 (`responses_items_to_chat_messages`, which every adapter reads) across
 endpoints, since Responses API items belong to the endpoint that
-produced them; and a hop between two Responses endpoints (Together's
+produced them (a Chat Completions model taking over an Anthropic
+conversation gets each `tool_result` block as a `role="tool"`
+message, and the images or PDFs nested in those results — which a
+tool message cannot carry — in one user message that follows them:
+the media parts first, then the text `[attachments from previous
+tool result(s)]` (`TOOL_RESULT_ATTACHMENT_NOTE`), then whatever else
+that user message held); and a hop between two Responses endpoints (Together's
 `openai/gpt-oss-120b` back to an OpenAI model) strips from each
 request, not from the conversation, what the other vendor issued —
 a `reasoning` item without the endpoint's own id prefix is dropped
@@ -3547,7 +3714,9 @@ guards hand-edited files).  A brand-new entry is seeded
 to — the exact name, a harbor-prefixed form such as
 `openai/gpt-6.1-sol`, or a `bedrock/<id>` profile of a `claude-*`
 entry, the one rule of `_lookup_model_info` — copying that model's
-context length and every per-million price field
+context length, its `thinking` level (without it the row would stop
+requesting the model's reasoning effort after the next start) and
+every per-million price field
 (`_PER_1M_PRICE_FIELDS`: input, output, cache read, cache write, 1-hour
 cache write, audio input, audio output, image output) and its
 `prompt_tiers`, if any (a Bedrock profile's prices, tiers included,
@@ -3562,9 +3731,13 @@ in the file as it is now, so a model saved in the panel is priced by
 the running daemon without a restart.  An entry named after a
 generated effort alias (`gpt-5.6-sol-xhigh` given its own endpoint)
 keeps the catalog's `alias_of` marker when it loads, since the panel
-writes none, so its requests still go out under the base id
-(`_strip_thinking_alias`) while its own context length and prices
-stay in force; a `-xhigh` name that is an entry of its
+writes none, and the alias's `thinking` level unless the entry
+carries its own, so its requests still go
+out under the base id (`_strip_thinking_alias`) at the alias's effort
+while its own context length and prices stay in force (a catalog
+entry of that name which is not a mapping, a hand-edited list or
+string, contributes nothing and does not stop the user entry from
+loading); a `-xhigh` name that is an entry of its
 own, with no marker (`_is_registered_model_id`, which reads the file
 live, so a router model such as `s10s-scout-xhigh` added after
 start-up counts), is kept whole, since that is the name its endpoint
@@ -3912,7 +4085,14 @@ folded in twice); the daemon persists the task's final cost unrounded
 as well, so a parent row sums its children's exact spend.  The same
 write records `model_costs`, the task's own `llm_call` events summed
 per model as `{"model": [cost, tokens]}`
-(`persistence._own_model_costs`), so the sidebar's Spend subpanel
+(`persistence._own_model_costs`; a model call made for the task
+outside its agent loop — a finish-gate review attempt, the commit
+message, a `talk` synthesis, a `decide` call — emits no `llm_call`,
+and the `gate_stage` record with `stage` `charge` that each such
+charge leaves, `persistence._record_model_charge` with its `model`,
+`cost_usd` and `tokens`, is summed under that model the same way; a
+row already finished when the charge lands has its split refreshed
+then), so the sidebar's Spend subpanel
 files a run that switched models with `set_model` under each model it
 actually called rather than under its launch model
 (`persistence._split_own_share`: spend no call accounts for stays
@@ -3992,7 +4172,9 @@ task count merge with the bare name the `llm_call` events carry.
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events — the log
   is rebuilt from the task's own persisted `Write` / `Edit` calls to
-  its `PROGRESS.md` (`task_digest.progress_log_tail`), not read from
+  its `PROGRESS.md` (`task_digest.progress_log_tail`; a call whose
+  result was an error or that a Stop interrupted counts as having
+  written nothing), not read from
   disk, since a work dir shared by several tasks may hold another
   task's text in the same file; its only
   tools are `task_context` and `finish`, so it never touches the task's
@@ -4155,7 +4337,10 @@ task count merge with the bare name the `llm_call` events carry.
   of the trial's review that the summary answers neither with a
   change nor with a quoted command and its output
   (`unanswered_verdict`, as the decisions model judges,
-  `answered_findings`; without the decisions model the findings are
+  `answered_findings`, its spend logged as a `findings_answered`
+  event with `cost_usd` and `tokens` and counted in the trial's cost
+  like the reviewer's, `SIDE_AGENT_EVENTS`; without the decisions
+  model the findings are
   unjudged and refuse nothing), or, while the trial's review is
   still to come, a read-only review by the configured `reviewer`
   model, `max_reviews` (`MAX_REVIEWS`, 1) per trial — a re-review,
@@ -4362,7 +4547,10 @@ task count merge with the bare name the `llm_call` events carry.
   the daemon port need not be reachable from here, only the ssh port;
   ssh runs in a process group of its own, killed whole, so a
   `ProxyCommand` of the user's ssh configuration goes down with it
-  instead of keeping ssh's output pipe open;
+  instead of keeping ssh's output pipe open (the enrolling ssh too:
+  one that has not answered within `SSH_TIMEOUT`, 30 s, or that a
+  Stop cuts short is killed whole, `ProxyCommand` included, before
+  `ssh <login> did not answer in time` is reported);
   through it this daemon presents its client certificate,
   `$KISS_HOME/tls/client.pem`, and the machine's daemon, which sniffs
   the first byte of every connection, serves the forwarded TLS like a
@@ -4406,8 +4594,15 @@ task count merge with the bare name the `llm_call` events carry.
   echoes one must echo this one, so a frame still on its way for an
   earlier request is skipped rather than taken as the answer, and the
   daemon announces `echoesGeneration` in its `auth_ok` (its replies
-  echo the stamp through `commands.request_generation`; a page's
-  command carries none and its reply stays as it was), after which a
+  echo the stamp, read by `commands.request_generation` for
+  `myModelsData` and `machines` and by the `models` and `history`
+  handlers themselves; a page stamps
+  some of its own requests the same way — its machine adds, whose
+  answers the Machines subpanel tells apart by generation, and its
+  history and model-list requests — and a command that carries none
+  gets its reply unstamped (a `history` reply says `generation: 0`);
+  the stamp is echoed to the
+  requester only, links and pages each counting from 0), after which a
   `models`, `history`, `myModelsData` or `machines` reply without a
   `generation` (`machines.CORRELATED_REPLIES`: a list the daemon
   pushed to every connection unasked, for another client's edit or a
@@ -4633,7 +4828,11 @@ task count merge with the bare name the `llm_call` events carry.
   once, and the 6-hourly default cron job keeps the file fresh; both
   default jobs come from `cron_agent.DEFAULT_JOBS`, seeded once per home
   by `seed_default_jobs` at daemon start so your edits and removals
-  stand; before the seeding, `cron_agent.adopt_previous_home_jobs`
+  stand (a job already stored under a default's name, or a former
+  name of it, paused or not, is left as it is: the check is made under
+  the store lock in the same step as the create, so a job created
+  meanwhile is never doubled, and a store that cannot be read seeds
+  nothing); before the seeding, `cron_agent.adopt_previous_home_jobs`
   records the daemon's home in `~/.kiss-web-home` and, when that
   marker named a different brand home (a brand install or an
   `rsorcar` deploy moved the daemon between `~/.kiss` and
@@ -4733,9 +4932,22 @@ task count merge with the bare name the `llm_call` events carry.
   login's home (`~/kiss` first, then any `~/<dir>` holding an
   `install.sh`, matched by `origin` through `git_sync.repo_key`) and
   runs `./install.sh --non-interactive` there, reporting per machine
-  ok or FAILED with the last 15 lines of output, the remote-access
-  password redacted; a machine registered by URL is reported as
-  skipped; `/install <name>[,<name>]` installs only those),
+  ok or FAILED with the reason (no answer to the checkout search
+  within `SEARCH_TIMEOUT_SECONDS`, 60 s; ssh that cannot connect; no
+  clone of the repository with an `install.sh` in the home;
+  `install.sh` running past `INSTALL_TIMEOUT_SECONDS`, 3600 s, or
+  exiting non-zero) and the last 15 non-blank lines of output, uncoloured, the
+  rest of any `password:` line redacted; a machine registered by URL
+  is reported as skipped; `/install <name>[,<name>]` installs only
+  those, and a name `/machine list` does not know fails the call
+  before anything is installed; its `system_prompt()` replaces
+  `SYSTEM.md` and tells the agent to call the tool once (`machines`
+  as the names the message gives, else `""`) and then `finish`, with
+  `success=true` only when every machine reports ok, never retrying;
+  its `prompt()` appends "Run ./install.sh in the private kiss
+  checkout of every registered machine." to every task, so a bare
+  `/install` runs on that text alone; it declares no `work_dir`, so
+  it runs in the caller's directory),
   `/sync_history_and_memory` (`seas/sync_history_and_memory/`, a
   `WorkerSea` that brings `$KISS_HOME/history.db` — tasks, events,
   deletion records — and `$KISS_HOME/memories` of this machine and of
@@ -4758,11 +4970,12 @@ task count merge with the bare name the `llm_call` events carry.
   command) with the default timeout.  The tool
   (`peer_sync.PeerSync`) reaches every machine at once over one
   multiplexed ssh connection each (`ssh_peer.SshPeer`) in three
-  waves — connect and read each peer's clock and memory fingerprints,
-  pull everything from every peer into this machine, then push this
-  machine's union to every peer — so one run converges every peer
-  that completes all three waves (a peer that fails in any wave is
-  left out of the later ones and its report says why it was skipped
+  waves — connect, find each peer's KISS home and read its clock and
+  memory fingerprints, pull everything from every peer into this
+  machine, then push this machine's union to every peer — so one run
+  converges every peer that completes all three waves (a peer that
+  fails in any wave is left out of the later ones and its report says
+  why it was skipped
   or left half-synced), apart from the held-back tasks and kept
   conflicts below; history rows travel through `kiss.scripts.sync_db` as
   a union of task rows by `task_history.id` and event rows by
@@ -4780,7 +4993,21 @@ task count merge with the bare name the `llm_call` events carry.
   with that time younger than `ABANDONED_AFTER` (24 h) — is held back
   on the side it runs on and travels once it finishes (events alone
   for a row the peer already has are never held); a machine that
-  fails is reported with the reason and not retried),
+  fails is reported with the reason and not retried.  A peer's home
+  is not assumed to be `~/.kiss`: a stock install keeps its state
+  there, a branded one in the directory its brand's `home_dir` names,
+  and one machine may run several daemons, so wave one runs one
+  remote shell (`peer_sync.home_probe`) that prints the home of the
+  daemon the machine was registered with — the directory under the
+  peer's `$HOME` whose `sorcar-local.json` endpoint file names the
+  port of the machine's registered URL, looked for in this install's
+  brand home and the stock `.kiss` (`HOME_CANDIDATES`, in that order)
+  first and then in every other `~/.*` — and, when that daemon is not
+  running (a stopped daemon removes its endpoint file) or the port is
+  unknown, the first candidate holding a `history.db`, else the first
+  that exists, else the first; the peer's report says `KISS home
+  there: ~/<dir>`, and an answer that is empty, `.`, `..` or holds a
+  `/` fails the peer in wave one),
   `/task_update` (reports what a running task has done so far),
   `/write` (writes prose for a general audience in concise, professional
   American English that reads as human-written; it defines only

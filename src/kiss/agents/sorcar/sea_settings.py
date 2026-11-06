@@ -77,6 +77,7 @@ from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, BaseSea, ChannelSea,
 from kiss.agents.sorcar._concurrency import locked_call
 from kiss.core.stop_signal import stop_requested
 from kiss.core.tool_interrupt import ToolCallInterrupted
+from kiss.core.utils import read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "use_web_tools": bool,
     "auto_classify": bool,
     "use_memory": bool,
+    "compaction": bool,
     "tool_profile": str,
     "docker_image": str,
     "timeout": (int, float),
@@ -144,6 +146,11 @@ SETTING_DOCS: dict[str, str] = {
     "auto_classify": "Let the pre-run classifier decide whether the task is simple (lite "
                      "prompt) (daemon default: the persisted setting).",
     "use_memory": "Give the run the `memory_*` tools (daemon default: the persisted setting).",
+    "compaction": "Let the run compact its context: old, large tool outputs and arguments "
+                  "become short stubs once the context grows large (default: on). `false` "
+                  "turns it off for the run; the daemon's global Compaction setting (the "
+                  "settings panel's checkbox) off turns it off for every run, whatever a "
+                  "SEA or a call passes.",
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
@@ -459,15 +466,19 @@ def _executing_owner(module_name: str) -> tuple[threading.Thread, int] | None:
 
 
 def _in_execution(thread: threading.Thread, module_name: str) -> bool:
-    """Whether *thread*'s stack holds an :func:`execute_python_file` call of *module_name*.
+    """Whether *thread*'s stack holds an :func:`execute_python_file` or
+    :func:`refresh_imported_module` call of *module_name*.
 
-    :func:`_executing` makes and drops its claim inside that call, so
+    :func:`_executing` makes and drops its claim inside those calls, so
     the owner of a live record always has one on its stack.
     """
     frame = sys._current_frames().get(thread.ident or 0)
     while frame is not None:
         if (
-            frame.f_code is execute_python_file.__code__
+            (
+                frame.f_code is execute_python_file.__code__
+                or frame.f_code is refresh_imported_module.__code__
+            )
             and frame.f_locals.get("module_name") == module_name
         ):
             return True
@@ -617,7 +628,7 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
         is_py_file = False
     if not is_py_file:
         raise SeaError(f"SEA {raw_path!r} is not an existing Python (.py) file")
-    module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(raw_path.encode()).hexdigest()[:12]}"
+    module_name = _module_name(path)
     module = types.ModuleType(module_name)
     module.__file__ = raw_path
     with _executing(module_name, raw_path):
@@ -628,9 +639,7 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
         previous = sys.modules.get(module_name)
         sys.modules[module_name] = module
         try:
-            source = path.read_text(encoding="utf-8")
-            code = compile(source, str(path), "exec", dont_inherit=True)
-            exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
+            _run_source(path, module)
         except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
             if previous is None:
                 sys.modules.pop(module_name, None)
@@ -641,6 +650,96 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
             logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
             raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
     return module.__dict__
+
+
+def _run_source(path: Path, module: types.ModuleType) -> None:
+    """Compile the current source of *path* and run it in *module*'s namespace.
+
+    Directly, with no ``__pycache__`` read or write: the module runs
+    the file's current contents, where the import machinery would run
+    the bytecode it cached for an earlier revision of the same size
+    and whole-second mtime.  The bytes are compiled, not decoded text,
+    so the source is read as ``import`` reads it (PEP 263: a UTF-8
+    byte-order mark is skipped, a ``coding`` cookie is honoured).  Read
+    past a concurrent atomic publish of the script (``sea lint --fix``),
+    which Windows otherwise reports to the reader as ``PermissionError``.
+    """
+    code = compile(read_bytes_waiting_for_writer(path), str(path), "exec", dont_inherit=True)
+    exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
+
+
+def _module_name(path: Path) -> str:
+    """Return the ``sys.modules`` name :func:`execute_python_file` registers *path* under."""
+    return f"_kiss_sea_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:12]}"
+
+
+_IMPORTED_STAMPS: dict[str, tuple[int, int, int]] = {}
+"""File path -> the revision :func:`refresh_imported_module` last re-executed its module from."""
+
+
+def refresh_imported_module(path: Path, stale: bool = False) -> bool:
+    """Re-execute the module a plain ``import`` loaded from *path* when the file may have changed.
+
+    A SEA may derive from a base of its own through an ordinary import
+    (``from parent_sea import Parent``) instead of ``sea_class``.
+    Python executes an imported module once per process, so a SEA
+    re-executed after an edit of such a base (the model picker
+    re-reading a changed parent) would still derive from the base's old
+    class.  The modules in ``sys.modules`` loaded from *path* are
+    re-executed in place, from the file's current source
+    (:func:`_run_source`, not ``importlib.reload``: that runs the
+    bytecode cached for an earlier revision of the same size and
+    second), unless this function last did so from the file's current
+    revision (:attr:`ParsedSea.stamp`) and *stale* is false; the
+    revision is read before the run, so an edit during it is re-read
+    next time, and the first call for a file re-executes once, the
+    revision its module was imported from being unknown.  *stale*
+    says the module is out of date whatever its revision: a class of
+    its derives from one whose module was re-executed since, and only
+    a re-execution rebinds it to the new base.  Modules of the kiss
+    package itself (the bundled bases) are left alone: the daemon
+    holds their classes everywhere, and a re-execution would make
+    unrelated new ones.  Serialised per file like
+    :func:`execute_python_file` (:func:`_executing`), so two threads
+    refreshing one base run one re-execution and the second finds the
+    finished module.
+
+    Args:
+        path: The file of the module, as ``sys.modules[...].__file__``
+            names it.
+        stale: Re-execute the module from an unchanged revision too.
+
+    Returns:
+        Whether a module was re-executed: a class loaded from it before
+        derives from the old module and is to be loaded again.
+
+    Raises:
+        SeaError: The re-execution raised (a base mid-edit); a Stop
+            landing in it is re-raised unchanged (:func:`is_stop`).
+    """
+    raw_path = str(path)
+    module_name = _module_name(path)
+    with _executing(module_name, raw_path):
+        stamp = parsed_sea(path).stamp
+        if stamp is None or (_IMPORTED_STAMPS.get(raw_path) == stamp and not stale):
+            return False
+        modules = [
+            module for module in list(sys.modules.values())
+            if getattr(module, "__file__", None) == raw_path
+            and not module.__name__.startswith(("kiss.", "_kiss_sea_"))
+        ]
+        if not modules:
+            return False
+        try:
+            for module in modules:
+                _run_source(path, module)
+        except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
+            if is_stop(exc):
+                raise
+            logger.warning("Failed to re-import SEA %r", raw_path, exc_info=True)
+            raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
+        _IMPORTED_STAMPS[raw_path] = stamp
+    return True
 
 
 def is_stop(exc: BaseException) -> bool:
@@ -828,26 +927,88 @@ def settings_functions(tree: ast.Module) -> list[ast.FunctionDef]:
 def settings_dicts(tree: ast.Module) -> list[ast.Dict]:
     """Return the dict literals of the ``settings`` methods of *tree* that hold settings keys.
 
-    Every dict literal in the function except dicts anywhere inside
-    the *value* of another dict's key (``model_config``'s contents,
-    however deep, are not settings).  The one rule for reading settings
+    The dict literals whose entries reach the method's return value:
+    returned as they are, merged with ``|``, unpacked with ``**``,
+    chosen by a conditional expression, or assigned to (or ``update``d
+    into) a local name the return value is built from in those same
+    ways.  A dict anywhere
+    inside the *value* of another dict's key (``model_config``'s
+    contents, however deep) and a dict the method only reads a value
+    from (``info["model"]``) are data, not settings: rewriting their
+    keys would break the script.  The one rule for reading settings
     from the source: the registry's ``hidden`` check and the linter
     use it alike.
     """
     dicts: list[ast.Dict] = []
     for node in settings_functions(tree):
-        nested = {
-            id(inner)
-            for sub in ast.walk(node)
-            if isinstance(sub, ast.Dict)
-            for value in sub.values
-            for inner in ast.walk(value)
-            if isinstance(inner, ast.Dict)
-        }
-        dicts.extend(
-            sub for sub in ast.walk(node) if isinstance(sub, ast.Dict) and id(sub) not in nested
-        )
+        assigned: dict[str, list[ast.expr]] = {}
+        returned: list[ast.expr] = []
+        for statement in _own_statements(node):
+            if isinstance(statement, ast.Return) and statement.value is not None:
+                returned.append(statement.value)
+            elif isinstance(statement, ast.Assign | ast.AnnAssign | ast.AugAssign):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Name) and statement.value is not None:
+                        assigned.setdefault(target.id, []).append(statement.value)
+            elif (updated := _update_call(statement)) is not None:
+                assigned.setdefault(updated[0], []).append(updated[1])
+        seen: set[str] = set()
+        for value in returned:
+            _result_dicts(value, assigned, seen, dicts)
     return dicts
+
+
+def _update_call(statement: ast.stmt) -> tuple[str, ast.expr] | None:
+    """Return ``(name, value)`` for a ``name.update(value)`` statement, else ``None``."""
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    if (
+        isinstance(call, ast.Call) and call.args and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "update" and isinstance(call.func.value, ast.Name)
+    ):
+        return call.func.value.id, call.args[0]
+    return None
+
+
+def _own_statements(node: ast.AST) -> Iterator[ast.stmt]:
+    """Yield the statements of *node*'s own body, not of a nested function, class or lambda."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        if isinstance(child, ast.stmt):
+            yield child
+        yield from _own_statements(child)
+
+
+def _result_dicts(
+    expr: ast.expr, assigned: Mapping[str, list[ast.expr]], seen: set[str], found: list[ast.Dict],
+) -> None:
+    """Append to *found* the dict literals whose entries reach the value of *expr*.
+
+    *assigned* maps the method's local names to the values assigned to
+    them; *seen* holds the names already followed, so a name re-assigned
+    from itself (``mine = mine | {...}``) is followed once, and a dict
+    reached twice is listed once.
+    """
+    if isinstance(expr, ast.Dict):
+        if any(dict_ is expr for dict_ in found):
+            return
+        found.append(expr)
+        for key, value in zip(expr.keys, expr.values, strict=True):
+            if key is None:  # a ``**`` unpack: the unpacked dict's entries are settings too
+                _result_dicts(value, assigned, seen, found)
+    elif isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.BitOr):
+        _result_dicts(expr.left, assigned, seen, found)
+        _result_dicts(expr.right, assigned, seen, found)
+    elif isinstance(expr, ast.IfExp):
+        _result_dicts(expr.body, assigned, seen, found)
+        _result_dicts(expr.orelse, assigned, seen, found)
+    elif isinstance(expr, ast.Name) and expr.id not in seen:
+        seen.add(expr.id)
+        for value in assigned.get(expr.id, ()):
+            _result_dicts(value, assigned, seen, found)
 
 
 def resolve_settings(declared: Mapping[str, Any], channel: bool = False) -> dict[str, Any]:

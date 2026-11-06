@@ -147,6 +147,32 @@ def test_write_keeps_the_mode_of_the_replaced_file(env: DockerManager) -> None:
     assert env.Bash("/tmp/mode/run.sh", "run").split("\n")[0] == "two"
 
 
+def test_write_through_a_symlink_updates_its_target_and_keeps_the_link(env: DockerManager) -> None:
+    """A Write to a symlink lands in the file it points to, as the ``cat > link`` it stands for.
+
+    The link stays a link (its mode is never the target's) and a dangling
+    link makes its missing target, as the shell redirection would.
+    """
+    tools = DockerTools(env.Bash)
+    tools.Write("/tmp/links/target.txt", "old\n")
+    env.Bash(
+        "cd /tmp/links && chmod 640 target.txt && ln -s target.txt link.txt"
+        " && ln -s /tmp/links/missing.txt dangling.txt",
+        "ln",
+    )
+    assert "Successfully wrote" in tools.Write("/tmp/links/link.txt", "new\n")
+    checked = env.Bash(
+        "cd /tmp/links && readlink link.txt && stat -c %a target.txt && cat target.txt && ls",
+        "check",
+    )
+    assert checked.split("\n")[:6] == [
+        "target.txt", "640", "new", "dangling.txt", "link.txt", "target.txt",
+    ], checked
+    assert "Successfully wrote" in tools.Write("/tmp/links/dangling.txt", "made\n")
+    checked = env.Bash("cd /tmp/links && readlink dangling.txt && cat missing.txt", "check")
+    assert checked.split("\n")[:2] == ["/tmp/links/missing.txt", "made"], checked
+
+
 def test_manager_closed_between_pieces_raises_and_publishes_nothing(
     env: DockerManager,
 ) -> None:

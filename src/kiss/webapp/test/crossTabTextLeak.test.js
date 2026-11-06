@@ -52,15 +52,10 @@ function makePage(opts) {
   if (options.voice) {
     return makeVoicePage({enabled: true, sourceUrl: SOURCE_URL});
   }
-  function beforeScripts(win) {
-    stubRaf(win);
-    win.__VOICE__ = {
-      voskSrc: '/media/vosk.js',
-      modelUrl: 'https://models.example.com/model.tar.gz',
-    };
-    win.localStorage.setItem('kissVoiceEnabled', '1');
-  }
-  const {win, posted} = makeChatPage({beforeScripts, sourceUrl: SOURCE_URL});
+  const {win, posted} = makeChatPage({
+    beforeScripts: stubRaf,
+    sourceUrl: SOURCE_URL,
+  });
   return {win, posted};
 }
 

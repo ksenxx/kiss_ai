@@ -64,17 +64,13 @@ class TestCatalogFlagRouting:
     def test_chat_completions_only_models_stay_on_v1(self) -> None:
         """Models OpenAI serves only on Chat Completions must stay v1.
 
-        ``gpt-4o-search-preview`` and ``gpt-audio`` are rejected by
-        ``/v1/responses`` ("not supported with the Responses API"), and
-        embeddings have no generation endpoint at all.
+        ``gpt-audio`` is rejected by ``/v1/responses`` ("not supported
+        with the Responses API"), and embeddings have no generation
+        endpoint at all.  The search-preview models, the other example,
+        left the catalog in the 2026-11-05 refresh (OpenAI no longer
+        lists them).
         """
-        for name in (
-            "gpt-4o-search-preview",
-            "gpt-4o-mini-search-preview",
-            "gpt-audio",
-            "gpt-audio-mini",
-            "text-embedding-3-small",
-        ):
+        for name in ("gpt-audio", "gpt-audio-mini", "text-embedding-3-small"):
             info = MODEL_INFO[name]
             assert info.use_responses_api is not True, name
             assert isinstance(model(name), OpenAICompatibleModel), name

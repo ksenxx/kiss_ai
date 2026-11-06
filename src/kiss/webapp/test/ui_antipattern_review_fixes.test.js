@@ -28,7 +28,7 @@
 
 const assert = require('assert');
 const h = require('./ui_antipattern_harness');
-const {typeInto} = require('./simplify2_harness');
+const {typeInto, waitFor, persistedDrafts} = require('./simplify2_harness');
 
 const {test, report} = h.makeRunner();
 
@@ -632,14 +632,10 @@ async function main() {
     const tabId = win._testApi.getActiveTabId();
     const inp = h.byId(win, 'task-input');
     pastePng(win, 'shot.png');
-    for (let i = 0; i < 100 && h.byId(win, 'send-btn').disabled; i++) {
-      await h.sleep(10);
-    }
+    await waitFor(() => !h.byId(win, 'send-btn').disabled, 'attachment read done');
     typeInto(win, inp, 'do the thing');
     h.click(win, h.byId(win, 'send-btn'));
-    for (let i = 0; i < 100 && !h.ofType(posted, 'submit').length; i++) {
-      await h.sleep(10);
-    }
+    await waitFor(() => h.ofType(posted, 'submit').length, 'submit posted');
     const submits = h.ofType(posted, 'submit');
     assert.strictEqual(submits.length, 1, 'the prompt went out');
     assert.strictEqual(submits[0].attachments.length, 1);
@@ -702,9 +698,8 @@ async function main() {
   });
 
   /** The drafts the page would hand a reloaded page, by tab. */
-  function persistedDrafts(win) {
-    win.dispatchEvent(new win.Event('pagehide'));
-    return (win.acquireTransport().getState() || {}).inputDrafts || {};
+  function drafts(win) {
+    return persistedDrafts(win, win.acquireTransport().getState);
   }
 
   await test('2026-11-04 W5 F1: the run echo sent before the refusal does not retire the refused draft', async () => {
@@ -713,14 +708,10 @@ async function main() {
       const tabId = win._testApi.getActiveTabId();
       const inp = h.byId(win, 'task-input');
       pastePng(win, 'draft.png');
-      for (let i = 0; i < 100 && h.byId(win, 'send-btn').disabled; i++) {
-        await h.sleep(10);
-      }
+      await waitFor(() => !h.byId(win, 'send-btn').disabled, 'attachment read done');
       typeInto(win, inp, 'review the attached draft');
       h.click(win, h.byId(win, 'send-btn'));
-      for (let i = 0; i < 100 && !h.ofType(posted, 'submit').length; i++) {
-        await h.sleep(10);
-      }
+      await waitFor(() => h.ofType(posted, 'submit').length, 'submit posted');
       assert.strictEqual(inp.value, '', 'the composer was cleared on send');
       if (background) win._testApi.createNewTab();
       // The daemon echoes every run before deciding on it: the refusal
@@ -760,7 +751,7 @@ async function main() {
     assert.strictEqual(h.ofType(posted, 'submit').length, 1);
     h.send(win, {type: 'setTaskText', text: 'accepted run', tabId});
     assert.strictEqual(
-      persistedDrafts(win)[tabId],
+      drafts(win)[tabId],
       undefined,
       'echoed: the daemon has it',
     );
@@ -794,18 +785,16 @@ async function main() {
       tabId: qTab,
     });
     pastePng(queued.win, 'refused.png');
-    for (let i = 0; i < 100 && h.byId(queued.win, 'send-btn').disabled; i++) {
-      await h.sleep(10);
-    }
+    await waitFor(
+      () => !h.byId(queued.win, 'send-btn').disabled,
+      'attachment read done',
+    );
     typeInto(queued.win, qInp, 'refused steering message');
     h.click(queued.win, h.byId(queued.win, 'send-btn'));
-    for (
-      let i = 0;
-      i < 100 && !h.ofType(queued.posted, 'appendUserMessage').length;
-      i++
-    ) {
-      await h.sleep(10);
-    }
+    await waitFor(
+      () => h.ofType(queued.posted, 'appendUserMessage').length,
+      'appendUserMessage posted',
+    );
     assert.strictEqual(
       h.ofType(queued.posted, 'appendUserMessage')[0].prompt,
       'refused steering message',
@@ -827,7 +816,7 @@ async function main() {
       'with its attachment',
     );
     assert.strictEqual(
-      persistedDrafts(queued.win)[qTab],
+      drafts(queued.win)[qTab],
       'refused steering message',
     );
     queued.win.close();
@@ -846,7 +835,7 @@ async function main() {
       h.ofType(posted, 'appendUserMessage').map(m => m.prompt),
       ['FIRST steering message', 'SECOND steering message'],
     );
-    assert.strictEqual(persistedDrafts(win)[tabId], 'SECOND steering message');
+    assert.strictEqual(drafts(win)[tabId], 'SECOND steering message');
     // The echo names no message: it acknowledges the one it carries.
     h.send(win, {
       type: 'prompt',
@@ -855,7 +844,7 @@ async function main() {
       tabId,
     });
     assert.strictEqual(
-      persistedDrafts(win)[tabId],
+      drafts(win)[tabId],
       'SECOND steering message',
       "FIRST's echo leaves SECOND's copy",
     );
@@ -866,7 +855,7 @@ async function main() {
       tabId,
     });
     assert.strictEqual(
-      persistedDrafts(win)[tabId],
+      drafts(win)[tabId],
       undefined,
       "SECOND's echo retires it",
     );
@@ -879,12 +868,12 @@ async function main() {
     assert.strictEqual(h.ofType(posted, 'appendUserMessage').length, 4);
     h.send(win, {type: 'prompt', steer: true, text: 'Please continue', tabId});
     assert.strictEqual(
-      persistedDrafts(win)[tabId],
+      drafts(win)[tabId],
       'Please continue',
       'the second copy outlives the first echo',
     );
     h.send(win, {type: 'prompt', steer: true, text: 'Please continue', tabId});
-    assert.strictEqual(persistedDrafts(win)[tabId], undefined);
+    assert.strictEqual(drafts(win)[tabId], undefined);
     win.close();
     // Two same-text runs submitted while idle.  The daemon echoes the
     // first run twice (its submit acknowledgment, then again once its
@@ -903,21 +892,21 @@ async function main() {
     for (let i = 0; i < 2; i++) {
       h.send(idle.win, echo);
       assert.strictEqual(
-        persistedDrafts(idle.win)[iTab],
+        drafts(idle.win)[iTab],
         'Please continue',
         "the first run's repeated echo leaves the second copy",
       );
     }
     h.send(idle.win, {type: 'clear', tabId: iTab});
     assert.strictEqual(
-      persistedDrafts(idle.win)[iTab],
+      drafts(idle.win)[iTab],
       'Please continue',
       'the first run started: the second copy stays',
     );
     h.send(idle.win, echo);
     h.send(idle.win, {...echo, type: 'prompt', steer: true});
     assert.strictEqual(
-      persistedDrafts(idle.win)[iTab],
+      drafts(idle.win)[iTab],
       undefined,
       "the second run's own acknowledgment retires it",
     );

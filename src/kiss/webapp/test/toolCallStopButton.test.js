@@ -377,10 +377,62 @@ async function run() {
     panelStopBody,
   );
   await pageTests();
+  await test('Stop follows the rename of its sub-agent tab', retagBody);
   report('toolCallStopButton');
   // The pages keep their panel tickers and stop-button reset timers
   // alive; the suite is done, so end the process explicitly.
   process.exit(0);
+}
+
+/**
+ * A sub-agent's tool runs on its own task; the daemon may re-announce
+ * that sub-agent under a new tab id (retagSubagentTab renames the tab
+ * and releases the old id).  The panel's Stop, clicked after the
+ * rename, must name the surviving tab: an interruptTool for the
+ * retired id reaches no running task.
+ */
+function retagBody() {
+  const wv = makePage();
+  const win = wv.win;
+  const parentId = wv.posted.find(m => m.type === 'ready').tabId;
+  win._testApi.hideWelcome();
+  send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
+  const announce = tabId =>
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: tabId,
+      parent_tab_id: parentId,
+      description: 'sub 1',
+      task_id: 't1',
+      isSubagentTab: true,
+      isDone: false,
+    });
+  announce('sa-1');
+  send(win, {type: 'status', running: true, tabId: 'sa-1', startTs: 1});
+  win._testApi.switchToTab('sa-1');
+  send(win, {
+    type: 'tool_call',
+    tabId: 'sa-1',
+    name: 'Bash',
+    command: 'sleep 60',
+    callId: 7,
+  });
+  announce('sa-2');
+  assert.ok(
+    wv.posted.some(m => m.type === 'closeTab' && m.tabId === 'sa-1'),
+    'setup: the retag releases the old id',
+  );
+  assert.strictEqual(win._testApi.getActiveTabId(), 'sa-2');
+  const tc = win.document.querySelector('#output .ev.tc');
+  const stop = tc.querySelector(':scope > .panel-stop-btn');
+  const before = wv.posted.length;
+  click(win, stop);
+  const msg = wv.posted.slice(before).find(m => m.type === 'interruptTool');
+  assert.ok(msg, 'interruptTool is posted');
+  assert.strictEqual(msg.tabId, 'sa-2', 'Stop names the renamed tab');
+  assert.strictEqual(msg.toolName, 'Bash');
+  assert.strictEqual(msg.callId, 7);
+  win.close();
 }
 
 async function panelStopBody() {

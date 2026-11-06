@@ -17,9 +17,11 @@ Every test runs against a real sqlite file in a temp directory.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
@@ -50,6 +52,32 @@ def _set_steer_timestamp(text: str, ts: float) -> None:
     th._get_db().execute(
         "UPDATE steer_inputs SET timestamp = ? WHERE text = ?", (ts, text),
     )
+
+
+def _peer_adds_a_task_and_reads(
+    go: threading.Event, done: threading.Event, texts: set[str], newest: list[float],
+) -> None:
+    """Another process's turn: commit a task, then read the history as the page does.
+
+    A raw connection stands for the other process (``_rw_lock`` orders
+    this process only).  *texts* receives the texts the read returned
+    and *newest* the watermark the reply would carry.
+    """
+    assert go.wait(timeout=15)
+    peer = sqlite3.connect(str(th._DB_PATH), timeout=30)
+    try:
+        peer.execute(
+            "INSERT INTO task_history (id, chat_id, timestamp, task, result) "
+            "VALUES ('peer-task', 'peer-chat', ?, 'peer prompt', 'Agent Failed Abruptly')",
+            (time.time(),),
+        )
+        peer.commit()
+        rows = peer.execute("SELECT task, timestamp FROM task_history").fetchall()
+    finally:
+        peer.close()
+    texts.update(str(task) for task, _ts in rows)
+    newest.append(max(float(ts) for _task, ts in rows))
+    done.set()
 
 
 def _steer_rows() -> list[tuple[str, float]]:
@@ -153,6 +181,44 @@ class TestSteerInputs:
         assert [t for t, _used in th._load_input_texts(since=watermark)] == [
             "delayed steer",
         ], "regression: the delayed write carries a time older than the watermark"
+
+    def test_a_task_stamps_its_time_under_the_databases_write_lock(self) -> None:
+        """A task another process overtook between its time stamp and its INSERT is not lost.
+
+        ``_rw_lock`` orders this process only.  ``_add_task`` used to
+        evaluate ``time.time()`` and only then let the INSERT take the
+        database's write lock; a peer process committing a newer task in
+        between, and a reader taking that task's time as its watermark,
+        left the task to commit with an OLDER time: every later delta
+        (``timestamp > watermark``) skipped it.  The connection's trace
+        callback fires when the INSERT starts, after its parameters are
+        evaluated and before it takes the lock: the peer's turn.  The
+        page's view (what the reader got, plus the delta since its
+        watermark) must hold both prompts.
+        """
+        go, done = threading.Event(), threading.Event()
+        texts: set[str] = set()
+        newest: list[float] = []
+        peer = threading.Thread(
+            target=_peer_adds_a_task_and_reads, args=(go, done, texts, newest), daemon=True,
+        )
+        peer.start()
+        db = th._get_db()
+
+        def trace(statement: str) -> None:
+            if statement.startswith("INSERT INTO task_history") and not go.is_set():
+                go.set()
+                done.wait(timeout=2)  # held off by the lock once it is taken first
+
+        db.set_trace_callback(trace)
+        try:
+            th._add_task("overtaken prompt")
+        finally:
+            db.set_trace_callback(None)
+        assert done.wait(timeout=30), "the peer never finished"
+        peer.join(5)
+        delta = {t for t, _used in th._load_input_texts(since=newest[0])}
+        assert {"overtaken prompt", "peer prompt"} <= texts | delta, (texts, delta)
 
     def test_prefix_match_merges_steer_and_tasks_by_recency(self) -> None:
         old_task, _chat = th._add_task("add a README")

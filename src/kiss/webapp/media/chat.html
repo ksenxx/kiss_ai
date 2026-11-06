@@ -585,6 +585,14 @@
             <input type="checkbox" id="cfg-use-memory" checked>
             Use persistent memory
           </label>
+          <!-- compaction: the global switch of context compaction
+               (config key ``compaction``, user_config.DEFAULTS).  Off,
+               no agent replaces old tool outputs in its context with
+               stubs, whatever a SEA or a run_agent call passes. -->
+          <label class="config-label config-checkbox" title="Compact the context of every agent: old, large tool outputs become short stubs once the context grows large. Off, no agent compacts.">
+            <input type="checkbox" id="cfg-compaction" checked>
+            Compaction
+          </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-chrome-bridge">
             Drive my Chrome: serve the "{{PRODUCT_NAME}} Bridge" extension (~/{{HOME_DIR}}/chrome_extension) from daemon start

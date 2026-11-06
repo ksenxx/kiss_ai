@@ -120,6 +120,7 @@ class _Session:
         default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
     )
     writes: queue.Queue[bytes | None] = field(default_factory=queue.Queue)
+    ended: threading.Event = field(default_factory=threading.Event)
     # Hangs the shell up ``GRACE_SECONDS`` after the disconnect;
     # cancelled when the page re-attaches or the shell is hung up.
     grace_timer: threading.Timer | None = None
@@ -198,20 +199,10 @@ class TerminalService:
         with self._lock:
             self._openings.append(opening)
         try:
-            session = self._start(opening, work_dir, cols, rows)
+            self._start(opening, work_dir, cols, rows)
         finally:
             with self._lock:
                 self._openings.remove(opening)
-        if session is None:
-            return
-        threading.Thread(
-            target=self._write_loop, args=(session,), daemon=True,
-            name=f"terminal-write-{tab_id[:8]}",
-        ).start()
-        threading.Thread(
-            target=self._pump, args=(session,), daemon=True,
-            name=f"terminal-read-{tab_id[:8]}",
-        ).start()
 
     def _start(
         self, opening: _Opening, work_dir: str, cols: int, rows: int,
@@ -241,12 +232,17 @@ class TerminalService:
                     session = self._sessions.get(tab_id)
                     if session is None:
                         break
-                    if not session.hung_up or time.monotonic() >= deadline:
+                    if not session.hung_up and not session.reaped:
                         # The shell is up (an earlier open of the tab): a
                         # live connection re-attaches; a dropped one has
                         # nothing to claim.
                         if not opening.detached:
                             self._reattach_locked(tab_id, conn_id, cols, rows)
+                        return None
+                    if time.monotonic() >= deadline:
+                        self._error(
+                            tab_id, conn_id, "The previous shell is still closing; try again.",
+                        )
                         return None
                 time.sleep(0.01)
             try:
@@ -256,15 +252,28 @@ class TerminalService:
                 self._error(tab_id, conn_id, f"The shell could not be started: {exc}")
                 return None
             with self._lock:
-                cancelled = opening.cancelled
+                cancelled: bool = opening.cancelled
                 if not cancelled:
                     self._sessions[tab_id] = session
-                    # Announced before the reader runs, so a shell that
-                    # exits at once still reports ``terminalOpened``
-                    # before its ``terminalExit``.
-                    self._emit_opened(session, attached=False)
-                    if opening.detached:
-                        self._detach_locked(session)
+                    # The reader first takes this lock: it cannot touch
+                    # the pty until both starts and the announcement succeed.
+                    try:
+                        threading.Thread(
+                            target=self._pump, args=(session,), daemon=True,
+                            name=f"terminal-read-{tab_id[:8]}",
+                        ).start()
+                        threading.Thread(
+                            target=self._write_loop, args=(session,), daemon=True,
+                            name=f"terminal-write-{tab_id[:8]}",
+                        ).start()
+                    except RuntimeError as exc:
+                        self._sessions.pop(tab_id)
+                        cancelled = True
+                        self._error(tab_id, conn_id, f"The shell could not be started: {exc}")
+                    else:
+                        self._emit_opened(session, attached=False)
+                        if opening.detached:
+                            self._detach_locked(session)
         if cancelled:
             self._discard(session)
             return None
@@ -283,7 +292,12 @@ class TerminalService:
         with self._lock:
             session = self._owned(tab_id, conn_id)
             if session is not None:
-                session.writes.put(data.encode("utf-8", errors="surrogateescape"))
+                try:
+                    encoded = data.encode("utf-8", errors="surrogateescape")
+                except UnicodeEncodeError:
+                    # A JS paste can contain an unpaired surrogate.
+                    encoded = data.encode("utf-8", errors="replace")
+                session.writes.put(encoded)
 
     def resize(self, tab_id: str, conn_id: str, cols: Any, rows: Any) -> None:
         """Set the pty window size (the shell gets ``SIGWINCH``).
@@ -423,6 +437,7 @@ class TerminalService:
         # No other terminal forks before this line runs (the spawn
         # lock), and subprocesses close every fd above 2 at exec.
         os.set_inheritable(fd, False)
+        os.set_blocking(fd, False)
         session = _Session(
             tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
             shell=argv[0], cwd=cwd,
@@ -500,22 +515,28 @@ class TerminalService:
         reused for something else.
         """
         broken = False
-        while True:
-            data = session.writes.get()
-            if data is None:
-                break
-            if broken:
-                continue
-            try:
-                while data:
-                    n = os.write(session.fd, data)
-                    data = data[n:]
-            except OSError:
-                broken = True
         try:
-            os.close(session.fd)
-        except OSError:
-            pass
+            with selectors.DefaultSelector() as ready:
+                ready.register(session.fd, selectors.EVENT_WRITE)
+                while (data := session.writes.get()) is not None:
+                    if broken:
+                        continue
+                    while data and not session.ended.is_set():
+                        try:
+                            if ready.select(0.1):
+                                data = data[os.write(session.fd, data):]
+                        except BlockingIOError:
+                            continue
+                        except OSError:
+                            broken = True
+                            break
+        finally:
+            # Only the reader can release ownership of the master.
+            session.ended.wait()
+            try:
+                os.close(session.fd)
+            except OSError:
+                pass
 
     def _pump(self, session: _Session) -> None:
         """Stream the shell's output to its connection until it exits.
@@ -524,6 +545,9 @@ class TerminalService:
         only at EOF: a background child that inherited the pty keeps
         the slave side open (no EOF) and may keep printing.
         """
+        with self._lock:
+            if self._sessions.get(session.tab_id) is not session:
+                return  # worker startup failed; _discard owns the pty
         selector = selectors.DefaultSelector()
         selector.register(session.fd, selectors.EVENT_READ)
         code: int | None = None
@@ -547,6 +571,7 @@ class TerminalService:
                 break
             self._emit_data(session, data)
         selector.close()
+        self._emit_data(session, b"", final=True)
         with self._lock:
             self._sessions.pop(session.tab_id, None)
             # A detached shell that exited on its own: its grace timer
@@ -560,6 +585,7 @@ class TerminalService:
                 {"type": "terminalExit", "tab_id": session.tab_id, "code": code},
                 session.conn_id,
             )
+        session.ended.set()
         session.writes.put(None)
 
     def _read(self, session: _Session) -> bytes:
@@ -595,8 +621,8 @@ class TerminalService:
                 return None
             time.sleep(0.02)
 
-    def _emit_data(self, session: _Session, data: bytes) -> None:
-        text = session.decoder.decode(data)
+    def _emit_data(self, session: _Session, data: bytes, *, final: bool = False) -> None:
+        text = session.decoder.decode(data, final=final)
         if text:
             self._emit(
                 {"type": "terminalData", "tab_id": session.tab_id, "data": text},

@@ -93,12 +93,19 @@ class TestBrowserProcessKilledOnClose:
         leaking the Chromium process (this is exactly what happened on
         the atexit path for browsers created in ThreadPoolExecutor
         workers).  The PID-kill fallback must still terminate it.
+
+        ``playwright.stop()`` fails the same way, and its request never
+        reaches the Node driver (closing the driver's stdin is left to
+        the event loop, which no longer turns): the driver process must
+        be killed and reaped as well, or one ``node run-driver`` stays
+        for every closed tool until the daemon exits.
         """
         box: dict = {}
 
         def _worker() -> None:
             tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
             box["pid"] = _launch(tool)
+            box["driver_pid"] = tool._playwright._impl_obj._connection._transport._proc.pid
             box["tool"] = tool
 
         t = threading.Thread(target=_worker)
@@ -106,9 +113,14 @@ class TestBrowserProcessKilledOnClose:
         t.join(timeout=120)
         assert not t.is_alive(), "worker thread hung"
         assert "pid" in box, "browser failed to launch in worker thread"
+        assert _pid_alive(box["driver_pid"]), "the Playwright driver is not a live process"
         box["tool"].close()
         assert _wait_dead(box["pid"]), (
             f"Chromium (pid {box['pid']}) leaked after cross-thread close()"
+        )
+        # A zombie still answers ``kill(pid, 0)``: the driver must be reaped too.
+        assert _wait_dead(box["driver_pid"]), (
+            f"Playwright driver (pid {box['driver_pid']}) leaked after cross-thread close()"
         )
 
     def test_ensure_browser_relaunch_kills_previous_process(self, tmp_path):

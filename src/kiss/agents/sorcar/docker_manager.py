@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
+from docker.utils import parse_repository_tag
 
 from kiss.agents.sorcar._concurrency import _race_delay, locked_call
 from kiss.agents.sorcar.edit_guards import (
@@ -404,7 +405,10 @@ def _rewrite_instead(
     Raises:
         ToolRedirect: The call to make instead.
     """
-    copy = heredoc_copy(command, workdir)
+    # The container's (or the bridge environment's) home is not this
+    # process's: a ``~`` target stays unresolved and heredoc_guard
+    # refuses the copy, asking for the literal path.
+    copy = heredoc_copy(command, workdir, home=None)
     if copy is not None and copy.path is not None and not copy.path.startswith("/dev/"):
         refusal = cd_refusal(copy.cwd, isdir)
         if refusal is not None:
@@ -573,6 +577,9 @@ class _ExecRun:
         self.cancelled = False
         self.start_committed = False
         self.start_refused = False
+        # Taken by the one reaper thread that sweeps; a repeat of
+        # ``cancel()`` may start a second thread, which finds it taken.
+        self.reaper_claim = threading.Lock()
 
     def run_worker(self) -> None:
         """Worker thread body: create, start and drain the exec, then fetch its exit code."""
@@ -633,7 +640,11 @@ class _ExecRun:
         cannot leak the lock under the worker.  Safe to repeat: a call
         cut short by an injection that landed after the mark but before
         the reaper's start (:meth:`DockerManager._exec` retries it once)
-        installs the reaper the first call did not.
+        installs the reaper the first call did not; one cut short later
+        starts a second thread, which exits at once because the first
+        holds :attr:`reaper_claim` (no bookkeeping on this thread can
+        tell the two apart: an injection can land between any two of
+        its statements, so the claim is taken by the reaper itself).
         """
         if not locked_call(self.lock, self._mark_cancelled):
             return
@@ -672,8 +683,12 @@ class _ExecRun:
         start costs one inspect every few seconds.
 
         Args:
-            swept: Set once the first sweep has run.
+            swept: Set once the first sweep has run (at once when another
+                reaper of this run holds the claim and sweeps).
         """
+        if not self.reaper_claim.acquire(blocking=False):
+            swept.set()
+            return
         try:
             self.manager._kill_exec(self.token, self.container)
         finally:
@@ -702,7 +717,6 @@ class DockerManager:
         tag: str = "latest",
         workdir: str = "/",
         mount_shared_volume: bool = True,
-        ports: dict[int, int] | None = None,
         volumes: dict[str, str] | None = None,
     ) -> None:
         """Initialize the Docker client.
@@ -721,9 +735,6 @@ class DockerManager:
                 a later ``container:<id>`` attach runs commands there.
             mount_shared_volume: Whether to mount a shared volume. Set to False
                 for images that already have content in the workdir (e.g., SWE-bench).
-            ports: Port mapping from container port to host port.
-                Example: {8080: 8080} maps container port 8080 to host port 8080.
-                Example: {80: 8000, 443: 8443} maps multiple ports.
             volumes: Extra read-write bind mounts, host path to container
                 path.  Example: ``{"/home/me/repo": "/home/me/repo"}``
                 makes the host directory visible at the same path inside
@@ -756,7 +767,6 @@ class DockerManager:
 
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
-        self.ports = ports
         self.volumes = dict(volumes or {})
         self.client_shared_path = "/testbed"
         self.host_shared_path: str | None = None
@@ -772,11 +782,13 @@ class DockerManager:
         if image_name.startswith(ATTACH_PREFIX):
             self.attached_container = image_name[len(ATTACH_PREFIX):]
             self.image, self.tag = "", ""
-        elif ":" in image_name:
-            self.image, self.tag = image_name.rsplit(":", 1)
         else:
-            self.image = image_name
-            self.tag = tag
+            # docker's reference grammar, as docker-py's pull() reads it:
+            # the text after the last colon is a tag only when no "/"
+            # follows it (``localhost:5000/name`` is a registry port, no
+            # tag), and ``name@sha256:...`` is a digest.
+            self.image, parsed_tag = parse_repository_tag(image_name)
+            self.tag = parsed_tag or tag
 
     def open(self) -> None:
         """Pull and load a Docker image, then create and start a container.
@@ -785,9 +797,9 @@ class DockerManager:
             KISSError: If a container is already open on this manager
                 (starting a second one would orphan the first — ``close``
                 only knows the newest container — and leak its shared
-                volume directory), or if the previous container's shared
-                volume directory still cannot be removed (starting anyway
-                would replace the only reference to it).
+                volume directory), or if the previous container, or its
+                shared volume directory, still cannot be removed (starting
+                anyway would replace the only reference to it).
         """
         locked_call(self._lifecycle_lock, self._open_locked)
 
@@ -798,6 +810,16 @@ class DockerManager:
                 "A container is already open on this DockerManager; "
                 "call close() before open() again."
             )
+        if self.container_name is not None:
+            # A previous close() could not remove the container (see
+            # _discard_container); retry before a new one takes its
+            # name on the manager and the shared volume dir it mounts.
+            self._discard_container()
+            if self.container_name is not None:
+                raise KISSError(
+                    f"The previous container {self.container_name} could not be "
+                    "removed; remove it and call open() again."
+                )
         if self.host_shared_path is not None:
             # A previous close() could not delete the shared volume
             # dir (see _remove_shared_volume_dir); retry before a new
@@ -824,7 +846,7 @@ class DockerManager:
             return
         image = self.image
         tag = self.tag
-        full_image_name = f"{image}:{tag}"
+        full_image_name = f"{image}@{tag}" if tag.startswith("sha256:") else f"{image}:{tag}"
         print(f"Pulling Docker image: {full_image_name}")
         try:
             self.client.images.get(full_image_name)
@@ -848,8 +870,6 @@ class DockerManager:
             mounts[self.host_shared_path] = {"bind": self.client_shared_path, "mode": "rw"}
         if mounts:
             container_kwargs["volumes"] = mounts
-        if self.ports:
-            container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
         # create() and start() are separate calls, under a name chosen
         # here, so the manager owns the container from the moment it
         # exists: docker-py's ``run()`` never removes a container whose
@@ -1248,25 +1268,6 @@ class DockerManager:
         except Exception:  # pragma: no cover — container already gone
             logger.debug("could not kill timed-out exec", exc_info=True)
 
-    def get_host_port(self, container_port: int) -> int | None:
-        """Get the host port mapped to a container port.
-
-        Args:
-            container_port: The container port to look up.
-
-        Returns:
-            The host port mapped to the container port, or None if not mapped.
-        """
-        container = self._open_container()
-        _race_delay()  # test hook: widens the guard-to-use window
-
-        container.reload()
-        port_bindings = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-        port_key = f"{container_port}/tcp"
-        if port_key in port_bindings and port_bindings[port_key]:
-            return int(port_bindings[port_key][0]["HostPort"])
-        return None
-
     def close(self) -> None:
         """Stop and remove the Docker container.
 
@@ -1358,11 +1359,14 @@ class DockerManager:
         ``host_shared_path`` is cleared only once the directory is gone
         (deleted here, or already absent): a failed ``rmtree`` keeps the
         path on the manager so the leak stays traceable and the next
-        :meth:`close` or :meth:`open` retries the removal.  A repeated
-        call with nothing tracked is a no-op.
+        :meth:`close` or :meth:`open` retries the removal.  While
+        ``container_name`` is set the container is not known to be
+        removed (:meth:`_discard_container` failed) and may still mount
+        the directory, so it is kept for the retry that removes the
+        container.  A repeated call with nothing tracked is a no-op.
         """
         path = self.host_shared_path
-        if path is None:
+        if path is None or self.container_name is not None:
             return
         if os.path.exists(path):
             try:

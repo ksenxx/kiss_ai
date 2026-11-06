@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import gc
 import importlib.util
 import json
 import os
@@ -629,6 +630,25 @@ def test_unattended_browser_has_no_webauthn(tool, server):
     )
 
 
+def _open_fds() -> set[tuple[str, str]]:
+    """The process's open descriptors as ``(number, target)`` pairs.
+
+    The target (``pipe:[inode]``, ``socket:[inode]``, a path) tells a
+    leaked pipe from an unrelated descriptor that was closed meanwhile
+    and whose number it took.  ``os.listdir`` names its own directory
+    handle too, the lowest free number at the time; it is closed again
+    by the time the names are read, so it (and anything else closed by
+    then) is left out.
+    """
+    fds: set[tuple[str, str]] = set()
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            fds.add((fd, os.readlink(f"/proc/self/fd/{fd}")))
+        except OSError:
+            pass
+    return fds
+
+
 def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, server):
     """Stopping the display kills Xvfb; without the binary the tool goes headless."""
     assert web_stealth.virtual_display() is not None
@@ -646,12 +666,17 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
     assert web_stealth._XVFB_PROC is None
     web_stealth.stop_virtual_display()  # idempotent when nothing runs
     # Restart cycles neither leak descriptors nor pile up atexit callbacks.
-    fds_before = len(os.listdir("/proc/self/fd"))
+    # A leak is a descriptor that is open afterwards and was not before;
+    # the count alone also drops when the cyclic collector closes an
+    # earlier test's unreachable socket meanwhile (full-suite load,
+    # 2026-11-05), so collect first and compare the sets.
+    gc.collect()
+    fds_before = _open_fds()
     callbacks_before = atexit._ncallbacks()
     for _ in range(2):
         assert web_stealth.virtual_display() is not None
         web_stealth.stop_virtual_display()
-    assert len(os.listdir("/proc/self/fd")) == fds_before
+    assert not _open_fds() - fds_before
     assert atexit._ncallbacks() == callbacks_before
     # Descriptor exhaustion: with two descriptors of headroom the pipe
     # still fits but Popen's own pipe does not; with none, not even the
@@ -675,7 +700,7 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
             resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
             for fd in plugs:
                 os.close(fd)
-        assert len(os.listdir("/proc/self/fd")) == fds_before
+        assert not _open_fds() - fds_before
 
     # No Xvfb binary on PATH -> no display -> the launch falls back to
     # real headless mode (with its headed user agent, see

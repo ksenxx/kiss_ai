@@ -53,10 +53,12 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
+from kiss.server.remote_tabs import RemoteTab
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import LocalWriter, open_local_connection
 from kiss.tests.remote_daemon import start_remote_daemon
+from kiss.tests.server.pause import Pause
 
 SUMMARY = "<p>Hello from box</p>"
 
@@ -367,6 +369,32 @@ class TestRemoteTabs(RemoteTabsHarness):
         self.assertEqual(error["code"], "prompt_refused")
         self.assertIn("dead (https://127.0.0.1:", error["text"])
         self.assertEqual(self.server._server_api.remote_tabs.machine_of("tab-y"), "")
+
+    async def test_a_bind_still_connecting_at_shutdown_stands_down(self) -> None:
+        """A shutdown during a bind's connect leaves no stream behind and forwards nothing.
+
+        The bind connects outside the lock; ``close_all`` finds nothing
+        to retire in that window, and the bind used to register its
+        stream afterwards and forward the run to the machine.
+        """
+        tabs = self.server._server_api.remote_tabs
+        tab = "tab-late"
+        held = Pause(RemoteTab.__init__.__code__, lambda local: local["tab_id"] == tab)
+        with held:
+            await self._submit(tab, "Run after shutdown", "box")
+            self.assertTrue(
+                await asyncio.to_thread(held.paused.wait, 30), "the bind never connected",
+            )
+            await asyncio.to_thread(tabs.close_all)
+            held.release()
+        for _ in range(600):
+            if not tabs._connecting:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(tabs._connecting, {}, "the bind never ended")
+        self.assertEqual(tabs.machine_of(tab), "")
+        self.assertNotIn(tab, await self._remote_tabs_state())
+        self.assertNotIn("Run after shutdown", await self._titles("box"))
 
     async def test_losing_the_machine_ends_the_tab_with_an_error(self) -> None:
         tab = "tab-lost"

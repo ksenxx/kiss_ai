@@ -42,6 +42,7 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.git_worktree import (
     _PRECOMMIT_FIX_LINES,
+    _RESCUE_SIBLING_MARKER,
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
     GitWorktree,
@@ -59,7 +60,7 @@ from kiss.agents.sorcar.git_worktree import (
     inside_kiss_worktree,
     repo_lock,
 )
-from kiss.agents.sorcar.persistence import _load_last_model, _record_gate_charge
+from kiss.agents.sorcar.persistence import _load_last_model, _record_model_charge
 from kiss.agents.sorcar.relentless_agent import (
     _OFFSET_PUBLISH_LOCK,
     RelentlessAgent,
@@ -247,31 +248,49 @@ def _read_scratch_files(wt: GitWorktree, paths: list[Path]) -> dict[Path, bytes]
     return found
 
 
-def _write_scratch_files(wt: GitWorktree, files: dict[Path, bytes]) -> str:
-    """Write a merged worktree's scratch files (:func:`_read_scratch_files`) into the main checkout.
+def _note_scratch_files(wt: GitWorktree, files: dict[Path, bytes]) -> str:
+    """Say where the main checkout holds a merged worktree's scratch files.
 
     ``tmp/`` is git-ignored, so the merge carries neither the log the
-    task kept for the user nor the verifier the finish gate runs; writing
-    them here spares the model doing it by hand and lets the gate run the
-    verifier on the merged tree.  Returns the note appended to the merge
-    result (``""`` when nothing was written).
+    task kept for the user nor the verifier the finish gate runs: the
+    teardown's rescue (:func:`_rescue_ignored_files`) lands them under
+    the original work dir before the worktree directory is removed, and
+    never over an existing copy — a different one keeps its name and
+    the worktree's version goes beside it as a ``.kiss-rescued-<ns>``
+    sibling.  (A tracked copy arrives with the merge instead.)  Nothing
+    is written here: the note tells the model and the user which copy
+    the main checkout holds, so the gate's verifier run and the next
+    session's log are not a surprise.  Returns the note appended to the
+    merge result (``""`` when the worktree had no scratch file).
 
     Args:
         wt: The merged worktree (its directory may already be gone).
         files: The bytes of each file, by its path relative to the task's
-            work dir (:func:`_read_scratch_files`); it is written at the
-            same path under the original work dir in the main checkout.
+            work dir (:func:`_read_scratch_files`).
     """
     notes = []
     for relative, content in files.items():
         target = wt.repo_root / _scratch_offset(wt) / relative
+        stem = target.name.removesuffix(target.suffix)
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
+            if target.is_file() and target.read_bytes() == content:
+                notes.append(f" Copied {relative.as_posix()} to {target}.")
+                continue
+            siblings = [
+                path
+                for path in target.parent.glob(f"{stem}{_RESCUE_SIBLING_MARKER}*{target.suffix}")
+                if path.is_file() and path.read_bytes() == content
+            ]
         except OSError:
-            logger.warning("Could not write %s", target, exc_info=True)
+            logger.warning("Could not read %s", target, exc_info=True)
             continue
-        notes.append(f" Copied {relative.as_posix()} to {target}.")
+        note = (
+            f" Kept the main checkout's {target}, which differs from the "
+            f"worktree's {relative.as_posix()}"
+        )
+        if siblings:
+            note += f"; the worktree's copy is beside it at {max(siblings)}"
+        notes.append(note + ".")
     return "".join(notes)
 
 
@@ -1055,6 +1074,67 @@ def _attribute_sub_usage(
             logger.debug("usage offset publish failed", exc_info=True)
 
 
+def side_call_binding(agent: Any) -> tuple[Any, str]:
+    """Bind a model call about to be made for *agent*'s task to that task.
+
+    Taken as the call starts and handed to
+    :func:`_attribute_side_call_usage`, so a call that returns after the
+    task ended (its row saved, or the agent reset for its next task)
+    still charges the task it was made for.
+
+    Args:
+        agent: The agent whose task the call is made for.
+
+    Returns:
+        ``(ledger epoch, persisted row id)``: *agent*'s current usage
+        epoch (``None`` for an agent without one) and its row id (``""``
+        for none).
+    """
+    epoch_of = getattr(agent, "_usage_epoch", None)
+    return (epoch_of() if callable(epoch_of) else None), _persisted_task_id(agent)
+
+
+def _attribute_side_call_usage(agent: Any, model: str, budget: float, tokens: int,
+                               binding: tuple[Any, str] | None = None) -> None:
+    """Charge a model call made for *agent*'s task outside its agent loop, filed under *model*.
+
+    Such a call (the commit message, a ``talk`` synthesis, a ``decide``
+    call) is not an agent step and emits no ``llm_call``.  A Sorcar
+    agent with a persisted row charges it as a finish-gate review is
+    charged (``SorcarAgent._charge_gate_usage``): bound to the task's
+    ledger epoch while the row is unfinished, added to the row (and its
+    finished ancestors) once it is, and recorded under the row
+    (:func:`~kiss.agents.sorcar.persistence._record_model_charge`) so the
+    Spend panel files it under *model*, not under the task's own model.
+    Otherwise the spend joins *agent*'s ledger (:func:`_attribute_sub_usage`)
+    and, with a row, is recorded the same way (best-effort: a failure
+    is logged, never raised).
+
+    Args:
+        agent: The agent whose task pays.
+        model: The model the call ran on.
+        budget: Its spend in USD.
+        tokens: Its tokens.
+        binding: :func:`side_call_binding` taken when the call started,
+            or ``None`` for *agent*'s task now.
+    """
+    if budget <= 0 and tokens <= 0:
+        return
+    epoch, task_id = binding if binding is not None else side_call_binding(agent)
+    key = f"side:{uuid.uuid4().hex}"
+    charge = getattr(agent, "_charge_gate_usage", None)
+    if task_id and callable(charge):
+        charge(budget, tokens, 0, key, epoch=epoch, task_id=task_id, model=model)
+        return
+    _attribute_sub_usage(agent, budget, tokens, 0, epoch=epoch)
+    if task_id and model and budget > 0:
+        try:
+            _record_model_charge(task_id, model, budget, tokens, f"side:{uuid.uuid4().hex}")
+        except Exception:
+            logger.warning("side-call spend of %s not filed under %s", task_id, model,
+                           exc_info=True)
+
+
 def _append_late_usage_events(updated: list[tuple[str, int, float, int]]) -> None:
     """Persist a ``usage_info`` with each row's new totals, so a replay shows a late charge.
 
@@ -1092,7 +1172,8 @@ def _first_cleanup_error(
     return exc if first is None else first
 
 
-def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
+def _attribute_tts_usage(agent: Any, usage: dict[str, Any],
+                         binding: tuple[Any, str] | None = None) -> None:
     """Attribute a ``talk``-tool TTS synthesis call's spend to *agent*.
 
     ``synthesize_talk_audio`` runs a throwaway single-shot
@@ -1105,13 +1186,14 @@ def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
     Args:
         agent: The Sorcar agent whose task accounting receives the spend.
         usage: The ``usage_out`` dict filled by ``synthesize_talk_audio``
-            (``budget_used`` USD, ``total_tokens_used``); empty when the
-            synthesis never issued an API call.
+            (``budget_used`` USD, ``total_tokens_used``, ``model``); empty
+            when the synthesis never issued an API call.
+        binding: :func:`side_call_binding` taken before the synthesis, or
+            ``None`` for *agent*'s task now.
     """
     budget = float(usage.get("budget_used", 0.0) or 0.0)
     tokens = int(usage.get("total_tokens_used", 0) or 0)
-    if budget > 0 or tokens > 0:
-        _attribute_sub_usage(agent, budget, tokens, 0)
+    _attribute_side_call_usage(agent, str(usage.get("model") or ""), budget, tokens, binding)
 
 
 _FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
@@ -1310,6 +1392,11 @@ class SorcarAgent(RelentlessAgent):
         # ``run_agent`` sub-task dispatched DURING the run can take
         # them over (``task_runner`` reads them off the parent agent).
         self._extra_tools: list[Callable[..., Any]] = []
+        # The ``skill`` tool ``run`` built for its work dir while composing
+        # the restricted-profile note (``None`` when no skill is configured
+        # there), reused by ``_get_tools`` so the skills are discovered
+        # once per run.
+        self._skill_probe: tuple[str, Callable[[str], str] | None] | None = None
         # The names of every tool the current run offers the model
         # (the executor holds the callables); the worktree guard reads
         # it to know whether ``create_worktree`` is available.
@@ -1626,6 +1713,7 @@ class SorcarAgent(RelentlessAgent):
             from kiss.core.speech_synthesis import synthesize_talk_audio
 
             tts_usage: dict[str, Any] = {}
+            binding = side_call_binding(self)
             try:
                 # None on every synthesis failure: talk degrades to text.
                 synthesized = synthesize_talk_audio(
@@ -1635,7 +1723,7 @@ class SorcarAgent(RelentlessAgent):
                 # Also on a Stop (KeyboardInterrupt) that unwinds through
                 # here: the synthesis already banked its spend in
                 # ``tts_usage`` and the task must still pay for it.
-                _attribute_tts_usage(self, tts_usage)
+                _attribute_tts_usage(self, tts_usage, binding)
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
             broadcast(payload)
@@ -1915,7 +2003,11 @@ class SorcarAgent(RelentlessAgent):
         if self._memory_tools is not None:
             tools.extend(self._memory_tools.tools())
         if allowed is None or "skill" in allowed:
-            skill_tool = make_skill_tool(self.work_dir or ".")
+            work_dir = self.work_dir or "."
+            if self._skill_probe is not None and self._skill_probe[0] == work_dir:
+                skill_tool = self._skill_probe[1]
+            else:
+                skill_tool = make_skill_tool(work_dir)
             if skill_tool is not None:
                 tools.append(skill_tool)
         if allowed is None or allowed & MCP_AUTH_TOOL_NAMES:
@@ -2367,6 +2459,7 @@ class SorcarAgent(RelentlessAgent):
         system_prompt_hook: Callable[[str], str] | None = None,
         tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = None,
         task_begun: bool = False,
+        compaction: bool = True,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2518,6 +2611,13 @@ class SorcarAgent(RelentlessAgent):
                 :meth:`_begin_task` for this task (``ChatSorcarAgent.run``
                 does, before it replaces the chat state the retirement's
                 commit message is generated from).
+            compaction: Whether the run compacts its context (see
+                :meth:`kiss.core.kiss_agent.KISSAgent.run`): False never
+                compacts, True (the default) compacts while the global
+                Compaction setting (the settings panel's checkbox,
+                persisted as ``compaction``) is on.  A ``run_agent`` /
+                ``run_parallel`` sub-agent inherits it unless its call
+                passes its own.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -2649,8 +2749,10 @@ class SorcarAgent(RelentlessAgent):
                         offered -= MEMORY_TOOL_NAMES
                     if not decisions_tool_available():
                         offered.discard("decide")
-                    if "skill" in offered and make_skill_tool(work_dir) is None:
-                        offered.discard("skill")
+                    if "skill" in offered:
+                        self._skill_probe = (work_dir, make_skill_tool(work_dir))
+                        if self._skill_probe[1] is None:
+                            offered.discard("skill")
                     listed = sorted(offered)
                     if allowed & MCP_AUTH_TOOL_NAMES:
                         listed.append("the tools of every configured MCP server")
@@ -2709,6 +2811,7 @@ class SorcarAgent(RelentlessAgent):
                     llm_call_hook=llm_call_hook,
                     tool_call_hook=tool_call_hook,
                     llm_response_hook=llm_response_hook,
+                    compaction=compaction,
                 )
                 completed = True
                 return result
@@ -2751,7 +2854,6 @@ class SorcarAgent(RelentlessAgent):
             self.set_printer(printer)
         self._unisolated_repos = set()
         self._worktree_finish_gate_used = False
-        self._coding_gate = self._new_coding_gate(with_reviewer=False)
         self._written_files = set()
         if self._wts:
             self._retire_after_task_saved()
@@ -3958,8 +4060,8 @@ class SorcarAgent(RelentlessAgent):
 
         if result == MergeResult.SUCCESS:
             self._wts.pop(_repo_key(wt), None)
-            copied = _write_scratch_files(wt, scratch_files)
-            return f"Successfully merged branch '{wt.branch}'." + copied + stash_suffix
+            landed = _note_scratch_files(wt, scratch_files)
+            return f"Successfully merged branch '{wt.branch}'." + landed + stash_suffix
 
         stash_step = ""
         if stash_warning:
@@ -4438,6 +4540,7 @@ class SorcarAgent(RelentlessAgent):
         and be called by a docker run that never installs one.
         """
         self._memory_tools = None
+        self._skill_probe = None
         self._ask_user_question_callback = None
         self.pre_step_hook = None
         self.tool_call_guard = None
@@ -4510,6 +4613,10 @@ class SorcarAgent(RelentlessAgent):
                            epoch: Any = None, task_id: str = "", model: str = "") -> None:
         """Attribute a gate review attempt's model spend to the run that asked for it.
 
+        A model call made for the run outside its agent loop (a ``decide``
+        call, a ``talk`` synthesis, the commit message) is charged here too
+        (:func:`_attribute_side_call_usage`), under a key of its own.
+
         A run with a persisted row and a server printer is charged
         through the printer's ``charge_task_usage`` bridge
         (:func:`~kiss.server.task_update.charge_side_channel_usage`),
@@ -4537,7 +4644,7 @@ class SorcarAgent(RelentlessAgent):
         charge never doubles a first one that did land.  The reviewer
         emits no ``llm_call``, so a row charge also records its *model*,
         spend and tokens under the row
-        (:func:`~kiss.agents.sorcar.persistence._record_gate_charge`)
+        (:func:`~kiss.agents.sorcar.persistence._record_model_charge`)
         for the Spend panel's split by model, however the review ends.
 
         Args:
@@ -4561,7 +4668,7 @@ class SorcarAgent(RelentlessAgent):
                 self._charge_persisted_usage(task_id, budget, tokens, steps, epoch, key)
             if model and budget > 0:
                 try:
-                    _record_gate_charge(task_id, model, budget, tokens, key)
+                    _record_model_charge(task_id, model, budget, tokens, key)
                 except Exception:
                     logger.warning("gate review spend of %s not filed under %s", task_id,
                                    model, exc_info=True)
@@ -4612,6 +4719,10 @@ class SorcarAgent(RelentlessAgent):
             _attribute_sub_usage(self, budget, tokens, steps, epoch=epoch, key=key)
             return
         _append_late_usage_events(updated)
+        printer: Any = getattr(self, "printer", None)
+        if printer is not None and hasattr(printer, "broadcast"):
+            # The history lists show the rows' new totals.
+            printer.broadcast({"type": "tasks_updated"})
 
     def _gate_tool_result(self, name: str, args: dict[str, Any], result: str,
                           refused: bool) -> None:

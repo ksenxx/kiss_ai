@@ -34,6 +34,12 @@ async function words(code, options) {
   return result.warnings.map(w => w.text);
 }
 
+// `line:column-endColumn` of every warning, in source order.
+async function ranges(code, options) {
+  const result = await lint(code, options);
+  return result.warnings.map(w => `${w.line}:${w.column}-${w.endColumn}`);
+}
+
 async function testHexColours() {
   const tokens = {tokenSelectors: [':root', 'body.remote-chat']};
   assert.deepStrictEqual(await words(':root { --bg: #1f1f1f; }', tokens), []);
@@ -139,6 +145,63 @@ async function testInvalidOptionIsReported() {
   console.log('  ok - invalid tokenSelectors reported, rule skipped');
 }
 
+// A22-1 (astra): a `/` inside a math function is a division, not the
+// line-height separator of the `font` shorthand; it must not hide the raw
+// sizes that follow it.
+async function testDivisionInsideFunctionsKeepsFontSizeChecks() {
+  assert.match(
+    (await words('.a { font-size: min(var(--fs-base) / 2, 12px); }'))[0],
+    /Raw font size "12px"/,
+  );
+  assert.deepStrictEqual(
+    (await words('.a { font-size: clamp(var(--fs-base) / 2, 12px, 20px); }')).map(
+      t => t.split(' outside')[0],
+    ),
+    ['Raw font size "12px"', 'Raw font size "20px"'],
+  );
+  assert.match(
+    (await words('.a { font: oblique min(10deg / 2, 20deg) 12px sans-serif; }'))[0],
+    /Raw font size "12px"/,
+  );
+  // The top-level `/` of the shorthand still starts the line height, even
+  // when the line height itself divides.
+  assert.deepStrictEqual(
+    await words('.a { font: var(--fs-sm)/calc(2em / 2) sans-serif; }'),
+    [],
+  );
+  console.log('  ok - division inside functions does not hide font sizes');
+}
+
+// A22-2 (astra): the option validator accepts a single selector string as
+// well as an array; a string must match selectors exactly, not as a
+// substring (`':root'.includes('root')`).
+async function testScalarTokenSelectorMatchesExactly() {
+  const scalar = {tokenSelectors: ':root'};
+  const result = await lint('root { --bg: #fff; }', scalar);
+  assert.strictEqual(result.invalidOptionWarnings.length, 0);
+  assert.strictEqual(result.warnings.length, 1);
+  assert.match(result.warnings[0].text, /Hex colour "#fff"/);
+  assert.deepStrictEqual(await words(':root { --bg: #fff; }', scalar), []);
+  console.log('  ok - a scalar tokenSelectors string matches exactly');
+}
+
+// A22-2 (fable): each warning is placed at its own value word, not at the
+// first occurrence of the same text in `prop: value`.
+async function testWarningRangesPointAtTheValueWord() {
+  assert.deepStrictEqual(
+    await ranges('.a { border-radius: 6px 6px 0 0; }'),
+    ['1:21-24', '1:25-28'],
+  );
+  assert.deepStrictEqual(await ranges('.a { --z-1: 1; }'), ['1:13-14']);
+  assert.deepStrictEqual(await ranges('.a { border-radius : 6px; }'), ['1:22-25']);
+  assert.deepStrictEqual(await ranges('.a { border-radius: /* x */ 6px; }'), ['1:29-32']);
+  assert.deepStrictEqual(
+    await ranges('.a {\n  font-size: var(--fs-sm,\n    11px);\n}'),
+    ['3:5-9'],
+  );
+  console.log('  ok - warning ranges point at the value word');
+}
+
 const TESTS = [
   testHexColours,
   testRadii,
@@ -147,6 +210,9 @@ const TESTS = [
   testTokenRedefinitionsOutsideTokenBlock,
   testDefaultTokenSelectorIsRoot,
   testInvalidOptionIsReported,
+  testDivisionInsideFunctionsKeepsFontSizeChecks,
+  testScalarTokenSelectorMatchesExactly,
+  testWarningRangesPointAtTheValueWord,
 ];
 
 async function runTests() {

@@ -60,10 +60,6 @@ def _make_backend(server: RecordingServer) -> MSTeamsChannelBackend:
     return backend
 
 
-def _paths(server: RecordingServer) -> list[str]:
-    return [req["path"] for req in server.requests]
-
-
 def test_msteams_poll_uses_channels_url_and_message_ids(graph_server) -> None:
     """poll_messages must hit /channels/ and emit message ids as ts/thread_ts."""
     backend = _make_backend(graph_server)
@@ -101,7 +97,7 @@ def test_msteams_send_message_without_thread(graph_server) -> None:
     """Non-threaded sends must POST to /channels/<chan>/messages."""
     backend = _make_backend(graph_server)
     backend.send_message("team1:chan1", "hi there")
-    path = _paths(graph_server)[0]
+    path = graph_server.paths()[0]
     assert path.endswith("/teams/team1/channels/chan1/messages")
 
 
@@ -112,7 +108,7 @@ def test_msteams_tool_urls_use_channels(graph_server) -> None:
     assert json.loads(backend.list_channel_messages("team1", "chan1"))["ok"]
     assert json.loads(backend.post_channel_message("team1", "chan1", "x"))["ok"]
     assert json.loads(backend.reply_to_message("team1", "chan1", "MSG1", "y"))["ok"]
-    paths = _paths(graph_server)
+    paths = graph_server.paths()
     assert any(p.endswith("/teams/team1/channels") for p in paths)
     assert any("/teams/team1/channels/chan1/messages" in p for p in paths)
     assert any("/teams/team1/channels/chan1/messages/MSG1/replies" in p for p in paths)

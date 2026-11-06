@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -68,25 +68,13 @@ def _hermetic_git_for_the_product(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 def set_known_work_dirs(work_dir: str, recent: Sequence[str]) -> None:
     """Write *work_dir* and *recent* (most recent first) as the ``work_dir`` and
-    ``recent_work_dirs`` keys of the session's ``config.json``; a test that calls this
-    requests :func:`restored_config` so the file goes back afterwards."""
+    ``recent_work_dirs`` keys of the session's ``config.json`` (the root conftest's
+    autouse ``_isolated_shared_config`` puts the file back after the test)."""
     config = kiss_home() / "config.json"
     data = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
     data["work_dir"] = work_dir
     data["recent_work_dirs"] = [{"path": path, "ts": 1.0} for path in recent]
     config.write_text(json.dumps(data), encoding="utf-8")
-
-
-@pytest.fixture
-def restored_config() -> Iterator[None]:
-    """Put the session's ``config.json`` back to what it was when the test ends."""
-    config = kiss_home() / "config.json"
-    before = config.read_bytes() if config.exists() else None
-    yield
-    if before is None:
-        config.unlink(missing_ok=True)
-    else:
-        config.write_bytes(before)
 
 
 def _commit(repo: Path, name: str, text: str) -> str:
@@ -790,10 +778,7 @@ def test_public_url_drops_the_credentials_a_url_carries() -> None:
     assert git_sync.public_url("https://user:p@ss@host/r") == "https://host/r"
 
 
-def test_known_work_dirs_lists_the_configured_folder_then_the_recent_ones(
-    tmp_path: Path,
-    restored_config: None,
-) -> None:
+def test_known_work_dirs_lists_the_configured_folder_then_the_recent_ones(tmp_path: Path) -> None:
     """``config.json``'s ``work_dir`` first, the recent dirs next, no duplicates or blanks."""
     kiss, other = tmp_path / "kiss", tmp_path / "other"
     kiss.mkdir()
@@ -817,10 +802,7 @@ def test_sync_with_a_url_syncs_the_work_dir_when_it_is_a_clone_of_it(tmp_path: P
     assert git(mine, "rev-parse", "HEAD") == pushed
 
 
-def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(
-    tmp_path: Path,
-    restored_config: None,
-) -> None:
+def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(tmp_path: Path) -> None:
     """The sub-task sent to a machine runs where its daemon runs; the clone may be elsewhere.
 
     The work dir is the machine's home (not a checkout), then a clone of
@@ -873,7 +855,6 @@ def test_sync_with_a_url_finds_the_checkout_among_the_daemons_work_dirs(
 
 def test_sync_names_the_discovered_checkout_when_its_merge_stops_on_conflicts(
     tmp_path: Path,
-    restored_config: None,
 ) -> None:
     """A conflict in a checkout found from the URL is reported with that checkout's path.
 

@@ -37,6 +37,7 @@ from kiss.core.context_compaction import (
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import get_cache_discount
 from kiss.core.printer import Printer
+from kiss.core.utils import finish
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -169,7 +170,9 @@ def Write(text: str) -> str:  # noqa: N802
     return "written " + "y" * 3000
 
 
-def _run_agent(base_url: str, script_len: int, hook_calls: list[int]) -> KISSAgent:
+def _run_agent(
+    base_url: str, script_len: int, hook_calls: list[int], compaction: bool = True,
+) -> KISSAgent:
     agent = KISSAgent("compaction-test")
 
     def on_reset() -> None:
@@ -179,11 +182,13 @@ def _run_agent(base_url: str, script_len: int, hook_calls: list[int]) -> KISSAge
     agent.run(
         model_name=MODEL,
         prompt_template="Call big_output repeatedly.",
-        tools=[big_output, Write],
+        # The scripted ``finish`` has the structured contract of ``finish_body``.
+        tools=[big_output, Write, finish],
         max_steps=script_len + 5,
         max_budget=50.0,
         verbose=False,
         model_config={"base_url": base_url, "api_key": "local"},
+        compaction=compaction,
     )
     return agent
 
@@ -284,7 +289,7 @@ def test_second_compaction_waits_for_the_step_gap() -> None:
         agent.run(
             model_name=MODEL,
             prompt_template="Call the outputs repeatedly.",
-            tools=[big_output, bigger_output],
+            tools=[big_output, bigger_output, finish],
             max_steps=len(script) + 5,
             max_budget=50.0,
             verbose=False,
@@ -308,10 +313,47 @@ def test_compaction_disabled_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     with serve(script) as (url, _requests):
         agent = _run_agent(url, len(script), hook_calls)
     assert hook_calls == []
-    assert not any(
-        str(m.get("content", "")).startswith(STUB_PREFIX)
-        for m in agent.model.conversation if m.get("role") == "tool"
-    )
+    assert not any(_stubbed(agent))
+    # The run's own option was on: the global setting alone turned it off.
+    assert agent.compaction is True
+
+
+def test_compaction_disabled_by_run_option() -> None:
+    """``run(compaction=False)`` leaves every output whole while the global setting is on.
+
+    The script is the one ``test_agent_compaction_replaces_old_outputs_but_not_writes``
+    compacts at step 32, so the option is the only difference.
+    """
+    assert DEFAULT_CONFIG.tool_output_compaction is True
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    hook_calls: list[int] = []
+    with serve(script) as (url, requests):
+        agent = _run_agent(url, len(script), hook_calls, compaction=False)
+    assert agent.compaction is False
+    assert hook_calls == []
+    assert agent._next_compaction_at == COMPACTION_START_TOKENS
+    assert len(_stubbed(agent)) == 31
+    assert not any(_stubbed(agent))
+    # The finish request still carried every output in full (a stub keeps 200 chars).
+    sent = [m for m in requests[-1]["messages"] if m.get("role") == "tool"]
+    assert len(sent) == 31
+    assert all(big_output() in str(m["content"]) for m in sent)
+    # The option is per run: the next run of the same agent compacts again.
+    with serve(script) as (url, _requests):
+        agent.run(
+            model_name=MODEL,
+            prompt_template="Call big_output repeatedly.",
+            tools=[big_output, Write, finish],
+            max_steps=len(script) + 5,
+            max_budget=50.0,
+            verbose=False,
+            model_config={"base_url": url, "api_key": "local"},
+        )
+    assert agent.compaction is True
+    assert hook_calls == [32]
+    assert any(_stubbed(agent))
 
 
 def test_results_after_the_last_assistant_turn_are_never_compacted() -> None:

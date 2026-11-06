@@ -597,6 +597,12 @@ def test_in_chat_prompt_job_is_submitted_as_typed(
     assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
         "error", "Task failed",
     )
+    # A failed run is an error however quiet its summary: a silent
+    # status would advance the coverage watermark over an unchecked window.
+    outcome.update(text="[SILENT]", success=False)
+    assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
+        "error", "Task failed",
+    )
     outcome["raise"] = ConnectionError("daemon down")
     assert cron_agent._run_prompt_job(job, work_dir, work_dir, 300.0) == (
         "error", "Error: daemon down",
@@ -782,6 +788,13 @@ def test_writers_refuse_a_corrupt_store(tmp_path: Path) -> None:
     created = cron_job("create", name="new", command="echo 2", schedule="every 1m")
     assert "not a JSON list" in created
     assert store.read_text(encoding="utf-8") == '{"a": 1}'
+    # A store that cannot be read (a directory in its place, wrong
+    # permissions) is reported as unreadable, not as corrupt JSON.
+    store.unlink()
+    store.mkdir()
+    created = cron_job("create", name="new", command="echo 2", schedule="every 1m")
+    assert "cannot be read" in created and "not a JSON list" not in created
+    assert store.is_dir() and load_jobs() == []
 
 
 def test_tick_runs_due_command_job(tmp_path: Path) -> None:

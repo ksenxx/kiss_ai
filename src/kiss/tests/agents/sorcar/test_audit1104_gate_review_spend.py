@@ -4,7 +4,7 @@ The finish gate's reviewer runs on another model family with no printer,
 so it emits no ``llm_call`` event; its spend is charged to the task.
 Each charged attempt now leaves a ``gate_stage`` record with ``stage``
 ``charge`` (``model``, ``cost_usd``, ``tokens``) under the task's row
-(``SorcarAgent._charge_gate_usage`` -> ``persistence._record_gate_charge``),
+(``SorcarAgent._charge_gate_usage`` -> ``persistence._record_model_charge``),
 which ``_own_model_costs`` counts, so the Spend-by-model split credits
 the reviewer's model, also for a review a Stop ended and for one charged
 after the row's final save.
@@ -86,13 +86,13 @@ class TestGateChargeRecords:
     def test_a_charge_after_the_final_save_refreshes_the_split(self) -> None:
         task = _task(4.5, 4_600, [_llm_call(FABLE, 4.0, 4_000)])
         assert json.loads(_model_costs(task)) == {FABLE: [4.0, 4_000]}
-        th._record_gate_charge(task, ASTRA, 0.5, 600, "late-key")
+        th._record_model_charge(task, ASTRA, 0.5, 600, "late-key")
         assert json.loads(_model_costs(task)) == {FABLE: [4.0, 4_000], ASTRA: [0.5, 600]}
         assert _by_model() == {FABLE: (4.0, 4_000), ASTRA: (0.5, 600)}
 
     def test_a_charge_before_the_final_save_is_in_its_split(self) -> None:
         task_id, _ = th._add_task("running", "", {"model": FABLE})
-        th._record_gate_charge(task_id, ASTRA, 0.5, 600, "early-key")
+        th._record_model_charge(task_id, ASTRA, 0.5, 600, "early-key")
         assert _model_costs(task_id) == ""  # not finished: the final save computes it
         th._queue_chat_event(_llm_call(FABLE, 4.0, 4_000), task_id)
         th._flush_chat_events()
@@ -184,8 +184,8 @@ def test_a_persisted_run_without_a_server_printer_files_the_review_too(
 @pytest.mark.usefixtures("history_db")
 def test_charge_records_are_not_transcript() -> None:
     task_id, _ = th._add_task("metadata only", "", {"model": FABLE})
-    th._record_gate_charge(task_id, ASTRA, 0.5, 600, "k1")
-    th._record_gate_charge(task_id, ASTRA, 0.5, 600, "k2")
+    th._record_model_charge(task_id, ASTRA, 0.5, 600, "k1")
+    th._record_model_charge(task_id, ASTRA, 0.5, 600, "k2")
     assert th._task_has_transcript_events(task_id) is False
     th._queue_chat_event({"type": "text", "text": "hello"}, task_id)
     assert th._task_has_transcript_events(task_id) is True

@@ -245,7 +245,14 @@ class _ObjectSpans:
     rescans the whole text only when one of them is a ``tool_calls``
     object: rescanning per delta made a large streamed tool call (a
     ``Write`` of a brace-heavy file) cost minutes of CPU after the CLI
-    had finished.
+    had finished.  A span that closed while candidates of its stack
+    were still open (``enclosed`` maps its start to them, outermost
+    first) is their data for as long as one of them may still parse
+    (:func:`_may_still_parse`), exactly as the whole-text scanner
+    swallows it once the candidate does: judging it on its own would
+    promote an envelope-shaped argument into a call.  A candidate that
+    can no longer parse (``Pass {"cmd" and then run:`` before the
+    block) hides nothing, as the whole-text scanner skips it.
     """
 
     def __init__(self) -> None:
@@ -254,6 +261,7 @@ class _ObjectSpans:
         self.fresh: list[int] | None = None
         self.in_string = False
         self.escaped = False
+        self.enclosed: dict[int, tuple[int, ...]] = {}
 
     def feed(self, text: str) -> list[tuple[int, int]]:
         """Consume *text*.
@@ -282,7 +290,10 @@ class _ObjectSpans:
                     stack.append(self.pos)
                     self.fresh = stack
                 elif ch == "}" and stack:
-                    closed.append((stack.pop(), self.pos + 1))
+                    start = stack.pop()
+                    if stack:
+                        self.enclosed[start] = tuple(stack)
+                    closed.append((start, self.pos + 1))
                 self.escaped = False
             self.pos += 1
         return closed
@@ -299,6 +310,35 @@ def _is_tool_calls_object(text: str) -> bool:
     except json.JSONDecodeError:
         return False
     return bool(_iter_tool_calls_lists(parsed))
+
+
+def _may_still_parse(content: str, candidates: tuple[int, ...], end: int) -> bool:
+    """Return whether one of *candidates* is still a valid JSON prefix at *end*.
+
+    The whole-text scanner (:func:`~kiss.core.models.model._iter_balanced_json_objects`)
+    lets a candidate swallow the objects inside it only when it parses,
+    and a candidate that fails to decode before an inner object never
+    will: the decoder reads the same prefix however the text goes on.
+    So the innermost candidate is tried first and the text is cut at
+    *end* (just past an inner object's ``}``, outside any string on the
+    candidates' parity): a decode that fails at the cut wants more text
+    and may still parse, one that fails earlier is broken for good.
+
+    Args:
+        content: The streamed text so far.
+        candidates: Offsets of the ``{`` still open on the inner
+            object's stack when it closed, outermost first.
+        end: The offset just past the inner object.
+    """
+    for start in reversed(candidates):
+        try:
+            json.loads(content[start:end], strict=False)
+        except json.JSONDecodeError as exc:
+            if exc.pos >= end - start:
+                return True
+            continue
+        return True
+    return False
 
 
 def _merge_usage(target: dict[str, Any], usage: dict[str, Any], add: bool) -> None:
@@ -649,6 +689,16 @@ class ClaudeCodeModel(CLITextModel):
         found_tool_calls = False
         last_tc_end = -1
         object_spans = _ObjectSpans()
+        # A ``tool_calls`` object closed inside a still-open candidate
+        # that may yet parse, to be judged with the whole text once a
+        # span closes outside any candidate (the enclosing one, or a
+        # later one when the enclosing one did not parse), and the open
+        # candidates it closed under: a sibling closing under the same
+        # ones is that candidate's data too and is not re-judged, so an
+        # argument holding thousands of envelope-shaped records costs
+        # one decode of the candidate, not one per record.
+        pending_enclosed = False
+        pending_under: tuple[int, ...] = ()
         # Usage is kept on the instance (``_partial_usage`` for finished
         # messages, ``_open_message_usage`` for the one streaming) so a
         # stream that raises mid-parse still leaves its observed usage
@@ -712,11 +762,33 @@ class ClaudeCodeModel(CLITextModel):
                                 window = content[-(len(text) + len("tool_calls")) :]
                                 seen_tool_calls_hint = "tool_calls" in window
                             # Outermost span first: inside valid JSON only
-                            # the outer object carries ``tool_calls``.
-                            if seen_tool_calls_hint and any(
-                                _is_tool_calls_object(content[start:end])
-                                for start, end in reversed(closed_spans)
-                            ):
+                            # the outer object carries ``tool_calls``.  A
+                            # span still inside an open candidate that may
+                            # yet parse is not judged on its own (see
+                            # ``_ObjectSpans``): the rescan of an incomplete
+                            # outer object would take an envelope-shaped
+                            # argument for the call and cut the content
+                            # there.  One inside candidates that can no
+                            # longer parse (a prose brace) is judged now.
+                            rescan = False
+                            spans = reversed(closed_spans) if seen_tool_calls_hint else ()
+                            for start, end in spans:
+                                enclosing = object_spans.enclosed.get(start)
+                                if enclosing is None:
+                                    rescan = pending_enclosed or _is_tool_calls_object(
+                                        content[start:end]
+                                    )
+                                elif enclosing != pending_under and _is_tool_calls_object(
+                                    content[start:end]
+                                ):
+                                    pending_enclosed = _may_still_parse(content, enclosing, end)
+                                    pending_under = enclosing
+                                    rescan = not pending_enclosed
+                                if rescan:
+                                    break
+                            if rescan:
+                                pending_enclosed = False
+                                pending_under = ()
                                 tc_end = _find_consecutive_tool_calls_end(content)
                                 if tc_end > 0:
                                     last_tc_end = tc_end
@@ -952,8 +1024,8 @@ class ClaudeCodeModel(CLITextModel):
             default=None,
         )
 
-    def _tool_call_text(self, content: str) -> str:
-        """Return the turn's text, or its thinking when the text calls no tool.
+    def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
+        """Return the turn's text calls, or its thinking's when the text calls no tool.
 
         A reasoning model sometimes emits the ``tool_calls`` block inside
         its thinking and then stops, so the thinking of the turn just
@@ -964,9 +1036,9 @@ class ClaudeCodeModel(CLITextModel):
         Args:
             content: The turn's assistant text.
         """
-        if _parse_text_based_tool_calls(content):
-            return content
-        return self._last_thinking_content
+        return _parse_text_based_tool_calls(content) or _parse_text_based_tool_calls(
+            self._last_thinking_content
+        )
 
     def extract_input_output_token_counts_from_response(
         self, response: Any

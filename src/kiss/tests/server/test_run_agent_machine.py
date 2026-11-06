@@ -72,9 +72,13 @@ def _finish(summary: str, pause: float = 0.0) -> dict[str, Any]:
     ]}
 
 
-def _run_agent(**arguments: Any) -> dict[str, Any]:
-    """A scripted answer: one ``run_agent(**arguments)`` call."""
-    return {"pause": 0.0, "calls": [("run_agent", arguments)]}
+def _call(name: str, **arguments: Any) -> dict[str, Any]:
+    """A scripted answer: one ``name(**arguments)`` tool call."""
+    return {"pause": 0.0, "calls": [(name, arguments)]}
+
+
+_run_agent = functools.partial(_call, "run_agent")
+"""A scripted answer: one ``run_agent(**arguments)`` call."""
 
 
 def _default_script(machine: str) -> list[dict[str, Any]]:

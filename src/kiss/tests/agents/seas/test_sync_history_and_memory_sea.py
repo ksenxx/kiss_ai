@@ -24,7 +24,6 @@ import stat
 import tarfile
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +56,7 @@ from kiss.tests.agents.seas.sea_contract import (
     tool_results,
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import posix_only, wait_for
 
 pytestmark = posix_only("drives the engine through a bash ssh stand-in")
 
@@ -210,16 +209,6 @@ def finish_task(path: Path, task_id: str) -> None:
     conn.execute("UPDATE events SET timestamp = ? WHERE task_id = ?", (time.time() - 3600, task_id))
     conn.commit()
     conn.close()
-
-
-def wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> bool:
-    """Poll *condition* every 20 ms until it holds (True) or *timeout* seconds pass (False)."""
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
 
 
 def page_text(memory: MemoryDir, name: str) -> str:

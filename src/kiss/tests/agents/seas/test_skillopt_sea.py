@@ -46,6 +46,7 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError
+from kiss.core.context_compaction import COMPACTION_START_TOKENS, STUB_PREFIX
 from kiss.core.llm_reply import LLMReply, zero_usage
 from kiss.core.tool_verdict import ALLOW, end_run, refuse
 from kiss.tests.agents.seas.sea_contract import assert_worker_contract, tool_names
@@ -264,7 +265,7 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
             'tool_profile': 'none', 'model': 'm', 'model_config': {'k': 1},
-            'docker_image': 'img', 'use_web_tools': True,
+            'docker_image': 'img', 'use_web_tools': True, 'compaction': False,
         }
 
     def llm_call_hook(self, new_messages):
@@ -302,6 +303,7 @@ def greet(name: str) -> str:
     assert kwargs["append_basic_tools"] is False
     assert kwargs["docker_image"] == "img"
     assert kwargs["web_tools"] is True
+    assert kwargs["compaction"] is False
     assert kwargs["llm_call_hook"](["m"]) == ["m", "seen"]
     assert kwargs["tool_call_hook"]("Bash", {}) == refuse("refused")
     assert kwargs["tool_call_hook"]("Read", {}) == ALLOW
@@ -1085,6 +1087,54 @@ class Sea(BaseSea):
         rollout = run_rollout(SeaTarget(fixed), task, cfg, tmp_path / "w2", {"max_steps": 7})
     assert "Steps: 1/7" in str(requests[1]["messages"][-1]["content"])
     assert rollout.passed is False and rollout.verdict == "missing expected text: ['done']"
+
+
+_BIG_OUTPUT_SEA = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+def big_output() -> str:
+    '''Return a 20k-character tool output.'''
+    return "line\\n" * 4000
+
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        return 'p'
+
+    def settings(self, settings):
+        return settings | {'tool_profile': 'none'%s}
+
+    def tools(self, tools):
+        return tools + [big_output]
+"""
+
+
+def _big_output_rollout(tmp_path: Path, name: str, extra_settings: str) -> list[str]:
+    """Roll out a SEA of 31 big tool outputs; return the outputs the finish request carried."""
+    sea = tmp_path / f"{name}_sea.py"
+    sea.write_text(_BIG_OUTPUT_SEA % extra_settings, encoding="utf-8")
+    task = EvalTask(id=name, prompt="Call big_output repeatedly.", expect=["done"])
+    script = [tool_call_body("big_output", {}, 3000) for _ in range(30)]
+    script.append(tool_call_body("big_output", {}, COMPACTION_START_TOKENS))
+    script.append(finish_body("<p>done</p>", prompt_tokens=60_000))
+    with serve(script) as (url, requests):
+        cfg = _config(tmp_path, sea, tmp_path / "unused.json", url, max_steps=40)
+        rollout = run_rollout(SeaTarget(sea), task, cfg, tmp_path / name)
+    assert rollout.passed and rollout.steps == len(script), rollout
+    sent = [m for m in requests[-1]["messages"] if m.get("role") == "tool"]
+    assert len(sent) == 31
+    return [str(m["content"]) for m in sent]
+
+
+def test_run_rollout_honours_the_sea_compaction_setting(tmp_path: Path) -> None:
+    """A target's ``compaction: False`` reaches the rollout's agent; without it the run compacts."""
+    whole = _big_output_rollout(tmp_path, "off", ", 'compaction': False")
+    # A stub keeps only the first 200 characters of the 20k-character output.
+    assert all("line\n" * 4000 in text for text in whole)
+    compacted = _big_output_rollout(tmp_path, "on", "")
+    assert compacted[0].startswith(STUB_PREFIX)
+    assert not compacted[-1].startswith(STUB_PREFIX)
 
 
 def test_run_rollout_sub_task_inherits_the_prompt_suffix(

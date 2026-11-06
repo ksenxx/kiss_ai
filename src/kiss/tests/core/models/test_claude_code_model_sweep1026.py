@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import random
+from itertools import pairwise
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _ObjectSpans
 from kiss.core.models.model import _brace_matches, _parse_text_based_tool_calls
@@ -94,6 +95,52 @@ class TestProseBraceBeforeQuote:
         assert content == call
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 1 and calls[0]["arguments"]["content"] == body
+
+
+_NESTED_ENVELOPE_CALL = json.dumps(
+    {
+        "tool_calls": [
+            {
+                "name": "store_payload",
+                "arguments": {
+                    "payload": {"tool_calls": [{"name": "unexpected_action", "arguments": {}}]}
+                },
+            }
+        ]
+    }
+)
+
+
+class TestEnvelopeInsideAStreamedArgument:
+    """An envelope-shaped document inside a call's arguments is that call's data, streamed too.
+
+    The whole-text parser reports ``store_payload`` only (the recognised
+    outer list is not walked into).  The streamed early stop judged the
+    inner document the moment it closed, while the outer object was
+    still open, and cut the content there: the truncated text then
+    parsed as ``unexpected_action``, a call the model never made.
+    """
+
+    def _stream(self, deltas: list[str]) -> list[str]:
+        m = _model()
+        content, _result = m._parse_stream_events(
+            iter(_delta_lines(deltas + [_HALLUCINATED_TAIL])), stop_on_tool_calls=True
+        )
+        assert m._stopped_for_tool_calls is True
+        assert content == _NESTED_ENVELOPE_CALL
+        return [c["name"] for c in _parse_text_based_tool_calls(content)]
+
+    def test_character_by_character(self) -> None:
+        assert self._stream(list(_NESTED_ENVELOPE_CALL)) == ["store_payload"]
+
+    def test_split_at_every_closing_brace(self) -> None:
+        text = _NESTED_ENVELOPE_CALL
+        cuts = [0, *(i + 1 for i, ch in enumerate(text) if ch == "}"), len(text)]
+        deltas = [text[a:b] for a, b in pairwise(cuts) if text[a:b]]
+        assert self._stream(deltas) == ["store_payload"]
+
+    def test_whole_text_at_once(self) -> None:
+        assert self._stream([_NESTED_ENVELOPE_CALL]) == ["store_payload"]
 
 
 def _parses(text: str) -> bool:

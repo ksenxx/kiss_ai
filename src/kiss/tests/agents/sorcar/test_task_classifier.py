@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -569,6 +571,56 @@ def test_memos_from_another_process_are_merged_on_write(
     assert cached_classification("theirs", STANDIN_MODEL, config) == TaskClassification(
         is_simple=False,
     )
+
+
+_WRITER_PROCESS = """
+import sys
+from kiss.agents.sorcar.task_classifier import (
+    TaskClassification, cached_classification, remember_classification,
+)
+who = sys.argv[1]
+cached_classification("warm", "m")  # load the mirror before the race starts
+print("loaded", flush=True)
+sys.stdin.readline()  # the parent's "go"
+for k in range(50):
+    remember_classification(f"{who}-{k}", "m", None, TaskClassification(is_simple=True))
+print("done", flush=True)
+"""
+
+
+def test_concurrent_processes_keep_every_memo(env: IsolatedKissHome) -> None:
+    """Two processes memoising at once lose none of their verdicts.
+
+    Each writer loads the mirror, then (on the parent's signal, so both
+    race) memoises 50 verdicts; every read-merge-write of the file is
+    a cross-process transaction, so the file ends with all 100.
+    """
+    writers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _WRITER_PROCESS, who],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        for who in ("a", "b")
+    ]
+    try:
+        for writer in writers:
+            assert writer.stdout is not None and writer.stdout.readline().strip() == "loaded"
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("go\n")
+            writer.stdin.flush()
+        for writer in writers:
+            out, _ = writer.communicate(timeout=120)
+            assert writer.returncode == 0 and out.strip() == "done"
+    finally:
+        for writer in writers:
+            writer.kill()
+    stored = json.loads((env.kiss_home / CLASSIFIER_CACHE_FILENAME).read_text(encoding="utf-8"))
+    missing = [
+        f"{who}-{k}" for who in ("a", "b") for k in range(50)
+        if _cache_key(f"{who}-{k}", "m", None) not in stored
+    ]
+    assert missing == []
 
 
 def test_clear_cache_removes_file_and_memory(env: IsolatedKissHome) -> None:

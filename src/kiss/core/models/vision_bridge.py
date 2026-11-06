@@ -95,25 +95,17 @@ def vision_model() -> str | None:
     return None
 
 
-def _attachment_kind(attachment: Attachment) -> str | None:
-    """Return ``"image"`` or ``"PDF"`` for a describable attachment, else ``None``."""
-    if attachment.mime_type.startswith("image/"):
-        return "image"
-    if attachment.mime_type == "application/pdf":
-        return "PDF"
-    return None
-
-
 def describable(attachment: Attachment) -> bool:
     """Return whether the bridge is for *attachment*: an image or a PDF.
 
     An audio or video clip is not: a model that cannot see may still
     hear, so the adapter carries the clip as its own content part.
+    :func:`describe_attachments` takes describable attachments only.
 
     Args:
         attachment: One attachment lifted out of a tool result.
     """
-    return _attachment_kind(attachment) is not None
+    return attachment.mime_type.startswith("image/") or attachment.mime_type == "application/pdf"
 
 
 def _describe_one(
@@ -128,7 +120,7 @@ def _describe_one(
     """Describe one attachment with *model_name*, or say why it could not be described.
 
     Args:
-        attachment: The image or PDF to describe.
+        attachment: The image or PDF to describe (see :func:`describable`).
         index: Its 1-based position among the tool result's attachments.
         model_name: The vision model, or ``None`` when none is configured.
         caller_model: The text-only model the description is for.
@@ -150,11 +142,8 @@ def _describe_one(
         KeyboardInterrupt: The user stopped the task during the call.
         KISSError: *limit_check* found the caller's budget spent.
     """
-    kind = _attachment_kind(attachment)
+    kind = "PDF" if attachment.mime_type == "application/pdf" else "image"
     failure = {"mime": attachment.mime_type, "index": index, "caller": caller_model}
-    if kind is None:
-        line = FAILURE_LINE.format(reason="only images and PDFs are described", **failure)
-        return Described(line, 0.0, 0, 0)
     if model_name is None:
         logger.warning(
             "Vision bridge: no vision model is configured; %s attachment %d was not described "
@@ -237,12 +226,13 @@ def describe_attachments(
     the caller to bill.  A caller that bills through *credit* gets each
     call's spend as the call ends, so a stop (which propagates) loses
     none of it.  An attachment that cannot be described (no vision
-    model configured, an API error, an audio or video clip) becomes a
-    :data:`FAILURE_LINE` that tells the model why it has no picture and
-    what to do instead; only a Stop and *limit_check* raise.
+    model configured, an API error) becomes a :data:`FAILURE_LINE` that
+    tells the model why it has no picture and what to do instead; only a
+    Stop and *limit_check* raise.
 
     Args:
-        attachments: The attachments lifted out of one tool result.
+        attachments: The images and PDFs lifted out of one tool result
+            (the :func:`describable` ones; the caller keeps the rest).
         caller_model: The name of the model the text is for; quoted in
             every line so the model knows it is the one that cannot see.
         what: The text of the tool result the attachments came with (the

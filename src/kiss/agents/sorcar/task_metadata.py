@@ -85,7 +85,9 @@ _SECRET_FORMATS: tuple[re.Pattern[bytes], ...] = tuple(
         rb"(AKIA[0-9A-Z]{16})(?![0-9A-Za-z])",
         rb"(xox[abprs]-\d{10,}+-[A-Za-z0-9-]{10,}+)",
         rb"(AIza[0-9A-Za-z_-]{35})",
-        rb"(eyJ[A-Za-z0-9_-]{10,}+\.eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+)",
+        # Only at the head of a base64url run: an attempt that may start
+        # inside one rescans the rest of the run from every position.
+        rb"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{10,}+\.eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+)",
     )
 )
 #: Free-form credentials, matched on the lower-cased bytes: ``Bearer``

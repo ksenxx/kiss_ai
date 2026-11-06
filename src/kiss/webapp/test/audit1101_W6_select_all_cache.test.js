@@ -174,8 +174,8 @@ async function main() {
       doc.body.insertBefore(script, doc.getElementById('two'));
       menu(win, doc.body, 'copy');
       await new Promise(resolve => setImmediate(resolve));
-      // One stretch at Select All time: its text nodes read as one.
-      assert.deepStrictEqual(copies, ['OneTwo']);
+      // One stretch at Select All time, read as rendered: two paragraphs.
+      assert.deepStrictEqual(copies, ['One\n\nTwo']);
     },
   );
 
@@ -235,7 +235,7 @@ async function main() {
         '<p id="one">One</p><script>var hidden = 1;</script>' +
         '<div id="outer"><div id="wrap"><p>Two</p><p>Three</p></div></div>';
       for (const [target, style, expected] of [
-        ['one', 'display:none', ['TwoThree']],
+        ['one', 'display:none', ['Two\n\nThree']],
         ['wrap', 'display:none', ['One']],
         ['outer', 'visibility:hidden', ['One']],
       ]) {
@@ -250,6 +250,148 @@ async function main() {
           target + ' hidden after Select All',
         );
       }
+    },
+  );
+
+  // The live Ranges are read as rendered, like the native Copy of the
+  // selection: a block boundary is a line break (two for a paragraph),
+  // a <br> one, cells are tab-separated, source whitespace collapses
+  // outside <pre> -- instead of the text nodes' data run together.
+  await test(
+    'Select All then Copy keeps the paragraph and line breaks the ' +
+      'page renders',
+    async () => {
+      const {win, copies} = makeWindow(
+        '<p>Alpha</p>\n<p>Beta<br>Gamma</p>\n' +
+          '<ul><li>one</li><li>two</li></ul>' +
+          '<table><tr><td>a</td><td>b</td></tr></table>' +
+          '<pre>  kept\n  indent</pre><div><span>in</span>line</div>',
+      );
+      menu(win, win.document.body, 'select-all');
+      menu(win, win.document.body, 'copy');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepStrictEqual(copies, [
+        'Alpha\n\nBeta\nGamma\n\none\ntwo\na\tb\n  kept\n  indent\ninline',
+      ]);
+    },
+  );
+
+  // Whitespace is preserved by the CSS `white-space` the text renders
+  // under, not by the <pre> tag alone: `pre`, `pre-wrap` and
+  // `break-spaces` (on any element, inherited by its children) keep
+  // every space and line break, `pre-line` keeps the line breaks and
+  // collapses the spaces around them, and a <pre> styled back to
+  // `normal` collapses like any other block.  Collapsing crosses text
+  // nodes as it does on screen: a collapsible space before a line
+  // break (a preserved one, a <br>, a cell's end) goes, one after a
+  // preserved space stays.
+  await test('Select All then Copy keeps the whitespace CSS white-space preserves', async () => {
+    const {win, copies} = makeWindow(
+      '<style>.log{white-space:pre-wrap}</style>' +
+        '<div style="white-space:pre-wrap">first line\n' +
+        '    indented line\nlast line</div>' +
+        '<div class="log"><span>  nested <b>bold</b>\n</span>tail</div>' +
+        '<p style="white-space:pre-line">one  \n   two\n\nthree</p>' +
+        '<div style="white-space:break-spaces">a  b</div>' +
+        '<pre style="white-space:normal">x\n   y</pre>' +
+        '<div style="white-space:pre-line">alpha <span>\n</span> beta</div>' +
+        '<div><span style="white-space:pre-wrap">x  </span> y</div>' +
+        '<p>Beta <br>Gamma</p>' +
+        '<table><tr><td>a </td><td> b</td></tr></table>',
+    );
+    menu(win, win.document.body, 'select-all');
+    menu(win, win.document.body, 'copy');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(copies, [
+      'first line\n    indented line\nlast line\n' +
+        '  nested bold\ntail\n\n' +
+        'one\ntwo\n\nthree\n\n' +
+        'a  b\nx y\n' +
+        'alpha\nbeta\n' +
+        'x   y\n\n' +
+        'Beta\nGamma\n\n' +
+        'a\tb',
+    ]);
+  });
+
+  // A document starting with a newline before an inline <script>: the
+  // whitespace must not become the one Range Chromium keeps (its
+  // rendered text is empty, so Copy would be disabled).
+  await test(
+    'Select All starts its selection at visible text, not at the ' +
+      'whitespace before a hidden source',
+    async () => {
+      const {win, copies} = makeWindow(
+        '\n<script>void 0</script><p id="target">Visible report</p>',
+      );
+      menu(win, win.document.body, 'select-all');
+      assert.strictEqual(win.getSelection().toString(), 'Visible report');
+      menu(win, win.document.body, 'copy');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepStrictEqual(copies, ['Visible report']);
+    },
+  );
+
+  // Right-clicking a formatting child of an editing host: the menu acts
+  // on the host (Select All selects all of it, Paste replaces a
+  // selection crossing the child), not on the <b> alone.
+  await test(
+    'a menu opened on an inherited-contenteditable child acts on the ' +
+      'editing host',
+    async () => {
+      const {win} = makeWindow(
+        '<div id="host" contenteditable="true"><b id="b">One</b> Two</div>',
+      );
+      const doc = win.document;
+      // jsdom has no isContentEditable: supply the inheritance the
+      // specification defines (the attribute of the nearest ancestor).
+      Object.defineProperty(win.HTMLElement.prototype, 'isContentEditable', {
+        configurable: true,
+        get() {
+          for (let el = this; el; el = el.parentElement) {
+            const v = el.getAttribute('contenteditable');
+            if (v === '' || v === 'true') return true;
+            if (v === 'false') return false;
+          }
+          return false;
+        },
+      });
+      Object.defineProperty(win.navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          readText: () => Promise.resolve('X'),
+          writeText: () => Promise.resolve(),
+        },
+      });
+      const host = doc.getElementById('host');
+      const b = doc.getElementById('b');
+      menu(win, b, 'select-all');
+      assert.strictEqual(win.getSelection().toString(), 'One Two');
+      // Select "ne T" across the <b> and its sibling text, then Paste.
+      // (jsdom drops the selection when the menu focuses its first item,
+      // which Chromium does not, so it is installed once the menu is up.)
+      b.dispatchEvent(
+        new win.MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+      const range = doc.createRange();
+      range.setStart(b.firstChild, 1);
+      range.setEnd(host.lastChild, 2);
+      win.getSelection().removeAllRanges();
+      win.getSelection().addRange(range);
+      const paste = doc.querySelector(
+        '#sorcar-content-context-menu .sorcar-ctx-item[data-action="paste"]',
+      );
+      assert.ok(paste && !paste.classList.contains('disabled'), 'paste offered');
+      paste.dispatchEvent(
+        new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
+      );
+      await new Promise(resolve => setImmediate(resolve));
+      assert.strictEqual(host.textContent, 'OXwo');
     },
   );
 

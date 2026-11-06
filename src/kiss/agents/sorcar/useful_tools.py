@@ -4,10 +4,12 @@
 # add your name here
 """Useful tools for agents: file editing and bash execution."""
 
+import codecs
 import collections
 import difflib
 import functools
 import hashlib
+import io
 import json
 import logging
 import math
@@ -56,6 +58,7 @@ from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.shell_scan import (
     UV_VALUED_OPTIONS,
     SimpleCommand,
+    TooDeepError,
     Word,
     bash_path,
     host_path,
@@ -1202,25 +1205,19 @@ def _in_loop(simple: SimpleCommand) -> bool:
     return False
 
 
-def sleep_guard(
-    command: str, limit: float = FOREGROUND_SLEEP_MAX_SECONDS, job_id: str = "",
-) -> str | None:
-    """Refuse a ``sleep`` longer than *limit* seconds (:func:`long_sleep`).
+def sleep_guard(command: str) -> str | None:
+    """Refuse a ``sleep`` longer than :data:`FOREGROUND_SLEEP_MAX_SECONDS` (:func:`long_sleep`).
 
     A long sleep is a polling turn: the model pays a full step to wait.
     The wait belongs in ``bash_job(action="wait", until=<regex>,
     timeout_seconds=N)``, which blocks server-side at no step cost; the
-    refusal names that call with *job_id* (the running job to wait on,
-    when there is one) and the sleep's own length.
+    refusal names that call and the sleep's own length.
 
     Args:
         command: The shell command text.
-        limit: Seconds a foreground sleep may take; the default is the
-            parallel runner's.
-        job_id: The id of a running background job to name, or ``""``.
     """
-    sleep = long_sleep(command, limit)
-    return None if sleep is None else sleep_refusal(sleep[0], job_id)
+    sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
+    return None if sleep is None else sleep_refusal(sleep[0])
 
 
 def sleep_refusal(seconds: float, job_id: str = "") -> str:
@@ -1675,21 +1672,28 @@ def _run_one_command(
 
     Returns:
         ``(returncode, output, seconds)``: the exit code (``None`` on
-        timeout, ``-1`` when the command was refused or failed to
-        launch), the combined output, and the wall time spent.
+        timeout, ``-1`` when the command was refused, not started because
+        *cancel* was set, or failed to launch), the combined output, and
+        the wall time spent.
     """
     # Stream-less: printers attribute output by thread-local task id, so
     # a callback from this worker thread would detach the output from
     # the task.
     runner = UsefulTools(stop_event=cancel, work_dir=work_dir)
     cwd = runner._resolve_cwd()
-    guard, note, command, timeout_seconds = _refuse_or_lift(
-        command, work_dir, timeout_seconds, cwd or os.getcwd())
+    try:
+        guard, note, command, timeout_seconds = _refuse_or_lift(
+            command, work_dir, timeout_seconds, cwd or os.getcwd())
+    except TooDeepError as e:
+        return -1, str(e), 0.0  # this command's verdict, not the whole fan-out's failure
     # Every command of the fan-out is a foreground wait for the caller,
     # so a long sleep is refused as in a foreground ``Bash`` call.
     guard = guard or sleep_guard(command)
     if guard is not None:
         return -1, guard, 0.0
+    if cancel.is_set():
+        # A stop before the launch: the shell is not started at all.
+        return -1, NOT_STARTED, 0.0
     started = time.monotonic()
     capture = _Capture()
     try:
@@ -1778,6 +1782,11 @@ def run_commands_pool(
     cancel = threading.Event()
     pool = ThreadPoolExecutor(max_workers=max_workers or len(command_list))
     try:
+        if _stop_requested(stop_event):
+            # Stopped before the pool: the workers see the cancel at once
+            # (``_run_one_command`` starts no shell) instead of after the
+            # first slice of the wait below, when they would already run.
+            cancel.set()
         futures = [pool.submit(run_one, command, cancel) for command in command_list]
         while not all(f.done() for f in futures):
             if _stop_requested(stop_event):
@@ -2000,19 +2009,47 @@ def _kill_job_group(process: subprocess.Popen) -> None:
             kill_process_group(process.pid, SIGKILL)
 
 
+def _job_group_alive(process: subprocess.Popen) -> bool:
+    """Return whether the group of the reaped job shell *process* still has members.
+
+    The orphans of an exited shell (``sh -c "server &"``) keep its pid
+    reserved as their group id, so ``killpg(pid, 0)`` names that group
+    and nothing else; a ``ProcessLookupError`` means every member is
+    gone.  So does the pid being alive again: the kernel hands it out
+    only once the last member is gone, and a group of that id is then a
+    stranger's (the same guard as :func:`_kill_job_group`).  Windows has
+    no process groups to probe: there the watch ends with the shell.
+    """
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        return False
+    if pid_alive(process.pid):  # pragma: no cover — needs the pid recycled
+        return False
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover — needs a setuid descendant
+        pass  # a member we may not signal still exists
+    return True
+
+
 def _watch_job(stop_event: threading.Event | None, process: subprocess.Popen) -> None:
     """Reap the background job *process* when it exits; kill its group if *stop_event* fires.
 
     Runs on a daemon thread per job.  Reaping promptly (rather than at
     the next ``bash_job`` call) keeps a finished job from lingering as a
-    zombie; the kill mirrors what a task Stop does to a foreground command.
+    zombie; the kill mirrors what a task Stop does to a foreground
+    command.  The watch goes on after the shell exited while its group
+    still has members (:func:`_job_group_alive`), so the Stop reaches a
+    ``server &`` the shell left behind, as ``bash_job(action="kill")``
+    does (:func:`_kill_job_group`).
     """
     if stop_event is None:
         process.wait()
         return
-    while process.poll() is None:
+    while process.poll() is None or _job_group_alive(process):
         if stop_event.wait(timeout=0.5):
-            _kill_process_group(process)
+            _kill_job_group(process)
             return
 
 
@@ -2033,6 +2070,27 @@ def _stop_monitor(
             if event.is_set():
                 _kill_process_group(process)
                 return
+
+
+# Held by ``Edit`` for its read-modify-write of a file and by ``Write`` for
+# its overwrite or append: the tool instances of a task and its sub-agents
+# (threads of one process editing the same tree) would otherwise undo each
+# other's changes, both calls reporting success, when one's write landed
+# between another's read and write of the same file.
+_FILE_WRITE_LOCK = threading.Lock()
+
+
+class _StreamCallbackError(Exception):
+    """The caller's ``stream_callback`` raised *error* (:meth:`UsefulTools._stream`).
+
+    Tells :meth:`UsefulTools._run_foreground` the callback's exception,
+    which propagates out of ``Bash``, from an internal failure of the
+    command's launch or wait, which is an ``Error:`` result.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(error)
+        self.error = error
 
 
 class UsefulTools:
@@ -2423,6 +2481,13 @@ class UsefulTools:
                     f"contents."
                 )
 
+            mime_type, _ = mimetypes.guess_type(str(resolved))
+            if (
+                mime_type in READ_TOOL_BINARY_MIME_TYPES
+                and resolved.stat().st_size > _MAX_BINARY_READ_BYTES
+            ):
+                # Refused by size before the text attempt reads it whole.
+                return self._read_binary(file_path, resolved)
             try:
                 text = resolved.read_text(encoding="utf-8")
             except UnicodeDecodeError:
@@ -2559,16 +2624,19 @@ class UsefulTools:
             ):
                 return self._unread_error(file_path, "overwriting")
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            if pending is not None and (resolved, content) == (pending[0], pending[1] + pending[2]):
-                # The Write stands for an append (``_pending_append``): the body
-                # goes after what the file holds as the Write lands, the file
-                # opened for appending as the shell's ``>>`` opens it, so what
-                # another writer appended since the file was read for the
-                # call, or appends now, is kept.
-                with resolved.open("a", encoding="utf-8", newline="") as appended:
-                    appended.write(pending[2])
-            else:
-                resolved.write_text(content, encoding="utf-8", newline="")
+            with _FILE_WRITE_LOCK:
+                if pending is not None and (resolved, content) == (
+                    pending[0], pending[1] + pending[2],
+                ):
+                    # The Write stands for an append (``_pending_append``): the body
+                    # goes after what the file holds as the Write lands, the file
+                    # opened for appending as the shell's ``>>`` opens it, so what
+                    # another writer appended since the file was read for the
+                    # call, or appends now, is kept.
+                    with resolved.open("a", encoding="utf-8", newline="") as appended:
+                        appended.write(pending[2])
+                else:
+                    resolved.write_text(content, encoding="utf-8", newline="")
             self._mark_read(resolved)
             self.written_files.add(resolved)
             return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -2612,40 +2680,43 @@ class UsefulTools:
                 # a scratch file (a note of an earlier session, say) is edited unread,
                 # as Write overwrites one: the result shows the region changed
                 return self._unread_edit_refusal(file_path, resolved, pairs[0][0])
-            content = resolved.read_text(encoding="utf-8", newline="")
-            crlf = "\r\n" in content
-            # (position in the final content, occurrences, new text) per edit.
-            placed: list[tuple[int, int, str]] = []
-            for index, (old, new, every) in enumerate(pairs, 1):
-                label = f"edit {index}: " if len(pairs) > 1 else ""
-                if old == new:
-                    return f"Error: {label}new_string must be different from old_string"
-                if old == "":
-                    return (
-                        f"Error: {label}old_string must not be empty. "
-                        "Use the Write tool to create or overwrite a file."
-                    )
-                count = content.count(old)
-                if count == 0 and crlf and "\r\n" not in old:
-                    old = old.replace("\n", "\r\n")
-                    new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+            with _FILE_WRITE_LOCK:
+                content = resolved.read_text(encoding="utf-8", newline="")
+                crlf = "\r\n" in content
+                # (position in the final content, occurrences, new text) per edit.
+                placed: list[tuple[int, int, str]] = []
+                for index, (old, new, every) in enumerate(pairs, 1):
+                    label = f"edit {index}: " if len(pairs) > 1 else ""
+                    if old == new:
+                        return f"Error: {label}new_string must be different from old_string"
+                    if old == "":
+                        return (
+                            f"Error: {label}old_string must not be empty. "
+                            "Use the Write tool to create or overwrite a file."
+                        )
                     count = content.count(old)
-                if count == 0:
-                    return f"Error: {label}String not found in file"
-                if not every and count > 1:
-                    return (
-                        f"Error: {label}String appears {count} times (not unique). "
-                        f"Use replace_all=True to replace all occurrences."
+                    if count == 0 and crlf and "\r\n" not in old:
+                        old = old.replace("\n", "\r\n")
+                        new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+                        count = content.count(old)
+                    if count == 0:
+                        return f"Error: {label}String not found in file"
+                    if not every and count > 1:
+                        return (
+                            f"Error: {label}String appears {count} times (not unique). "
+                            f"Use replace_all=True to replace all occurrences."
+                        )
+                    position = content.find(old)
+                    starts = (
+                        [m.start() for m in re.finditer(re.escape(old), content)]
+                        if every else [position]
                     )
-                position = content.find(old)
-                starts = (
-                    [m.start() for m in re.finditer(re.escape(old), content)]
-                    if every else [position]
-                )
-                placed = _moved_by_later_edit(placed, starts, len(old), new)
-                placed.append((position, count if every else 1, new))
-                content = content.replace(old, new) if every else content.replace(old, new, 1)
-            resolved.write_text(content, encoding="utf-8", newline="")
+                    placed = _moved_by_later_edit(placed, starts, len(old), new)
+                    placed.append((position, count if every else 1, new))
+                    content = (
+                        content.replace(old, new) if every else content.replace(old, new, 1)
+                    )
+                resolved.write_text(content, encoding="utf-8", newline="")
             self.written_files.add(resolved)
             reports: list[str] = []
             for index, (position, replaced, new) in enumerate(placed, 1):
@@ -3039,14 +3110,14 @@ class UsefulTools:
         capture = _Capture(max_output_chars, self._new_spill)
         try:
             returncode, output = self._bash_streaming(command, timeout_seconds, cwd, capture)
-        except Exception as e:
+        except _StreamCallbackError as failed:
             # Contract (see test_bash_background_pipe_hang): an exception
             # raised by the caller-supplied stream callback must PROPAGATE
             # out of Bash (after the process group is killed), not be
             # swallowed into an "Error:" string like internal failures
-            # (a launch in a vanished worktree) are.
-            if self.stream_callback:
-                raise
+            # (a launch in a directory that cannot be entered) are.
+            raise failed.error from failed.error.__cause__
+        except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
         finally:
@@ -3192,10 +3263,20 @@ class UsefulTools:
             its log may still grow.
         """
         deadline = time.monotonic() + seconds
-        with open(job.log_path, encoding="utf-8", errors="replace") as log:
+        # Decoded incrementally: a text-mode read of a log still being
+        # written flushes a character's lead bytes as U+FFFD as soon as it
+        # catches up with the writer, before the rest of the character lands.
+        # Line endings are translated as the foreground path's text-mode
+        # pipe does, so a Windows command's CRLF output reads the same.
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
+        )
+        with open(job.log_path, "rb") as log:
             while True:
                 exited = job.process.poll() is not None
-                piece = log.read(_READ_CHARS)
+                piece = decoder.decode(log.read(_READ_CHARS))
+                if not piece and exited:
+                    piece = decoder.decode(b"", final=True)  # a cut-off last character
                 if piece:
                     capture.append(piece)
                     if self.stream_callback is not None:
@@ -3433,8 +3514,21 @@ class UsefulTools:
             if line is None:
                 return True
             capture.append(line)
-            if self.stream_callback is not None:
-                self.stream_callback(line)
+            self._stream(line)
+
+    def _stream(self, piece: str) -> None:
+        """Hand *piece* to ``stream_callback`` (if set).
+
+        Its exception is raised as :class:`_StreamCallbackError`, which
+        :meth:`_run_foreground` tells from an internal failure.
+        """
+        callback = self.stream_callback
+        if callback is None:
+            return
+        try:
+            callback(piece)
+        except Exception as e:
+            raise _StreamCallbackError(e) from e
 
     def _bash_streaming(
         self,

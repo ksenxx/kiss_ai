@@ -315,26 +315,56 @@ function testStaleSnapshotDoesNotResurrectClosedTab() {
 }
 
 function testCloseShieldExpiresWhenDaemonKeepsTab() {
-  // The daemon kept the tab (it refused or lost the close): after a
-  // few snapshots that still list it, the tab comes back rather than
-  // staying hidden on this client for ever.
-  const {win} = makePage();
+  // The daemon kept the tab (it refused or lost the close): the
+  // snapshot that acknowledges the close (2026-11-05 A18-1: the
+  // daemon echoes the closeTab's `ack` token in the `acks` of the
+  // first snapshot taken after it processed the command) still lists
+  // the tab, so the tab comes back rather than staying hidden on this
+  // client for ever.  Snapshots other activity publishes meanwhile
+  // (acknowledging nobody of ours) are no acknowledgment, however
+  // many: they must not resurrect the tab the user closed.
+  const {win, posted} = makePage();
   win._testApi.endLaunch();
-  const snap = {type: 'tabs_state', tabs: [entry('t1'), entry('t2')]};
-  send(win, snap);
+  const snap = acks => ({
+    type: 'tabs_state',
+    tabs: [entry('t1'), entry('t2')],
+    acks,
+  });
+  send(win, snap([]));
   closeTabViaUi(win, 't2');
+  const close = msgsOf(posted, 'closeTab').pop();
+  assert.ok(close.ack, 'closeTab carries an ack token for the daemon to echo');
   assert.deepStrictEqual(tabIds(win), ['t1']);
-  send(win, snap);
-  send(win, snap);
+  for (let i = 0; i < 5; i++) send(win, snap(['not-ours']));
+  assert.deepStrictEqual(
+    tabIds(win),
+    ['t1'],
+    'REGRESSION: unrelated snapshots retired the close shield and ' +
+      'resurrected the tab the user closed',
+  );
+  send(win, snap([close.ack]));
+  assert.deepStrictEqual(
+    tabIds(win),
+    ['t1', 't2'],
+    'the acknowledging snapshot still listing the tab lifts the shield',
+  );
+
+  // A daemon that echoes no acknowledgments (no `acks` on its
+  // snapshots): the third snapshot still listing the tab lifts the
+  // shield, as before.
+  closeTabViaUi(win, 't2');
+  const legacy = {type: 'tabs_state', tabs: [entry('t1'), entry('t2')]};
+  send(win, legacy);
+  send(win, legacy);
   assert.deepStrictEqual(tabIds(win), ['t1'], 'still shielded after 2');
-  send(win, snap);
+  send(win, legacy);
   assert.deepStrictEqual(
     tabIds(win),
     ['t1', 't2'],
     'the third snapshot still listing the tab lifts the shield',
   );
   win.close();
-  console.log('PASS close shield expires after repeated snapshots');
+  console.log('PASS close shield lifts on its acknowledgment');
 }
 
 function testCloseShieldIsDroppedOnReconnect() {
@@ -367,16 +397,31 @@ function testCloseShieldIsDroppedOnReconnect() {
 }
 
 function testCloseShieldExpiresAfterTtl() {
-  // Same divergence without a visible outage (the confirming snapshot
-  // was simply never delivered): the shield is a stale-echo defence
-  // measured in milliseconds, so it lapses on its own after 5 s.
+  // Elapsed time is no acknowledgment either (A18-1): against a daemon
+  // that echoes them, a snapshot acknowledging nobody of ours leaves
+  // the shield up however old it is.  Against a daemon that echoes no
+  // acknowledgments, the shield is a stale-echo defence measured in
+  // milliseconds, so it lapses on its own after 5 s (the confirming
+  // snapshot was simply never delivered, without a visible outage).
   const {win} = makePage();
   win._testApi.endLaunch();
   const snap = {type: 'tabs_state', tabs: [entry('t1'), entry('t2')]};
-  send(win, snap);
+  send(win, {...snap, acks: []});
   const realNow = win.Date.now;
   let now = realNow();
   win.Date.now = () => now;
+  closeTabViaUi(win, 't2');
+  now += 60000;
+  send(win, {...snap, acks: ['not-ours']});
+  assert.deepStrictEqual(
+    tabIds(win),
+    ['t1'],
+    'REGRESSION: an old close shield lapsed without its acknowledgment',
+  );
+  send(win, {type: 'tabs_state', tabs: [entry('t1')], acks: []});
+  assert.deepStrictEqual(tabIds(win), ['t1'], 'the omission confirms the close');
+
+  send(win, snap);
   closeTabViaUi(win, 't2');
   now += 4000;
   send(win, snap);

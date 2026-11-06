@@ -16,7 +16,11 @@ The Windows branch of ``open`` (no :mod:`pty`) and a shell spawn that
 raises cannot be reached on the Linux hosts these tests run on without
 replacing module globals, so they are not exercised here.  The browser
 half (xterm.js, the "..." menu item, the tab) is covered by
-``tests/webapp/test_remote_terminal_tab.py``.
+``tests/webapp/test_remote_terminal_tab.py``. The writer's defensive
+``BlockingIOError``/``OSError`` handlers cover a kernel readiness change
+or an invalid descriptor; the public API has one writer and never closes
+its descriptor before that writer, so those failures cannot be forced
+here without replacing an OS call or violating descriptor ownership.
 
 The service runs the developer's ``$SHELL`` as an interactive login
 shell, dotfiles included (a ``cd`` in ``~/.zshrc`` moves it out of the
@@ -28,10 +32,15 @@ with ``%``, not ``$``).  The tests therefore point ``SHELL`` at
 from __future__ import annotations
 
 import os
+import selectors
+import shlex
 import shutil
+import signal
 import sys
 import threading
 import time
+from contextlib import ExitStack
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +49,8 @@ import pytest
 from kiss.core.processes import find_bash
 from kiss.server import terminal_tab
 from kiss.server.terminal_tab import TerminalService, default_shell
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
+from kiss.tests.server.pause import Pause
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
@@ -401,3 +412,122 @@ def test_shutdown_reaps_every_shell(tmp_path: Path) -> None:
     assert session_count(svc) == 0
     assert len(printer.of_type("terminalExit")) == 2
     svc.shutdown()  # nothing left: returns at once
+
+
+def test_close_interrupts_a_full_pty_write(service: Any, tmp_path: Path) -> None:
+    """A foreground child retaining the slave cannot strand the input writer."""
+    svc, printer = service
+    pid_file = tmp_path / "foreground.pid"
+    script = (
+        "import os, pathlib, time; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    )
+    svc.open("blocked-write", "c1", str(tmp_path), 80, 24)
+    with svc._lock:
+        session = svc._sessions["blocked-write"]
+    writer = next(t for t in threading.enumerate() if t.name == "terminal-write-blocked-")
+    try:
+        python = shlex.quote(sys.executable)
+        svc.input(
+            "blocked-write", "c1",
+            f"stty raw -echo; trap '' HUP; {python} -c {shlex.quote(script)}\n",
+        )
+        printer.wait_for(lambda: pid_file.exists() and pid_file.read_text().isdigit())
+        svc.input("blocked-write", "c1", "x" * (1024 * 1024))
+        _wait_until(session.writes.empty)
+        svc.close("blocked-write", "c1")
+        printer.wait_for(lambda: printer.of_type("terminalExit"))
+        writer.join(5)
+        assert not writer.is_alive(), "PTY input writer survived terminalExit"
+        with pytest.raises(OSError):
+            os.fstat(session.fd)
+    finally:
+        if pid_file.exists() and pid_file.read_text().isdigit():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        writer.join(5)
+
+
+def _after_reap(values: dict[str, Any], session: Any) -> bool:
+    return session.reaped and threading.current_thread().name == "terminal-read-reaped"
+
+
+def test_reconnect_never_attaches_to_a_reaped_shell(service: Any, tmp_path: Path) -> None:
+    """Hold the real output drain after waitpid; reopening must refuse the dead shell."""
+    svc, printer = service
+    svc.open("reaped", "c1", str(tmp_path), 80, 24)
+    with svc._lock:
+        session = svc._sessions["reaped"]
+    after_reap = partial(_after_reap, session=session)
+    with Pause(selectors.DefaultSelector.select.__code__, after_reap) as gate:
+        svc.input("reaped", "c1", "exit\n")
+        assert gate.paused.wait(15), "reader did not reach its post-reap drain"
+        svc.open("reaped", "c2", str(tmp_path), 80, 24)
+        assert not printer.of_type("terminalOpened", "c2")
+        assert printer.of_type("terminalError", "c2")
+    printer.wait_for(lambda: printer.of_type("terminalExit", "c1"))
+    svc.open("reaped", "c2", str(tmp_path), 80, 24)
+    assert printer.of_type("terminalOpened", "c2")[0]["attached"] is False
+
+
+def _starve_worker(values: dict[str, Any], name: str, limits: ExitStack) -> bool:
+    if values["self"].name == name:
+        limits.enter_context(nproc_limit_lowered_to_one())
+    return False
+
+
+@pytest.mark.skipif(not thread_start_can_be_starved(), reason="requires enforced RLIMIT_NPROC")
+@pytest.mark.parametrize("worker", ["read", "write"])
+def test_worker_start_failure_leaves_no_terminal(
+    tmp_path: Path, worker: str,
+) -> None:
+    """Starve each actual worker start after fork, without replacing any product code."""
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    try:
+        with ExitStack() as limits, Pause(
+            threading.Thread.start.__code__,
+            partial(_starve_worker, name=f"terminal-{worker}-starved", limits=limits),
+        ):
+            svc.open("starved", "c1", str(tmp_path), 80, 24)
+        assert session_count(svc) == 0
+        assert not printer.of_type("terminalOpened")
+        assert printer.of_type("terminalError")
+        _wait_until(lambda: not any(t.name.endswith("-starved") for t in threading.enumerate()))
+        svc.open("starved", "c2", str(tmp_path), 80, 24)
+        assert printer.of_type("terminalOpened", "c2")[0]["attached"] is False
+    finally:
+        svc.shutdown()
+        # Also reap the orphaned shell on the unfixed implementation.
+        with svc._lock:
+            abandoned = svc._sessions.pop("starved", None)
+        if abandoned is not None:
+            os.kill(abandoned.pid, signal.SIGKILL)
+            os.waitpid(abandoned.pid, 0)
+            writers = [t for t in threading.enumerate() if t.name == "terminal-write-starved"]
+            if writers:
+                abandoned.writes.put(None)
+                for thread in writers:
+                    thread.join(5)
+            else:
+                os.close(abandoned.fd)
+
+
+def test_terminal_exit_flushes_incomplete_utf8(service: Any, tmp_path: Path) -> None:
+    """A truncated final character is replaced before terminalExit, never silently lost."""
+    svc, printer = service
+    svc.open("utf8", "c1", str(tmp_path), 80, 24)
+    svc.input("utf8", "c1", "exec printf '\\342'\n")
+    printer.wait_for(lambda: printer.of_type("terminalExit"))
+    assert printer.output("utf8").endswith("\ufffd")
+
+
+def test_malformed_surrogate_paste_still_reaches_shell(service: Any, tmp_path: Path) -> None:
+    """One invalid JS code unit does not discard the rest of a paste."""
+    svc, printer = service
+    svc.open("surrogate", "c1", str(tmp_path), 80, 24)
+    svc.input("surrogate", "c1", "v='x\ud800y'; printf '\\n%s\\n' \"$v\"; exit\n")
+    printer.wait_for(lambda: printer.of_type("terminalExit"))
+    assert "\r\nx?y\r\n" in printer.output("surrogate")

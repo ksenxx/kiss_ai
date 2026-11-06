@@ -343,9 +343,14 @@ def test_stderr_read_before_a_stray_holder_stalls_the_drain_is_kept(tmp_path: Pa
     the timeout; only its stderr pipe stays open, in a descendant that
     escaped the group.  The caller stops waiting for the drain thread
     after ``PIPE_GIVE_UP_SECONDS`` and must still report the stderr
-    read so far, not an empty string.
+    read so far, not an empty string.  The drain thread is told to stop
+    at that point: left to its own deadline (the command's timeout plus
+    the give-up), it would keep the pipe and the returned result for
+    another 25 s and overwrite ``stderr`` with whatever the stray wrote
+    meanwhile.
     """
     pid_file = tmp_path / "stderr-holder.pid"
+    threads_before = set(threading.enumerate())
     started = time.monotonic()
     try:
         out = run_capped(
@@ -362,6 +367,11 @@ def test_stderr_read_before_a_stray_holder_stalls_the_drain_is_kept(tmp_path: Pa
     assert out.returncode == 0
     assert out.timed_out is False
     assert out.truncated is False
+    for thread in threading.enumerate():
+        if isinstance(thread, threading.Timer):
+            thread.join(5)  # the cancelled watchdog is on its way out
+    stray = [t for t in threading.enumerate() if t not in threads_before and t.is_alive()]
+    assert stray == [], "the stderr drain thread outlived the call"
 
 
 @posix_only("a descendant in its own session survives the group kill")

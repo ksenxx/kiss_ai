@@ -161,6 +161,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             llm_response_hook=merge.llm_response_hook,
             web_tools=merge_settings["use_web_tools"],
             use_memory=merge_settings["use_memory"],
+            compaction=merge_settings.get("compaction", True),
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)

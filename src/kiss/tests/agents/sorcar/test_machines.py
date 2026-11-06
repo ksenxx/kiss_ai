@@ -27,6 +27,7 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -39,6 +40,7 @@ from websockets.sync.client import connect as ws_connect
 from kiss.agents.sorcar import machines as mach
 from kiss.core import tls_certs
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.locked import locked_call
 from kiss.server import sidebar_panels
 from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.server.web_server import _get_local_ips
@@ -122,6 +124,17 @@ def _closed_port() -> int:
 
 def _titles(page: mach.HistoryPage) -> list[str]:
     return [str(r["title"]) for r in page.rows]
+
+
+def _hold_send_thread(frame: FrameType, event: str, arg: Any) -> None:
+    """Profile hook for new threads: hold the link's write helper for 50 ms, as a loaded box would.
+
+    Installed with ``threading.setprofile``; every thread started while it
+    is installed runs it once, on its first event, and drops it again.
+    """
+    sys.setprofile(None)
+    if threading.current_thread().name == "sorcar-local-send":
+        time.sleep(0.05)
 
 
 def test_normalize_url_accepts_the_usual_spellings() -> None:
@@ -352,14 +365,21 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
-    # An already expired deadline fails even when the reply is buffered.
+    # An already expired deadline fails even when the reply is buffered,
+    # and with the reply's timeout when the thread that writes the
+    # command waits for a core first (a loaded box: full-suite run of
+    # 2026-11-05), not with a write failure that blames the daemon.
     assert link._ws is not None
     # (A raw frame on the link's socket must carry the machine's password
     # like the link's own frames do, or the daemon closes the socket.)
     link._ws.send(json.dumps({"type": "ping", "password": "secret-1"}))
     time.sleep(0.3)
-    with pytest.raises(mach.MachineError, match="no pong within 0s"):
-        link.request({"type": "ping"}, "pong", timeout=0.0)
+    threading.setprofile(_hold_send_thread)
+    try:
+        with pytest.raises(mach.MachineError, match="no pong within 0s"):
+            link.request({"type": "ping"}, "pong", timeout=0.0)
+    finally:
+        threading.setprofile(None)
     assert link._health.retry_at > time.monotonic()
     link._health.retry_at = 0.0
     assert link.request({"type": "ping"}, "pong")["type"] == "pong"
@@ -395,6 +415,83 @@ def test_link_survives_a_dropped_socket_and_reports_a_dead_machine(
     assert "no usable pinned certificate" in mach.machine_status(wrong)
     os.unlink(wrong.cert_file())
     os.unlink(dead.cert_file())
+
+
+def _request_a_reply_that_never_comes(link: mach.MachineLink, timeout: float) -> None:
+    """Thread body: a request that holds the link's lock for its whole *timeout*."""
+    with pytest.raises(mach.MachineError, match="did not answer"):
+        link.request({"type": "ping"}, "never-sent", timeout=timeout)
+
+
+def test_a_stream_handshake_does_not_wait_behind_a_request(remote: RemoteDaemon) -> None:
+    """A stream connects beside a request in flight on the shared socket.
+
+    ``open_connection`` counted its handshake in and out under the
+    link's lock, which a request holds for its whole exchange: a chat
+    tab's stream could not even start its handshake until an unrelated
+    request on the machine had returned (its reply budget, up to the
+    request's timeout), and its own timeout did not bound that wait.
+    """
+    machine = mach.add_machine("box", remote.url, "secret-1")
+    link = mach.link_for(machine)
+    assert link.request({"type": "ping"}, "pong")["type"] == "pong"
+    waiting = threading.Thread(target=_request_a_reply_that_never_comes, args=(link, 6.0))
+    waiting.start()
+    try:
+        time.sleep(0.3)  # the request is in its exchange, holding the lock
+        assert waiting.is_alive()
+        stream = link.open_connection(timeout=5.0)
+        stream.close()
+        assert waiting.is_alive(), "the stream was opened only after the request had returned"
+    finally:
+        waiting.join(30)
+        link._health.retry_at = 0.0
+
+
+def _opens_a_stream(
+    link: mach.MachineLink, streams: list[ClientConnection], errors: list[Exception],
+) -> None:
+    """Thread body: ``open_connection`` on *link*, its result or error collected."""
+    try:
+        streams.append(link.open_connection(timeout=5.0))
+    except mach.MachineError as exc:
+        errors.append(exc)
+
+
+def test_a_retired_link_never_starts_a_stream_handshake(remote: RemoteDaemon) -> None:
+    """A retirement that returned leaves no stream handshake to start afterwards.
+
+    ``open_connection`` checks the link's availability outside the
+    dial lock, then counts its handshake in under it: a ``retire``
+    landing between the two found no handshake to wait for and
+    returned, and the handshake went on to open its socket (for an
+    SSH machine, its tunnel) after ``close_links`` had swept them.
+    The retirement check is repeated under the dial lock, where the
+    count is: a handshake counted in is one the retirement waits for,
+    and one the retirement no longer waits for never starts.
+    """
+    machine = mach.add_machine("box", remote.url, "secret-1")
+    link = mach.link_for(machine)
+    streams: list[ClientConnection] = []
+    errors: list[Exception] = []
+    opening = threading.Thread(target=_opens_a_stream, args=(link, streams, errors))
+    # Held at the entry of ``locked_call(self._idle, self._start_dial)``:
+    # the availability check has passed, the handshake is not counted.
+    with Pause(
+        locked_call.__code__, lambda local: getattr(local["fn"], "__name__", "") == "_start_dial",
+    ) as held:
+        opening.start()
+        assert held.paused.wait(30), "open_connection about to count its handshake in"
+        started = time.monotonic()
+        link.retire()
+        assert time.monotonic() - started < 5.0, "retire waited for a handshake not started"
+    opening.join(30)
+    assert not opening.is_alive()
+    for stream in streams:
+        stream.close()
+    assert streams == [], "a stream handshake started on the retired link"
+    assert len(errors) == 1 and "registry changed" in str(errors[0])
+    assert link._dialing == 0
 
 
 def test_registry_change_keeps_the_links_of_unchanged_machines(

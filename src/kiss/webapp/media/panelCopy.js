@@ -36,6 +36,14 @@
     'panel-time',
   ];
 
+  /**
+   * Whether *el* is panel chrome every text walker leaves out: the copy
+   * and stop buttons, the collapsed preview, the timestamp and elapsed
+   * labels (SKIP_CLASSES).  Shared with main.js's collapsed-preview text.
+   *
+   * @param {?Node} el A node; anything without a classList is content.
+   * @returns {boolean} True for chrome.
+   */
   function shouldSkip(el) {
     if (!el || !el.classList) return false;
     for (let i = 0; i < SKIP_CLASSES.length; i++) {
@@ -192,11 +200,20 @@
       } else if (tag === 'UL') {
         childCtx = {pre: ctx.pre, lists: ctx.lists.concat([{ordered: false}])};
       } else if (tag === 'OL') {
-        let start = parseInt(node.getAttribute('start') || '1', 10);
-        if (!isFinite(start)) start = 1;
+        // The numbers the browser shows: a reversed list counts down,
+        // from its item count unless a start is given.
+        const reversed = node.hasAttribute('reversed');
+        let start = parseInt(node.getAttribute('start') || '', 10);
+        if (!isFinite(start)) {
+          start = reversed
+            ? Array.from(node.children).filter(c => c.tagName === 'LI').length
+            : 1;
+        }
         childCtx = {
           pre: ctx.pre,
-          lists: ctx.lists.concat([{ordered: true, n: start}]),
+          lists: ctx.lists.concat([
+            {ordered: true, n: start, step: reversed ? -1 : 1},
+          ]),
         };
       } else if (tag === 'LI') {
         const depth = ctx.lists.length;
@@ -205,8 +222,10 @@
         const top = depth > 0 ? ctx.lists[depth - 1] : null;
         let marker = '- ';
         if (top && top.ordered) {
+          const value = parseInt(node.getAttribute('value') || '', 10);
+          if (isFinite(value)) top.n = value;
           marker = top.n + '. ';
-          top.n++;
+          top.n += top.step;
         }
         st.out += indent + marker;
       } else if (
@@ -598,6 +617,7 @@
   // two SVG strings are exported for the tests only; the app reaches
   // them through the other entries.
   const api = {
+    shouldSkip: shouldSkip,
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
     wireCopyButton: wireCopyButton,

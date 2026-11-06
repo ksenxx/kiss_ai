@@ -1794,6 +1794,25 @@ async function main() {
     assert.ok(
       !machinesBtn.disabled && !machinesBtn.classList.contains('spinning'),
     );
+    // A history reply that relabels a machine repaints the Machines
+    // list from the cached reply; a repaint is not a reply, so the
+    // probe in flight keeps its spin.
+    machinesBtn.click();
+    send(win, {
+      type: 'history',
+      sessions: [],
+      offset: 0,
+      generation: 1,
+      machineLabels: {gpu: 'gpu.local'},
+    });
+    assert.ok(
+      machinesBtn.disabled && machinesBtn.classList.contains('spinning'),
+      'a relabel repaint does not stop the machines spin',
+    );
+    send(win, {type: 'machines', machines: [], checkedAt: 2});
+    assert.ok(
+      !machinesBtn.disabled && !machinesBtn.classList.contains('spinning'),
+    );
     // A dropped connection never answers: the buttons recover.
     btn.click();
     machinesBtn.click();

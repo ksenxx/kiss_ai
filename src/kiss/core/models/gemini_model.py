@@ -19,6 +19,7 @@ from google.genai import types
 
 from kiss.core.kiss_error import ContentFilterError, KISSError, OutputCapError
 from kiss.core.models.model import (
+    _AUDIO_FORMAT_TO_MIME,
     FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
@@ -32,9 +33,13 @@ from kiss.core.models.model import (
     split_data_url,
     text_of_parts,
 )
+from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error
 
 logger = logging.getLogger(__name__)
+
+# Portable effort levels above Gemini's top ``thinking_level``.
+_GEMINI_TOP_LEVEL = {"xhigh": "high", "max": "high"}
 
 
 # The request parameters Gemini accepts, taken from the SDK's own config
@@ -231,9 +236,11 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
 
     Handles Anthropic ``image`` / ``document`` blocks (base64 or url
     source) and OpenAI ``image_url`` / ``file`` content parts (base64
-    data URLs).  Such blocks enter the conversation when it is handed off
-    from another provider's model (e.g. via the Sorcar ``set_model``
-    tool).  Remote (non-data) URLs cannot be inlined and are dropped.
+    data URLs) and ``input_audio`` parts (base64 data with the OpenAI
+    ``format`` name, mapped back to its MIME type).  Such blocks enter
+    the conversation when it is handed off from another provider's
+    model (e.g. via the Sorcar ``set_model`` tool).  Remote (non-data)
+    URLs cannot be inlined and are dropped.
 
     Args:
         block: The foreign media block/part dict.
@@ -260,6 +267,13 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
         part = _data_url_to_part(file_data, "application/pdf")
         if part is not None:
             return part
+    elif block_type == "input_audio":
+        audio = block.get("input_audio") or {}
+        data = _decode_base64(audio.get("data", ""))
+        if data is not None:
+            fmt = audio.get("format", "")
+            mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
+            return types.Part.from_bytes(data=data, mime_type=mime_type)
     logger.warning("Dropping unconvertible %s block for Gemini.", block_type)
     return None
 
@@ -511,7 +525,7 @@ class GeminiModel(Model):
                         call_id,
                     )
                 )
-            elif block_type in ("image", "document", "image_url", "file"):
+            elif block_type in ("image", "document", "image_url", "file", "input_audio"):
                 part = _media_block_to_part(block)
                 if part is not None:
                     parts.append(part)
@@ -672,6 +686,8 @@ class GeminiModel(Model):
         translated.  Keys Gemini has no field for are reported rather than
         dropped in silence: ``GenerateContentConfig`` forbids extras, so
         forwarding them blindly would raise a ``ValidationError``.
+        ``thinking_config`` and ``reasoning_effort`` are merged by
+        :meth:`_thinking_config`.
 
         Args:
             chat_messages: The conversation, pre-converted by
@@ -691,13 +707,49 @@ class GeminiModel(Model):
             params.setdefault("max_output_tokens", max_output_tokens)
         if stop_sequences is not None:
             params.setdefault("stop_sequences", stop_sequences)
-        if params.get("thinking_config") is None:
-            params["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
+        params["thinking_config"] = self._thinking_config(
+            params.get("thinking_config"), params.pop("reasoning_effort", None)
+        )
 
         params = self._keep_supported_request_params(params, _GEMINI_CONFIG_FIELDS, "Gemini")
         params["tools"] = tools
         params["system_instruction"] = self._resolve_system_instruction(chat_messages)
         return types.GenerateContentConfig(**params)
+
+    def _thinking_config(
+        self, configured: types.ThinkingConfig | dict[str, Any] | None, effort: str | None
+    ) -> types.ThinkingConfig:
+        """Return the request's thinking config, with thought summaries on.
+
+        ``include_thoughts`` defaults to ``True`` (an explicit ``False`` is
+        kept) so the UI shows the model's thinking even when the caller
+        configures only a level or a budget.  ``thinking_level`` comes
+        from ``reasoning_effort`` when given (it replaces any configured
+        level or budget, so KISSAgent can lower the effort of a retry;
+        ``xhigh`` and ``max``, which Gemini lacks, become ``high``);
+        otherwise from the catalog ``thinking`` level of this model
+        (e.g. ``high`` for ``gemini-4-argon-high``) when the caller set
+        neither a level nor a budget, since Gemini rejects both at once.
+
+        Args:
+            configured: The ``thinking_config`` from ``model_config``.
+            effort: The ``reasoning_effort`` from ``model_config``.
+
+        Returns:
+            The thinking config to send.
+        """
+        fields = types.ThinkingConfig.model_validate(configured or {}).model_dump(
+            exclude_none=True
+        )
+        fields.setdefault("include_thoughts", True)
+        if effort:
+            fields.pop("thinking_budget", None)
+            fields["thinking_level"] = _GEMINI_TOP_LEVEL.get(effort, effort)
+        elif "thinking_level" not in fields and "thinking_budget" not in fields:
+            info = MODEL_INFO.get(self.model_name)
+            if info is not None and info.thinking:
+                fields["thinking_level"] = info.thinking
+        return types.ThinkingConfig(**fields)
 
     def _stream_parts(self, parts: list[Any]) -> None:
         """Stream parts, routing thinking tokens through the thinking callback.
@@ -775,7 +827,7 @@ class GeminiModel(Model):
         block_reason: str | None = None
         stream = _AbortableStream(
             self.client.models.generate_content_stream(
-                model=self.model_name, contents=contents, config=config
+                model=_strip_thinking_alias(self.model_name), contents=contents, config=config
             ),
             self._http_client,
         )

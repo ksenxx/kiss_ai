@@ -68,6 +68,15 @@ BRIDGE_PREFIX = "exec:"
 #: ``Exception``, not ``OSError``, and ``urlopen`` does not wrap it.
 _BRIDGE_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
 
+#: Seconds past a command's deadline the bridge gets to deliver its reply
+#: (the server reports an overrun after ``timeout + 30`` at the latest, see
+#: :func:`~kiss.benchmarks.terminal_bench.exec_bridge_server.exec_once`, then
+#: sweeps the command).  It is the request's socket timeout, which bounds an
+#: idle read, and the margin of :func:`bridge_exec`'s overall deadline, which
+#: bounds the whole wait: a reply body that trickles in without ever
+#: completing keeps the idle timeout from firing.
+_REPLY_MARGIN_S = 60.0
+
 
 def _post(url: str, path: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
     """POST *body* as JSON to *url* + *path* and return the decoded reply dict."""
@@ -123,7 +132,13 @@ def bridge_exec(
     ``DockerManager`` does (:func:`_kill_bounded`).  An exception thrown
     into this thread's wait (a ``KeyboardInterrupt``, the runner's Stop
     injected as one) posts the same kill before it propagates, so the
-    command never outlives the call.
+    command never outlives the call; so does a request the bridge failed
+    after it may have started the command (the reply connection dropped,
+    an invalid reply), before the error propagates.  The wait as a whole
+    ends :data:`_REPLY_MARGIN_S` past the command's deadline: a bridge
+    that has not delivered the reply by then (stalled, or trickling a
+    body that never completes) gets the same kill and the command is
+    reported as timed out.
 
     Args:
         url: The bridge's base URL (``http://127.0.0.1:<port>``).
@@ -134,8 +149,9 @@ def bridge_exec(
 
     Returns:
         ``(exit code, combined output)``; the exit code is ``None`` when the
-        command was still running at the deadline and ``-1`` when it was
-        stopped (the output then ends with :data:`STOPPED_MESSAGE`).
+        command was still running at the deadline (or the bridge delivered
+        no reply within the margin past it) and ``-1`` when it was stopped
+        (the output then ends with :data:`STOPPED_MESSAGE`).
 
     Raises:
         KISSError: When the bridge cannot be reached or answers garbage.
@@ -146,29 +162,35 @@ def bridge_exec(
 
     def fetch() -> None:
         try:
-            outcome.append(_post(url, "/exec", body, timeout + 60))
+            outcome.append(_post(url, "/exec", body, timeout + _REPLY_MARGIN_S))
         except KISSError as error:
             outcome.append(error)
 
     worker = threading.Thread(target=fetch, name=f"exec-bridge-{token[:8]}", daemon=True)
+    deadline = time.monotonic() + timeout + _REPLY_MARGIN_S
     try:
         worker.start()
         while worker.is_alive():
             if _stop_requested(cancel):
                 _kill_bounded(url, token)
                 return -1, STOPPED_MESSAGE
+            if time.monotonic() >= deadline:
+                _kill_bounded(url, token)
+                return None, ""
             worker.join(0.2)
+        reply = outcome[0]
+        if isinstance(reply, KISSError):
+            raise reply
+        if "output" not in reply:
+            raise KISSError(f"Exec bridge {url} returned an invalid reply: {reply!r}")
     except BaseException:
         # The wait was unwound from outside (an injected Stop, a
-        # KeyboardInterrupt): the request thread and the command on the
-        # environment must not go on without anyone waiting for them.
+        # KeyboardInterrupt) or the request failed after the bridge may
+        # have started the command: the request thread and the command
+        # on the environment must not go on without anyone waiting for
+        # them.
         _kill_bounded(url, token)
         raise
-    reply = outcome[0]
-    if isinstance(reply, KISSError):
-        raise reply
-    if "output" not in reply:
-        raise KISSError(f"Exec bridge {url} returned an invalid reply: {reply!r}")
     code = reply.get("exit_code")
     return (int(code) if code is not None else None), str(reply["output"])
 

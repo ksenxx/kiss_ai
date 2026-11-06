@@ -4,20 +4,28 @@
 # add your name here
 """Tests for useful_tools.py module."""
 
+import json
 import os
+import re
 import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
+import tracemalloc
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar.useful_tools import (
+    _MAX_BINARY_READ_BYTES,
+    NOT_STARTED,
     UsefulTools,
     _truncate_output,
 )
+from kiss.core.processes import pid_alive
 
 
 @pytest.fixture
@@ -121,6 +129,71 @@ class TestBugs:
         big = "X" * 200
         result = _truncate_output(big, 5)
         assert len(result) <= 5
+
+    def test_read_refuses_an_oversized_binary_without_loading_it(self, temp_test_dir):
+        """Read checks the binary size cap before reading, so an oversized PNG costs no memory.
+
+        A sparse file one byte over the cap with a PNG signature (invalid
+        UTF-8) used to be read whole by the text attempt before the
+        binary branch measured it (A10-7).
+        """
+        big = temp_test_dir / "big.png"
+        with open(big, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+            handle.truncate(_MAX_BINARY_READ_BYTES + 1)
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        tracemalloc.start()
+        try:
+            result = ut.Read(str(big), max_lines=1)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert result.startswith("Error: Binary file") and "too large" in result, result
+        assert peak < _MAX_BINARY_READ_BYTES // 4, f"Read allocated {peak} bytes to refuse the file"
+
+
+class TestConcurrentEdits:
+    """Two agents (two tool instances, two threads) editing one file lose no change.
+
+    ``Edit`` is a read-modify-write of the whole file; without a lock a
+    sibling's write landing between another's read and write was undone
+    by that write, both calls reporting success (A10-2).  Edit has no
+    synchronisation point a test could hold without a test double, so
+    the race is provoked by volume: forty edits per thread on a 4 MB
+    file, every one of which must survive.
+    """
+
+    def test_concurrent_edits_of_one_file_keep_every_change(self, temp_test_dir):
+        path = temp_test_dir / "shared.txt"
+        edits_per_thread = 40
+        lines = [f"{prefix}{i}=0\n" for prefix in "ab" for i in range(edits_per_thread)]
+        path.write_text("".join(lines) + ("x" * 200 + "\n") * 20000)
+        tools = [UsefulTools(work_dir=str(temp_test_dir)) for _ in "ab"]
+        for tool in tools:
+            assert "a0=0" in tool.Read(str(path), max_lines=2)
+        results: dict[str, list[str]] = {}
+
+        def edit(prefix: str, tool: UsefulTools) -> None:
+            results[prefix] = [
+                tool.Edit(str(path), f"{prefix}{i}=0\n", f"{prefix}{i}=1\n")
+                for i in range(edits_per_thread)
+            ]
+
+        threads = [
+            threading.Thread(target=edit, args=(prefix, tool))
+            for prefix, tool in zip("ab", tools, strict=True)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        assert all(r.startswith("Successfully") for rs in results.values() for r in rs), results
+        text = path.read_text()
+        lost = [
+            f"{prefix}{i}" for prefix in "ab" for i in range(edits_per_thread)
+            if f"{prefix}{i}=1\n" not in text
+        ]
+        assert lost == [], f"edits undone by a concurrent Edit: {lost}"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
@@ -227,6 +300,54 @@ class TestStopEvent:
         except ProcessLookupError:
             pass
         assert not alive, f"Child {child_pid} survived stop_event!"
+
+    def test_stop_set_before_a_parallel_call_starts_no_command(self, temp_test_dir):
+        """A pool entered with the task's stop event already set starts nothing (A10-5).
+
+        The workers used to be submitted before the stop was looked at,
+        so a quick command ran (and was then killed) after the Stop.
+        """
+        stop_event = threading.Event()
+        stop_event.set()
+        marker = temp_test_dir / "started.marker"
+        ut = UsefulTools(stop_event=stop_event, work_dir=str(temp_test_dir))
+        report = ut.run_commands_parallel(json.dumps([f"touch {marker}", f"touch {marker}"]))
+        assert report.count(NOT_STARTED) == 2, report
+        assert not marker.exists(), "a command ran after the task was stopped"
+
+    def test_stop_kills_a_background_jobs_orphans_after_its_shell_exited(self, temp_test_dir):
+        """A job's descendant that outlives the job's shell is killed by a later task Stop (A10-6).
+
+        ``sleep 100 &`` stays in the job's process group after the shell
+        exits; the watcher used to end with the shell, leaving nothing to
+        kill the group when the Stop came.
+        """
+        stop_event = threading.Event()
+        ut = UsefulTools(stop_event=stop_event, work_dir=str(temp_test_dir))
+        pid_file = temp_test_dir / "orphan.pid"
+        script = temp_test_dir / "orphan.sh"
+        script.write_text(f"sleep 100 &\necho $! > {pid_file}\n")
+        started = ut.Bash(f"bash {script}", "orphan", background=True)
+        match = re.search(r"job (j[0-9a-f]+)", started)
+        assert match is not None, started
+        job_id = match.group(1)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if "exited with code 0" in ut.bash_job(job_id) and pid_file.is_file():
+                break
+            time.sleep(0.05)
+        assert "exited with code 0" in ut.bash_job(job_id)
+        orphan = int(pid_file.read_text().strip())
+        assert pid_alive(orphan)
+        try:
+            stop_event.set()
+            deadline = time.monotonic() + 10
+            while pid_alive(orphan) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not pid_alive(orphan), f"the job's orphan {orphan} survived the task Stop"
+        finally:
+            with suppress(OSError):
+                os.kill(orphan, signal.SIGKILL)
 
 
 class TestStreamingTimeout:

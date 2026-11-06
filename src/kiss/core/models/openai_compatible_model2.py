@@ -573,7 +573,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return False
         try:
             json.loads(s)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:  # json.JSONDecodeError is one
             return False
         return True
 

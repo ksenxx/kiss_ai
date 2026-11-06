@@ -46,7 +46,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import selectors
 import signal
 import struct
 import subprocess
@@ -60,11 +59,13 @@ from typing import Any
 if sys.platform != "win32":
     import fcntl
     import termios
+else:  # pragma: no cover — Windows-only branch
+    import _winapi
+    import msvcrt
 
 from kiss.core.config import kiss_home
 from kiss.core.locked import locked_call
 from kiss.core.processes import (
-    IS_WINDOWS,
     kill_process_group,
     popen_process_group,
     run_process_group,
@@ -89,9 +90,9 @@ shows after the TTL."""
 HOOK_END_TIMEOUT = 2.0
 """Seconds a replaced or cancelled ``login`` hook gets to exit on SIGTERM before SIGKILL."""
 
-HOOK_EXIT_POLL = 0.2
-"""Seconds between the relay's checks, while its stdout is silent, that the ``login`` hook
-is still running (:func:`_hook_lines`)."""
+HOOK_EXIT_POLL = 0.05
+"""Seconds between the relay's looks, while the ``login`` hook's stdout is silent, at what
+the pipe holds and whether the hook is still running (:func:`_hook_lines`)."""
 
 PASTE_LIMIT = 4096
 """Characters of a paste handed to the hook: enough for any redirect URL, less than a pipe holds."""
@@ -126,48 +127,51 @@ def _parse(line: str) -> dict[str, Any]:
 
 
 def _unread_bytes(fd: int) -> int:
-    """How many bytes the pipe read through *fd* holds that have not been read yet."""
+    """How many bytes the pipe read through *fd* holds that have not been read yet (0 at EOF)."""
+    if sys.platform == "win32":  # pragma: no cover — Windows-only branch
+        try:
+            return int(_winapi.PeekNamedPipe(msvcrt.get_osfhandle(fd))[0])
+        except BrokenPipeError:  # every write end closed and nothing left to read
+            return 0
     return int(struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0])
 
 
 def _hook_lines(proc: subprocess.Popen[str]) -> Iterator[str]:
-    """The lines of *proc*'s stdout, until EOF or, once *proc* has exited, what it held then.
+    """The lines of *proc*'s stdout until, once *proc* has exited, what it held then.
 
-    EOF alone cannot bound the read: a helper the hook started with its
-    stdout inherited (a browser opener, say) keeps the pipe's write end
-    open for as long as it lives, which may be long after the hook
-    printed its last line and exited.  So each wait for the pipe lasts
-    at most :data:`HOOK_EXIT_POLL` seconds, the hook's exit is checked
-    between waits, and at the exit exactly the bytes the pipe holds
-    then (everything the hook wrote is among them) are read: a helper
-    that keeps writing cannot keep the read going either.  The helper
-    is left alone: it may be the user's browser.
+    EOF cannot bound the read: a helper the hook started with its stdout
+    inherited (a browser opener, say) keeps the pipe's write end open
+    for as long as it lives, which may be long after the hook printed
+    its last line and exited.  So the pipe is looked at, every
+    :data:`HOOK_EXIT_POLL` seconds while it is silent, for what it holds
+    and for the hook's exit (the same on every platform: Windows has no
+    readiness wait for a pipe), and at the exit exactly the bytes the
+    pipe holds then (everything the hook wrote is among them) are read:
+    a helper that keeps writing cannot keep the read going either.  The
+    helper is left alone: it may be the user's browser.
     """
     assert proc.stdout is not None
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch (readiness APIs reject pipes)
-        yield from proc.stdout
-        return
     fd = proc.stdout.fileno()
     pending = b""
     unread = None  # bytes the pipe held at the hook's exit that are still to read
-    with selectors.DefaultSelector() as ready:
-        ready.register(fd, selectors.EVENT_READ)
-        while unread is None or unread > 0:
-            if unread is None:
-                if proc.poll() is not None:
-                    unread = _unread_bytes(fd)
-                    continue
-                if not ready.select(HOOK_EXIT_POLL):
-                    continue
-            chunk = os.read(fd, 65536 if unread is None else min(unread, 65536))
-            if not chunk:
-                break
-            if unread is not None:
-                unread -= len(chunk)
-            lines = (pending + chunk).split(b"\n")
-            pending = lines.pop()
-            for line in lines:
-                yield line.decode("utf-8", errors="replace")
+    while unread is None or unread > 0:
+        held = unread
+        if held is None:
+            exited = proc.poll() is not None
+            held = _unread_bytes(fd)
+            if exited:
+                unread = held
+                continue
+            if not held:
+                time.sleep(HOOK_EXIT_POLL)
+                continue
+        chunk = os.read(fd, min(held, 65536))
+        if unread is not None:
+            unread -= len(chunk)
+        lines = (pending + chunk).split(b"\n")
+        pending = lines.pop()
+        for line in lines:
+            yield line.decode("utf-8", errors="replace")
     if pending:
         yield pending.decode("utf-8", errors="replace")
 
@@ -279,8 +283,8 @@ class SigninLogin:
         The window that clicked gets ``signinUrl`` (``provider``, ``url``)
         as soon as the hook prints the page to open, then ``signinError``
         when the hook fails; ``signinDone`` (``email``) goes to every
-        window.  A hook that cannot start, or prints no URL first, is a
-        ``signinError`` too.
+        window.  A hook that cannot start, or whose relay thread cannot,
+        or that prints no URL first, is a ``signinError`` too.
 
         Args:
             provider: The provider id from the ``signin`` event.
@@ -314,12 +318,21 @@ class SigninLogin:
             assert proc.stdin is not None
             os.set_blocking(proc.stdin.fileno(), False)  # see paste()
             self._proc = proc
-        threading.Thread(
+        thread = threading.Thread(
             target=self._relay,
             args=(proc, provider, reply),
             name="signin-login",
             daemon=True,
-        ).start()
+        )
+        try:
+            thread.start()
+        except RuntimeError as exc:  # no thread to be had: nothing would read the hook
+            with self._lock:
+                if self._proc is proc:  # else cancel() or a newer start() ended it: silent
+                    self._end_locked()
+                    reply({"type": "signinError", "provider": provider, "error": str(exc)}, False)
+            assert proc.stdout is not None
+            proc.stdout.close()  # the relay's job, done here for want of one
 
     def paste(self, text: str) -> bool:
         """Write the pasted redirect URL or code to the running hook's stdin.
@@ -389,20 +402,35 @@ class SigninLogin:
         Its stdin is closed and its process group is sent SIGTERM at
         once; a thread (:meth:`_end`) then kills whatever of the group
         ignores that after :data:`HOOK_END_TIMEOUT` seconds.  (The relay
-        thread cannot do this: it is blocked reading the hook's stdout.)
+        thread cannot do this: it is reading the hook's stdout.)  With no
+        thread to be had, the group is seen out here, bounded the same
+        way.  A hook that has exited already (reaped here or by the relay
+        thread, which finishes it either way) is signalled nothing: a
+        reaped pid may be a stranger's by now, and a helper the hook left
+        behind is left alone as after any exit of its own.  Whether it
+        has is settled before its stdin is closed: a hook that exits on
+        that close (EOF on its ``read``) must still be ended with its
+        group.
         """
         proc, self._proc = self._proc, None
         if proc is None:
             return
+        exited = proc.poll() is not None
         assert proc.stdin is not None
         proc.stdin.close()
+        if exited:
+            return
         try:
             kill_process_group(proc.pid, signal.SIGTERM)
         except OSError:
             proc.terminate()
         thread = threading.Thread(target=self._end, args=(proc,), name="signin-end", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            terminate_process_group(proc, HOOK_END_TIMEOUT)
+            return
         self._ending.append(thread)
-        thread.start()
 
     def _end(self, proc: subprocess.Popen[str]) -> None:
         """Thread body of :meth:`_end_locked`: see the ended *proc* and its group out."""
