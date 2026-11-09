@@ -769,7 +769,7 @@ def signal_unreaped_child(pid: int, sig: int) -> bool:
         if exited is not None:
             return True
         try:
-            if pidfd >= 0:
+            if pidfd >= 0 and sys.platform == "linux":
                 signal.pidfd_send_signal(pidfd, sig)
             else:
                 os.kill(pid, sig)

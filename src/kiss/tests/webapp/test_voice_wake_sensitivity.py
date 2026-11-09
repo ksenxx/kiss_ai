@@ -37,8 +37,11 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
         from kiss.server.web_server import RemoteAccessServer
 
         self.tmpdir = Path(tempfile.mkdtemp())
+        # Said without a pause, the greeting and the wake phrase land in
+        # one grammar final ("hey sir hey sore car"), which only the
+        # trailing-alias match (sensitivity >= 75) accepts.
         self.wav = _say_wav(
-            self.tmpdir, "hey", "hey there [[slnc 300]] Abracadabra [[slnc 1500]]"
+            self.tmpdir, "hey", "hey there Hey Sorcar [[slnc 1500]]"
         )
         self.port = find_free_port()
 

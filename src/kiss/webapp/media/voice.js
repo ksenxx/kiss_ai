@@ -12,12 +12,27 @@
   const inp = document.getElementById('task-input');
   if (!btn || !inp) return;
 
-  // The wake word (mirrors WAKE_WORD in kiss/server/speech.py).  It is
-  // in the Vosk model's vocabulary, long and rare in conversation, so
-  // the grammar cannot force-fit everyday speech ("hey soccer", "sorry
-  // car", ...) onto it the way the earlier "Hey Sorcar" allowed.
-  const WAKE_ALIASES = ['abracadabra'];
+  // The wake phrase "Hey Sorcar" (mirrors WAKE_PHRASE in
+  // kiss/server/speech.py).  "Sorcar" is not in the Vosk model's
+  // vocabulary, so the grammar spells it with the dictionary words the
+  // model hears for it.
+  const WAKE_ALIASES = ['hey sore car', 'hey sir car', 'hey sar car'];
+  // How the grammar-free recognizer confirms a wake.  It cannot spell
+  // the name: for "Hey Sorcar" in 21 macOS voices it wrote "hey
+  // soccer", "hey saga", "hey saw car", "hey sort of", "who's or car",
+  // and through this Mac's speaker and microphone "he's order".  So a
+  // final confirms when it has the word "hey" (18 of the 21 voices) or
+  // when it ends in words whose letters are within FREE_WAKE_MAX_EDITS
+  // of FREE_WAKE_SPELLING ("he's order" and "who's or car" are 3 away;
+  // everyday finals such as "his car" or "he's sorry" are 4 or more).
+  const FREE_WAKE_WORD = 'hey';
+  const FREE_WAKE_SPELLING = 'heysorcar';
+  const FREE_WAKE_MAX_EDITS = 3;
+  const FREE_WAKE_MAX_WORDS = 4;
   const COOLDOWN_MS = 2000;
+  // The inaudible level the audio processor writes to its output so the
+  // browser keeps the real audio sink (see onaudioprocess).
+  const SINK_KEEP_AWAKE_LEVEL = 1e-7;
   const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
   const SENSITIVITY_KEY = 'kissVoiceSensitivity';
@@ -292,7 +307,7 @@
     let tip;
     if (state === 'listening') {
       tip =
-        "Voice trigger on: say 'Abracadabra' and pause " +
+        "Voice trigger on: say 'Hey Sorcar' and pause " +
         'briefly (click to turn off)';
       notifyUser(null, null);
     } else if (state === 'loading') {
@@ -302,7 +317,7 @@
       tip = 'Voice trigger error: ' + plain;
       notifyUser('error', plain);
     } else {
-      tip = "Voice trigger: listen for the word 'Abracadabra'";
+      tip = "Voice trigger: listen for the phrase 'Hey Sorcar'";
     }
     btn.classList.remove(
       'voice-off',
@@ -419,10 +434,47 @@
   let grammarHeardAt = 0;
   let freeHeardAt = 0;
 
-  /** Whether the grammar-free transcript *text* contains the wake word. */
+  /** Return the Levenshtein edit distance between strings *a* and *b*. */
+  function editDistance(a, b) {
+    let previous = [];
+    for (let j = 0; j <= b.length; j++) previous.push(j);
+    for (let i = 1; i <= a.length; i++) {
+      const current = [i];
+      for (let j = 1; j <= b.length; j++) {
+        current.push(
+          Math.min(
+            previous[j] + 1,
+            current[j - 1] + 1,
+            previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+          ),
+        );
+      }
+      previous = current;
+    }
+    return previous[b.length];
+  }
+
+  /**
+   * Whether the grammar-free transcript *text* confirms the wake phrase:
+   * it has the word "hey", or its last one to FREE_WAKE_MAX_WORDS words
+   * spell something within FREE_WAKE_MAX_EDITS of "heysorcar".
+   */
   function freeTextHasWake(text) {
-    const words = normalize(text).split(' ');
-    return WAKE_ALIASES.some(alias => words.indexOf(alias) !== -1);
+    const t = normalize(text);
+    if (!t) return false;
+    const words = t.split(' ');
+    if (words.indexOf(FREE_WAKE_WORD) !== -1) return true;
+    const first = Math.max(0, words.length - FREE_WAKE_MAX_WORDS);
+    for (let i = first; i < words.length; i++) {
+      const letters = words
+        .slice(i)
+        .join('')
+        .replace(/[^a-z]/g, '');
+      if (editDistance(letters, FREE_WAKE_SPELLING) <= FREE_WAKE_MAX_EDITS) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -430,11 +482,13 @@
    * other one heard it too within WAKE_AGREE_MS.
    *
    * The grammar recognizer alone is not enough: its grammar has only
-   * "abracadabra" and [unk], so Kaldi can force-fit any loud enough
-   * stretch of speech onto the word (Russian "which can remember" and
-   * Bengali "government" both did, 2026-11-08).  The grammar-free
-   * recognizer has the full vocabulary and only writes "abracadabra"
-   * when the word was really said.
+   * the wake phrase and [unk], so Kaldi can force-fit any loud enough
+   * stretch of speech onto it (Russian and Bengali talk did with the
+   * earlier "Abracadabra", 2026-11-08).  The grammar-free recognizer
+   * has the full vocabulary, so it writes the foreign words instead
+   * (see freeTextHasWake); English sound-alikes it lets through ("hey,
+   * so the car.") are rejected by the daemon's transcript check
+   * (speech.py).
    *
    * @param {boolean} fromGrammar true for the grammar recognizer's
    *   final, false for the grammar-free one's.
@@ -1073,17 +1127,17 @@
           recognizer.setWords(true);
         }
         // Only a FINAL result can wake.  Partial hypotheses are not
-        // trustworthy with a two-word grammar: Kaldi must label every
-        // sound as either "abracadabra" or [unk], and mid-utterance it
-        // routinely guesses "[unk] abracadabra" for ordinary speech
-        // ("abstract algebra", "the data is in the dashboard", "sorry,
-        // I could not hear you") before the final decode settles on
-        // plain "[unk]".  Waking on such a partial after a 100 ms
-        // pause, as this page once did, made the wake fire at random
-        // during conversation.  The final result lands about a second
-        // after the word ends, with a confidence per word.  Even a
-        // final only counts once the grammar-free recognizer below
-        // agrees (heardWake).
+        // trustworthy with a tiny grammar: Kaldi must label every
+        // sound as a wake-phrase word or [unk], and mid-utterance it
+        // routinely guesses the wake phrase for ordinary speech
+        // (measured with the earlier "Abracadabra": "abstract
+        // algebra", "sorry, I could not hear you") before the final
+        // decode settles on plain "[unk]".  Waking on such a partial
+        // after a 100 ms pause, as this page once did, made the wake
+        // fire at random during conversation.  The final result lands
+        // about a second after the word ends, with a confidence per
+        // word.  Even a final only counts once the grammar-free
+        // recognizer below agrees (heardWake).
         grammarHeardAt = 0;
         freeHeardAt = 0;
         recognizer.on('result', message => {
@@ -1127,6 +1181,13 @@
         let lastRmsAt = 0;
         processorNode.onaudioprocess = event => {
           if (!recognizer) return;
+          // Never output pure silence: after 30 s of zeros Chrome swaps
+          // the audio sink for a fake one that ran this callback at
+          // under half speed (measured 2026-11-08 in Google Chrome with
+          // the real mic: 43 s of audio in 60 s), so the recognizers got
+          // chopped audio and missed the wake phrase.  1e-7 is about
+          // -140 dBFS, far below hearing.
+          event.outputBuffer.getChannelData(0).fill(SINK_KEEP_AWAKE_LEVEL);
           const samples = event.inputBuffer.getChannelData(0);
           let sumSquares = 0;
           for (let i = 0; i < samples.length; i++) {

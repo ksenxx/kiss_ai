@@ -142,7 +142,7 @@ Figure 1. The data path from clients to models. Every client speaks the same com
 | Python client API | `from kiss.server import sorcar; sorcar.run(task, ...)` returning `TaskResult(text, success, cost, tokens, steps, chat_id, task_id)` | 25 keyword options including `sea_path` (a SEA whose `settings()` configures the run and whose `add_to_tools()` returns the extra tool callables), `tool_profile`, `docker_image`, `timeout=3600`, `stop_on_timeout` |
 | Slash commands | `/<name> <text>` at position 0 of a prompt | Registered from three sources (section 9); `/<name> help` prints the SEA's `description()` |
 | Channels | `kiss-<channel>` CLIs, `run_agent(agent="slack", ...)`, always-on gateways scheduled by cron | 44 agents (section 18) |
-| Voice | In-page wake word "Abracadabra", `talk()` playback on every open browser tab (and on the daemon's speakers for a CLI run) | Section 17 |
+| Voice | In-page wake phrase "Hey Sorcar", `talk()` playback on every open browser tab (and on the daemon's speakers for a CLI run) | Section 17 |
 
 Prompt assets shipped in `src/kiss/`:
 
@@ -335,7 +335,7 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 
 ## 17. Voice
 
-- In-page wake-word listener (`voice.js` + `vosk.js`) with speaker identification on the daemon (`speech.py`); the wake word is **"Abracadabra"** (10-17: replaced "Hey Sorcar", which false-triggered on everyday speech such as "hey soccer", first by "Abracadabra Sorcar" and then by the single word; "Hey Sorcar" had replaced "Sorcar" on 09-26); sensitivity 0-100 in Settings; spoken text is either submitted at once or inserted at the cursor ("Auto submit spoken task"); an acknowledgement clip (`working-on-it.mp3`) plays when a spoken task starts.
+- In-page wake-word listener (`voice.js` + `vosk.js`) with speaker identification on the daemon (`speech.py`); the wake phrase is **"Hey Sorcar"** again (11-08: it replaced "Abracadabra"; a wake needs both in-page recognizers to hear it, and the daemon drops a transcript without the name, so a sound-alike such as "Hey, so the car." can light the mic but never submits a task; 10-17: "Abracadabra" replaced "Hey Sorcar", which false-triggered on everyday speech such as "hey soccer", first by "Abracadabra Sorcar" and then by the single word; "Hey Sorcar" had replaced "Sorcar" on 09-26); sensitivity 0-100 in Settings; spoken text is either submitted at once or inserted at the cursor ("Auto submit spoken task"); an acknowledgement clip (`working-on-it.mp3`) plays when a spoken task starts.
 - Spoken input arrives as `Speaker #n:` text; the agent answers with `talk(language, text, emotion)` (emotions such as calm, cheerful, curious, serious, warm), played on every device with the task's tab open and, for a `sorcar` CLI run, on the daemon machine's speakers (`talk_player.py`); TTS spend folds into the task.
 - 116 top-level voice tasks and 265 `talk` calls recorded.
 

@@ -303,7 +303,7 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
                 return
             logger.warning("Killing leaked Chromium (pid %d) with signal %d", pid, sig)
             try:
-                if pidfd >= 0:
+                if pidfd >= 0 and sys.platform == "linux":
                     signal.pidfd_send_signal(pidfd, sig)
                 else:
                     os.kill(pid, sig)

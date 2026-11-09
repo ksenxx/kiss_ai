@@ -53,12 +53,15 @@ def registry_repository() -> Iterator[str]:
 
     The registry runs in a container of its own; the image is pushed to
     it and then untagged locally, so every ``open()`` of the yielded
-    ``localhost:<port>/kiss-registry-test`` has to pull it.
+    ``localhost:<port>/kiss-registry-test`` has to pull it. The port is
+    published as ``docker run -P`` does: on Docker Desktop an explicit
+    binding with no host port left the daemon's push to ``localhost``
+    dialing ``[::1]:<port>`` until it timed out.
     """
     client = docker.from_env()
     before = image_container_ids(client)
     registry = client.containers.run(
-        "registry:2", detach=True, ports={"5000/tcp": None},
+        "registry:2", detach=True, publish_all_ports=True,
         labels={OWNER_LABEL: owner_label_value()},
     )
     repository = ""
